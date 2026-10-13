@@ -248,6 +248,17 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
+if run_check guards "N1 canary oracle input contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
+"$PYTHON" tests/run_n1_canary_mutations.py
+"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
+fi
+
+if run_check guards "N1 native oracle contracts"; then
+"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli tests.test_n1_canary_native_wiring
+"$PYTHON" tests/run_n1_canary_native_mutations.py
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -451,6 +462,7 @@ if run_check guards "TUI relay e2e harness unit tests (#5065/#5997)"; then
   scripts.e2e.tui_relay.test_cell_resolution \
   scripts.e2e.tui_relay.test_discord_client \
   scripts.e2e.tui_relay.test_driver_health \
+  scripts.e2e.tui_relay.test_herdr_observe \
   scripts.e2e.tui_relay.test_durable_delivery \
   scripts.e2e.tui_relay.test_fixtures \
   scripts.e2e.tui_relay.test_known_gap \
@@ -512,6 +524,11 @@ fi
 if run_check contracts "Shared CI shell lexer tests"; then
 # The test-target and PG lane gates read workflow shell through this one lexer.
 "$PYTHON" -m unittest tests.test_ci_shell_lex
+fi
+
+if run_check contracts "D4-B acceptance manifest (#5340)"; then
+"$PYTHON" scripts/check_herdr_s3_d4b_manifest.py --structure-only
+"$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
 fi
 
 if run_check contracts "New production file comment-ratio gate"; then

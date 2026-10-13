@@ -296,17 +296,6 @@ impl Names {
         }
         Ok(Some(seq))
     }
-
-    /// The whole log by stored name, or `None` when it or a name cannot be read, without alarms.
-    pub(super) fn history(
-        &mut self,
-        store: &ChannelStore,
-        read: Result<Vec<BindingEvent>, String>,
-        applied: Option<u64>,
-    ) -> Option<Vec<BindingEvent>> {
-        let (_, named) = self.read(store, read.ok()?, 0, applied).ok()??;
-        Some(named)
-    }
 }
 
 fn halted(detail: impl Into<String>) -> WriterAlarm {

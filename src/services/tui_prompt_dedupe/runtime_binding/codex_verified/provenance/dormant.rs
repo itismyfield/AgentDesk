@@ -9,6 +9,5 @@ pub(crate) struct OwedOrigin {
     pub range: Range<u64>,
 }
 
-#[cfg(test)]
 #[path = "dormant_construction.rs"]
 pub(crate) mod construction;

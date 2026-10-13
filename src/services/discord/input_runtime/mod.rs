@@ -10,6 +10,8 @@ pub(crate) mod offer;
 pub(crate) mod reconcile;
 #[allow(dead_code)]
 pub(crate) mod supervisor;
+pub(in crate::services::discord) use runtime::source_policy_facts;
+pub(in crate::services::discord) use supervisor::intake;
 pub(crate) use supervisor::runtime;
 
 /// Fence, clear and supervisor holds; an unused supervisor registry adds nothing to the fence's.

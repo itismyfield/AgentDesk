@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "a92a0553be96164462dc3a10306285e7427cb66b93cf610c2970de2510ed89d9"
+    "4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -2811,6 +2811,20 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             {path.name: path.read_text(encoding="utf-8") for path in workflow_paths()},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_main_windows_warm_times_out_steps_before_advisory_job(self) -> None:
+        job = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
+        self.assertIs(job["continue-on-error"], True)
+        compile_steps = [step for step in job["steps"] if "cargo" in step.get("run", "")]
+        self.assertEqual(len(compile_steps), 2)
+        for step in compile_steps:
+            timeout = step.get("timeout-minutes")
+            self.assertIs(type(timeout), int, f"warm {step['name']} needs a native step deadline")
+            self.assertGreater(timeout, 0)
+        # Job cancellation bypasses advisory failure; leave setup/post actions
+        # at least 30 minutes beyond the sum of both compile deadlines.
+        budget = sum(step["timeout-minutes"] for step in compile_steps)
+        self.assertGreaterEqual(job["timeout-minutes"], budget + 30)
 
     def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
         source = MAIN_WORKFLOW.read_text(encoding="utf-8")

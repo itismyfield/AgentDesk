@@ -626,13 +626,14 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
             continue;
         }
         let proof = matches!(cold, Cold::FailedThenStop | Cold::StopThenClosed);
-        // The actual exit writes the receipt, acks the shown stop in it, then finalize clears it.
+        // The actual exit writes the receipt, acks the shown stop in it, then the policy close's
+        // mailbox step clears it.
         let through_receipt = [
             ("before_receipt", None),
             ("after_receipt", Some(true)),
             ("after_notice_ack", Some(false)),
-            ("before_policy_clear", Some(false)),
-            ("before_finalize", None),
+            ("before_submit", Some(false)),
+            ("after_submit", None),
         ];
         assert_eq!(
             steps,
@@ -648,6 +649,51 @@ async fn herdr_cold_stop_settles_only_with_a_before_start_proof() {
                 (true, true, 1)
             },
             "{cold:?}"
+        );
+    }
+}
+
+/// Settlement off, as in non-test builds: a proof-carrying cold stop never reaches policy close,
+/// while the ordinary exit still frees the slot and the count as the positive control.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn p10_fin_off_bridge_exit_never_submits_a_policy_close() {
+    use crate::services::discord::turn_bridge::before_start_stop::test_hooks;
+    use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE;
+    use crate::services::turn_orchestrator::policy_close::test_hooks as step;
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    for (index, cold) in [Cold::FailedThenStop, Cold::StopThenClosed]
+        .into_iter()
+        .enumerate()
+    {
+        let bridge_steps = std::rc::Rc::new(std::cell::Cell::new(0));
+        let step_stages = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (bridge_seen, step_seen) = (bridge_steps.clone(), step_stages.clone());
+        test_hooks::observe(Some(Box::new(move |_, _| {
+            bridge_seen.set(bridge_seen.get() + 1)
+        })));
+        step::observe(Some(Box::new(move |_| step_seen.set(step_seen.get() + 1))));
+        let submitted = test_hooks::submitted();
+        HERDR_SETTLEMENT_OVERRIDE.set(false);
+        let (signal, holds, _row, active) =
+            herdr_cold_case(5_340_341_000 + index as u64, cold).await;
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        test_hooks::observe(None);
+        step::observe(None);
+        assert_eq!(
+            test_hooks::submitted(),
+            submitted,
+            "{cold:?}: no policy submission"
+        );
+        assert_eq!(bridge_steps.get(), 0, "{cold:?}: no receipt step");
+        assert_eq!(step_stages.get(), 0, "{cold:?}: no policy mailbox step");
+        let _ = signal;
+        assert_eq!(
+            (holds, active),
+            (false, 0),
+            "{cold:?}: the ordinary exit frees it"
         );
     }
 }

@@ -410,6 +410,13 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     {
         changed.push("tui_o.writer.dormant_channels");
     }
+    // A live ON cannot install reservations missed at boot; repeat this warning on every reload.
+    let capable = crate::services::tui_o::channel_policy::boot()
+        .map(|boot| boot.late_adopt_capable())
+        .unwrap_or_else(|| old.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt));
+    if new.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt) && !capable {
+        changed.push("tui_o.writer.late_adopt");
+    }
     changed
 }
 
@@ -610,6 +617,10 @@ pub(crate) fn test_live_guard(
 }
 
 #[cfg(test)]
+#[path = "config/late_live_reload_tests.rs"]
+mod late_live_reload_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -786,7 +797,10 @@ mod tests {
         assert!(!crate::services::tui_o::repost::config::RepostConfig::default().enabled);
         let mut on = Config::default();
         on.tui_o = Some(crate::services::tui_o::shadow::tap::TuiOConfig {
-            repost: crate::services::tui_o::repost::config::RepostConfig { enabled: true },
+            repost: crate::services::tui_o::repost::config::RepostConfig {
+                enabled: true,
+                channels: [6325].into_iter().collect(),
+            },
             ..crate::services::tui_o::shadow::tap::TuiOConfig::default()
         });
         let mut boot = RepostSwitch::new(on.tui_o.as_ref(), tokio::sync::watch::channel(None).1);
