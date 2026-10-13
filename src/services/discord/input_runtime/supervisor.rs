@@ -12,7 +12,7 @@ use tokio::sync::{OwnedMutexGuard, watch};
 
 use self::command::{ScanCommit, SupervisorCmd};
 use self::ordering::AdmissionOrder;
-use self::receipt::{Deferred, Receipt};
+use self::receipt::{Deferred, Receipt, ResponsibilityLookup};
 use self::reserve::Reserved;
 use super::clear::{self, ClearHost, Step, Unresolved};
 use super::fence::{self, Closing, Failure, Gate, Mode};
@@ -580,17 +580,17 @@ impl<P: Ports> Supervisor<P> {
             }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
-                    Responsibility::Conflict
+                    ResponsibilityLookup::unproven(Responsibility::Conflict)
                 } else {
                     loan(&mut self.slot, move |lease| {
                         lease
                             .get()
                             .and_then(|ledger| ledger.rows())
-                            .map(|rows| rows.responsibility(&identity))
-                            .unwrap_or(Responsibility::Unknown)
+                            .map(|rows| receipt::lookup(&rows, &identity))
+                            .unwrap_or_else(|_| ResponsibilityLookup::unknown())
                     })
                     .await
-                    .unwrap_or(Responsibility::Unknown)
+                    .unwrap_or_else(ResponsibilityLookup::unknown)
                 };
                 let _ = reply.send(result);
             }
@@ -994,3 +994,6 @@ fn boundary(at: transition::Boundary) -> &'static str {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "supervisor_tests.rs"]
 mod tests;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+pub(in crate::services::discord) use tests::{ScanFixtureEvidence, run_scan_fixture};
