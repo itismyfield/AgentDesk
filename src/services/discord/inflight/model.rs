@@ -20,6 +20,7 @@ pub(in crate::services::discord) use legacy_replay_coordinate::{
 #[cfg(test)]
 pub(in crate::services::discord) use legacy_replay_coordinate::{
     CoordinateInstallPhase, InstalledSourceWitness, PriorNormalizedCoordinate, RawTurnWitness,
+    is_coordinate_hold_reason,
 };
 use serde_adapters::{
     deserialize_relay_owner_kind_tolerant, deserialize_runtime_kind_tolerant,

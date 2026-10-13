@@ -17,20 +17,20 @@ use crate::services::codex_tui::rollout_tail::RolloutRecordDecoder;
 use crate::services::discord::inflight::RawTurnWitness;
 
 /// The durable facts a proof must find in the source; `composed` is the stored FROZEN + BODY.
-pub(super) struct ProofRequest<'a> {
-    pub(super) raw_path: &'a Path,
-    pub(super) session_id: Option<&'a str>,
-    pub(super) native_turn_id: Option<&'a str>,
-    pub(super) composed: &'a str,
+pub(in crate::services::discord::recovery_engine) struct ProofRequest<'a> {
+    pub(in crate::services::discord::recovery_engine) raw_path: &'a Path,
+    pub(in crate::services::discord::recovery_engine) session_id: Option<&'a str>,
+    pub(in crate::services::discord::recovery_engine) native_turn_id: Option<&'a str>,
+    pub(in crate::services::discord::recovery_engine) composed: &'a str,
 }
 
 /// A verified alignment. `reader` sits right after the record that crossed the prefix and
 /// `residual_text` is the part of that record's text beyond the prefix.
-pub(super) struct ProofPlan {
-    pub(super) witness: RawTurnWitness,
-    pub(super) reader: BufReader<std::fs::File>,
-    pub(super) decoder: RolloutRecordDecoder,
-    pub(super) residual_text: String,
+pub(in crate::services::discord::recovery_engine) struct ProofPlan {
+    pub(in crate::services::discord::recovery_engine) witness: RawTurnWitness,
+    pub(in crate::services::discord::recovery_engine) reader: BufReader<std::fs::File>,
+    pub(in crate::services::discord::recovery_engine) decoder: RolloutRecordDecoder,
+    pub(in crate::services::discord::recovery_engine) residual_text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,7 +54,9 @@ fn named(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-pub(super) fn prove(request: &ProofRequest<'_>) -> Result<ProofPlan, CoordinateHold> {
+pub(in crate::services::discord::recovery_engine) fn prove(
+    request: &ProofRequest<'_>,
+) -> Result<ProofPlan, CoordinateHold> {
     use CoordinateHold::{AwaitEvidence, NeedsEvidence};
     let session_id = named(request.session_id).ok_or(NeedsEvidence("session_unknown"))?;
     let native_turn = named(request.native_turn_id).ok_or(NeedsEvidence("native_turn_unknown"))?;
