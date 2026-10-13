@@ -744,7 +744,7 @@ mod operations_shape {
     use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource};
     use crate::services::tui_o::store::rotation::{Boundary, SourceLink};
     use crate::services::tui_o::store::{
-        CURSOR_DIR, InitSource, Initialized, OStore, STORE_DIR_NAME, StoreConfig,
+        CURSOR_DIR, ChannelStore, InitSource, Initialized, OStore, STORE_DIR_NAME, StoreConfig,
     };
 
     fn hop_seqs() -> Vec<u64> {
@@ -916,6 +916,141 @@ mod operations_shape {
         assert_eq!(
             (judgment.summary.eligible, judgment.summary.unknown),
             (0, 59)
+        );
+    }
+
+    #[test]
+    fn transition_cleanup_retired_missing_source_retry_reads_its_witness_back_from_the_store() {
+        let runtime = tempfile::tempdir().unwrap();
+        let sources: Vec<SourceId> = (0..2)
+            .map(|n| {
+                let path = runtime.path().join(format!("t{n}.jsonl"));
+                std::fs::write(&path, b"{\"n\":0}\n").unwrap();
+                source_id_for(&format!("session-{n}"), &path).unwrap()
+            })
+            .collect();
+        let config = StoreConfig { enabled: true };
+        let store = OStore::open_if_enabled(&config, runtime.path())
+            .unwrap()
+            .unwrap();
+        let now = chrono::Utc::now();
+        let initialized = Initialized {
+            channel: CHANNEL,
+            sources: Vec::new(),
+            initial_anchor: 0,
+            build_digest: "test".into(),
+            at: now,
+        };
+        let era = store
+            .begin_era(&[CHANNEL], now, |_| Ok(initialized.clone()))
+            .unwrap();
+        let mut channel = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+        for source in &sources {
+            channel.attach_source(source).unwrap();
+            let mut capture = SourceCapture::open(source.clone(), 0).unwrap();
+            let CaptureOutcome::Batch(batch) = capture.poll(1 << 20) else {
+                panic!("capture failed");
+            };
+            channel
+                .append_spool(&batch, &capture.prefix_hash())
+                .unwrap();
+        }
+        let (old, current) = (&sources[0], &sources[1]);
+        let mut rotation = Rotation::default();
+        let next = Successor {
+            source: current.clone(),
+            seq: Some(2),
+            tmux_session: Some(PANE.into()),
+            drain_to: None,
+            proof: None,
+        };
+        rotation.successors.insert(source_key(old), next);
+        channel.write_rotation(&rotation).unwrap();
+        channel.prepare_cleanup_witnesses().unwrap();
+        // Probe stamps are the caller's: the file's mtime is a day old by them, the witness fresh.
+        let wall = SystemTime::now();
+        let probed = wall + Duration::from_secs(25 * 3600);
+        let cursor = channel.cursor(old).unwrap().clone();
+        let witness = CleanupWitness {
+            source: old.clone(),
+            captured_through: cursor.captured_through,
+            prefix_hash: cursor.prefix_hash.clone(),
+            fingerprint: Fingerprint::path(old).unwrap(),
+            observed_at: wall + Duration::from_secs(3 * 3600),
+        };
+        channel.write_cleanup_witness(&witness).unwrap();
+        std::fs::remove_file(&old.path).unwrap();
+        let snapshot_of = |channel: &ChannelStore, witness: Option<CleanupWitness>| {
+            let cursors: Vec<Cursor> = channel.cursors().cloned().collect();
+            let mut facts = BTreeMap::new();
+            for cursor in &cursors {
+                let is_old = cursor.source == *old;
+                let reader = ReaderView {
+                    capture: None,
+                    pending_batch: false,
+                    drain_to: None,
+                    captured_any: true,
+                };
+                let source_facts = SourceFacts {
+                    reader: Some(reader),
+                    gc_logged: false,
+                    witness: if is_old { witness.clone() } else { None },
+                    earlier: Some(observe::observe(cursor, probed)),
+                    later: Some(observe::observe(cursor, probed + RETIRE_QUIET)),
+                };
+                facts.insert(source_key(&cursor.source), source_facts);
+            }
+            Snapshot {
+                channel: CHANNEL,
+                provider: ShadowProvider::Claude,
+                home: Home::Settled,
+                rotation: channel.rotation().unwrap(),
+                cursors,
+                pinned: Ok(Some(current.clone())),
+                execution: Ok(vec![current.clone()]),
+                sources: facts,
+                legacy_hops: Ok(BTreeMap::new()),
+                obligations: Ok(Obligations::default()),
+            }
+        };
+        let request = Fixture::synthetic().request;
+        let read = channel.cleanup_witness(old).unwrap();
+        let judgment = judge(&snapshot_of(&channel, read), &request);
+        let Verdict::Eligible(draft) = judgment.hops[0].verdict.clone() else {
+            panic!("{:?}", judgment.hops);
+        };
+        assert_eq!(draft.verified.fingerprint, witness.fingerprint);
+        // Stand in for the retirement: the audited, retired cursor as the store would hold it.
+        channel.set_retired(old, true).unwrap();
+        let retired = Cursor {
+            transition_cleanup: Some(*draft),
+            ..channel.cursor(old).unwrap().clone()
+        };
+        let cursor_file = (runtime.path().join(STORE_DIR_NAME))
+            .join(CHANNEL.to_string())
+            .join(CURSOR_DIR)
+            .join(format!("{}.json", source_key(old)));
+        std::fs::write(cursor_file, serde_json::to_vec(&retired).unwrap()).unwrap();
+        drop(channel);
+        let reopened = store.open_channel(&era, CHANNEL).unwrap().unwrap();
+        assert_eq!(reopened.cursor(old), Some(&retired));
+        assert_eq!(reopened.cleanup_witness(old).unwrap(), None);
+        let recorded = reopened.recorded_witness(old).unwrap();
+        assert_eq!(recorded.as_ref(), Some(&witness));
+        let snapshot = snapshot_of(&reopened, recorded);
+        let judgment = judge(&snapshot, &request);
+        assert_eq!(judgment.hops[0].verdict, Verdict::AlreadyDone);
+        let other = Request {
+            job_id: "hrot-e2e-2".into(),
+            ..request
+        };
+        let judgment = judge(&snapshot, &other);
+        let Verdict::Eligible(again) = &judgment.hops[0].verdict else {
+            panic!("{:?}", judgment.hops);
+        };
+        assert_eq!(
+            (again.job_id.as_str(), again.verified.fingerprint.clone()),
+            ("hrot-e2e-2", witness.fingerprint)
         );
     }
 }

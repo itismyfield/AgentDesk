@@ -90,6 +90,19 @@ impl ChannelStore {
         Ok(witness.bound_to(cursor).then_some(witness))
     }
 
+    /// The stored witness once it validates, whether or not the cursor is retired. A read of the
+    /// record only: unlike `cleanup_witness` it grants no missing-source cleanup.
+    #[cfg(test)]
+    pub(crate) fn recorded_witness(
+        &self,
+        source: &SourceId,
+    ) -> Result<Option<CleanupWitness>, StoreError> {
+        let name = format!("{}.json", source_key(source));
+        let witness: Option<CleanupWitness> =
+            durable::read_json(&self.dir.join(CLEANUP_DIR).join(name))?;
+        witness.map(|w| w.validate(source).map(|()| w)).transpose()
+    }
+
     pub fn write_cleanup_witness(&mut self, witness: &CleanupWitness) -> Result<(), StoreError> {
         self.mutate(|store| {
             witness.validate(&witness.source)?;
