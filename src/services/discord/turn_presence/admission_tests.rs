@@ -911,13 +911,14 @@ async fn b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retr
     let polls = AtomicUsize::new(0);
     let mounted = Arc::new(Barrier::new(2));
     let waiting = Arc::new(Barrier::new(3));
-    let cancel = Arc::new(AtomicBool::new(false));
+    let release_wait = Arc::new(AtomicBool::new(false));
     let (held, acquired) = mpsc::channel();
     let (finished, completion) = mpsc::channel();
     let channel = fixture.identity.channel;
     let callback = {
         let (homes, gate) = (homes.clone(), gateway.clone());
-        let (mounted, waiting, cancel) = (mounted.clone(), waiting.clone(), cancel.clone());
+        let (mounted, waiting, release_wait) =
+            (mounted.clone(), waiting.clone(), release_wait.clone());
         std::thread::spawn(move || {
             let _homes = homes.enter();
             gate.admit(|_| {
@@ -925,11 +926,11 @@ async fn b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retr
                 mounted.wait();
                 assert!(!homes.available(), "the live callback waits for HOMES");
                 waiting.wait();
-                // Cancellable Home wait lets the blocking mutant release its gate before assertions.
-                while !homes.available() && !cancel.load(Ordering::SeqCst) {
+                // Releasable Home wait lets the blocking mutant release its gate before assertions.
+                while !homes.available() && !release_wait.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
-                if !cancel.load(Ordering::SeqCst) {
+                if !release_wait.load(Ordering::SeqCst) {
                     assert!(channel_home::registered_channel(channel).is_none());
                 }
             })
@@ -937,12 +938,12 @@ async fn b2b2_contended_gateway_rejects_without_waiting_and_a_fresh_reading_retr
     };
     acquired.recv().unwrap();
     let controller = {
-        let (waiting, cancel) = (waiting.clone(), cancel.clone());
+        let (waiting, release_wait) = (waiting.clone(), release_wait.clone());
         std::thread::spawn(move || {
             waiting.wait();
             let completed = completion.recv_timeout(std::time::Duration::from_secs(1));
             if completed.is_err() {
-                cancel.store(true, Ordering::SeqCst);
+                release_wait.store(true, Ordering::SeqCst);
             }
             completed == Ok(true)
         })
