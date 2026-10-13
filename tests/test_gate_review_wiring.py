@@ -85,6 +85,25 @@ class GateReviewWiring(unittest.TestCase):
                                     capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
 
+    def test_audit_shard_runs_severity_harness_regressions(self):
+        source = (ROOT / "scripts/ci-script-checks.sh").read_text().splitlines()
+        start = source.index('if run_check cargo "Maintainability audit tests"; then') + 1
+        body = "\n".join(source[start:source.index("fi", start)])
+        self.write("tests/__init__.py", "")
+        self.write("tests/test_audit_maintainability.py", """import unittest
+class FooterViewWritesCheck(unittest.TestCase):
+    def test_fixture(self): pass
+class GiantFileRatchetCheck(unittest.TestCase):
+    def test_fixture(self): pass
+class HarnessCli(unittest.TestCase):
+    def test_warning_blocker_regression(self): self.fail('severity harness executed')
+""")
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", body], cwd=self.root,
+                                env={**os.environ, "PYTHON": sys.executable},
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("severity harness executed", result.stderr)
+
     def hook(self, *, fail=False):
         for path in (".githooks/pre-push", "scripts/resolve-python-runner.sh"):
             target = self.root / path

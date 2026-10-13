@@ -707,17 +707,7 @@ if run_check contracts "API docs coverage gate (#3719)"; then
 fi
 
 if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
-# docs/relay-state-contract.md anchors code with `sym:` symbol paths. This check
-# verifies the doc's `sym:` anchors exactly match the references PARSED FROM THE
-# CODE in the relay_state_contract_refs blocks (use / field / assoc-fn forms,
-# never comments) — it does NOT judge whether a symbol exists. Symbol EXISTENCE
-# is proven by the compiler: those reference blocks fail
-# `cargo check --workspace --all-targets` (a required gate) if a symbol is
-# renamed/moved/removed. Splitting it this way is what killed the regex-bypass
-# game (raw strings / macros / cfg can't fool a real compile), and deriving the
-# anchor set from the compiled code (not `// sym:` comments) is what killed the
-# r3 comment-decoupling bypass.
-# It also matches docs/contracts/h2-tmux-boundary-ratchet.md anchors to imported H2 Python functions.
+# Documentation references warn; unavailable inputs fail, and compilation verifies symbols.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi
@@ -766,8 +756,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck \
-  tests.test_audit_maintainability.GiantFileRatchetCheck
+"$PYTHON" -m unittest tests.test_audit_maintainability
 fi
 
 if run_check cargo "Maintainability audit"; then
