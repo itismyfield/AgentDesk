@@ -62,8 +62,8 @@ pub(in crate::services::discord) enum ClaudeRotationPlan {
     /// with a tail that has provably stopped). It can never receive a terminal,
     /// so settle it and release the channel.
     SettleStaleInflight,
-    /// Nothing is pinned to the frozen transcript; the rotation is already fully
-    /// propagated and the record can be retired.
+    /// No inflight is pinned to the frozen transcript, so the record is retired. This
+    /// checks neither that a feeder moved to the new transcript nor any delivery.
     RebindOnly,
 }
 
@@ -326,8 +326,8 @@ async fn settle_one_claude_session_rotation(
                 new_session_id = %rotation.new_session_id,
                 old_transcript_path = %rotation.old_output_path,
                 new_transcript_path = %rotation.new_output_path,
-                "#5188: Claude session rotation fully propagated; delivery now reads the new \
-                 transcript and no inflight is pinned to the frozen one"
+                "#5188: retired Claude session rotation record; no inflight is pinned to the \
+                 frozen transcript (feeder switch and delivery not verified here)"
             );
             crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                 &rotation.tmux_session_name,
@@ -451,10 +451,8 @@ mod tests {
         }
     }
 
-    // Direction (a): a rotation with no inflight pinned to the frozen transcript
-    // is already fully propagated — delivery follows the new session and the
-    // record retires. Before #5188 the binding was reverted to the frozen file by
-    // the launch-script rehydration pass and nothing ever retired.
+    // Direction (a): with no inflight pinned to the frozen transcript the record retires
+    // at once; this plan checks neither the feeder switch nor delivery.
     #[test]
     fn rotation_without_a_pinned_inflight_rebinds_immediately() {
         assert_eq!(
