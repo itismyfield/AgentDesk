@@ -105,7 +105,12 @@ pub(crate) fn sample_gate(gate: &HomeGate, row_provider: &str) -> GateSample {
         Some(held) => match gate.gate.try_current() {
             Err(TryLockError::WouldBlock) => return GateSample::Busy(SampleLock::Inner),
             Err(TryLockError::Poisoned(_)) => return GateSample::Poisoned(SampleLock::Inner),
-            Ok(inner) if inner == (GatewayOwnership::Owned { epoch: held.gate_epoch }) => {
+            Ok(inner)
+                if inner
+                    == (GatewayOwnership::Owned {
+                        epoch: held.gate_epoch,
+                    }) =>
+            {
                 let intake = if local.intake_closed == Some(held.home_epoch) {
                     HomeIntake::Closed
                 } else {
@@ -177,7 +182,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn sampling_expires_prunes_closes_and_initializes_nothing() {
         assert!(matches!(try_sample(CH, "codex"), GateSample::NotRegistered));
-        assert!(with_homes(|homes| homes.get().is_none()), "no registry made");
+        assert!(
+            with_homes(|homes| homes.get().is_none()),
+            "no registry made"
+        );
 
         let sent = Instant::now();
         let gate = held(CH, 4, sent);
@@ -187,7 +195,10 @@ mod tests {
         let permit = listed.admit_command("codex").expect("held gate admits");
         unregister(&(CH + 1).to_string());
         drop(permit);
-        assert!(commands_listed(CH + 1), "an idle counter waits for the next prune");
+        assert!(
+            commands_listed(CH + 1),
+            "an idle counter waits for the next prune"
+        );
 
         tokio::time::advance(HOLD_FOR + Duration::from_secs(1)).await;
         let sample = try_sample(CH, "codex");
@@ -215,17 +226,26 @@ mod tests {
     async fn a_taken_or_poisoned_lock_gives_no_sample() {
         let gate = held(CH, 4, Instant::now());
         register(Arc::clone(&gate));
-        assert!(owned(&try_sample(CH, "codex")).is_some(), "free locks sample");
+        assert!(
+            owned(&try_sample(CH, "codex")).is_some(),
+            "free locks sample"
+        );
 
         with_homes(|homes| {
             let _registry = lock_homes(homes.get().unwrap());
             let busy = try_sample(CH, "codex");
-            assert!(matches!(busy, GateSample::Busy(SampleLock::Registry)), "{busy:?}");
+            assert!(
+                matches!(busy, GateSample::Busy(SampleLock::Registry)),
+                "{busy:?}"
+            );
         });
         {
             let _local = gate.local.lock().unwrap();
             let busy = try_sample(CH, "codex");
-            assert!(matches!(busy, GateSample::Busy(SampleLock::Local)), "{busy:?}");
+            assert!(
+                matches!(busy, GateSample::Busy(SampleLock::Local)),
+                "{busy:?}"
+            );
         }
 
         // A writer's admission holds the inner lock; the sample must come back at once.
@@ -249,7 +269,10 @@ mod tests {
         admitting.join().unwrap();
         sampler.join().unwrap();
         let busy = busy.expect("the sample waited on the inner lock");
-        assert!(matches!(busy, GateSample::Busy(SampleLock::Inner)), "{busy:?}");
+        assert!(
+            matches!(busy, GateSample::Busy(SampleLock::Inner)),
+            "{busy:?}"
+        );
 
         let poison = |lock: &dyn Fn()| {
             let _ = catch_unwind(AssertUnwindSafe(lock));
@@ -258,13 +281,19 @@ mod tests {
             let _inner = gate.gate().admit(|_| -> u8 { panic!("poison inner") });
         });
         let poisoned = try_sample(CH, "codex");
-        assert!(matches!(poisoned, GateSample::Poisoned(SampleLock::Inner)), "{poisoned:?}");
+        assert!(
+            matches!(poisoned, GateSample::Poisoned(SampleLock::Inner)),
+            "{poisoned:?}"
+        );
         poison(&|| {
             let _local = gate.local.lock();
             panic!("poison local");
         });
         let poisoned = try_sample(CH, "codex");
-        assert!(matches!(poisoned, GateSample::Poisoned(SampleLock::Local)), "{poisoned:?}");
+        assert!(
+            matches!(poisoned, GateSample::Poisoned(SampleLock::Local)),
+            "{poisoned:?}"
+        );
         poison(&|| {
             with_homes(|homes| {
                 let _registry = homes.get().unwrap().lock();
@@ -272,7 +301,10 @@ mod tests {
             })
         });
         let poisoned = try_sample(CH, "codex");
-        assert!(matches!(poisoned, GateSample::Poisoned(SampleLock::Registry)), "{poisoned:?}");
+        assert!(
+            matches!(poisoned, GateSample::Poisoned(SampleLock::Registry)),
+            "{poisoned:?}"
+        );
         for sample in [busy, poisoned] {
             assert!(sample.sample().is_none() && sample.unreadable());
         }
@@ -329,7 +361,11 @@ mod tests {
             }
         }
         writer.join().unwrap();
-        assert!(mixed.is_empty(), "mixed samples: {:?}", &mixed[..mixed.len().min(5)]);
+        assert!(
+            mixed.is_empty(),
+            "mixed samples: {:?}",
+            &mixed[..mixed.len().min(5)]
+        );
         assert!(
             owned_seen > 100 && epochs_seen.len() > 10,
             "the sampler raced the writer: {owned_seen} samples over {} epochs",

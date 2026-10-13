@@ -687,6 +687,8 @@ src/
 │   │   │   ├── temporary.rs
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
+│   │   ├── channel_home/
+│   │   │   └── ingress_snapshot.rs
 │   │   ├── channel_ingress/
 │   │   │   └── tests.rs
 │   │   ├── execution_capacity/
@@ -1112,6 +1114,10 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
+│   │   ├── ingress_shadow/
+│   │   │   ├── shadow_tests.rs
+│   │   │   ├── telemetry.rs
+│   │   │   └── worker.rs
 │   │   ├── input_runtime/
 │   │   │   ├── activation/
 │   │   │   │   ├── plan.rs
@@ -1431,6 +1437,7 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
+│   │   │   │   ├── ingress_shadow_compat_tests.rs
 │   │   │   │   ├── ledger.rs
 │   │   │   │   ├── ledger_io_tests.rs
 │   │   │   │   ├── ledger_tests.rs
@@ -2176,6 +2183,7 @@ src/
 │   │   ├── idle_relay_drift.rs
 │   │   ├── inflight.rs
 │   │   ├── inflight_heartbeat_sweeper.rs
+│   │   ├── ingress_shadow.rs
 │   │   ├── inject_disposition.rs
 │   │   ├── inject_disposition_test_support.rs
 │   │   ├── inject_disposition_tests.rs

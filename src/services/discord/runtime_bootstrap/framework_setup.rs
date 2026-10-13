@@ -224,7 +224,8 @@ pub(super) async fn run_bot_framework_setup(
 
 /// Build the full ordered list of poise slash commands registered by the bot.
 /// Order is preserved exactly as it was inline in run_bot.
-pub(in crate::services::discord) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>> {
+pub(in crate::services::discord) fn run_bot_build_slash_commands()
+-> Vec<poise::Command<Data, Error>> {
     let mut slash_commands = vec![
         commands::cmd_start(),
         commands::cmd_resume(),

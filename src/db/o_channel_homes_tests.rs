@@ -408,8 +408,15 @@ async fn a_row_read_carries_pgs_clock_from_the_same_statement_pg() {
     let before = clock().await;
     let (row, read_at) = read_home_at(&pool, C).await.unwrap().expect("row");
     let after = clock().await;
-    assert_eq!(Some(&row), home(&pool).await.as_ref(), "the same row as read_home");
-    assert!(before <= read_at && read_at <= after, "{before} <= {read_at} <= {after}");
+    assert_eq!(
+        Some(&row),
+        home(&pool).await.as_ref(),
+        "the same row as read_home"
+    );
+    assert!(
+        before <= read_at && read_at <= after,
+        "{before} <= {read_at} <= {after}"
+    );
     let age = read_at - row.renewed_at.expect("renewed");
     assert!(
         age >= chrono::Duration::seconds(5) && age < chrono::Duration::seconds(6),

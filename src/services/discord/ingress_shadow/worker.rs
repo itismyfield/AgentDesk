@@ -11,8 +11,8 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::telemetry::{Counts, Observed, Record, Sink};
 use super::Descriptor;
+use super::telemetry::{Counts, Observed, Record, Sink};
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeProvider};
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home::ingress_snapshot::{self, GateSample};
@@ -27,8 +27,12 @@ const CLOSE_EVERY: Duration = Duration::from_secs(60);
 
 #[cfg(test)]
 pub(super) type FixedRead = Arc<
-    dyn Fn(u64) -> futures::future::BoxFuture<'static, Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError>>
-        + Send
+    dyn Fn(
+            u64,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError>,
+        > + Send
         + Sync,
 >;
 
@@ -222,9 +226,12 @@ pub(super) async fn judge(
         IngressObservation::LocalCandidate { home_epoch } => {
             ("local_candidate", Some(*home_epoch), None, None)
         }
-        IngressObservation::IgnoreForeign { holder, home_epoch } => {
-            ("ignore_foreign", Some(*home_epoch), None, Some(holder.clone()))
-        }
+        IngressObservation::IgnoreForeign { holder, home_epoch } => (
+            "ignore_foreign",
+            Some(*home_epoch),
+            None,
+            Some(holder.clone()),
+        ),
         IngressObservation::Hold(why) => {
             let read = match &found {
                 Lookup::Row(home, _) => Some(home.epoch),
@@ -258,7 +265,10 @@ pub(super) async fn judge(
         lookup_ms: millis(looked_up.saturating_duration_since(started)),
         sample_ms: millis(now.saturating_duration_since(looked_up)),
         lookup: found.label().to_owned(),
-        sampler: sample.as_ref().map_or("not_sampled", GateSample::label).to_owned(),
+        sampler: sample
+            .as_ref()
+            .map_or("not_sampled", GateSample::label)
+            .to_owned(),
         row_epoch,
         local_epoch,
         verdict: label.to_owned(),

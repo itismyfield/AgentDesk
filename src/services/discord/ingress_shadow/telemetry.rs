@@ -158,7 +158,9 @@ pub(super) mod window {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(in crate::services::discord) enum Window {
-        Pass { paired: usize },
+        Pass {
+            paired: usize,
+        },
         Incomplete(Vec<Gap>),
         /// Sources more than one observer process judged its own candidate.
         Conflict(Vec<(u64, u64)>),
@@ -205,7 +207,11 @@ pub(super) mod window {
                 Record::Observed(observed) => entry.observed.push(observed),
             }
         }
-        let wanted: BTreeSet<&str> = expected.nodes.iter().map(|n| n.incarnation.as_str()).collect();
+        let wanted: BTreeSet<&str> = expected
+            .nodes
+            .iter()
+            .map(|n| n.incarnation.as_str())
+            .collect();
         for incarnation in seen.keys().filter(|seen| !wanted.contains(*seen)) {
             gaps.push(Gap::UnexpectedIncarnation((*incarnation).to_owned()));
         }
@@ -216,14 +222,16 @@ pub(super) mod window {
                 continue;
             };
             match entry.starts.as_slice() {
-                [Record::Start {
-                    instance_id,
-                    build,
-                    bot,
-                    provider,
-                    allowlist,
-                    ..
-                }] => {
+                [
+                    Record::Start {
+                        instance_id,
+                        build,
+                        bot,
+                        provider,
+                        allowlist,
+                        ..
+                    },
+                ] => {
                     let listed: BTreeSet<u64> = allowlist.iter().copied().collect();
                     if *instance_id != node.instance_id
                         || *build != node.build

@@ -77,9 +77,12 @@ fn describe(event: &serenity::FullEvent) -> Option<(EventKind, NonZeroU64, u64, 
         serenity::FullEvent::InteractionCreate { interaction } => {
             let (kind, channel, id, application) = match interaction {
                 I::Command(c) => (EventKind::Command, c.channel_id, c.id, c.application_id),
-                I::Autocomplete(c) => {
-                    (EventKind::Autocomplete, c.channel_id, c.id, c.application_id)
-                }
+                I::Autocomplete(c) => (
+                    EventKind::Autocomplete,
+                    c.channel_id,
+                    c.id,
+                    c.application_id,
+                ),
                 I::Component(c) => (EventKind::Component, c.channel_id, c.id, c.application_id),
                 I::Modal(m) => (EventKind::Modal, m.channel_id, m.id, m.application_id),
                 _ => return None,
@@ -149,7 +152,10 @@ pub(super) fn start_if_enabled(
 ) -> Option<IngressShadow> {
     let config = config?;
     let Some(provider) = HomeProvider::parse(provider.as_str()) else {
-        tracing::warn!(provider = provider.as_str(), "ingress shadow is for claude and codex only");
+        tracing::warn!(
+            provider = provider.as_str(),
+            "ingress shadow is for claude and codex only"
+        );
         return None;
     };
     let Begin {
@@ -166,7 +172,11 @@ pub(super) fn start_if_enabled(
         build: None,
         sink: Sink::Log,
     };
-    Some(spawn(&config.channels, scope, HomeSource::of(pool.as_ref())))
+    Some(spawn(
+        &config.channels,
+        scope,
+        HomeSource::of(pool.as_ref()),
+    ))
 }
 
 fn spawn(channels: &BTreeSet<u64>, scope: Scope, source: HomeSource) -> IngressShadow {

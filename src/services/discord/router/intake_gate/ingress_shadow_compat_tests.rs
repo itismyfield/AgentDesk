@@ -219,7 +219,8 @@ impl Transport {
         let proxy = format!("http://{}", listener.local_addr().unwrap());
         let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let ctx = discord_mock::serenity_context(proxy, gateway_url.clone()).await;
-        ctx.http.set_application_id(serenity::ApplicationId::new(APPLICATION));
+        ctx.http
+            .set_application_id(serenity::ApplicationId::new(APPLICATION));
         // Poise needs a manager in its context; nothing here starts a shard.
         let framework: Arc<dyn serenity::framework::Framework> = Arc::new(IdleFramework);
         let (manager, _) =
@@ -387,9 +388,20 @@ async fn session(shared: &SharedData) -> Value {
 fn generations(item: &crate::services::turn_orchestrator::Intervention) -> Vec<String> {
     let generation = |g: &crate::services::turn_orchestrator::SourceMessageQueuedGeneration| {
         let stamped = g.enqueued_at_epoch_us.is_some();
-        format!("{:?}", (g.message_id, g.queued_generation, stamped, g.preserve_on_cancel))
+        format!(
+            "{:?}",
+            (
+                g.message_id,
+                g.queued_generation,
+                stamped,
+                g.preserve_on_cancel
+            )
+        )
     };
-    item.source_message_queued_generations.iter().map(generation).collect()
+    item.source_message_queued_generations
+        .iter()
+        .map(generation)
+        .collect()
 }
 
 /// The queued inputs field by field; arrival instants and wall stamps only by presence.
@@ -398,10 +410,19 @@ fn queued(queue: &[crate::services::turn_orchestrator::Intervention]) -> String 
         format!(
             "{:?}",
             (
-                (i.author_id, i.author_is_bot, i.message_id, i.queued_generation),
+                (
+                    i.author_id,
+                    i.author_is_bot,
+                    i.message_id,
+                    i.queued_generation
+                ),
                 (&i.source_message_ids, generations(i)),
                 (&i.source_text_segments, &i.text, &i.mode, &i.reply_context),
-                (i.has_reply_boundary, i.merge_consecutive, &i.pending_uploads),
+                (
+                    i.has_reply_boundary,
+                    i.merge_consecutive,
+                    &i.pending_uploads
+                ),
                 &i.voice_announcement,
             )
         )
@@ -432,7 +453,10 @@ async fn record_error(error: poise::FrameworkError<'_, Data, crate::services::di
         | poise::FrameworkError::Command { error, .. } => format!(": {error}"),
         _ => String::new(),
     };
-    HANDLER_ERRORS.lock().unwrap().push(format!("{error}{inner}"));
+    HANDLER_ERRORS
+        .lock()
+        .unwrap()
+        .push(format!("{error}{inner}"));
 }
 
 /// One run in this process: the fixture, every event through Poise dispatch with the production
@@ -484,7 +508,13 @@ async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
         assert!(claimed, "fixture holds a real active turn");
     }
     let transport = Transport::start().await;
-    assert!(shared.http.cached_serenity_ctx.set(transport.ctx.clone()).is_ok());
+    assert!(
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(transport.ctx.clone())
+            .is_ok()
+    );
     shared.turn_view_reconciler.enable_test_http_reactions();
     assert!(
         crate::services::discord::provider_handles_channel(
@@ -543,7 +573,11 @@ async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
     if let Some(probe) = &probe
         && run == Run::On(ObserverKind::Answering)
     {
-        assert!(probe.judged(probe.submitted(), Duration::from_secs(5)).await);
+        assert!(
+            probe
+                .judged(probe.submitted(), Duration::from_secs(5))
+                .await
+        );
     }
     let snapshot = mailbox_snapshot(&shared, channel).await;
     let effects = Effects {
@@ -627,7 +661,11 @@ fn child(test: &str) -> bool {
         .unwrap();
     let outcome = runtime.block_on(Box::pin(invoke(case, run, &root)));
     drop(runtime);
-    std::fs::write(std::env::var(OUT_ENV).unwrap(), serde_json::to_vec(&outcome).unwrap()).unwrap();
+    std::fs::write(
+        std::env::var(OUT_ENV).unwrap(),
+        serde_json::to_vec(&outcome).unwrap(),
+    )
+    .unwrap();
     true
 }
 
@@ -671,20 +709,30 @@ fn differences(left: &Effects, right: &Effects) -> Vec<String> {
     for index in 0..left.http.len().max(right.http.len()) {
         let (l, r) = (left.http.get(index), right.http.get(index));
         if l != r {
-            found.push(clip(format!("http #{index}: {:?} vs {:?}", l.map(shown), r.map(shown))));
+            found.push(clip(format!(
+                "http #{index}: {:?} vs {:?}",
+                l.map(shown),
+                r.map(shown)
+            )));
         }
     }
-    let names: std::collections::BTreeSet<_> = left.files.keys().chain(right.files.keys()).collect();
+    let names: std::collections::BTreeSet<_> =
+        left.files.keys().chain(right.files.keys()).collect();
     for name in names {
         let (l, r) = (left.files.get(name), right.files.get(name));
         if l != r {
-            let text = |bytes: Option<&Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(b).into_owned());
+            let text =
+                |bytes: Option<&Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(b).into_owned());
             found.push(clip(format!("file {name}: {:?} vs {:?}", text(l), text(r))));
         }
     }
     for (field, l, r) in [
         ("queue", json!(left.queue), json!(right.queue)),
-        ("checkpoint", json!(left.checkpoint), json!(right.checkpoint)),
+        (
+            "checkpoint",
+            json!(left.checkpoint),
+            json!(right.checkpoint),
+        ),
         ("session", left.session.clone(), right.session.clone()),
         ("dm_reply", left.dm_reply.clone(), right.dm_reply.clone()),
     ] {
@@ -697,26 +745,39 @@ fn differences(left: &Effects, right: &Effects) -> Vec<String> {
 
 fn writes(effects: &Effects) -> Vec<(&str, &str)> {
     let calls = effects.http.iter().filter(|call| call.0 != "GET");
-    calls.map(|call| (call.0.as_str(), call.1.as_str())).collect()
+    calls
+        .map(|call| (call.0.as_str(), call.1.as_str()))
+        .collect()
 }
 
 /// What the shadow-off run must have done, so two empty runs never agree by accident.
 fn expect_off(case: Case, off: &Effects) -> Vec<String> {
     let writes = writes(off);
-    let callbacks = writes.iter().filter(|(_, path)| path.ends_with("/callback")).count();
-    let followups = writes.iter().filter(|(_, path)| path.starts_with("/api/v10/webhooks/")).count();
-    let reacted = writes.iter().any(|(method, path)| *method == "PUT" && path.contains("/reactions/"));
+    let callbacks = writes
+        .iter()
+        .filter(|(_, path)| path.ends_with("/callback"))
+        .count();
+    let followups = writes
+        .iter()
+        .filter(|(_, path)| path.starts_with("/api/v10/webhooks/"))
+        .count();
+    let reacted = writes
+        .iter()
+        .any(|(method, path)| *method == "PUT" && path.contains("/reactions/"));
     let held = match case {
         Case::Queued => {
             reacted && off.checkpoint == Some(MESSAGE) && off.queue.contains("shadow live input")
         }
         Case::PendingDmReply => {
             off.dm_reply[4] == "consumed"
-                && off.dm_reply[3].as_str().is_some_and(|context| context.contains("yes, ship it"))
+                && off.dm_reply[3]
+                    .as_str()
+                    .is_some_and(|context| context.contains("yes, ship it"))
         }
         Case::ModelPicker | Case::IdleRecap | Case::NodePicker | Case::Sidecar => callbacks == 1,
         Case::HelpAllowed => {
-            (callbacks, followups) == (1, 1) && writes.first().is_some_and(|w| w.1.ends_with("/callback"))
+            (callbacks, followups) == (1, 1)
+                && writes.first().is_some_and(|w| w.1.ends_with("/callback"))
         }
         Case::HelpRefused => (callbacks, followups) == (0, 0),
         Case::Message
@@ -724,13 +785,17 @@ fn expect_off(case: Case, off: &Effects) -> Vec<String> {
         | Case::Duplicate
         | Case::Image
         | Case::File
-        | Case::AttachmentOnly => !writes.is_empty() || off.results.iter().any(|r| r.contains("event handler")),
+        | Case::AttachmentOnly => {
+            !writes.is_empty() || off.results.iter().any(|r| r.contains("event handler"))
+        }
     };
     if held {
         return Vec::new();
     }
     let state = json!({"results": off.results, "queue": off.queue, "checkpoint": off.checkpoint, "dm_reply": off.dm_reply});
-    vec![clip(format!("{case:?}: the off run lacks its expected effect: {writes:?} {state}"))]
+    vec![clip(format!(
+        "{case:?}: the off run lacks its expected effect: {writes:?} {state}"
+    ))]
 }
 
 /// Every case off twice, then on with each observer: the shadow took one submission per raw event,
@@ -751,16 +816,26 @@ fn compare(test: &str, cases: &[Case]) {
         for kind in ObserverKind::ALL {
             let on = spawn_run(test, case, Run::On(kind));
             if kind == ObserverKind::Answering {
-                assert_eq!(on.completed, events, "{case:?}: the answering observer judged each event");
+                assert_eq!(
+                    on.completed, events,
+                    "{case:?}: the answering observer judged each event"
+                );
             }
-            assert_eq!(on.submitted, events, "{case:?} {kind:?}: one submission per raw event");
+            assert_eq!(
+                on.submitted, events,
+                "{case:?} {kind:?}: one submission per raw event"
+            );
             let dropped = match kind {
                 ObserverKind::Answering | ObserverKind::TimingOut => 0,
                 ObserverKind::Full | ObserverKind::Closed => events,
             };
             assert_eq!(on.dropped, dropped, "{case:?} {kind:?}");
             let changed = differences(&off.effects, &on.effects);
-            problems.extend(changed.iter().map(|d| format!("{case:?} {kind:?}: the shadow changed {d}")));
+            problems.extend(
+                changed
+                    .iter()
+                    .map(|d| format!("{case:?} {kind:?}: the shadow changed {d}")),
+            );
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -786,7 +861,12 @@ fn ingress_shadow_keeps_attachment_messages_byte_identical() {
 fn ingress_shadow_keeps_components_byte_identical() {
     compare(
         "ingress_shadow_keeps_components_byte_identical",
-        &[Case::ModelPicker, Case::IdleRecap, Case::NodePicker, Case::Sidecar],
+        &[
+            Case::ModelPicker,
+            Case::IdleRecap,
+            Case::NodePicker,
+            Case::Sidecar,
+        ],
     );
 }
 

@@ -227,9 +227,14 @@ fn only_the_switch_with_listed_channels_starts_an_observer() {
     ] {
         assert_eq!(parse(off), None, "{off}");
         let runtime: crate::config::RuntimeSettingsConfig = serde_yaml::from_str(off).unwrap();
-        assert_eq!(runtime.is_empty(), off == "{}", "{off}: kept on a round-trip");
+        assert_eq!(
+            runtime.is_empty(),
+            off == "{}",
+            "{off}: kept on a round-trip"
+        );
     }
-    let on = parse("channel_ingress_shadow_enabled: true\nchannel_ingress_shadow_channels: [11, 0, 12]");
+    let on =
+        parse("channel_ingress_shadow_enabled: true\nchannel_ingress_shadow_channels: [11, 0, 12]");
     let on = on.expect("switch and channels");
     assert_eq!(on.channels, BTreeSet::from([11, 12]));
 
@@ -247,7 +252,10 @@ fn only_the_switch_with_listed_channels_starts_an_observer() {
                 pool: None,
             }
         };
-        let (calls, samples) = (observed_calls(), channel_home::ingress_snapshot::sampled_calls());
+        let (calls, samples) = (
+            observed_calls(),
+            channel_home::ingress_snapshot::sampled_calls(),
+        );
         assert!(start_if_enabled(None, &ProviderKind::Claude, begin).is_none());
         assert!(start_if_enabled(Some(&on), &ProviderKind::Gemini, begin).is_none());
         observe(None, &message(11, 1));
@@ -257,9 +265,16 @@ fn only_the_switch_with_listed_channels_starts_an_observer() {
         observe(Some(&shadow), &message(11, 1));
         observe(Some(&shadow), &message(13, 2));
         assert_eq!(begun.get(), 1);
-        assert_eq!(shadow.counts.submitted.load(Ordering::Acquire), 1, "listed channel only");
         assert_eq!(
-            (observed_calls(), channel_home::ingress_snapshot::sampled_calls()),
+            shadow.counts.submitted.load(Ordering::Acquire),
+            1,
+            "listed channel only"
+        );
+        assert_eq!(
+            (
+                observed_calls(),
+                channel_home::ingress_snapshot::sampled_calls()
+            ),
             (calls, samples),
             "the hook never judges or samples on the event's thread"
         );
@@ -270,12 +285,28 @@ fn only_the_switch_with_listed_channels_starts_an_observer() {
 
 #[test]
 fn an_event_is_described_by_its_own_channel_and_ids() {
-    let ids = |event| describe(&event).map(|(kind, channel, id, app)| (kind, channel.get(), id, app));
-    assert_eq!(ids(message(CH, 31)), Some((EventKind::Message, CH, 31, None)));
-    assert_eq!(ids(interaction(2, CH, 32)), Some((EventKind::Command, CH, 32, Some(77))));
-    assert_eq!(ids(interaction(3, CH, 33)), Some((EventKind::Component, CH, 33, Some(77))));
-    assert_eq!(ids(interaction(4, CH, 34)), Some((EventKind::Autocomplete, CH, 34, Some(77))));
-    assert_eq!(ids(interaction(5, CH, 35)), Some((EventKind::Modal, CH, 35, Some(77))));
+    let ids =
+        |event| describe(&event).map(|(kind, channel, id, app)| (kind, channel.get(), id, app));
+    assert_eq!(
+        ids(message(CH, 31)),
+        Some((EventKind::Message, CH, 31, None))
+    );
+    assert_eq!(
+        ids(interaction(2, CH, 32)),
+        Some((EventKind::Command, CH, 32, Some(77)))
+    );
+    assert_eq!(
+        ids(interaction(3, CH, 33)),
+        Some((EventKind::Component, CH, 33, Some(77)))
+    );
+    assert_eq!(
+        ids(interaction(4, CH, 34)),
+        Some((EventKind::Autocomplete, CH, 34, Some(77)))
+    );
+    assert_eq!(
+        ids(interaction(5, CH, 35)),
+        Some((EventKind::Modal, CH, 35, Some(77)))
+    );
     let delete = serenity::FullEvent::MessageDelete {
         channel_id: serenity::ChannelId::new(CH),
         deleted_message_id: serenity::MessageId::new(36),
@@ -290,9 +321,16 @@ fn a_full_or_closed_queue_drops_and_counts_without_waiting() {
         let (shadow, probe) = observer(kind, &[CH]);
         observe(Some(&shadow), &message(CH, 41));
         let read = |count: &std::sync::atomic::AtomicU64| count.load(Ordering::Acquire);
-        assert_eq!(probe.submitted(), 1, "{kind:?}: the dropped one has its sequence");
         assert_eq!(
-            (read(&shadow.counts.dropped_full), read(&shadow.counts.dropped_closed)),
+            probe.submitted(),
+            1,
+            "{kind:?}: the dropped one has its sequence"
+        );
+        assert_eq!(
+            (
+                read(&shadow.counts.dropped_full),
+                read(&shadow.counts.dropped_closed)
+            ),
             (full, closed),
             "{kind:?}"
         );
@@ -319,17 +357,29 @@ async fn the_worker_judges_the_real_gate_and_records_every_id() {
         let (shadow, probe) = started(&[CH], source);
         let id = 51 + index as u64;
         observe(Some(&shadow), &message(CH, id));
-        assert!(probe.judged(1, Duration::from_secs(1)).await, "worker completed");
+        assert!(
+            probe.judged(1, Duration::from_secs(1)).await,
+            "worker completed"
+        );
         let observed = probe.observed();
         let [observed] = observed.as_slice() else {
             panic!("one record: {observed:?}")
         };
         assert_eq!(
-            (observed.kind, observed.channel, observed.source_id, observed.sequence),
+            (
+                observed.kind,
+                observed.channel,
+                observed.source_id,
+                observed.sequence
+            ),
             (EventKind::Message, CH, id, 1)
         );
         assert_eq!(
-            (observed.instance_id.as_str(), observed.bot.as_str(), observed.provider.as_str()),
+            (
+                observed.instance_id.as_str(),
+                observed.bot.as_str(),
+                observed.provider.as_str()
+            ),
             (LOCAL, "bot-1", "claude")
         );
         seen.push((
@@ -341,14 +391,26 @@ async fn the_worker_judges_the_real_gate_and_records_every_id() {
         ));
     }
     let row = |verdict: &str, reason: Option<&str>, row, local, sampler: &str| {
-        (verdict.to_owned(), reason.map(str::to_owned), row, local, sampler.to_owned())
+        (
+            verdict.to_owned(),
+            reason.map(str::to_owned),
+            row,
+            local,
+            sampler.to_owned(),
+        )
     };
     assert_eq!(
         seen,
         vec![
             row("local_candidate", None, Some(4), Some(4), "sampled"),
             row("ignore_foreign", None, Some(4), Some(4), "sampled"),
-            row("hold", Some("LocalEpochMismatch"), Some(5), Some(4), "sampled"),
+            row(
+                "hold",
+                Some("LocalEpochMismatch"),
+                Some(5),
+                Some(4),
+                "sampled"
+            ),
             row("hold", Some("NoHomeAuthority"), None, None, "not_sampled"),
         ]
     );
@@ -378,7 +440,11 @@ async fn freshness_counts_the_whole_lookup_on_the_database_clock() {
         let expected = (verdict, reason, u64::from(unknown));
         let unknowns = probe.counts.unknown.load(Ordering::Acquire);
         assert_eq!(
-            (observed.verdict.as_str(), observed.reason.as_deref(), unknowns),
+            (
+                observed.verdict.as_str(),
+                observed.reason.as_deref(),
+                unknowns
+            ),
             expected,
             "age {age:?} delay {delay:?}"
         );
@@ -403,7 +469,11 @@ async fn an_unreadable_gate_holds_and_counts_as_unknown() {
     let records = Arc::new(Mutex::new(Vec::new()));
     let channels = BTreeSet::from([CH]);
     let scope = scope(&records, &channels);
-    let source = HomeSource::Fixed(fixed(Some(worker_row(CH, LOCAL, 4)), Duration::ZERO, Duration::ZERO));
+    let source = HomeSource::Fixed(fixed(
+        Some(worker_row(CH, LOCAL, 4)),
+        Duration::ZERO,
+        Duration::ZERO,
+    ));
     let descriptor = Descriptor {
         sequence: 1,
         kind: EventKind::Message,
@@ -413,15 +483,24 @@ async fn an_unreadable_gate_holds_and_counts_as_unknown() {
         received: Instant::now(),
     };
     // A writer's admission holds the gate's inner lock while this judges.
-    let judging = || judge(&scope, "inc", &source, descriptor).now_or_never().unwrap();
+    let judging = || {
+        judge(&scope, "inc", &source, descriptor)
+            .now_or_never()
+            .unwrap()
+    };
     let busy = gate.gate().admit(|_| judging()).expect("held gate admits");
-    let free = judge(&scope, "inc", &source, descriptor).now_or_never().unwrap();
+    let free = judge(&scope, "inc", &source, descriptor)
+        .now_or_never()
+        .unwrap();
     channel_home::unregister(&CH.to_string());
     assert_eq!(
         (busy.0.reason.as_deref(), busy.0.sampler.as_str(), busy.1),
         (Some("NoLocalLease"), "inner_busy", true)
     );
-    assert_eq!((free.0.verdict.as_str(), free.1), ("local_candidate", false));
+    assert_eq!(
+        (free.0.verdict.as_str(), free.1),
+        ("local_candidate", false)
+    );
 }
 
 fn start(incarnation: &str, instance_id: &str, allowlist: &[u64]) -> Record {
@@ -501,7 +580,11 @@ fn paired_window() -> Vec<Record> {
 }
 
 fn without(records: &[Record], drop: impl Fn(&Record) -> bool) -> Vec<Record> {
-    records.iter().filter(|record| !drop(record)).cloned().collect()
+    records
+        .iter()
+        .filter(|record| !drop(record))
+        .cloned()
+        .collect()
 }
 
 fn is_judged(record: &Record, incarnation: &str, sequence: u64) -> bool {
@@ -523,10 +606,16 @@ fn a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_clos
     );
     incomplete(
         without(&window, |r| is_judged(r, "a1", 3) || is_judged(r, "b1", 3)),
-        vec![Gap::MissingSequence(a1(), 3), Gap::MissingSequence("b1".into(), 3)],
+        vec![
+            Gap::MissingSequence(a1(), 3),
+            Gap::MissingSequence("b1".into(), 3),
+        ],
     );
     incomplete(
-        without(&window, |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1")),
+        without(
+            &window,
+            |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1"),
+        ),
         vec![
             Gap::MissingClose(a1()),
             Gap::AfterClose(a1(), 1),
@@ -535,7 +624,9 @@ fn a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_clos
         ],
     );
     let only_a = without(&window, |r| match r {
-        Record::Start { incarnation, .. } | Record::Close { incarnation, .. } => incarnation == "b1",
+        Record::Start { incarnation, .. } | Record::Close { incarnation, .. } => {
+            incarnation == "b1"
+        }
         Record::Observed(o) => o.incarnation == "b1",
     });
     incomplete(
@@ -559,7 +650,10 @@ fn a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_clos
     stray.push(judged("a2", 1, 81, "ignore_foreign", 4));
     incomplete(
         stray,
-        vec![Gap::UnexpectedIncarnation("a2".into()), Gap::Unpaired(CH, 81)],
+        vec![
+            Gap::UnexpectedIncarnation("a2".into()),
+            Gap::Unpaired(CH, 81),
+        ],
     );
 }
 
@@ -568,7 +662,10 @@ fn a_lost_unknown_or_unfinished_sequence_or_no_pair_never_certifies() {
     let nodes = expected(&[("a", "a1"), ("b", "b1")]);
     let window = paired_window();
     let with_close = |last, completed, lost, unknown| {
-        let mut records = without(&window, |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1"));
+        let mut records = without(
+            &window,
+            |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1"),
+        );
         records.push(close("a1", last, completed, lost, unknown));
         evaluate_window(&nodes, &records)
     };
@@ -577,15 +674,24 @@ fn a_lost_unknown_or_unfinished_sequence_or_no_pair_never_certifies() {
         with_close(4, 3, 1, 0),
         Window::Incomplete(vec![Gap::Unfinished(a1()), Gap::MissingSequence(a1(), 4)])
     );
-    assert_eq!(with_close(3, 3, 0, 1), Window::Incomplete(vec![Gap::Unfinished(a1())]));
-    assert_eq!(with_close(3, 2, 0, 0), Window::Incomplete(vec![Gap::Unfinished(a1())]));
+    assert_eq!(
+        with_close(3, 3, 0, 1),
+        Window::Incomplete(vec![Gap::Unfinished(a1())])
+    );
+    assert_eq!(
+        with_close(3, 2, 0, 0),
+        Window::Incomplete(vec![Gap::Unfinished(a1())])
+    );
     let idle = vec![
         start("a1", "a", &[CH]),
         start("b1", "b", &[CH]),
         close("a1", 0, 0, 0, 0),
         close("b1", 0, 0, 0, 0),
     ];
-    assert_eq!(evaluate_window(&nodes, &idle), Window::Incomplete(vec![Gap::NoPairs]));
+    assert_eq!(
+        evaluate_window(&nodes, &idle),
+        Window::Incomplete(vec![Gap::NoPairs])
+    );
 }
 
 #[test]
@@ -596,13 +702,19 @@ fn two_processes_judging_one_source_their_own_is_a_conflict_across_ids_and_epoch
     records.push(judged("a1", 1, 91, "local_candidate", 4));
     records.push(judged("a2", 1, 91, "local_candidate", 4));
     records.extend([close("a1", 1, 1, 0, 0), close("a2", 1, 1, 0, 0)]);
-    assert_eq!(evaluate_window(&twins, &records), Window::Conflict(vec![(CH, 91)]));
+    assert_eq!(
+        evaluate_window(&twins, &records),
+        Window::Conflict(vec![(CH, 91)])
+    );
 
     let nodes = expected(&[("a", "a1"), ("b", "b1")]);
     let mut moved = paired_window();
     moved.retain(|r| !is_judged(r, "b1", 2));
     moved.push(judged("b1", 2, 82, "local_candidate", 5));
-    assert_eq!(evaluate_window(&nodes, &moved), Window::Conflict(vec![(CH, 82)]));
+    assert_eq!(
+        evaluate_window(&nodes, &moved),
+        Window::Conflict(vec![(CH, 82)])
+    );
     let mut handed = paired_window();
     handed.retain(|r| !is_judged(r, "b1", 2));
     handed.push(judged("b1", 2, 82, "ignore_foreign", 5));
@@ -620,7 +732,9 @@ async fn the_observer_pool_reads_rows_on_one_connection_and_closes_pg() {
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let channel = CH.to_string();
-    delegate(&pool, &channel, "claude", "gw", "node-b").await.unwrap();
+    delegate(&pool, &channel, "claude", "gw", "node-b")
+        .await
+        .unwrap();
     finish_release(&pool, &channel, "gw", 1).await.unwrap();
     adopt(&pool, &channel, "node-b", 2).await.unwrap();
 
@@ -630,31 +744,66 @@ async fn the_observer_pool_reads_rows_on_one_connection_and_closes_pg() {
     };
     let observer_pool = observer_pool.clone();
     assert_eq!(observer_pool.options().get_max_connections(), 1);
-    assert_eq!(observer_pool.size(), 0, "nothing connects before the first lookup");
+    assert_eq!(
+        observer_pool.size(),
+        0,
+        "nothing connects before the first lookup"
+    );
     let (shadow, probe) = started(&[CH, CH + 1], source);
     observe(Some(&shadow), &message(CH, 111));
     observe(Some(&shadow), &message(CH + 1, 112));
-    assert!(probe.judged(2, Duration::from_secs(10)).await, "both judged");
+    assert!(
+        probe.judged(2, Duration::from_secs(10)).await,
+        "both judged"
+    );
     drop(shadow);
     let deadline = Instant::now() + Duration::from_secs(10);
     let terminal = |records: &Vec<Record>| {
-        records.iter().any(|record| matches!(record, Record::Close { terminal: true, .. }))
+        records
+            .iter()
+            .any(|record| matches!(record, Record::Close { terminal: true, .. }))
     };
     while !terminal(&probe.records.lock().unwrap()) {
         assert!(Instant::now() < deadline, "worker ended");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(observer_pool.is_closed(), "the observer pool closes with its worker");
+    assert!(
+        observer_pool.is_closed(),
+        "the observer pool closes with its worker"
+    );
     let verdicts: Vec<_> = probe
         .observed()
         .into_iter()
-        .map(|o| (o.channel, o.lookup, o.verdict, o.reason, o.row_epoch, o.holder))
+        .map(|o| {
+            (
+                o.channel,
+                o.lookup,
+                o.verdict,
+                o.reason,
+                o.row_epoch,
+                o.holder,
+            )
+        })
         .collect();
     assert_eq!(
         verdicts,
         vec![
-            (CH, "row".into(), "ignore_foreign".into(), None, Some(2), Some("node-b".into())),
-            (CH + 1, "missing".into(), "hold".into(), Some("NoHomeAuthority".into()), None, None),
+            (
+                CH,
+                "row".into(),
+                "ignore_foreign".into(),
+                None,
+                Some(2),
+                Some("node-b".into())
+            ),
+            (
+                CH + 1,
+                "missing".into(),
+                "hold".into(),
+                Some("NoHomeAuthority".into()),
+                None,
+                None
+            ),
         ]
     );
     pool.close().await;
