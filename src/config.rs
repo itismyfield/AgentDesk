@@ -3006,6 +3006,61 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
+    fn assert_retired_shadow_settings_load(enabled: bool) {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retired-shadow-config.yaml");
+        let settings = format!(
+            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n\
+             writer: {{channels: [41, 42], late_adopt: true, dormant_channels: [42]}}\n\
+             turn: {{channels: [41], all_owned: true}}\n\
+             repost: {{enabled: true, channels: [41]}}\n\
+             alert_channel_id: 42\n\
+             codex_history_adoption: true\n"
+        );
+        let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
+            serde_yaml::from_str(&settings).unwrap();
+        let indented = settings
+            .lines()
+            .map(|line| format!("  {line}\n"))
+            .collect::<String>();
+        let data_dir = serde_json::to_string(&dir.path().join("data")).unwrap();
+        let yaml = format!(
+            concat!(
+                "server: {{}}\ndata: {{dir: {}}}\n",
+                "agents:\n  - id: retired-shadow\n    name: Retired shadow\n",
+                "    channels:\n",
+                "      claude: {{id: '41', runtime: tui}}\n",
+                "      codex: {{id: '42', runtime: tui}}\n",
+                "tui_o:\n{}"
+            ),
+            data_dir, indented
+        );
+        std::fs::write(&path, &yaml).unwrap();
+
+        let loaded = load_from_path(&path).unwrap();
+        let output = loaded.tui_o.as_ref().unwrap();
+
+        assert_eq!(output, &expected);
+        assert_eq!(output.shadow.enabled, enabled);
+        assert_eq!(output.shadow.channel_allowlist, [41, 42]);
+        assert_eq!(
+            serde_yaml::to_string(output).unwrap(),
+            serde_yaml::to_string(&expected).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+    }
+
+    #[test]
+    fn load_from_path_preserves_retired_shadow_enabled_settings() {
+        assert_retired_shadow_settings_load(true);
+    }
+
+    #[test]
+    fn load_from_path_preserves_retired_shadow_disabled_settings() {
+        assert_retired_shadow_settings_load(false);
+    }
+
     #[test]
     fn load_from_path_rejects_invalid_escalation_schedule_timezone() {
         let dir = tempfile::tempdir().unwrap();
