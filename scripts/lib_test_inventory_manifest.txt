@@ -8989,6 +8989,7 @@ services::discord::tui_prompt_relay::session_rotation_settle::tests::a_pane_with
 services::discord::tui_prompt_relay::session_rotation_settle::tests::a_stalled_drain_gives_up_and_settles_at_the_bound
 services::discord::tui_prompt_relay::session_rotation_settle::tests::rehydration_does_not_revert_an_adopted_binding_after_the_settle_pass_runs
 services::discord::tui_prompt_relay::session_rotation_settle::tests::rotation_without_a_pinned_inflight_rebinds_immediately
+services::discord::tui_prompt_relay::session_rotation_settle::tests::the_rebind_only_log_does_not_claim_a_feeder_switch_or_delivery
 services::discord::tui_prompt_relay::session_rotation_settle::tests::the_settle_warn_reports_the_post_fold_drain_observation
 services::discord::tui_prompt_relay::session_rotation_settle::tests::the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper
 services::discord::tui_prompt_relay::session_rotation_settle::tests::undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles
@@ -9008,6 +9009,7 @@ services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_y
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::strict_wait_refuses_an_owner_not_proven_to_read_the_observed_source
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::strict_wait_yields_through_progress_on_the_same_episode
 services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::strict_wait_yields_to_an_owner_reading_the_observed_source
+services::discord::tui_prompt_relay::synthetic_start::non_bridge_claim::strict_yield_tests::the_hand_off_logs_tell_source_match_recheck_and_outcome_apart
 services::discord::tui_prompt_relay::synthetic_start::stale_reclaim::claim_entry_tests::claim_entry_reclaims_a_finished_readopted_owner_and_starts_the_new_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::admitted_source_witness_advances_only_the_original_allocation
 services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_is_refused_for_want_of_a_witness

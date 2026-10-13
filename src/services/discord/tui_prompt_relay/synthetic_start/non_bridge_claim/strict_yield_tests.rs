@@ -375,3 +375,86 @@ fn reowned_turn_resumes_through_the_dormant_consumer_after_a_failed_tail() {
         assert!(turn.resume_unpublished(&turn.shared).await.is_some());
     });
 }
+
+#[derive(Clone, Default)]
+struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        (self.0.lock().unwrap_or_else(|poison| poison.into_inner())).extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The settle and hand-off logs keep the source match, the recheck and the outcome apart, so
+/// a yield, a re-own and a refusal read differently.
+#[test]
+fn the_hand_off_logs_tell_source_match_recheck_and_outcome_apart() {
+    let logs = Logs::default();
+    crate::logging::test_capture::pin_callsite_interest();
+    let _capture = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    isolated(|dir| async move {
+        let (b, end) = transcript(&dir, "logged-yield.jsonl", "");
+        let turn = Turn::observe(130, &b, end, Some(&b), Some(&b));
+        turn.claim().await;
+        assert!(matches!(turn.hand_off(&b).await, NonBridgeHandoff::Yielded));
+        let (c, end) = transcript(&dir, "logged-reown.jsonl", "");
+        let turn = Turn::observe(131, &c, end, Some(&c), Some(&c));
+        turn.wire().await;
+        turn.stop_watcher();
+        assert!(matches!(
+            turn.hand_off(&c).await,
+            NonBridgeHandoff::Reowned(_)
+        ));
+    });
+    let text = String::from_utf8(logs.0.lock().expect("logs").clone()).expect("utf8 logs");
+    let line = |needle: &str| {
+        (text.lines().filter(|line| line.contains(needle)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let settled = line("settled whether a non-bridge owner reads the expected source");
+    for field in [
+        "expected_row_match=Match",
+        "expected_watcher_match=Match",
+        "row_revalidated=true",
+        "watcher_revalidated=true",
+        "yield_allowed=true",
+        "row_revalidated=false",
+        "watcher_live=false",
+        "yield_allowed=false",
+        "reason=\"watcher is not relay-live\"",
+    ] {
+        assert!(settled.contains(field), "{field}: {settled}");
+    }
+    let handed = line("handed off its observed turn");
+    for field in [
+        "handoff=\"yielded\"",
+        "handoff=\"reowned\"",
+        "reason=\"re-owned\"",
+    ] {
+        assert!(handed.contains(field), "{field}: {handed}");
+    }
+    assert!(
+        line("re-owned a refused TUI-direct delegation").contains("previous_output="),
+        "{text}"
+    );
+}

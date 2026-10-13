@@ -470,6 +470,27 @@ mod tests {
     // Direction (b) — THE REGRESSION THIS FIX MUST NOT CAUSE. A live turn's answer
     // was written to the transcript that `/clear` then froze. Chasing the rotation
     // now would discard it, so the plan must be to drain first.
+    /// The retire log claims only what the plan checked: no inflight pinned to the frozen file.
+    #[cfg(unix)]
+    #[test]
+    fn the_rebind_only_log_does_not_claim_a_feeder_switch_or_delivery() {
+        let arm = include_str!("session_rotation_settle.rs")
+            .split_once("ClaudeRotationPlan::RebindOnly => {")
+            .expect("the RebindOnly arm")
+            .1
+            .split_once("clear_claude_session_rotation(")
+            .expect("the arm retires the record")
+            .0;
+        assert!(
+            arm.contains("feeder switch and delivery not verified here"),
+            "{arm}"
+        );
+        assert!(
+            !arm.contains("fully propagated") && !arm.contains("delivery now reads"),
+            "{arm}"
+        );
+    }
+
     #[test]
     fn undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles() {
         assert_eq!(
