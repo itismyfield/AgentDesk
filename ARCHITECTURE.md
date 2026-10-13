@@ -2705,7 +2705,8 @@ src/
 │   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
-│   │   │   └── spool.rs
+│   │   │   ├── spool.rs
+│   │   │   └── spool_transition_tests.rs
 │   │   ├── writer/
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
@@ -2794,6 +2795,10 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── transition_cleanup.rs
+│   │   │   ├── transition_cleanup_tests.rs
+│   │   │   ├── transition_observe.rs
+│   │   │   ├── transition_observe_tests.rs
 │   │   │   ├── unpinned_past_tests.rs
 │   │   │   ├── verified_delivery_tests.rs
 │   │   │   └── writer_tests.rs
