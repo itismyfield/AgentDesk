@@ -484,8 +484,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
   services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
-  services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg
-  services::discord::inflight::receipt_boundary_tests::s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more

@@ -1532,8 +1532,10 @@ services::discord::inflight::receipt_boundary_tests::s3act_b3b_generic_store_can
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_rebind_gc_preserves_receipt_under_lock_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_commit_wins_concurrent_clear_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_free_reaper_results_and_logs_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_survives_all_legacy_deletes_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_scoped_invalidation_preserves_receipt_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unknown_receipt_json_shape_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unparseable_receipt_row_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_writer_matrix_carries_raw_receipt_pg
