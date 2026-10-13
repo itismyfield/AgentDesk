@@ -267,7 +267,7 @@ pub(super) async fn restore_queued_and_inflight_work(
     // Inputs held by a person's draft get their pane protection and release watch back.
     let mut live_queue_ids = collect_live_queue_message_ids(shared).await;
     live_queue_ids.retain(|channel, _| !protected(*channel));
-    super::turn_bridge::rewatch_draft_holds(shared, provider, &live_queue_ids);
+    super::turn_bridge::followup_requeue::rewatch_draft_holds(shared, provider, &live_queue_ids);
 
     // P1-2: Warn about legacy queue files that cannot be restored
     warn_legacy_pending_queue_files(provider);

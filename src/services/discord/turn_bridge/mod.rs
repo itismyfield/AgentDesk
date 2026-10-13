@@ -11,8 +11,7 @@ mod current_message_anchor;
 #[cfg(unix)]
 mod early_tui_completion;
 mod finalize_epilogue;
-mod followup_requeue;
-pub(in crate::services::discord) use followup_requeue::rewatch_draft_holds;
+pub(in crate::services::discord) mod followup_requeue;
 mod guards;
 mod headless_delivery;
 pub(in crate::services::discord) mod intake_settlement;
@@ -771,8 +770,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             post_loop_finalize_output.long_running_placeholder_active;
         let inflight_state = post_loop_finalize_output.inflight_state;
         let api_friction_reports = post_loop_finalize_output.api_friction_reports;
-        let claude_tui_followup_pre_submit_requeue_candidate =
-            post_loop_finalize_output.claude_tui_followup_pre_submit_requeue_candidate;
         let review_dispatch_warning = post_loop_finalize_output.review_dispatch_warning;
         let is_prompt_too_long = post_loop_finalize_output.is_prompt_too_long;
         let bridge_relay_delegated_to_watcher =
@@ -813,7 +810,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     should_fail_dispatch_after_delivery,
                     single_message_panel_footer_mode,
                     is_prompt_too_long,
-                    claude_tui_followup_pre_submit_requeue_candidate,
+                    claude_tui_followup_pre_submit_requeue_candidate: post_loop_finalize_output
+                        .claude_tui_followup_pre_submit_requeue_candidate,
                     tui_error_classification: post_loop_finalize_output.tui_error_classification,
                     had_prior_session_id_at_turn_start,
                     session_handshake_seen,

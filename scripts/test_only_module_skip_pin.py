@@ -35,6 +35,8 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_draft_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
