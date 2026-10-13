@@ -282,6 +282,8 @@ fn history_page(history: &[Value], query: &HistoryQuery) -> Option<Vec<Value>> {
 /// newest first, since both index into the page assuming that order.
 #[test]
 fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
+    type PageCase = (Option<usize>, Option<u64>, Option<u64>, Option<Vec<u64>>);
+
     // Seeded out of order so the page order comes from the mock, not the seed.
     let history: Vec<Value> = [3, 1, 4, 10, 5, 9, 2, 6, 8, 7]
         .into_iter()
@@ -298,7 +300,7 @@ fn history_page_returns_the_ids_nearest_the_cursor_newest_first() {
         )
         .map(|page| page.iter().map(history_message_id).collect::<Vec<u64>>())
     };
-    let cases: [(Option<usize>, Option<u64>, Option<u64>, Option<Vec<u64>>); 12] = [
+    let cases: [PageCase; 12] = [
         (Some(3), None, None, Some(vec![10, 9, 8])),
         (None, None, None, Some(vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1])),
         (Some(2), Some(5), None, Some(vec![4, 3])),
@@ -407,8 +409,10 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         if content == "..." {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
             if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
+                // Subscribe before announcing arrival so an immediate release is retained.
+                let released = state.release_first_placeholder.notified();
                 state.first_placeholder_arrived.notify_waiters();
-                state.release_first_placeholder.notified().await;
+                released.await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"message": "release A", "code": 0})),

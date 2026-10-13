@@ -8932,6 +8932,7 @@ services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::late_roll
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::lost_mailbox_claim_has_only_queue_effects
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::merged_runtime_refusal_has_only_plus_effects
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::persistence_refusal_never_emits_pending
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::placeholder_release_during_arrival_notification_completes_post
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::purge_closed_actor_cannot_claim_or_erase_successor_pending
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::runtime_transition_refusal_has_only_queue_effects
 services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::synthetic_inputs_keep_their_no_discord_reaction_policy
