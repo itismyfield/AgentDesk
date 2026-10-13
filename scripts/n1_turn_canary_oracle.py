@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Independent N1 oracle input lane; final native and audit stages are pending."""
+"""Independent N1 canary oracle with fail-closed evidence and effect audits."""
 import argparse
 import json
 from pathlib import Path
 import sys
 
 from n1_canary import Unknown, loads
+from n1_canary.audit import finish, run
 from n1_canary.discord import collect, getter, history_valid
 from n1_canary.evidence import input_checks, observation_checks, pg_select, pg_valid, read_files
 from n1_canary.manifest import digest, validate
@@ -30,10 +31,11 @@ def main(argv=None):
                   reasons=["stages_pending:o3"])
     manifest_path = Path(args.manifest)
     manifest = None
+    native = None
     try:
         raw_manifest = manifest_path.read_bytes()
         candidate = loads(raw_manifest)
-        validate(candidate)
+        producer_supported = validate(candidate)
         manifest = candidate
         result["manifest_digest"] = digest(raw_manifest)
         base = manifest_path.resolve().parent
@@ -47,8 +49,10 @@ def main(argv=None):
         omit = (["pg"] if args.pg_dsn_env else []) + (["discord"] if args.discord_base_url else [])
         values, raw, reasons, refs = read_files(manifest, base, overrides, omit)
         result["evidence"] = refs
-        result["reasons"].extend(reasons + input_checks(manifest, values, raw))
-        observation, confirmation, reasons = observation_checks(manifest, values)
+        identity_reasons = input_checks(manifest, values, raw)
+        result["reasons"].extend(reasons + identity_reasons)
+        observation, confirmation, reasons = observation_checks(
+            manifest, values, producer_supported and "build_identity_unverified" not in identity_reasons)
         result.update(observation=observation, confirmation=confirmation)
         result["reasons"].extend(reasons)
         try:
@@ -73,11 +77,28 @@ def main(argv=None):
                 extra = values["discord"].get("reasons", [])
                 if isinstance(extra, list):
                     result["reasons"].extend(x for x in extra if isinstance(x, str))
+        audit = run(native, values, raw, manifest, observation, confirmation,
+                    history_valid(values.get("discord"), manifest["discord"]), not identity_reasons)
+        result["audit"] = audit
+        result["failures"] = sorted(set(audit["failures"]))
+        result["reasons"].extend(audit["reasons"])
+        for field in ("delivery", "historical_debt", "effects", "unexplained_bot_messages"):
+            if field in audit:
+                result[field] = audit[field]
+        if audit["stages"]["native"]:
+            result["turns"]["completed_distinct"] = audit["completed_distinct"]
+            result["reasons"] = [r for r in result["reasons"] if r not in {
+                "native_origin_unverified", "native_sample_under_50", "native_sample_boundary_mismatch"}]
+        if all(audit["stages"].values()):
+            result["reasons"] = [r for r in result["reasons"] if r != "stages_pending:o3"]
     except Unknown as error:
         result["reasons"].append(str(error))
     except (OSError, ValueError, UnicodeError):
         result["reasons"].append("manifest_invalid")
     result["reasons"] = sorted(set(result["reasons"]))
+    if result["reasons"] and "effects" in result:
+        result["effects"].update(synthetic_committed_exact=None, placeholder_created_exact=None)
+    finish(result)
     if args.output:
         try:
             output = Path(args.output).resolve()
@@ -94,8 +115,9 @@ def main(argv=None):
                 stream.write(json.dumps(result, sort_keys=True) + "\n")
         except (OSError, Unknown):
             result["reasons"].append("output_unavailable")
+    code = finish(result)
     print(json.dumps(result, sort_keys=True))
-    return 2
+    return code
 
 
 if __name__ == "__main__":

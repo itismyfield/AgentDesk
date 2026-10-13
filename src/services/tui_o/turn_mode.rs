@@ -3,6 +3,8 @@ use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
+use super::n1_observation::{ConfirmStamp, confirmation_stamp};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct TurnConfig {
@@ -47,31 +49,32 @@ pub(crate) fn admit_effect<T>(
 }
 
 // The caller must read the retirement population before confirming a selected channel.
-pub(crate) fn confirm(channel: u64) {
-    if channel != 0 {
-        CONFIRMED
+// Returns whether this call added the channel to the confirmed set.
+pub(crate) fn confirm(channel: u64) -> bool {
+    channel != 0
+        && CONFIRMED
             .get_or_init(|| RwLock::new(BTreeSet::new()))
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(channel);
-    }
+            .insert(channel)
 }
 
 /// Confirms each selected channel of `owned` only after `retire` reports it fully retired. An empty
 /// selection returns before `owned` or `retire` runs, so an unconfigured process reads nothing.
+/// Each confirmed channel carries the observer stamp read right after its own insertion, if any.
 pub(crate) fn confirm_selected(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
     mut retire: impl FnMut(u64) -> bool,
-) -> Vec<u64> {
+) -> Vec<(u64, Option<ConfirmStamp>)> {
     let Some(config) = config.filter(|c| c.all_owned || !c.channels.is_empty()) else {
         return Vec::new();
     };
     let mut confirmed = Vec::new();
     for channel in owned().into_iter().filter(|&c| config.selects(c)) {
         if retire(channel) {
-            confirm(channel);
-            confirmed.push(channel);
+            let stamp = confirm(channel).then(confirmation_stamp).flatten();
+            confirmed.push((channel, stamp));
         }
     }
     confirmed

@@ -1979,13 +1979,13 @@ if __name__ == "__main__":
 
 class HerdrHealthAssertions(unittest.TestCase):
     def fixture(self):
-        return {'herdr': {'admission': 'open', 'restart_required': False,
+        return {'status': 'healthy', 'fully_recovered': True, 'degraded_reasons': [], 'herdr': {'admission': 'open', 'restart_required': False,
                 'configured_channels': ['41'], 'endpoints': {'test': {'local': True}},
                 'input_holds': 0, 'reconnect': {'channels': 1, 'published': 1,
                 'withheld': 0, 'unknown': 0, 'pending': 0}}}
 
     def row(self):
-        return {'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
+        return {'other_input_holds': [], 'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
                  'pane': 'provider_running', 'launch_evidence': 'recorded', 'nonce': 'one', 'input_hold': None}]}
 
     def test_ready_and_clean_and_published(self):
@@ -2043,12 +2043,12 @@ class HerdrHealthAssertions(unittest.TestCase):
 
     def test_observe_uses_only_health_and_readonly_status(self):
         from tui_relay import herdr
-        args = Namespace(base_url='http://unused.test', channel_id='41', cell='claude-herdr',
+        args = Namespace(base_url='http://127.0.0.1:8797', channel_id='41', cell='claude-herdr',
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk')
         with patch.object(driver, '_read_api_json', return_value=(200, self.fixture())) as health, \
              patch.object(herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps(self.row()))) as status:
-            result = herdr.observe(driver, args, clean=True, reconnected=True)
-        health.assert_called_once_with(args.base_url, '/api/health', timeout=5)
+            result = herdr.observe(driver, args, reconnected=True)
+        health.assert_called_once_with(args.base_url, '/api/health/detail', timeout=5)
         status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual(result['row']['nonce'], 'one')
 

@@ -9,12 +9,14 @@ from check_o_shadow_write_zero import TOKEN, expand
 ROOT = Path(__file__).resolve().parent.parent
 PRODUCER = "src/services/tui_o/n1_observation.rs"
 HOOKS = {
-    "src/services/tui_o/writer/input_facts.rs": "observation::turn_closed",
-    "src/services/discord/inflight/save_store.rs": "observe_synthetic_create",
-    "src/services/discord/gateway/outbound_messages.rs": "placeholder_attempt",
-    "src/services/discord/tui_direct_pending_start/turn_retirement.rs": "confirmation_boundary",
-    "src/services/discord/turn_presence/supervisor.rs": "observation::snapshot",
-    "src/logging.rs": "n1_observation::sink::initialize",
+    "src/services/tui_o/writer/input_facts.rs": ("observation::turn_closed", "observation::turn_unknown"),
+    "src/services/discord/inflight/save_store.rs": ("observe_synthetic_create",),
+    "src/services/discord/gateway/outbound_messages.rs": ("placeholder_attempt",),
+    "src/services/discord/tui_direct_pending_start/turn_retirement.rs": (
+        "confirmation_boundary", "mode_confirmed"),
+    "src/services/tui_o/turn_mode.rs": ("confirmation_stamp",),
+    "src/services/discord/turn_presence/supervisor.rs": ("observation::snapshot",),
+    "src/logging.rs": ("n1_observation::sink::initialize",),
 }
 ALLOWED = ("std::collections::", "std::sync::", "std::time::Instant", "serde::Serialize",
            "uuid::Uuid", "super::shadow::ShadowProvider", "super::shadow::SourceBinding",
@@ -57,10 +59,9 @@ def main():
         errors.append("observation producer missing")
     else:
         errors.extend(producer_errors((ROOT / PRODUCER).read_text()))
-    for path, hook in HOOKS.items():
+    for path, hooks in HOOKS.items():
         code = TOKEN.sub(lambda m: "\n" * m.group(0).count("\n"), (ROOT / path).read_text())
-        if hook not in code:
-            errors.append(f"{path}: missing {hook}")
+        errors.extend(f"{path}: missing {hook}" for hook in hooks if hook not in code)
     for path, (origin, count) in CALLERS.items():
         code = (ROOT / path).read_text()
         if len(re.findall(rf'origin:\s*"{origin}"', code)) != count:

@@ -2812,6 +2812,20 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_main_windows_warm_times_out_steps_before_advisory_job(self) -> None:
+        job = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["windows_cache_warm"]
+        self.assertIs(job["continue-on-error"], True)
+        compile_steps = [step for step in job["steps"] if "cargo" in step.get("run", "")]
+        self.assertEqual(len(compile_steps), 2)
+        for step in compile_steps:
+            timeout = step.get("timeout-minutes")
+            self.assertIs(type(timeout), int, f"warm {step['name']} needs a native step deadline")
+            self.assertGreater(timeout, 0)
+        # Job cancellation bypasses advisory failure; leave setup/post actions
+        # at least 30 minutes beyond the sum of both compile deadlines.
+        budget = sum(step["timeout-minutes"] for step in compile_steps)
+        self.assertGreaterEqual(job["timeout-minutes"], budget + 30)
+
     def test_hardening_rejects_main_windows_warm_that_misses_pr_cache_key(self) -> None:
         source = MAIN_WORKFLOW.read_text(encoding="utf-8")
         warm = source.index("\n  # Warms the shared cargo registry cache")
