@@ -101,16 +101,21 @@ async fn th8_two_routers_one_holder_pg() {
     let gw = Node::spawn(&scene, "th8_gateway", GW);
     mini.finish(Duration::from_secs(180)).await;
     gw.finish(Duration::from_secs(60)).await;
-    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+    let done = ("done".to_string(), MINI.to_string(), Some(epoch));
+    assert_eq!(routed(&scene.pool).await, [done]);
+    scene.drop_db().await;
+}
+
+/// Status, target and routed epoch of each of the channel's outbox rows.
+pub(super) async fn routed(pool: &PgPool) -> Vec<(String, String, Option<i64>)> {
+    sqlx::query_as(
         "SELECT status::TEXT, target_instance_id, home_epoch FROM intake_outbox
          WHERE channel_id = $1",
     )
     .bind(C.to_string())
-    .fetch_all(&scene.pool)
+    .fetch_all(pool)
     .await
-    .unwrap();
-    assert_eq!(rows, [("done".to_string(), MINI.to_string(), Some(epoch))]);
-    scene.drop_db().await;
+    .unwrap()
 }
 
 pub(super) async fn holder_node(env: &Env) {

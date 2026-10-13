@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::harness::*;
-use super::route_pg::{owner, replies, tick};
+use super::route_pg::{owner, replies, routed, tick};
 use crate::db::o_channel_homes::HomeState;
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home_drain::Owed;
@@ -237,15 +237,8 @@ async fn th6_gateway_role_move_keeps_holder_pg() {
         held,
         "with the gateway role moved to GW"
     );
-    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT status::TEXT, target_instance_id, home_epoch FROM intake_outbox
-         WHERE channel_id = $1",
-    )
-    .bind(C.to_string())
-    .fetch_all(&scene.pool)
-    .await
-    .unwrap();
-    assert_eq!(rows, [("done".to_string(), MINI.to_string(), Some(epoch))]);
+    let done = ("done".to_string(), MINI.to_string(), Some(epoch));
+    assert_eq!(routed(&scene.pool).await, [done]);
     scene.drop_db().await;
 }
 
