@@ -1391,11 +1391,14 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_last_
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_pending_bind_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_post_close_recheck_finds_tail_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_blocks_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_settles_not_found_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_settles_unresolved_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_releasing_tail_posts_before_release_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_running_post_blocks_leave_with_projection_zero_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_tail_posts_before_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unknown_is_not_empty_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unreadable_post_count_blocks_leave_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_waiting_boundary_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force_live_target_then_reboot_orphan_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
