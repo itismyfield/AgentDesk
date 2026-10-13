@@ -905,16 +905,6 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
     {
         return None;
     }
-    let eof = std::fs::metadata(rollout_path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    // Inputs a reservation held across a restart are read again from its first fresh record.
-    let start_offset = crate::services::tui_prompt_dedupe::rehydrate_held_handoff_floor(
-        "codex",
-        tmux_session_name,
-        rollout_path,
-        eof,
-    );
     let relay_output_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let relay_last_offset = std::fs::metadata(&relay_output_path)
@@ -926,7 +916,10 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
         relay_output_path: Some(relay_output_path),
         input_fifo_path: None,
         session_id: session_id.or_else(|| codex_rollout_session_id(rollout_path)),
-        last_offset: start_offset,
+        last_offset: crate::services::tui_prompt_dedupe::codex_rehydrated_scan_offset(
+            tmux_session_name,
+            rollout_path,
+        ),
         relay_last_offset: Some(relay_last_offset),
     })
 }

@@ -499,15 +499,13 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
     }
 }
 
-/// A restarted process restores the reservation that held inputs and returns the
-/// scan start: the first user record created since the reservation. Without one, `eof`.
-pub(crate) fn rehydrate_held_handoff_floor(
-    provider: &str,
-    tmux: &str,
-    rollout_path: &Path,
-    eof: u64,
-) -> u64 {
-    let provider = normalize_provider(provider);
+/// A restored Codex binding's scan start: the rollout's end, or the first user record created
+/// since a reservation that held inputs across the restart, which is restored too.
+pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u64 {
+    let eof = std::fs::metadata(rollout_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let provider = normalize_provider("codex");
     let tmux = tmux.trim();
     let key = PromptKey::new(&provider, tmux);
     // Every restore path asks again; a reservation already held answers with the same floor.
