@@ -444,6 +444,88 @@ class HerdrDegradedWaiver(unittest.TestCase):
         self.assertIn("only to Herdr cells", err.getvalue())
 
 
+CLEARED = "세션을 초기화했어요."
+REFUSED = "세션을 초기화하지 못했어요: rotation_unsettled(59)"
+
+
+def bot(message_id, content, **extra):
+    return {"id": str(message_id), "content": content, "author": {"id": "7", "bot": True}, **extra}
+
+
+class HerdrTextClear(unittest.TestCase):
+    """E-50's text !clear: a server refusal fails at once; silence keeps the acknowledgement timeout."""
+
+    def setUp(self):
+        self.args = arguments()
+        self.enterContext(patch("urllib.request.urlopen", side_effect=AssertionError("offline only")))
+        self.enterContext(patch.object(driver, "_read_api_json", return_value=(200, health())))
+        self.enterContext(patch.object(herdr.subprocess, "run", return_value=Namespace(stdout=json.dumps(status()))))
+        self.enterContext(patch.object(driver, "post_send_sleep"))
+        self.sleep = self.enterContext(patch.object(herdr.time, "sleep"))
+        clock = itertools.count(0, 5)
+        self.enterContext(patch.object(herdr.time, "monotonic", side_effect=lambda: next(clock)))
+        self.client = Mock()
+        self.client.send_control.return_value = {"id": "100"}
+        after = bot(300, "[E2E:AFTER]")
+        self.client.wait_for_message.return_value = (after, [after])
+
+    def run_clear(self, *fetches, before=()):
+        steps = [*({"wait_for_raw_discord_text": "READY", "timeout_s": 5} for _ in before),
+                 {"send_discord_prompt": "!clear [E2E:CLEAR]"}, {"wait_for_raw_discord_text": CLEARED, "timeout_s": 20},
+                 {"send_discord_prompt": "Reply with [E2E:AFTER]"}, {"wait_for_discord_text": "[E2E:AFTER]"}]
+        self.client.fetch_messages.side_effect = [*before, *fetches] + [list(fetches[-1])] * 20 if fetches else [*before] + [[]] * 20
+        scenario = dict(id="E-50", agent_mode="real_live", coverage_class="live", steps=steps, assertions=[])
+        with redirect_stdout(io.StringIO()):
+            return driver.run_scenario(scenario, args=self.args, client=self.client, run_id="test")
+
+    def test_refusal_reply_fails_at_once_with_its_reason(self):
+        for refusal in (REFUSED, "세션 전환 중이라 초기화하지 못했어요"):
+            with self.subTest(refusal=refusal):
+                self.client.reset_mock()
+                self.sleep.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear([bot(101, "!clear [E2E:CLEAR]"), bot(102, refusal)])
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn(f"text !clear refused by the server: {refusal}", result["reason"])
+                self.assertEqual(self.client.send.call_count, 1)
+                self.assertEqual(self.client.fetch_messages.call_count, 1)
+                self.sleep.assert_not_called()
+
+    def test_completion_reply_continues_to_the_next_turn(self):
+        result = self.run_clear([bot(101, "!clear [E2E:CLEAR]"), bot(102, CLEARED)])
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(self.client.send.call_args.args[1], "Reply with [E2E:AFTER]")
+
+    def test_silence_or_unrelated_refusal_text_keeps_the_timeout(self):
+        stale = [bot(150, "READY"), bot(140, REFUSED)]
+        for label, rows, before in (("silence", [], ()),
+                                    ("other channel", [bot(102, REFUSED, channel_id="99")], ()),
+                                    ("user message", [{**bot(102, REFUSED), "author": {"id": "8", "bot": False}}], ()),
+                                    ("quoted in a reply", [bot(102, f"> {REFUSED}")], ()),
+                                    ("sent before the clear", stale, (stale,))):
+            with self.subTest(label=label):
+                self.client.reset_mock()
+                self.client.send_control.return_value = {"id": "100"}
+                result = self.run_clear(rows, before=before) if rows else self.run_clear(before=before)
+                self.assertEqual(result["status"], "fail", result)
+                self.assertIn(f"acknowledgement missing: {CLEARED}", result["reason"])
+                self.assertEqual(self.client.send.call_count, 1)
+        # Server wording that drifted from the prefixes loses only the fail-fast, never reads as cleared.
+        with patch.object(herdr, "CLEAR_REFUSAL_PREFIXES", ("세션을 비우지 못했어요:",)):
+            self.client.reset_mock()
+            self.client.send_control.return_value = {"id": "100"}
+            result = self.run_clear([bot(102, REFUSED)])
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn(f"acknowledgement missing: {CLEARED}", result["reason"])
+
+    def test_refusal_prefixes_match_the_server_wording(self):
+        # The server answers a refused text !clear with these error strings; keep them in step.
+        root = Path(__file__).resolve().parents[3] / "src/services/discord/commands"
+        first, second = herdr.CLEAR_REFUSAL_PREFIXES
+        self.assertIn(f'"{first} {{reason}}"', (root / "control/native.rs").read_text(encoding="utf-8"))
+        self.assertIn(f'"{second}"', (root / "control.rs").read_text(encoding="utf-8"))
+
+
 class RestartObserveOnly(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())

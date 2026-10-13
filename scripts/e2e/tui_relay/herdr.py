@@ -22,6 +22,9 @@ TMUX_STEPS = {
 # Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
 AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
 CHANNEL_ID = re.compile(r"\d{17,}")
+# Text !clear refusals as worded in commands/control/native.rs and control.rs. A wording change
+# only loses the fail-fast: the acknowledgement wait then times out as before.
+CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:", "세션 전환 중이라 초기화하지 못했어요")
 
 
 def validate_arguments(parser, args):
@@ -197,6 +200,16 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         raise
 
 
+def clear_refusal(rows, *, after, channel):
+    """The bot reply refusing the pending text !clear, posted in this channel after it was sent."""
+    for row in rows:
+        content = row.get("content") or ""
+        if ((row.get("author") or {}).get("bot") and str(row.get("id", "")).isdigit() and int(row["id"]) > after
+                and str(row.get("channel_id", channel)) == str(channel) and content.startswith(CLEAR_REFUSAL_PREFIXES)):
+            return content
+    return None
+
+
 def expected_cancel_refusal(error):
     """Only the observed host guard conflict is a product gap; not generic HTTP failure."""
     cause = error.__cause__
@@ -341,6 +354,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
     first_response = False
     phase = "preflight"
     setup_id = None
+    clear_after = None
     result["herdr_observations"] = []
     # Reset/cancel and queue truncation are deliberately never used as Herdr setup.
     result["reset_policy"] = "preserve Herdr session; reset-before-each not executed"
@@ -413,6 +427,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 gap_token = None
                 if prompt.strip().split(maxsplit=1)[0:1] == ["!clear"]:
                     first_response, prompt_count = False, -1
+                    clear_after = max([int(setup_id)] + [int(r["id"]) for r in window.raw_messages if str(r.get("id", "")).isdigit()])
                 elif profile and profile["issue"] == "#5340 P10-2" and prompt_count and first_response:
                     marker = step.get("hold_marker") if step.get("request_key") == "QA" else step.get("body_marker")
                     open_gap(step_index, marker.replace("{run_id}", run_id) if marker else None)
@@ -445,7 +460,11 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                 while True:
                     rows = client.fetch_messages(args.channel_id, after_id=after_id, limit=100)
                     ingest(rows)
+                    refusal = clear_after is not None and clear_refusal(rows, after=clear_after, channel=args.channel_id)
+                    if refusal:
+                        raise assertions.AssertionError(f"text !clear refused by the server: {refusal}")
                     if any(marker in r.get("content", "") for r in rows):
+                        clear_after = None
                         break
                     if time.monotonic() >= deadline:
                         raise assertions.AssertionError(f"Herdr control acknowledgement missing: {marker}")
