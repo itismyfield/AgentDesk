@@ -579,7 +579,7 @@ impl<P: Ports> Supervisor<P> {
                 }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
-                    // Close is no parent Idle; it only takes back what this drive's approvals rested on.
+                    // Not a parent Idle: only the presence lease this drive holds is taken back.
                     drive.presence.withdraw("input_close");
                     self.close_command(ack).await;
                     drive.ready = false;

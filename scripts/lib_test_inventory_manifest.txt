@@ -2389,6 +2389,7 @@ services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retire
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
 services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+services::cluster::channel_home::tests::b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount
 services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
 services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
 services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
@@ -5004,6 +5005,7 @@ services::discord::input_runtime::supervisor::tests::crash_left_clear_resumes_be
 services::discord::input_runtime::supervisor::tests::drive_entry::a_pending_bind_drops_the_instance_whose_facts_already_saw_idle
 services::discord::input_runtime::supervisor::tests::drive_entry::a_rejected_binding_ends_its_facts_and_only_the_rebound_instances_own_idle_submits
 services::discord::input_runtime::supervisor::tests::drive_entry::an_open_turn_is_no_hold_and_an_in_flight_row_still_steps_under_it
+services::discord::input_runtime::supervisor::tests::drive_entry::b2b2_close_and_drive_end_withdraw_only_the_presence_the_drive_started_under
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_closed_ack_certifies_flush_before_later_clear_not_ledger_immutability
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_policy_before_receipt_defers_unknown_external_and_retries_same_origin
 services::discord::input_runtime::supervisor::tests::drive_entry::c2_policy_before_receipt_defers_unknown_scan_without_ack_or_source_loss
@@ -10188,6 +10190,8 @@ services::discord::turn_presence::admission::tests::b2_suspend_blocks_first_poll
 services::discord::turn_presence::admission::tests::b2_unchanged_identity_and_owner_keep_the_ticket_and_approval
 services::discord::turn_presence::admission::tests::b2b1_reading_kept_across_resume_cannot_seed_or_approve_the_new_ticket
 services::discord::turn_presence::admission::tests::b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_approvals
+services::discord::turn_presence::admission::tests::b2b2_a_gateway_first_poll_holds_off_a_home_mount
+services::discord::turn_presence::admission::tests::b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner
 services::discord::turn_presence::admission::tests::fresh_busy_admits_one_first_poll_and_response_waits_outside_locks
 services::discord::turn_presence::admission::tests::gateway_epoch_unknown_and_loss_refuse_previously_approved_requests
 services::discord::turn_presence::admission::tests::home_epoch_loss_expiry_and_replacement_never_fall_back_to_gateway
@@ -10198,6 +10202,7 @@ services::discord::turn_presence::admission::tests::unstamped_or_legacy_busy_can
 services::discord::turn_presence::admission::tests::unsupported_host_and_unreadable_inflight_are_unknown_without_writes
 services::discord::turn_presence::admission::tests::zero_bot_or_channel_cannot_seed_runtime_authority
 services::discord::turn_presence::entrypoints::tests::b2b1_suspend_and_resume_reach_only_the_runtime_installed_for_that_shared
+services::discord::turn_presence::entrypoints::tests::b2b2_a_removed_cluster_relay_withdraws_only_its_provider_runtime
 services::discord::turn_presence::lifecycle::tests::b2_completed_children_are_reaped_and_running_children_cancel_on_drop
 services::discord::turn_presence::lifecycle::tests::b2_late_invalidate_and_retire_preserve_successor_and_other_runtime
 services::discord::turn_presence::lifecycle::tests::b2_lifecycle_owns_and_cancels_every_child_even_before_first_poll

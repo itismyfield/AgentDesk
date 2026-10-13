@@ -16,7 +16,7 @@ pub(in crate::services::discord) trait Fence: Send + Sync {
     fn withdraw(&self, channel: u64, retire: bool, cause: &'static str);
     /// Revokes only approvals resting on this Gateway witness; Home-owned ones stay.
     fn withdraw_gateway(&self, gate: &Arc<OwnershipGate>, cause: &'static str);
-    /// Revokes the channel's approvals resting on an owner other than its Home mount (`None`: Gateway).
+    /// Revokes the channel's approvals resting on an owner other than `mount` (`None`: Gateway).
     fn withdraw_unmounted(&self, channel: u64, mount: Option<&Arc<HomeGate>>, cause: &'static str);
     /// The channel's current registration generation; adoption leaves it, a reset replaces it.
     fn generation(&self, channel: u64) -> Option<Arc<()>>;
