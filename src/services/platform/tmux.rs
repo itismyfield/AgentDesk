@@ -78,6 +78,7 @@ fn wait_for_tmux_output(
 }
 
 mod availability;
+pub(crate) mod health_probe;
 mod sized;
 
 pub use availability::{
@@ -940,8 +941,6 @@ impl From<bool> for PaneLiveness {
         }
     }
 }
-
-const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 mod liveness;
 
