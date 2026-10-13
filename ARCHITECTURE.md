@@ -1019,6 +1019,7 @@ src/
 │   │   │   ├── snapshot.rs
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
+│   │   │   ├── tail_evidence.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── transcript_turn.rs
 │   │   │   ├── transcript_turn_tests.rs

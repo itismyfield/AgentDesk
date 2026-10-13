@@ -734,6 +734,7 @@ fn coverage_under_an_unproven_generation_is_not_promoted_to_green() {
 fn section_6_2_enrichment(capture_lagged: bool) -> SessionEnrichment {
     let row_output_path = "/nonexistent/agentdesk/b6-row-transcript.jsonl";
     SessionEnrichment {
+        tail_observation: Default::default(),
         inflight: None,
         attached: true,
         watcher_attached: true,
