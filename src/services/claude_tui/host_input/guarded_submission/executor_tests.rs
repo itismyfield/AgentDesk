@@ -59,7 +59,7 @@ done
 if [ "$capture" = 1 ]; then printf x >> {captures}; fi
 if [ "$enter" = 1 ]; then printf x >> {enters}; fi
 if [ "$capture" = 1 ] && [ "$joined" = 1 ]; then printf x >> {joined}; fi
-if [ "$conditional" = 1 ]; then printf x >> {conditions}; fi
+if [ "$conditional" = 1 ] && {{ [ "$enter" = 1 ] || [ "$payload" = 1 ]; }}; then printf x >> {conditions}; fi
 mode=$(cat {mode} 2>/dev/null)
 pane=$(cat {pane} 2>/dev/null)
 n=$(wc -c < {captures} 2>/dev/null || printf 0)
@@ -160,6 +160,7 @@ while True:
         out.write(chunk)
     pending += chunk
     if not payload:
+        expected = (root / 'expected').read_bytes()
         pasted = pending.startswith(b'\x1b[200~')
         size = len(expected) + (12 if pasted else 0)
         if len(pending) < size:
@@ -738,7 +739,10 @@ fn cg_b2b_default_off_real_entries_keep_legacy_io_and_no_guarded_observer() {
         let frame = "legacy exact  body";
         renderer(&f, &name, frame, &screen(""), &screen(frame), &screen(""));
         let fence = Arc::new(Fence::default());
-        assert_eq!(selected(&name, frame, None), None);
+        assert_eq!(
+            selected(&name, frame, None, capture_request(&name).unwrap()),
+            None
+        );
         assert_eq!(count(&f, &name, "payloads"), 0);
         assert_eq!(
             std::fs::read(f.root.path().join("exec-captures"))
@@ -1838,4 +1842,675 @@ fn cg_b2c_warm_owner_preserves_cancellation_after_payload_and_after_enter() {
         terminals, 0,
         "cancellations after payload and Enter must stay typed"
     );
+}
+
+pub(crate) fn d1_fixture_config(
+    f: &Fixture,
+    ids: &[u64],
+) -> (Vec<crate::config::TestEnvVarGuard>, crate::config::Config) {
+    use crate::config::TestEnvVarGuard as Env;
+    use std::os::unix::fs::PermissionsExt;
+    let path = f.root.path().join("cg-d1-fixture.yaml");
+    let bindings = ids.iter().enumerate().map(|(index, id)| format!("  - id: cg-d1-{index}\n    name: cg-d1-{index}\n    channels:\n      claude: {{id: '{id}', runtime: tui}}\n")).collect::<String>();
+    let data = serde_json::to_string(&f.root.path().join("data")).unwrap();
+    let yaml = format!(
+        "server: {{}}\ndata: {{dir: {data}}}\ncluster: {{instance_id: cg-d1}}\nproviders:\n  claude: {{runtime: tui}}\nagents:\n{bindings}session_hosts: {{claude_guard_channels: {ids:?}}}\n"
+    );
+    std::fs::write(&path, &yaml).unwrap();
+    let fake = f.root.path().join("claude-fixture");
+    std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let env = vec![
+        Env::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &path),
+        Env::set_path_after_shared_test_env_lock("CLAUDE_CONFIG_DIR", f.root.path()),
+        Env::set_path_after_shared_test_env_lock("AGENTDESK_CLAUDE_PATH", &fake),
+    ];
+    (env, serde_yaml::from_str(&yaml).unwrap())
+}
+
+pub(crate) fn d1_execution_proof(
+    name: &str,
+    channel: u64,
+) -> crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation {
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+    std::fs::create_dir_all(
+        Path::new(&tc::session_temp_path(name, "proof"))
+            .parent()
+            .unwrap(),
+    )
+    .unwrap();
+    tc::write_tmux_owner_marker(name).unwrap();
+    tc::host_marker::record_tmux_host_marker(name);
+    tc::write_tmux_runtime_kind_marker(
+        name,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )
+    .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let prepared =
+        PreparedIncarnation::prepare("claude", name, Some(channel), Some(&sid), false).unwrap();
+    prepared
+        .finish_spawn(crate::services::discord::stamp_spawn_markers(
+            name,
+            Some(&prepared),
+        ))
+        .unwrap();
+    prepared
+}
+
+fn d1_submit(
+    name: &str,
+    frame: &str,
+    entry: Entry,
+    fence: Arc<Fence>,
+) -> (Result<(), String>, Option<InputRun>) {
+    crate::services::claude_tui::submit_canary::with_channel(41, || {
+        with_scope(Some(fence), || {
+            crate::services::claude_tui::guarded_outcome::capture(|| {
+                let token = CancelToken::new();
+                match entry {
+                    Entry::Fresh => input::send_fresh_prompt(name, frame, Some(&token)),
+                    Entry::Followup => input::send_followup_prompt(name, frame, Some(&token)),
+                    Entry::ProvenWarm => {
+                        let root = tempfile::tempdir().unwrap();
+                        let transcript = root.path().join("session.jsonl");
+                        std::fs::write(&transcript, "{\"type\":\"result\"}\n").unwrap();
+                        crate::services::claude_tui::guarded_outcome::send_followup_prompt_or_idle_transcript(name, frame, Some(&token), &transcript)
+                    }
+                }
+            })
+        })
+    })
+}
+
+#[test]
+fn cg_d1_selected_input_boundaries_and_other_legacy_use_actual_tmux() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for (index, frame) in [
+        "한글  원문".to_string(),
+        " 한글  원문".to_string(),
+        "x".repeat(532),
+        "x".repeat(533),
+        "x".repeat(799),
+        "x".repeat(800),
+        "😀".repeat(401),
+        "a\n  b\nc".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("d1-boundary-{index}");
+        let folded =
+            crate::services::tui_input::actor::gate::claude_guarded::claude_should_fold(&frame);
+        let own = if folded {
+            let lf = frame.bytes().filter(|byte| *byte == b'\n').count();
+            if lf == 0 {
+                "[Pasted text #7]".to_string()
+            } else {
+                format!("[Pasted text #7 +{lf} lines]")
+            }
+        } else {
+            frame.clone()
+        };
+        renderer(&f, &name, &frame, &screen(""), &screen(&own), &screen(""));
+        d1_execution_proof(&name, 41);
+        let entry = match index % 3 {
+            0 => Entry::Fresh,
+            1 => Entry::Followup,
+            _ => Entry::ProvenWarm,
+        };
+        let fence = Arc::new(Fence::default());
+        let (result, observed) = d1_submit(&name, &frame, entry, Arc::clone(&fence));
+        assert_eq!(
+            observed,
+            Some(InputRun::Applied),
+            "selected input must consume the guarded result: {result:?}"
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+        assert_receipt(
+            &f,
+            &name,
+            &frame,
+            if folded || frame.contains('\n') {
+                "paste"
+            } else {
+                "literal"
+            },
+            1,
+        );
+        assert_eq!(
+            std::fs::read(f.root.path().join("exec-enters"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let name = "d1-other-normal";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let (result, observed) = crate::services::claude_tui::submit_canary::with_channel(44, || {
+        crate::services::claude_tui::guarded_outcome::capture(|| {
+            input::send_fresh_prompt(name, "own", None)
+        })
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(observed, None);
+    assert_receipt(&f, name, "own", "literal", 1);
+    assert!(
+        std::fs::read(f.root.path().join("exec-conditions"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn cg_d1_selected_unknown_mismatch_and_host_conflict_never_downgrade() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for (index, case) in [
+        "missing",
+        "channel",
+        "tmux",
+        "root",
+        "host",
+        "nonce",
+        "unknown-host",
+        "conflict-host",
+        "provider",
+        "profile",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let name = format!("d1-identity-{index}");
+        renderer(&f, &name, "own", &screen(""), &screen("own"), &screen(""));
+        if *case != "missing" {
+            let proof = d1_execution_proof(&name, 41);
+            let mut ctx = serde_json::to_value(&proof.context).unwrap();
+            match *case {
+                "channel" => ctx["channel_id"] = 44.into(),
+                "tmux" => ctx["tmux_session"] = "another".into(),
+                "root" => ctx["owner_runtime_root"] = "/another".into(),
+                "host" => ctx["host"] = "another".into(),
+                "provider" => ctx["provider"] = "codex".into(),
+                "profile" => ctx["launch_mode"] = "unsupported".into(),
+                "nonce" => {
+                    std::fs::write(
+                        crate::services::tmux_common::session_temp_path(&name, "spawn_nonce"),
+                        "f".repeat(32),
+                    )
+                    .unwrap();
+                }
+                "unknown-host" => {
+                    std::fs::remove_file(crate::services::tmux_common::session_temp_path(
+                        &name,
+                        "host_kind",
+                    ))
+                    .unwrap();
+                }
+                "conflict-host" => {
+                    std::fs::write(
+                        crate::services::tmux_common::session_temp_path(&name, "host_kind"),
+                        "herdr",
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(&proof.path, serde_json::to_vec(&ctx).unwrap()).unwrap();
+        }
+        let fence = Arc::new(Fence::default());
+        let (result, _) = d1_submit(&name, "own", Entry::Fresh, Arc::clone(&fence));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("claude tui guarded submission held:")),
+            "{case}: selected evidence must hold, not become Legacy: {result:?}"
+        );
+        assert!(
+            f.received(&name).is_empty(),
+            "{case}: no payload or fallback"
+        );
+        assert_eq!(
+            fence.calls.load(Ordering::SeqCst),
+            0,
+            "{case}: before durable fence"
+        );
+    }
+    let name = "d1-unscoped-selected";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    d1_execution_proof(name, 41);
+    let fence = Arc::new(Fence::default());
+    let (result, observed) =
+        with_scope(Some(Arc::clone(&fence) as Arc<dyn SubmissionFence>), || {
+            guarded_outcome::capture(|| {
+                crate::services::claude_tui::input::send_fresh_prompt(name, "own", None)
+            })
+        });
+    assert!(
+        result.is_err() && matches!(observed, Some(InputRun::Refused(InputRefusal::Unknown))),
+        "missing creator context must not infer a channel from execution files: {result:?} {observed:?}"
+    );
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 0);
+    assert!(f.received(name).is_empty());
+}
+
+#[test]
+fn cg_d1_production_hold_survives_off_and_blocks_warm_fresh_resend() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "d1-post-payload-off";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    d1_execution_proof(name, 41);
+    let fence = Arc::new(Fence {
+        arm: Some((f.root.path().join("exec-mode"), "drop_payload")),
+        ..Fence::default()
+    });
+    let (result, observed) = d1_submit(name, "own", Entry::ProvenWarm, Arc::clone(&fence));
+    assert!(
+        matches!(observed, Some(InputRun::Indeterminate { confirmed: 0, .. })),
+        "{result:?} {observed:?}"
+    );
+    assert_receipt(&f, name, "own", "literal", 0);
+    drop(boot);
+    let _off = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[]);
+    let original = f.received(name);
+    let cleans = AtomicUsize::new(0);
+    assert!(
+        input::with_composer_cleanup_lock(name, || cleans.fetch_add(1, Ordering::SeqCst)).is_none()
+    );
+    assert_eq!(cleans.load(Ordering::SeqCst), 0);
+    for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+        let (again, observed) = d1_submit(name, "own", entry, Arc::clone(&fence));
+        assert!(again.is_err());
+        assert!(observed.is_none_or(|run| matches!(run, InputRun::Indeterminate { .. })));
+    }
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.received(name), original);
+    crate::services::claude_tui::guarded_outcome::forget_test_hold(name);
+}
+
+#[test]
+fn cg_d1_empty_boot_preserves_legacy_actions_and_steering_selected_is_hold() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let off = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[]);
+    for (index, channel) in [Some(41), Some(44), None].into_iter().enumerate() {
+        let name = format!("d1-off-{index}");
+        renderer(&f, &name, "own", &screen(""), &screen("own"), &screen(""));
+        let run = || {
+            crate::services::claude_tui::guarded_outcome::capture(|| {
+                input::send_fresh_prompt(&name, "own", None)
+            })
+        };
+        let (result, observed) = channel.map_or_else(run, |channel| {
+            crate::services::claude_tui::submit_canary::with_channel(channel, run)
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(observed, None);
+        assert_receipt(&f, &name, "own", "literal", 1);
+        assert!(
+            std::fs::read(f.root.path().join("exec-conditions"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    drop(off);
+    let _on =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let name = "d1-first-profile-steer";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    d1_execution_proof(name, 41);
+    let (result, observed) = crate::services::claude_tui::submit_canary::with_channel(41, || {
+        crate::services::claude_tui::guarded_outcome::capture(|| {
+            input::inject_steering_prompt(name, "own")
+        })
+    });
+    assert!(result.is_err());
+    assert!(matches!(
+        observed,
+        Some(InputRun::Refused(InputRefusal::Composer(Refusal::NotReady)))
+    ));
+    assert!(f.received(name).is_empty());
+}
+
+#[test]
+fn cg_d1_fixed_request_rejects_nonce_swap_at_the_payload_fence() {
+    struct Swap {
+        marker: PathBuf,
+        nonce: String,
+        calls: AtomicUsize,
+    }
+    impl SubmissionFence for Swap {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&self.marker, &self.nonce).unwrap();
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "d1-nonce-boundary";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let original = d1_execution_proof(name, 41);
+    let replacement = d1_execution_proof(name, 41);
+    let marker = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        name,
+        "spawn_nonce",
+    ));
+    std::fs::write(&marker, &original.context.execution_nonce).unwrap();
+    let fence = Arc::new(Swap {
+        marker,
+        nonce: replacement.context.execution_nonce,
+        calls: AtomicUsize::new(0),
+    });
+    let (result, observed) = crate::services::claude_tui::submit_canary::with_channel(41, || {
+        with_scope(Some(fence.clone()), || {
+            crate::services::claude_tui::guarded_outcome::capture(|| {
+                input::send_fresh_prompt(name, "own", None)
+            })
+        })
+    });
+    assert!(
+        matches!(
+            observed,
+            Some(InputRun::Indeterminate {
+                confirmed: 0,
+                cause: StopCause::Refused(InputRefusal::IdentityMismatch)
+            })
+        ),
+        "{result:?} {observed:?}"
+    );
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+    assert!(f.received(name).is_empty());
+    assert!(
+        std::fs::read(f.root.path().join("exec-enters"))
+            .unwrap()
+            .is_empty()
+    );
+    crate::services::claude_tui::guarded_outcome::forget_test_hold(name);
+}
+
+#[test]
+fn cg_d1_runtime_env_change_does_not_change_the_selected_attempt() {
+    struct Change;
+    impl SubmissionFence for Change {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            unsafe {
+                std::env::set_var("AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS", "");
+            }
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _input = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS",
+        std::ffi::OsStr::new("41"),
+    );
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "d1-env-boundary";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    d1_execution_proof(name, 41);
+    let (result, observed) = crate::services::claude_tui::submit_canary::with_channel(41, || {
+        with_scope(Some(Arc::new(Change)), || {
+            crate::services::claude_tui::guarded_outcome::capture(|| {
+                input::send_fresh_prompt(name, "own", None)
+            })
+        })
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(observed, Some(InputRun::Applied));
+    assert_receipt(&f, name, "own", "literal", 1);
+}
+
+#[test]
+fn cg_d1_readiness_wait_keeps_the_original_execution_request() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "d1-readiness-identity";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let original = d1_execution_proof(name, 41);
+    let replacement = d1_execution_proof(name, 41);
+    let marker = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        name,
+        "spawn_nonce",
+    ));
+    std::fs::write(&marker, &original.context.execution_nonce).unwrap();
+    let busy = f.root.path().join("d1-busy-capture");
+    let seen = f.root.path().join("d1-readiness-seen");
+    std::fs::write(&busy, "Thinking...\n  esc to interrupt\n").unwrap();
+    let shim = f.root.path().join("tmux");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    let prefix = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = capture-pane ] && [ -f {} ]; then touch {}; cat {}; exit 0; fi\ndone\n",
+        quote(&busy),
+        quote(&seen),
+        quote(&busy)
+    );
+    std::fs::write(&shim, prefix + script.strip_prefix("#!/bin/sh\n").unwrap()).unwrap();
+    let worker = std::thread::spawn(move || {
+        wait(|| seen.exists());
+        std::fs::write(marker, &replacement.context.execution_nonce).unwrap();
+        std::fs::remove_file(busy).unwrap();
+    });
+    let fence = Arc::new(Fence::default());
+    let (result, observed) = d1_submit(name, "own", Entry::Followup, Arc::clone(&fence));
+    worker.join().unwrap();
+    assert!(
+        matches!(
+            observed,
+            Some(InputRun::Refused(InputRefusal::IdentityMismatch))
+        ),
+        "request captured before readiness must reject the replacement: {result:?} {observed:?}"
+    );
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 0);
+    assert!(f.received(name).is_empty());
+}
+
+#[test]
+fn cg_d1_production_own_draft_requires_exact_spaces() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let frame = "a  b";
+    for (index, composer) in [frame, "a b", "a\tb", "a\nb"].iter().enumerate() {
+        let name = format!("d1-exact-spaces-{index}");
+        renderer(
+            &f,
+            &name,
+            frame,
+            &screen(""),
+            &screen(composer),
+            &screen(""),
+        );
+        d1_execution_proof(&name, 41);
+        let fence = Arc::new(Fence::default());
+        let (result, observed) = d1_submit(&name, frame, Entry::Fresh, Arc::clone(&fence));
+        if index == 0 {
+            assert_eq!(result, Ok(()));
+            assert_eq!(observed, Some(InputRun::Applied));
+        } else {
+            assert!(
+                matches!(
+                    observed,
+                    Some(InputRun::Indeterminate {
+                        confirmed: 1,
+                        cause: StopCause::Refused(InputRefusal::Composer(Refusal::OwnDraft))
+                    })
+                ),
+                "foreign composer must hold after actual payload: {result:?} {observed:?}"
+            );
+        }
+        assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+        assert_receipt(&f, &name, frame, "literal", usize::from(index == 0));
+        guarded_outcome::forget_test_hold(&name);
+    }
+}
+
+#[test]
+fn cg_d1_real_warm_terminal_does_not_recreate_or_resend_a_guarded_hold() {
+    use crate::services::claude_tui::hosting::{
+        ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let _boot =
+        crate::config::session_hosts::force_with_claude_guard_for_test(Some("cg-d1"), &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let name = "d1-warm-terminal";
+    renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+    let proof = d1_execution_proof(name, 41);
+    let transcript = f.root.path().join("d1-warm.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    let fence = Arc::new(Fence {
+        arm: Some((f.root.path().join("exec-mode"), "drop_payload")),
+        ..Fence::default()
+    });
+    let outcome = with_scope(Some(Arc::clone(&fence) as Arc<dyn SubmissionFence>), || {
+        crate::services::claude_tui::submit_canary::with_channel(41, || {
+            guarded_outcome::warm_owned(|| {
+                let (tx, _) = std::sync::mpsc::channel();
+                let raw = try_claude_tui_warm_followup(
+                    proof.context.expected_native_session_id.clone().unwrap(),
+                    transcript.clone(),
+                    transcript.display().to_string(),
+                    true,
+                    f.root.path(),
+                    "own",
+                    tx,
+                    None,
+                    &FollowupHost::legacy_tmux(name),
+                    Some(41),
+                );
+                assert!(
+                    matches!(raw, ClaudeTuiWarmFollowupOutcome::Terminal(Err(_))),
+                    "a guarded warm stop must not request fresh recreation"
+                );
+                raw
+            })
+        })
+    });
+    assert!(matches!(
+        outcome,
+        guarded_outcome::OwnedWarmOutcome::Stopped(InputRun::Indeterminate { confirmed: 0, .. })
+    ));
+    assert_receipt(&f, name, "own", "literal", 0);
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+    let prior = f.received(name);
+    for entry in [Entry::Fresh, Entry::Followup, Entry::ProvenWarm] {
+        assert!(d1_submit(name, "own", entry, Arc::clone(&fence)).0.is_err());
+    }
+    assert_eq!(f.received(name), prior);
+    assert_eq!(fence.calls.load(Ordering::SeqCst), 1);
+    guarded_outcome::forget_test_hold(name);
+}
+
+#[test]
+fn cg_d1_missing_host_identity_is_hold_and_known_host_is_a_live_control() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    install_shim(&f);
+    let (_env, _) = d1_fixture_config(&f, &[41]);
+    let config = f.root.path().join("cg-d1-fixture.yaml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, text.replace("cluster: {instance_id: cg-d1}\n", "")).unwrap();
+    let _instance =
+        crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("AGENTDESK_INSTANCE_ID");
+    unsafe { std::env::remove_var("AGENTDESK_INSTANCE_ID") };
+    let _boot = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[41]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for known in [false, true] {
+        let name = if known {
+            "d1-host-known"
+        } else {
+            "d1-host-unknown"
+        };
+        if known {
+            unsafe { std::env::set_var("AGENTDESK_INSTANCE_ID", "cg-d1") };
+        }
+        renderer(&f, name, "own", &screen(""), &screen("own"), &screen(""));
+        let proof = d1_execution_proof(name, 41);
+        assert_eq!(proof.context.host.is_some(), known);
+        let fence = Arc::new(Fence::default());
+        let (result, observed) = d1_submit(name, "own", Entry::Fresh, Arc::clone(&fence));
+        if known {
+            assert_eq!(result, Ok(()));
+            assert_eq!(observed, Some(InputRun::Applied));
+            assert_receipt(&f, name, "own", "literal", 1);
+        } else {
+            assert!(
+                matches!(observed, Some(InputRun::Refused(_))),
+                "unknown host cannot become a proven execution: {result:?} {observed:?}"
+            );
+            assert!(f.received(name).is_empty());
+        }
+        assert_eq!(fence.calls.load(Ordering::SeqCst), usize::from(known));
+    }
 }

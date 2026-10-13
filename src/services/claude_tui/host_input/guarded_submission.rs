@@ -1,4 +1,4 @@
-//! Dormant Claude executor: a locked PRE precedes the durable fence and one passive submission.
+//! Boot-selected Claude executor: a locked PRE precedes the durable fence and one submission.
 
 #[cfg(test)]
 use super::LegacyTmuxGate;
@@ -227,35 +227,82 @@ fn passive_ready(capture: &str) -> bool {
             || crate::services::tmux_common::tmux_capture_indicates_claude_tui_busy(&plain))
 }
 
-struct Request {
-    target: InputTarget,
-    gate: Rc<dyn MutationGate>,
-    steering: bool,
+pub(crate) struct Request {
+    pub(crate) target: InputTarget,
+    pub(crate) gate: Rc<dyn MutationGate>,
+    pub(crate) steering: bool,
 }
 
-fn request(_session: &str) -> Option<Rc<Request>> {
+fn request(session: &str) -> Option<Rc<Request>> {
     #[cfg(test)]
-    {
-        test_support::request(_session)
+    if let Some(request) = test_support::request(session) {
+        return Some(request);
     }
-    #[cfg(not(test))]
-    {
-        None
-    }
+    crate::services::claude_tui::submit_canary::request(session)
 }
 
 pub(crate) fn selection_refusal(session: &str) -> Option<InputRun> {
     let request = request(session)?;
-    (request.target.tmux_session().ok() != Some(session))
-        .then_some(InputRun::Refused(InputRefusal::IdentityMismatch))
+    match request.target.tmux_session() {
+        Ok(target) if target == session => {
+            if crate::services::claude_tui::submit_canary::enabled() {
+                request.gate.admit(session).err().map(InputRun::Refused)
+            } else {
+                None
+            }
+        }
+        Ok(_) => Some(InputRun::Refused(InputRefusal::IdentityMismatch)),
+        Err(refusal) => Some(InputRun::Refused(refusal)),
+    }
+}
+
+pub(crate) fn capture_request(
+    session: &str,
+) -> Result<Option<Rc<Request>>, guarded_outcome::SubmissionError> {
+    if let Some(run) = guarded_outcome::held(session) {
+        return Err(guarded_outcome::SubmissionError::Guarded(run));
+    }
+    let request = request(session);
+    if let Some(request) = &request {
+        let target = request
+            .target
+            .tmux_session()
+            .map_err(crate::services::claude_tui::submit_canary::stopped)?;
+        if target != session {
+            return Err(crate::services::claude_tui::submit_canary::stopped(
+                InputRefusal::IdentityMismatch,
+            ));
+        }
+    }
+    Ok(request)
+}
+
+pub(crate) fn readiness_error(
+    session: &str,
+    error: String,
+    request: &Option<Rc<Request>>,
+) -> guarded_outcome::SubmissionError {
+    if request.is_none() {
+        return guarded_outcome::readiness_error(session, error);
+    }
+    let run = guarded_outcome::held(session).unwrap_or_else(|| {
+        if input::is_prompt_ready_cancelled_error(&error) {
+            InputRun::Cancelled { confirmed: 0 }
+        } else {
+            refused(Refusal::NotReady)
+        }
+    });
+    guarded_outcome::finish(&run);
+    guarded_outcome::SubmissionError::Guarded(run)
 }
 
 pub(crate) fn selected(
     session: &str,
     prompt: &str,
     cancel: Option<&CancelToken>,
+    request: Option<Rc<Request>>,
 ) -> Option<InputRun> {
-    selected_with_context(session, prompt, cancel, SubmitContext::Idle)
+    selected_with_context(session, prompt, cancel, SubmitContext::Idle, request?)
 }
 
 fn selected_with_context(
@@ -263,10 +310,10 @@ fn selected_with_context(
     prompt: &str,
     cancel: Option<&CancelToken>,
     context: SubmitContext,
+    request: Rc<Request>,
 ) -> Option<InputRun> {
-    let request = request(session)?;
-    if let Some(refusal) = selection_refusal(session) {
-        return Some(refusal);
+    if request.target.tmux_session().ok() != Some(session) {
+        return Some(InputRun::Refused(InputRefusal::IdentityMismatch));
     }
     guarded_outcome::begin();
     let run = match context {
@@ -282,10 +329,18 @@ fn selected_with_context(
 }
 
 pub(crate) fn steering_selected(session: &str, prompt: &str) -> Option<InputRun> {
-    if request(session)?.steering {
-        return selected_with_context(session, prompt, None, SubmitContext::ClaudeSteering);
+    let request = request(session)?;
+    if request.steering {
+        return selected_with_context(
+            session,
+            prompt,
+            None,
+            SubmitContext::ClaudeSteering,
+            request,
+        );
     }
     let run = refused(Refusal::NotReady);
+    guarded_outcome::finish(&run);
     #[cfg(test)]
     test_support::remember(&run);
     Some(run)
