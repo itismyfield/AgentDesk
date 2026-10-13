@@ -74,12 +74,63 @@ pub(crate) struct BootSessionHosts {
     local_node: Option<String>,
 }
 
+const GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
+type GuardOverride = std::result::Result<Option<BTreeSet<u64>>, String>;
+static GUARD_INPUT: OnceLock<GuardOverride> = OnceLock::new();
+
+fn read_guard_input() -> Result<Option<BTreeSet<u64>>> {
+    let value = std::env::var_os(GUARD_ENV)
+        .map(|raw| {
+            raw.into_string()
+                .map_err(|_| anyhow::anyhow!("{GUARD_ENV}: invalid UTF-8"))
+        })
+        .transpose()?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut ids = BTreeSet::new();
+    if !value.is_empty() {
+        for raw in value.split(',') {
+            let raw = raw.trim();
+            ensure!(
+                !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()),
+                "{GUARD_ENV}: invalid channel id"
+            );
+            let id = raw.parse::<u64>()?;
+            ensure!(id != 0, "{GUARD_ENV}: 0 is not a channel id");
+            ids.insert(id);
+        }
+    }
+    Ok(Some(ids))
+}
+
+// Config loading validates before install; both stages use this same frozen startup input.
+fn normalized(config: &Config) -> Result<(Config, &'static str)> {
+    let ids = GUARD_INPUT.get_or_init(|| read_guard_input().map_err(|error| error.to_string()));
+    let ids = ids.as_ref().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut effective = config.clone();
+    let source = match ids {
+        None => "yaml",
+        Some(ids) => {
+            effective
+                .session_hosts
+                .claude_guard_channels
+                .clone_from(ids);
+            if ids.is_empty() { "env-empty" } else { "env" }
+        }
+    };
+    Ok((effective, source))
+}
+
 impl BootSessionHosts {
     pub(crate) fn from_config(config: &Config) -> Result<Self> {
-        let local_node = config.cluster.instance_id.as_deref().map(str::trim);
+        let (effective, source) = normalized(config)?;
+        let channels = validate_effective(&effective)?;
+        tracing::info!(source, channels = ?effective.session_hosts.claude_guard_channels, policy = "idle-only", "Claude submit guard boot selection");
+        let local_node = effective.cluster.instance_id.as_deref().map(str::trim);
         Ok(Self {
-            config: config.session_hosts.clone(),
-            channels: validate(config)?,
+            config: effective.session_hosts.clone(),
+            channels,
             local_node: local_node.filter(|id| !id.is_empty()).map(str::to_owned),
         })
     }
@@ -107,6 +158,11 @@ impl BootSessionHosts {
 
 /// Every endpoint complete with absolute paths, every channel a registered TUI on a known endpoint.
 pub(crate) fn validate(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
+    let (effective, _) = normalized(config)?;
+    validate_effective(&effective)
+}
+
+fn validate_effective(config: &Config) -> Result<BTreeMap<u64, ChannelEndpoint>> {
     let herdr = &config.session_hosts.herdr;
     for (key, endpoint) in &herdr.endpoints {
         let at = format!("session_hosts.herdr.endpoints.{key}");
