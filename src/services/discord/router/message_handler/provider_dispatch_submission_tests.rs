@@ -440,10 +440,75 @@ pub(super) fn observe_owner(
     }
 }
 
+/// Counts fence requests, so a held retry is shown to stop before any durable boundary.
+#[derive(Default)]
+struct CountingFence(std::sync::atomic::AtomicUsize);
+impl crate::services::claude_tui::submission_fence::SubmissionFence for CountingFence {
+    fn before_first_payload(
+        &self,
+    ) -> Result<(), crate::services::claude_tui::submission_fence::PreSubmitPersistenceRefused>
+    {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn refusal(
+        &self,
+    ) -> Option<crate::services::claude_tui::submission_fence::PreSubmitPersistenceRefused> {
+        None
+    }
+}
+
+/// The cancelled turn still owns its birth row, fenced phase and own mailbox slot, unrequeued.
+async fn assert_kept(
+    stage: &str,
+    shared: &SharedData,
+    channel: ChannelId,
+    born: &crate::services::discord::inflight::InflightEpisodePin,
+    token: &Arc<crate::services::provider::CancelToken>,
+) {
+    let row = crate::services::discord::inflight::load_inflight_state(
+        &ProviderKind::Claude,
+        channel.get(),
+    )
+    .unwrap_or_else(|| panic!("{stage}: the cancelled turn's row was finalized"));
+    assert!(
+        crate::services::discord::inflight::InflightEpisodePin::from_state(&row)
+            .is_same_episode_as(born),
+        "{stage}: the row is the original birth episode, not a successor"
+    );
+    assert_eq!(
+        row.managed_submission
+            .as_ref()
+            .map(|record| record.phase.clone()),
+        Some(SubmissionPhase::MayHaveSubmitted),
+        "{stage}: the fenced phase never drops back"
+    );
+    let mailbox = shared.mailbox_peek(channel).unwrap().snapshot().await;
+    assert!(
+        mailbox
+            .cancel_token
+            .as_ref()
+            .is_some_and(|slot| Arc::ptr_eq(slot, token)),
+        "{stage}: the slot still holds the cancelled turn's own token"
+    );
+    assert!(mailbox.intervention_queue.is_empty(), "{stage}: requeued");
+    assert!(
+        crate::services::discord::busy_followup_retry_store::load(
+            &ProviderKind::Claude,
+            channel.get(),
+            row.effective_busy_followup_retry_user_msg_id(),
+        )
+        .is_none(),
+        "{stage}: no busy follow-up retry was persisted"
+    );
+}
+
 async fn actual_creator(creator: Creator) {
     use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
         d1_execution_proof, d1_fixture_config, install_shim, renderer, screen,
     };
+    use crate::services::claude_tui::{guarded_outcome, input, submission_fence, submit_canary};
+    use crate::services::discord::inflight::{InflightEpisodePin, SubmissionFailure};
     use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Tmux;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Tmux::after_shared_test_env_lock();
@@ -532,6 +597,10 @@ async fn actual_creator(creator: Creator) {
     *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
         .lock()
         .unwrap() = Some((channel, finished));
+    assert!(
+        super::CLAUDE_LEGACY_PROBE.lock().unwrap().is_none(),
+        "no stand-in driver may replace the real input entry"
+    );
     let timeout = std::time::Duration::from_secs(20);
     match creator {
         Creator::Headless => {
@@ -628,6 +697,34 @@ async fn actual_creator(creator: Creator) {
         durable_phase(channel),
         Some(SubmissionPhase::MayHaveSubmitted)
     );
+    // T0: the executor is parked in its first payload, so only selected()'s own begin() can
+    // have made the owner Running; nothing in this test calls begin().
+    assert!(
+        matches!(cap.classify_failure(), SubmissionFailure::GuardedRunning),
+        "T0: selected() must notify begin before the executor's first payload"
+    );
+    let pane = f.root.path().join(&name);
+    let count = |file: &std::path::Path| std::fs::read(file).map_or(0, |bytes| bytes.len());
+    let exec_enters = f.root.path().join("exec-enters");
+    assert_eq!(
+        (
+            count(&pane.join("payloads")),
+            count(&pane.join("enters")),
+            count(&exec_enters)
+        ),
+        (1, 0, 0),
+        "T0: one payload and no Enter"
+    );
+    let frame = std::fs::read(pane.join("frame")).unwrap();
+    let delivered = match std::fs::read_to_string(pane.join("kind")).unwrap().as_str() {
+        "paste" => [b"\x1b[200~".as_slice(), &frame, b"\x1b[201~"].concat(),
+        _ => frame,
+    };
+    assert_eq!(std::fs::read(pane.join("received")).unwrap(), delivered);
+    let born = InflightEpisodePin::from_state(
+        &crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, id)
+            .unwrap(),
+    );
     token
         .cancelled
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -635,26 +732,18 @@ async fn actual_creator(creator: Creator) {
         .await
         .unwrap()
         .unwrap();
-    let row = crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, id)
-        .expect("the real bridge must preserve the row while executor is Running");
-    assert_eq!(
-        row.managed_submission
-            .as_ref()
-            .map(|record| record.phase.clone()),
-        Some(SubmissionPhase::MayHaveSubmitted)
-    );
+    // T1: the bridge is done while the executor still has no result to report.
+    assert_kept("T1", &shared, channel, &born, &token).await;
     assert!(matches!(
         cap.classify_failure(),
-        crate::services::discord::inflight::SubmissionFailure::GuardedRunning
+        SubmissionFailure::GuardedRunning
     ));
-    let mailbox = mailbox.snapshot().await;
-    assert!(mailbox.cancel_token.is_some());
-    assert!(mailbox.intervention_queue.is_empty());
-    assert!(
-        std::fs::read(f.root.path().join("exec-enters"))
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        guarded_outcome::held(&name),
+        None,
+        "T1: the executor has not returned before the bridge finished"
     );
+    assert_eq!(count(&exec_enters), 0);
     assert_eq!(
         std::fs::read(f.root.path().join(&name).join("frame")).unwrap(),
         std::fs::read(f.root.path().join(&name).join("expected")).unwrap()
@@ -678,10 +767,50 @@ async fn actual_creator(creator: Creator) {
     tokio::time::timeout(timeout, gate.close().unwrap().drain())
         .await
         .unwrap();
-    assert!(matches!(
-        cap.classify_failure(),
-        crate::services::discord::inflight::SubmissionFailure::GuardedStopped(_)
-    ));
+    // T2: the late executor result is a typed hold kept on the session; the turn stays held.
+    let SubmissionFailure::GuardedStopped(
+        stopped @ crate::services::claude_tui::host_input::InputRun::Indeterminate { .. },
+    ) = cap.classify_failure()
+    else {
+        panic!("T2: a payload already sent must stop as a typed Indeterminate hold");
+    };
+    assert_eq!(guarded_outcome::held(&name), Some(stopped.clone()));
+    assert_kept("T2", &shared, channel, &born, &token).await;
+    // T3: the same effective prompt on a fresh, uncancelled token returns the stored hold.
+    let fence = Arc::new(CountingFence::default());
+    let fresh = crate::services::provider::CancelToken::new();
+    for warm in [false, true] {
+        let again = guarded_outcome::with_owner(Some(cap.observer()), || {
+            submission_fence::with_scope(Some(Arc::clone(&fence) as _), || {
+                submit_canary::with_channel(id, || match warm {
+                    true => input::send_followup_prompt_or_idle_transcript(
+                        &name,
+                        &submitted,
+                        Some(&fresh),
+                        &transcript,
+                    ),
+                    false => input::send_fresh_prompt(&name, &submitted, Some(&fresh)),
+                })
+            })
+        });
+        assert_eq!(
+            again,
+            Err(format!("claude tui guarded submission held: {stopped:?}")),
+            "T3 warm={warm}"
+        );
+    }
+    assert_eq!(fence.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        (
+            std::fs::read(pane.join("received")).unwrap(),
+            count(&pane.join("enters")),
+            count(&exec_enters)
+        ),
+        (delivered, 0, 0),
+        "T3: no duplicate payload, Enter or cleanup key reached the pane"
+    );
+    assert_kept("T3", &shared, channel, &born, &token).await;
+    println!("CG_C32 {creator:?} T2={stopped:?} T3=held(fresh,warm) fence=0 payload=1 enter=0");
     crate::services::claude_tui::guarded_outcome::forget_test_hold(&name);
     shared.mailboxes.remove_fixture_for_test(channel);
     server.abort();

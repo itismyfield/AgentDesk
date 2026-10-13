@@ -671,6 +671,11 @@ mod claim {
         if !eligible(head) {
             return QueuedHeadClaim::NotEligible;
         }
+        // Read again under the actor: a head parked or unreadable since the front check stays.
+        use crate::services::discord::busy_followup_retry_store::{RetryClass, input_class};
+        if input_class(provider, channel_id, head) != RetryClass::Ready {
+            return QueuedHeadClaim::NotEligible;
+        }
         let item = Box::new(head.clone());
         let original = canonical_item(head, channel_id);
         let lease = Arc::new(HeadLease);

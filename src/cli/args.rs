@@ -561,9 +561,6 @@ pub(crate) enum Commands {
         #[arg(long = "no-agentdesk")]
         no_agentdesk: bool,
     },
-    /// Read-only TUI output shadow: window start, report, synthetic manifest
-    #[command(subcommand)]
-    OShadow(crate::cli::o_shadow::OShadowCommand),
     O(crate::cli::o::OArgs),
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
@@ -1143,7 +1140,6 @@ mod tests {
             "health",
             "machine-compare",
             "activity",
-            "o-shadow",
             "o",
             "herdr",
             "channel-home",
