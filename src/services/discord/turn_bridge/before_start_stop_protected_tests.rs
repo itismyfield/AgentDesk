@@ -42,18 +42,18 @@ fn held_elsewhere(lock: &std::path::Path) -> bool {
 fn sidecar_held_at_each_stage(
     close: &Close,
     probe: &Probe,
-    panic_at: Option<&'static str>,
-) -> Arc<Mutex<Vec<(&'static str, bool)>>> {
+    panic_at: Option<Stage>,
+) -> Arc<Mutex<Vec<(Stage, bool)>>> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (slot, lock) = (seen.clone(), sidecar(close));
     probe.on_stage(Box::new(move |stage| {
-        if stage == "before_finalize" {
+        if stage == Stage::BeforeFinalize {
             return;
         }
         let held = held_elsewhere(&lock);
         slot.lock().unwrap().push((stage, held));
         if Some(stage) == panic_at {
-            panic!("injected policy close panic at {stage}");
+            panic!("injected policy close panic at {stage:?}");
         }
     }));
     seen
@@ -79,7 +79,7 @@ async fn p10_fin_s2_protected_open_commit() {
         "{outcome:?}"
     );
     let here = std::thread::current().id();
-    assert!(probe.stages().contains(&"after_commit"));
+    assert!(probe.stages().contains(&Stage::AfterCommit));
     let threads = step_threads(&probe);
     assert!(!threads.is_empty() && threads.iter().all(|thread| *thread != here));
     assert_released(&close, &queued, "protected").await;
@@ -87,6 +87,7 @@ async fn p10_fin_s2_protected_open_commit() {
         probe.snapshot().judge(probe.request, &ALL),
         Ok(vec![1; ALL.len()])
     );
+    assert_eq!(probe.snapshot().complete(probe.request), Ok(()));
     // Gate open and the input fence passed: the witness answers the re-ask.
     let again = close.submit(close.intent(acked)).await;
     assert!(
@@ -158,16 +159,21 @@ async fn p10_fin_s2_sidecar_contention_refuses_without_waiting() {
     assert!(snapshot.is_some_and(|slot| Arc::ptr_eq(&slot, &close.actor)));
     assert!(still_held, "both answers came while the sidecar was held");
     assert!(probe.stages().is_empty(), "no clear was tried");
-    let read = probe
-        .snapshot()
-        .judge(probe.request, &[Point::Dequeued, Point::AckObserved]);
-    assert_eq!(read, Ok(vec![1, 1]));
+    // The fence refused before the step: no commit, no finalize, and the run is complete.
+    let read = probe.snapshot().judge(probe.request, &ALL);
+    assert_eq!(read, Ok(vec![1, 1, 1, 0, 1, 0, 0, 0]));
+    assert_eq!(probe.snapshot().complete(probe.request), Ok(()));
     assert_held(&close, &before, &queued, "contended").await;
-    let outcome = close.submit(close.intent(acked)).await;
+    let retry = close.intent(acked);
+    let after = retry.request.trace.probe();
+    let outcome = close.submit(retry).await;
     assert!(
         matches!(outcome, PolicyCloseOutcome::Settled),
         "{outcome:?}"
     );
+    // Marker, reservations and re-mint fence are as the refused close found them.
+    let refused = probe.mailbox().expect("seen at the fence");
+    assert_eq!(after.mailbox(), Some(refused));
     assert_released(&close, &queued, "after release").await;
 }
 
@@ -181,7 +187,7 @@ async fn p10_fin_s2_protected_bridge_end_to_end() {
     assert!(herdr_stop_settlement_available());
     let seen = armed();
     assert!(close.consume(shown()).await, "the close settles");
-    assert!(seen.lock().unwrap().contains(&"after_commit"));
+    assert!(seen.lock().unwrap().contains(&Stage::AfterCommit));
     assert_released(&close, &queued, "bridge").await;
 }
 
@@ -311,7 +317,7 @@ async fn p10_fin_s2_authority_names_one_row() {
         let scope = PopulationScope::try_writer(&root, &provider, channel, &permit).unwrap();
         let receipt = acked.clone().into_policy_receipt(generation);
         assert_eq!(
-            receipt.try_clear(&step::authority(&scope)),
+            step::with_authority(Some(scope), |authority| receipt.try_clear(authority)),
             PolicyClear::InputFence(Failure::StalePermit),
             "{case}"
         );
@@ -322,7 +328,7 @@ async fn p10_fin_s2_authority_names_one_row() {
     assert_eq!(nested.err(), Some(Failure::Busy), "same-thread nesting");
     let receipt = acked.clone().into_policy_receipt(generation);
     assert_eq!(
-        receipt.try_clear(&step::legacy()),
+        step::with_authority(None, |legacy| receipt.try_clear(legacy)),
         PolicyClear::InputFence(Failure::Busy)
     );
     assert_eq!(close.bytes(), bytes, "legacy on a protected row");
@@ -332,7 +338,7 @@ async fn p10_fin_s2_authority_names_one_row() {
     assert_eq!(refused.err(), Some(Failure::StalePermit));
     let scope = PopulationScope::try_writer(&root, &provider, channel, &permit).unwrap();
     assert_eq!(
-        receipt.try_clear(&step::authority(&scope)),
+        step::with_authority(Some(scope), |authority| receipt.try_clear(authority)),
         PolicyClear::Cleared
     );
     assert!(close.bytes().is_none(), "the exact scope clears it");
@@ -352,7 +358,7 @@ async fn p10_fin_s2_late_protection_is_typed_busy() {
     let protected = Arc::new(Mutex::new(None));
     let slot = protected.clone();
     probe.on_stage(Box::new(move |stage| {
-        if stage == "before_clear" {
+        if stage == Stage::BeforeClear {
             *slot.lock().unwrap() = Gate::protect(provider.clone(), channel).ok();
         }
     }));
@@ -372,7 +378,7 @@ async fn p10_fin_s2_late_protection_is_typed_busy() {
     );
     assert_eq!(
         probe.stages(),
-        ["before_claim", "before_clear", "clear_refused"]
+        [Stage::BeforeClaim, Stage::BeforeClear, Stage::ClearRefused]
     );
     assert_held(&close, &before, &queued, "late protection").await;
 }
@@ -381,7 +387,7 @@ async fn p10_fin_s2_late_protection_is_typed_busy() {
 /// after the clear too.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_s2_authority_spans_the_commit() {
-    for (n, panic_at) in [None, Some("after_detach")].into_iter().enumerate() {
+    for (n, panic_at) in [None, Some(Stage::AfterDetach)].into_iter().enumerate() {
         let close = Close::open(5_341_108 + n as u64, |_| {}).await;
         let queued = close.other_turn_and_queue().await;
         let acked = close.acked().await;
@@ -395,22 +401,22 @@ async fn p10_fin_s2_authority_spans_the_commit() {
             "{outcome:?}"
         );
         let seen = seen.lock().unwrap().clone();
-        let expected: &[&str] = match panic_at {
+        let expected: &[Stage] = match panic_at {
             None => &[
-                "before_claim",
-                "before_clear",
-                "after_clear",
-                "after_detach",
-                "after_debit",
-                "after_fence",
-                "after_commit",
+                Stage::BeforeClaim,
+                Stage::BeforeClear,
+                Stage::AfterClear,
+                Stage::AfterDetach,
+                Stage::AfterDebit,
+                Stage::AfterFence,
+                Stage::AfterCommit,
             ],
             Some(_) => &[
-                "before_claim",
-                "before_clear",
-                "after_clear",
-                "after_detach",
-                "unwound",
+                Stage::BeforeClaim,
+                Stage::BeforeClear,
+                Stage::AfterClear,
+                Stage::AfterDetach,
+                Stage::Unwound,
             ],
         };
         let stages: Vec<_> = seen.iter().map(|(stage, _)| *stage).collect();
@@ -447,21 +453,20 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
             probe
                 .stages()
                 .iter()
-                .filter(|s| **s == "after_commit")
+                .filter(|s| **s == Stage::AfterCommit)
                 .count(),
             1
         );
-        let read = probe
-            .snapshot()
-            .judge(probe.request, &[Point::Dequeued, Point::MailboxCommitted]);
-        assert_eq!(read, Ok(vec![1, 1]));
+        let read = probe.snapshot().judge(probe.request, &ALL);
+        assert_eq!(read, Ok(vec![1; ALL.len()]));
+        assert_eq!(probe.snapshot().complete(probe.request), Ok(()));
     }
     assert_ne!(probe_one.request, probe_two.request);
     let foreign = probe_one
         .snapshot()
         .judge(probe_two.request, &[Point::Dequeued]);
     assert_eq!(foreign, Err(Judged::Foreign));
-    let missing = probe_one.snapshot().unregistered(Point::QueueExit);
+    let missing = probe_one.snapshot().unseen(Point::QueueExit);
     let missing = missing.judge(probe_one.request, &[Point::QueueExit]);
     assert_eq!(missing, Err(Judged::Missing(Point::QueueExit)));
     let totals = step::totals();
@@ -480,7 +485,7 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
     let acked = third.acked().await;
     let intent = third.intent(acked.clone());
     let gap = intent.request.trace.probe();
-    panic_once_at(&gap, "before_finalize");
+    panic_once_at(&gap, Stage::BeforeFinalize);
     let outcome = third.submit(intent).await;
     assert!(
         matches!(
@@ -499,6 +504,10 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
         gap.snapshot().judge(gap.request, &points),
         Ok(vec![1, 1, 0])
     );
+    assert_eq!(
+        gap.snapshot().complete(gap.request),
+        Err(Judged::Incomplete)
+    );
     let intent = third.intent(acked);
     let asked = intent.request.trace.probe();
     let again = third.submit(intent).await;
@@ -506,8 +515,10 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
         matches!(again, PolicyCloseOutcome::DuplicateConfirmed),
         "{again:?}"
     );
+    // Each zero is this request's own reading, never one another request registered.
     assert_eq!(
         asked.snapshot().judge(asked.request, &points),
         Ok(vec![0, 0, 0])
     );
+    assert_eq!(asked.snapshot().complete(asked.request), Ok(()));
 }

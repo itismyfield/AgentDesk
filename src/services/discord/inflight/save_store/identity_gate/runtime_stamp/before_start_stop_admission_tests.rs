@@ -446,3 +446,69 @@ fn old_rows_and_unknown_receipts_keep_their_shape() {
         .expect("a malformed receipt keeps the row readable");
     assert!(!loaded.herdr_before_start_stop.unwrap().supported());
 }
+
+/// A panicking transition answers `None` like any refusal, and the scheduler keeps serving.
+#[tokio::test(flavor = "current_thread")]
+async fn off_scheduler_answers_a_transition_panic_with_none() {
+    let panicked = off_scheduler(|| -> Option<u8> { panic!("injected transition panic") }).await;
+    assert_eq!(panicked, None);
+    assert_eq!(off_scheduler(|| Some(7)).await, Some(7));
+}
+
+/// A caller dropped after its worker started leaves that worker running: the transition ends, and
+/// the same pooled worker reads its own settlement switch again.
+#[test]
+fn off_scheduler_caller_cancel_lets_the_worker_finish_and_restore() {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    use crate::services::turn_orchestrator::policy_close::test_hooks::Settlement;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .thread_keep_alive(std::time::Duration::from_secs(600))
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let worker = || {
+            tokio::task::spawn_blocking(|| {
+                (
+                    std::thread::current().id(),
+                    herdr_stop_settlement_available(),
+                )
+            })
+        };
+        let (thread, on) = worker().await.unwrap();
+        assert!(on, "the worker's own switch");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let finished = std::sync::Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let off = Settlement::set(false);
+        let mut call = Box::pin(off_scheduler(move || {
+            let seen = (
+                std::thread::current().id(),
+                herdr_stop_settlement_available(),
+            );
+            started_tx.send(seen).unwrap();
+            release_rx.recv().unwrap();
+            done.store(true, Ordering::SeqCst);
+            Some(())
+        }));
+        assert!(futures::poll!(call.as_mut()).is_pending());
+        drop(off);
+        let started = started_rx.recv().unwrap();
+        drop(call);
+        release_tx.send(()).unwrap();
+        let after = worker().await.unwrap();
+        assert_eq!(
+            started,
+            (thread, false),
+            "the worker ran with the caller's off"
+        );
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the cancelled call's worker finished"
+        );
+        assert_eq!(after, (thread, true), "and restored its own switch");
+    });
+}

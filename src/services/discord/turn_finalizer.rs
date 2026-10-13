@@ -778,8 +778,12 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         trace.note(Point::Dequeued, 1);
                         // Test seam: the dequeued close is lost before processing, its ACK with it.
                         #[cfg(test)]
-                        if trace.lost(crate::services::turn_orchestrator::policy_close::test_hooks::Loss::Dequeued) {
-                            continue;
+                        {
+                            use crate::services::turn_orchestrator::policy_close::test_hooks as probe;
+                            if trace.lost(probe::Loss::Dequeued) {
+                                trace.not_run(probe::Branch::Lost);
+                                continue;
+                            }
                         }
                         cached_shared = Some(Arc::downgrade(&shared));
                         let mut owned_ledger = std::mem::take(&mut ledger);

@@ -95,6 +95,12 @@ impl FenceCell {
         self.with(|fence| fence.refuses(user_message_id, turn_nonce))
     }
 
+    /// Whether the fence is raised and which episode it last saw start.
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> (bool, Option<(Option<MessageId>, Option<String>)>) {
+        self.with(|fence| (fence.raised, fence.latest_started.clone()))
+    }
+
     #[cfg(test)]
     fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)

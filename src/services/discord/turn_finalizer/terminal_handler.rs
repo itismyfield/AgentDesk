@@ -306,6 +306,12 @@ async fn settle_policy_close(
         Point::QueueExit,
         u64::from(matches!(captured, Ok(Mailbox::Committed(_)))),
     );
+    #[cfg(test)]
+    use crate::services::turn_orchestrator::policy_close::test_hooks::{Branch, Stage};
+    #[cfg(test)]
+    if !matches!(captured, Ok(Mailbox::Committed(_))) {
+        trace.not_run(Branch::NotCommitted);
+    }
     let finish = match captured {
         Err(stage) => return (PolicyCloseOutcome::Unconfirmed(stage), None),
         Ok(Mailbox::Duplicate) => return (PolicyCloseOutcome::DuplicateConfirmed, None),
@@ -317,9 +323,12 @@ async fn settle_policy_close(
         clear_inflight: false,
         ..FinalizeContext::bridge()
     };
-    // Test seam between the commit and its trailing finalize.
+    // Test seam between the commit and its trailing finalize, which has not been entered yet.
     #[cfg(test)]
-    trace.fire("before_finalize");
+    {
+        trace.not_run(Branch::BeforeFinalize);
+        trace.fire(Stage::BeforeFinalize);
+    }
     trace.note(Point::FinalizeEntered, 1);
     let finalized = super::finalize::do_finalize_with_release(
         key,

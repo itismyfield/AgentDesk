@@ -121,11 +121,56 @@ pub(super) struct StepGuard {
     _permit: Option<Permit>,
 }
 impl StepGuard {
-    /// The policy close's write authority: the held population scope, or legacy without a gate.
+    /// The policy close's write authority, bound to this guard's own population scope.
     pub(super) fn policy_authority(&self) -> policy_close::PolicyAuthority<'_> {
-        match &self._population {
-            Some(scope) => policy_close::PolicyAuthority::protected(scope),
-            None => policy_close::PolicyAuthority::legacy(),
+        policy_close::PolicyAuthority::from_step(self)
+    }
+    pub(super) fn population(&self) -> Option<&fence::PopulationScope> {
+        self._population.as_ref()
+    }
+    #[cfg(test)]
+    pub(super) fn for_test(population: Option<fence::PopulationScope>) -> Self {
+        Self {
+            _population: population,
+            _effect: None,
+            _permit: None,
+        }
+    }
+}
+/// What a policy close's mailbox state holds besides its slot: the dispatch marker on disk, the
+/// dispatch and injection reservations, and the re-mint fence.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PolicyMailboxView {
+    marker: Option<Vec<u8>>,
+    reservation: (Option<MessageId>, Vec<MessageId>, bool, bool),
+    fence: (bool, Option<(Option<MessageId>, Option<String>)>),
+}
+#[cfg(test)]
+impl PolicyMailboxView {
+    fn of(
+        channel: ChannelId,
+        state: &ChannelMailboxState,
+        context: &QueuePersistenceContext,
+    ) -> Self {
+        let marker = fence::population_root().and_then(|root| {
+            let tokens = root
+                .join("discord_pending_queue")
+                .join(context.provider.as_str());
+            let path = tokens
+                .join(&context.token_hash)
+                .join(format!("{}.dispatch", channel.get()));
+            std::fs::read(path).ok()
+        });
+        Self {
+            marker,
+            reservation: (
+                state.pending_user_dispatch,
+                state.pending_user_dispatch_source_ids.clone(),
+                state.pending_user_dispatch_lease.is_some(),
+                state.injection_reserved.is_some(),
+            ),
+            fence: state.remint_fence.snapshot(),
         }
     }
 }
@@ -161,6 +206,12 @@ pub(super) fn enter(
     msg: &mut ChannelMailboxMsg,
 ) -> Result<StepGuard, Failure> {
     use ChannelMailboxMsg as M;
+    // Test seam: the mailbox state each policy close finds as it reaches the fence.
+    #[cfg(test)]
+    if let M::PolicyClose { request, .. } = &*msg {
+        let view = PolicyMailboxView::of(channel, state, &request.persistence);
+        request.trace.note_mailbox(view);
+    }
     let Some(gate) = persistence(msg)
         .or(state.last_persistence.as_ref())
         .map_or_else(
@@ -306,7 +357,14 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         M::FinishTurnIfToken { reply, .. } => {
             let _ = reply.send(TokenFinish::Unavailable);
         }
-        M::PolicyClose { reply, .. } => {
+        M::PolicyClose {
+            reply,
+            request: _request,
+        } => {
+            #[cfg(test)]
+            _request
+                .trace
+                .not_run(policy_close::test_hooks::Branch::Fenced);
             let refusal = policy_close::PolicyRetain::InputFence(failure);
             let _ = reply.send(policy_close::PolicyMailboxOutcome::Retained(refusal));
         }

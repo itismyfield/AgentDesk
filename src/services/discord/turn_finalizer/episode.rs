@@ -771,6 +771,10 @@ impl TurnFinalizer {
         let sent = self.tx.send(msg).is_ok();
         trace.note(Point::SendAccepted, u64::from(sent));
         if !sent {
+            #[cfg(test)]
+            trace.not_run(
+                crate::services::turn_orchestrator::policy_close::test_hooks::Branch::SendFailed,
+            );
             return PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerSend);
         }
         let acked = rx.await;

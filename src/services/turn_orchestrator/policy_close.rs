@@ -12,6 +12,14 @@ use super::{ChannelMailboxState, FinishTurnResult, InterventionMode, QueuePersis
 use crate::services::discord::input_runtime::fence::{Failure, PopulationScope};
 use crate::services::provider::{CancelToken, ProviderKind};
 
+/// Test seam at a typed stage of the close, on the request's own probe; gone outside tests.
+macro_rules! at {
+    ($request:expr, $stage:ident) => {
+        #[cfg(test)]
+        $request.trace.fire(test_hooks::Stage::$stage);
+    };
+}
+
 /// The close's one durable effect: the non-blocking exact clear of its acked receipt row, under
 /// the authority the step holds over its channel.
 pub(crate) trait PolicyReceipt: Send {
@@ -29,12 +37,12 @@ enum Held<'a> {
 }
 
 impl<'a> PolicyAuthority<'a> {
-    pub(super) fn legacy() -> Self {
-        Self(Held::Legacy)
-    }
-
-    pub(super) fn protected(scope: &'a PopulationScope) -> Self {
-        Self(Held::Protected(scope))
+    /// The only way to an authority: the step guard's own scope, or legacy when it holds none.
+    pub(super) fn from_step(step: &'a super::input_fence::StepGuard) -> Self {
+        match step.population() {
+            Some(scope) => Self(Held::Protected(scope)),
+            None => Self(Held::Legacy),
+        }
     }
 
     pub(crate) fn is_protected(&self) -> bool {
@@ -198,7 +206,7 @@ pub(super) fn step(
     let outcome = match (run, removed) {
         (Ok(outcome), _) => outcome,
         (Err(_), Some(token)) => {
-            at(&request, "unwound");
+            at!(request, Unwound);
             super::mark_turn_finished_signal_done(channel_id);
             PolicyMailboxOutcome::Committed(FinishTurnResult {
                 removed_token: Some(token),
@@ -232,7 +240,7 @@ fn close(
     }
     #[cfg(test)]
     request.trace.note_started(state.turn_started_instant);
-    at(request, "before_claim");
+    at!(request, BeforeClaim);
     if !request.claims(state, channel_id) {
         return PolicyMailboxOutcome::Superseded;
     }
@@ -242,14 +250,14 @@ fn close(
         turn_nonce: request.turn_nonce.clone(),
         actor: request.actor.clone(),
     };
-    at(request, "before_clear");
+    at!(request, BeforeClear);
     let refused = match request.receipt.try_clear(authority) {
         PolicyClear::Cleared => None,
         PolicyClear::InputFence(failure) => Some(PolicyRetain::InputFence(failure)),
         cleared => Some(PolicyRetain::Clear(cleared)),
     };
     if let Some(refused) = refused {
-        at(request, "clear_refused");
+        at!(request, ClearRefused);
         return PolicyMailboxOutcome::Retained(refused);
     }
     let mut commit = Commit {
@@ -262,20 +270,20 @@ fn close(
         debited: false,
         fenced: false,
     };
-    at(request, "after_clear");
+    at!(request, AfterClear);
     commit.detach();
-    at(request, "after_detach");
+    at!(request, AfterDetach);
     commit.debit();
-    at(request, "after_debit");
+    at!(request, AfterDebit);
     commit.fence();
-    at(request, "after_fence");
+    at!(request, AfterFence);
     commit.witness();
     let held = commit.held;
     drop(commit);
     // After the commit: the queue, marker and latch work a matching finish does.
     super::pause_inbound_stall_for_turn(state, held);
     state.last_persistence = Some(request.persistence.clone());
-    at(request, "after_commit");
+    at!(request, AfterCommit);
     let mut finish =
         super::finalize_turn_state(state, channel_id, Some(&request.persistence), false);
     finish.removed_token = removed.clone();
@@ -343,22 +351,70 @@ impl Drop for Commit<'_> {
     }
 }
 
-/// Test seam at each stage of the close, on the request's own probe; nothing outside tests.
-fn at(_request: &PolicyCloseRequest, _stage: &'static str) {
-    #[cfg(test)]
-    _request.trace.fire(_stage);
-}
-
 #[cfg(test)]
 pub(crate) mod test_hooks {
     use super::{COUNTS, POINTS, Point, PolicyCloseRequest, REGISTERED, Trace};
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::ThreadId;
     use std::time::Instant;
 
-    type Hook = Box<dyn FnMut(&'static str) + Send>;
+    type Hook = Box<dyn FnMut(Stage) + Send>;
+
+    /// Where a close's step, and the finalize after it, can be seen and interrupted.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Stage {
+        BeforeClaim,
+        BeforeClear,
+        ClearRefused,
+        AfterClear,
+        AfterDetach,
+        AfterDebit,
+        AfterFence,
+        AfterCommit,
+        Unwound,
+        BeforeFinalize,
+    }
+
+    /// A branch that, once taken, rules out the points it names for this request.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Branch {
+        /// The finalizer refused the message; nothing downstream ran.
+        SendFailed,
+        /// The finalizer dequeued and dropped it; no mailbox step or finalize ran.
+        Lost,
+        /// The input fence refused the step before it began.
+        Fenced,
+        /// The mailbox did not commit, so the finalize is skipped.
+        NotCommitted,
+        /// The commit is in and the finalize has not been entered yet.
+        BeforeFinalize,
+    }
+
+    impl Branch {
+        fn rules_out(self) -> &'static [Point] {
+            use Point::*;
+            match self {
+                Self::SendFailed => &[
+                    Dequeued,
+                    MailboxCommitted,
+                    AckObserved,
+                    QueueExit,
+                    FinalizeEntered,
+                    FinalizeReturned,
+                ],
+                Self::Lost => &[
+                    MailboxCommitted,
+                    QueueExit,
+                    FinalizeEntered,
+                    FinalizeReturned,
+                ],
+                Self::Fenced => &[MailboxCommitted],
+                Self::NotCommitted | Self::BeforeFinalize => &[FinalizeEntered, FinalizeReturned],
+            }
+        }
+    }
 
     /// The one message the normal finalizer actor loses for a request.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,11 +431,14 @@ pub(crate) mod test_hooks {
         pub(crate) episode: String,
         pub(crate) request: u64,
         settlement: bool,
-        stages: Mutex<Vec<(&'static str, ThreadId)>>,
+        stages: Mutex<Vec<(Stage, ThreadId)>>,
         counts: [AtomicU64; POINTS],
+        seen: AtomicU32,
+        not_run: AtomicU32,
         started: Mutex<Option<Instant>>,
         hook: Mutex<Option<Hook>>,
         loss: Mutex<Option<Loss>>,
+        mailbox: Mutex<Option<super::super::input_fence::PolicyMailboxView>>,
     }
 
     thread_local! { static ARMED: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
@@ -404,15 +463,23 @@ pub(crate) mod test_hooks {
             settlement: settlement_now(),
             stages: Mutex::default(),
             counts: [const { AtomicU64::new(0) }; POINTS],
+            seen: AtomicU32::new(0),
+            not_run: AtomicU32::new(0),
             started: Mutex::default(),
             hook: Mutex::new(ARMED.with(|slot| slot.borrow_mut().take())),
             loss: Mutex::default(),
+            mailbox: Mutex::default(),
         }));
         request
     }
 
+    fn bit(point: Point) -> u32 {
+        1 << point as u32
+    }
+
     impl Probe {
         pub(super) fn note(&self, point: Point, count: u64) {
+            self.seen.fetch_or(bit(point), Ordering::Relaxed);
             self.counts[point as usize].fetch_add(count, Ordering::Relaxed);
         }
 
@@ -425,7 +492,7 @@ pub(crate) mod test_hooks {
             *lock(&self.loss) = Some(loss);
         }
 
-        pub(crate) fn stages(&self) -> Vec<&'static str> {
+        pub(crate) fn stages(&self) -> Vec<Stage> {
             lock(&self.stages).iter().map(|(stage, _)| *stage).collect()
         }
 
@@ -442,11 +509,18 @@ pub(crate) mod test_hooks {
             *lock(&self.started)
         }
 
-        /// This request's counts, read against the points this process ever reached.
+        /// What the mailbox held as this request reached its input fence.
+        pub(crate) fn mailbox(&self) -> Option<super::super::input_fence::PolicyMailboxView> {
+            lock(&self.mailbox).clone()
+        }
+
+        /// This request's own readings: its counts, the points it reached, and the ones a
+        /// branch it took ruled out.
         pub(crate) fn snapshot(&self) -> Snapshot {
             Snapshot {
                 run: self.request,
-                registered: REGISTERED.load(Ordering::Relaxed),
+                seen: self.seen.load(Ordering::Relaxed),
+                not_run: self.not_run.load(Ordering::Relaxed),
                 counts: std::array::from_fn(|i| self.counts[i].load(Ordering::Relaxed)),
             }
         }
@@ -461,7 +535,7 @@ pub(crate) mod test_hooks {
             self.probe.clone().expect("a bound request")
         }
 
-        pub(crate) fn fire(&self, stage: &'static str) {
+        pub(crate) fn fire(&self, stage: Stage) {
             let Some(probe) = &self.probe else {
                 return;
             };
@@ -472,6 +546,20 @@ pub(crate) mod test_hooks {
                 if let Some(hook) = restore.1.as_mut() {
                     hook(stage);
                 }
+            }
+        }
+
+        /// Records that this request took `branch`, so the points it rules out read as not run.
+        pub(crate) fn not_run(&self, branch: Branch) {
+            if let Some(probe) = &self.probe {
+                let mask = branch.rules_out().iter().fold(0, |mask, p| mask | bit(*p));
+                probe.not_run.fetch_or(mask, Ordering::Relaxed);
+            }
+        }
+
+        pub(crate) fn note_mailbox(&self, view: super::super::input_fence::PolicyMailboxView) {
+            if let Some(probe) = &self.probe {
+                *lock(&probe.mailbox) = Some(view);
             }
         }
 
@@ -552,15 +640,16 @@ pub(crate) mod test_hooks {
         crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
     }
 
-    /// Counts read under one run: this process for the totals, one request for a probe.
+    /// Readings under one run: this process for the totals, one request for a probe.
     #[derive(Clone, Debug)]
     pub(crate) struct Snapshot {
         pub(crate) run: u64,
-        registered: u32,
+        seen: u32,
+        not_run: u32,
         counts: [u64; POINTS],
     }
 
-    /// Why a snapshot cannot be read as counts.
+    /// Why a snapshot cannot be read as counts, or as a finished run.
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) enum Judged {
         Foreign,
@@ -568,26 +657,48 @@ pub(crate) mod test_hooks {
         Incomplete,
     }
 
+    const ALL: [Point; POINTS] = [
+        Point::SubmitAttempt,
+        Point::SendAccepted,
+        Point::Dequeued,
+        Point::MailboxCommitted,
+        Point::AckObserved,
+        Point::QueueExit,
+        Point::FinalizeEntered,
+        Point::FinalizeReturned,
+    ];
+
     impl Snapshot {
-        /// The counts at `required`. Another run, a point no call site reached, and a commit or
-        /// finalize that never returned are refused, since their zeros say nothing.
+        /// The raw counts at `required`: a reached point reads its count, one a taken branch
+        /// ruled out reads 0, and any other point is `Missing`.
         pub(crate) fn judge(&self, run: u64, required: &[Point]) -> Result<Vec<u64>, Judged> {
             if self.run != run {
                 return Err(Judged::Foreign);
             }
-            if let Some(point) = required
-                .iter()
-                .find(|point| self.registered & (1 << **point as u32) == 0)
-            {
-                return Err(Judged::Missing(*point));
-            }
-            let count = |point: Point| self.counts[point as usize];
-            if count(Point::FinalizeEntered) != count(Point::FinalizeReturned)
-                || count(Point::MailboxCommitted) > count(Point::QueueExit)
+            let read = |point: Point| {
+                if self.seen & bit(point) != 0 {
+                    Ok(self.counts[point as usize])
+                } else if self.not_run & bit(point) != 0 {
+                    Ok(0)
+                } else {
+                    Err(Judged::Missing(point))
+                }
+            };
+            required.iter().map(|point| read(*point)).collect()
+        }
+
+        /// Whether the run finished: every point read, and no commit without its queue exit and
+        /// finalize, and no finalize without its return.
+        pub(crate) fn complete(&self, run: u64) -> Result<(), Judged> {
+            let counts = self.judge(run, &ALL)?;
+            let count = |point: Point| counts[point as usize];
+            if count(Point::MailboxCommitted) > count(Point::QueueExit)
+                || count(Point::MailboxCommitted) > count(Point::FinalizeEntered)
+                || count(Point::FinalizeEntered) != count(Point::FinalizeReturned)
             {
                 return Err(Judged::Incomplete);
             }
-            Ok(required.iter().map(|point| count(*point)).collect())
+            Ok(())
         }
 
         pub(crate) fn with_run(mut self, run: u64) -> Self {
@@ -595,13 +706,14 @@ pub(crate) mod test_hooks {
             self
         }
 
-        pub(crate) fn unregistered(mut self, point: Point) -> Self {
-            self.registered &= !(1 << point as u32);
+        pub(crate) fn unseen(mut self, point: Point) -> Self {
+            self.seen &= !bit(point);
             self
         }
     }
 
-    /// The process-wide totals under this process's run.
+    /// The process-wide totals under this process's run; a point is read once any call site
+    /// in the process reached it.
     pub(crate) fn totals() -> Snapshot {
         static RUN: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
             u64::from(std::process::id()) << 32
@@ -613,7 +725,8 @@ pub(crate) mod test_hooks {
         });
         Snapshot {
             run: *RUN,
-            registered: REGISTERED.load(Ordering::Relaxed),
+            seen: REGISTERED.load(Ordering::Relaxed),
+            not_run: 0,
             counts: std::array::from_fn(|i| COUNTS[i].load(Ordering::Relaxed)),
         }
     }
@@ -623,15 +736,12 @@ pub(crate) mod test_hooks {
         super::super::mailbox_unreachable_tests::closed_handle()
     }
 
-    /// The authority of a step without an input fence.
-    pub(crate) fn legacy() -> super::PolicyAuthority<'static> {
-        super::PolicyAuthority::legacy()
-    }
-
-    /// The authority a protected step lends, for capability tests outside the actor.
-    pub(crate) fn authority(
-        scope: &crate::services::discord::input_runtime::fence::PopulationScope,
-    ) -> super::PolicyAuthority<'_> {
-        super::PolicyAuthority::protected(scope)
+    /// Runs `work` with the authority a step guard holding `scope` lends; `None` is legacy.
+    pub(crate) fn with_authority<T>(
+        scope: Option<crate::services::discord::input_runtime::fence::PopulationScope>,
+        work: impl FnOnce(&super::PolicyAuthority<'_>) -> T,
+    ) -> T {
+        let step = super::super::input_fence::StepGuard::for_test(scope);
+        work(&super::PolicyAuthority::from_step(&step))
     }
 }

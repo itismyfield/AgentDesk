@@ -1017,7 +1017,7 @@ async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
     let clear = |row: &InflightTurnState, generation| {
         let receipt = row.clone().into_policy_receipt(generation);
-        receipt.try_clear(&test_hooks::legacy())
+        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
     };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;
@@ -1149,7 +1149,7 @@ async fn crash_phase(phase: &str) {
         // The clear runs inside the close's mailbox step; this process dies right after it.
         if std::env::var(test_hooks::STOP_AT).as_deref() == Ok("after_policy_clear") {
             crate::services::turn_orchestrator::policy_close::test_hooks::arm(Box::new(|stage| {
-                if stage == "after_clear" {
+                if stage == crate::services::turn_orchestrator::policy_close::test_hooks::Stage::AfterClear {
                     println!(
                         "COLDSTOP_B_STOP after_policy_clear pid={}",
                         std::process::id()

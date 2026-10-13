@@ -1,7 +1,7 @@
 //! The policy close's mailbox step clears its exact receipt before anything is released, so a
 //! successor never starts over a receipt row; a clear refused there releases nothing.
 use super::*;
-use crate::services::turn_orchestrator::policy_close::test_hooks as step;
+use crate::services::turn_orchestrator::policy_close::test_hooks::{self as step, Stage};
 
 /// What the close's mailbox step held when it reached its clear: the active count and whether
 /// the durable receipt's notice was still pending.
@@ -12,7 +12,7 @@ fn at_clear(close: &Close, bump: bool) -> AtClear {
     let seen = AtClear::default();
     let (slot, shared, row) = (seen.clone(), close.shared.clone(), close.row.clone());
     step::arm(Box::new(move |stage| {
-        if stage != "before_clear" {
+        if stage != Stage::BeforeClear {
             return;
         }
         let durable =
