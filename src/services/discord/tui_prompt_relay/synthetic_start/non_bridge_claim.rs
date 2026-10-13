@@ -18,7 +18,7 @@ pub(in crate::services::discord::tui_prompt_relay) enum NonBridgeWait {
     Yielded,
     /// `own_row` pins this turn's delegated row as the last poll read it, if there was one.
     Refused {
-        own_row: Option<InflightEpisodePin>,
+        own_row: Option<Box<InflightEpisodePin>>,
         reason: &'static str,
     },
 }
@@ -31,9 +31,8 @@ pub(in crate::services::discord::tui_prompt_relay) enum NonBridgeHandoff {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static REVALIDATE_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+pub(in crate::services::discord::tui_prompt_relay) static REVALIDATE_PAUSE:
+    super::bridge_handoff::reown::PauseSlot = Mutex::new(None);
 
 /// The row fields a yield rests on. Progress (offsets, body, message rollover,
 /// native session) is left out so a live turn does not fail its own recheck.
@@ -251,7 +250,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn wait_for_source_boun
                 NonBridgeWait::Yielded
             } else {
                 NonBridgeWait::Refused {
-                    own_row: poll.own_row,
+                    own_row: poll.own_row.map(Box::new),
                     reason: poll.reason,
                 }
             };

@@ -15,9 +15,6 @@ pub(in crate::services::discord::tui_prompt_relay::synthetic_start) const PROMPT
     "please review the 5808 handoff";
 const CLAUDE: &str = "claude";
 
-pub(in crate::services::discord::tui_prompt_relay::synthetic_start) type PauseSlot =
-    Mutex<Option<(u64, Arc<Notify>, Arc<Notify>)>>;
-
 /// Runs `body` with the dedupe maps to itself, under its own runtime root.
 pub(in crate::services::discord::tui_prompt_relay::synthetic_start) fn isolated<
     F: Future<Output = ()>,
@@ -421,12 +418,15 @@ fn reown_leaves_row_and_lease_untouched_when_a_proof_fails() {
             let (row, lease) = (turn.row_json(), turn.live_lease());
             let result = if case == "watcher reads E at the save" {
                 let (entered, resume) = arm(&REOWN_PAUSE, turn.channel);
-                let act = async {
-                    entered.notified().await;
-                    turn.watch(b.to_str().expect("utf8 path"));
-                    resume.notify_one();
-                };
-                tokio::join!(turn.reown(), act).0
+                let reown = turn.reown();
+                tokio::pin!(reown);
+                tokio::select! {
+                    _ = entered.notified() => {}
+                    result = &mut reown => panic!("{case}: the re-own reaches the save: {result:?}"),
+                }
+                turn.watch(b.to_str().expect("utf8 path"));
+                resume.notify_one();
+                reown.await
             } else {
                 turn.reown().await
             };

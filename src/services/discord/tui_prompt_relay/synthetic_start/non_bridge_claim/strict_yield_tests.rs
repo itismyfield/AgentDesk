@@ -11,7 +11,7 @@ const OWNER_ELSEWHERE: &str = "owner does not read the expected source";
 
 fn refused(wait: NonBridgeWait) -> (Option<InflightEpisodePin>, &'static str) {
     match wait {
-        NonBridgeWait::Refused { own_row, reason } => (own_row, reason),
+        NonBridgeWait::Refused { own_row, reason } => (own_row.map(|pin| *pin), reason),
         NonBridgeWait::Yielded => panic!("yielded"),
     }
 }
@@ -143,19 +143,21 @@ fn strict_wait_does_not_yield_on_a_row_or_watcher_that_changed_before_the_rechec
             let turn = Turn::observe(n, &b, end, Some(&b), Some(&b));
             turn.claim().await;
             let (entered, resume) = arm(&REVALIDATE_PAUSE, turn.channel);
-            let act = async {
-                entered.notified().await;
-                let mut successor = turn.row();
-                if change == "source moved" {
-                    successor.output_path = other.to_str().map(str::to_string);
-                } else {
-                    successor.external_turn_id = Some("external:claude:successor".to_string());
-                }
-                inflight::save_inflight_state(&successor).expect("successor");
-                resume.notify_one();
-                successor
-            };
-            let (wait, successor) = tokio::join!(turn.wait(&b, turn.turn_id()), act);
+            let wait = turn.wait(&b, turn.turn_id());
+            tokio::pin!(wait);
+            tokio::select! {
+                _ = entered.notified() => {}
+                _ = &mut wait => panic!("{change}: the first poll reaches the recheck"),
+            }
+            let mut successor = turn.row();
+            if change == "source moved" {
+                successor.output_path = other.to_str().map(str::to_string);
+            } else {
+                successor.external_turn_id = Some("external:claude:successor".to_string());
+            }
+            inflight::save_inflight_state(&successor).expect("successor");
+            resume.notify_one();
+            let wait = wait.await;
             let expected = if change == "source moved" {
                 OWNER_ELSEWHERE
             } else {

@@ -16,10 +16,13 @@ pub(in crate::services::discord::tui_prompt_relay) struct ObservedTurn<'a> {
     pub(in crate::services::discord::tui_prompt_relay) lease: &'a ExternalInputRelayLease,
 }
 
+/// A test pause point: the channel it fires on, then its entered and resume signals.
 #[cfg(test)]
-pub(in crate::services::discord::tui_prompt_relay) static REOWN_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+pub(in crate::services::discord::tui_prompt_relay) type PauseSlot =
+    Mutex<Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static REOWN_PAUSE: PauseSlot = Mutex::new(None);
 
 /// Whether a delegated actor proof, live or dead, is still held for the channel.
 #[cfg(test)]
