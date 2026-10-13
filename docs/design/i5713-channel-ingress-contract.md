@@ -302,9 +302,9 @@ singleton 운영에서는 paired 분모가 0이므로 결과는 INCOMPLETE이며
 
 | AC | 계약 | 시험 | 뮤턴트 |
 |---|---|---|---|
-| AC1 | raw 이벤트마다 정확히 1회, 모든 early return 앞에서 제출 | `ingress_shadow_compat_tests`(case별 `submitted == 이벤트 수`), `an_event_is_described_by_its_own_channel_and_ids` | early_return_before_ingress |
+| AC1 | raw 이벤트마다 정확히 1회, 모든 early return 앞에서 제출 | `ingress_shadow_keeps_*_byte_identical`(case별 `submitted == 이벤트 수`), `an_event_is_described_by_its_own_channel_and_ids` | early_return_before_ingress |
 | AC2 | off면 queue·pool·sampler·observe 0, `begin` 미호출 | `only_the_switch_with_listed_channels_starts_an_observer`, compat off 실행 | disabled_still_observes |
-| AC3 | off/on(응답·timeout·full·closed)의 효과 순서·bytes·횟수·결과 동일, 응답 observer는 관측 완료 양수 | `ingress_shadow_compat_tests` | shadow_controls_dispatch, hook 제거 |
+| AC3 | off/on(응답·timeout·full·closed)의 효과 순서·bytes·횟수·결과 동일, 응답 observer는 관측 완료 양수 | `ingress_shadow_keeps_{live_messages,attachment_messages,components,poise_commands}_byte_identical`, `ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg` | shadow_controls_dispatch, hook_removed |
 | AC4 | 기대 payload가 비어 있지 않고 off/on이 정확히 같음 | 같은 시험 | drop_payload_byte |
 | AC5 | Poise 허용·거절, `/help` initial callback 1·follow-up 1 | 같은 시험(`HelpAllowed`, `HelpRefused`) | skip_initial_callback |
 | AC6 | 표본 key만 다른 `(codex, CH+1)`·`(claude, CH)`는 `LocalSampleMismatch` | `own_worker_row_holds_without_an_open_unexpired_local_lease` | sample_key_check_removed |
@@ -316,6 +316,13 @@ singleton 운영에서는 paired 분모가 0이므로 결과는 INCOMPLETE이며
 | P2-1 | 중간·마지막 기록 삭제, close 삭제, 기대 incarnation 누락, allowlist 불일치, 일부 source만 paired는 INCOMPLETE | `a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_close` | ignore_unpaired_tail, ignore_terminal_manifest |
 | AC12 | 새 직접 소비자가 §4.4에 분류됨 | `home_authority_inventory_lists_every_direct_consumer` | worker 행 삭제 |
 | U3 | observer pool은 연결 1개, 첫 조회 전 연결 없음, worker 종료 때 닫힘 | `the_observer_pool_reads_rows_on_one_connection_and_closes_pg` | — |
+
+호환 하네스(`router/intake_gate/ingress_shadow_compat_tests.rs`)는 case마다 off를 두 번, 응답·timeout·full·closed observer로 한 번씩 각각 별도 자식 프로세스에서 돌린다.
+이벤트는 생산 `run_bot_framework_options`(command check·event handler)로 실제 Poise `dispatch_event`를 거친다. 기록은 Discord 요청의 method·path·raw body, runtime root 아래 모든 파일 bytes, mailbox queue, checkpoint, session, DM 회신 행, handler 오류다.
+비교 전에 off 실행의 기대 효과(큐 경로의 reaction·checkpoint·durable queue 본문, DM 회신 소비, component callback 1, `/help` callback 1·follow-up 1, 거절 0)를 먼저 단언한다.
+한계: 시계를 고정할 seam이 없어 durable queue의 `created_at_wall_time_ms`·`enqueued_at_epoch_us`와 mailbox의 도착 `Instant`만 값 대신 존재로 비교한다.
+idle 채널 일반 메시지는 fixture가 provider 시작 placeholder를 거절해 본문이 효과에 나타나지 않으므로, 일반·thread 본문 bytes는 큐 경로(`Queued`, `ThreadQueued`)에서 비교한다.
+live 첨부 다운로드는 Discord CDN host만 허용하고 test seam이 없어 다운로드 거절 경로만 비교한다. 첨부 bytes·digest 동일성은 U14로 남는다.
 
 ### 9.5 롤백과 남은 항목
 
