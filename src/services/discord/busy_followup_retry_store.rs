@@ -463,9 +463,8 @@ pub(in crate::services::discord) fn is_capped(
     state_is_capped(load(provider, channel_id, user_msg_id))
 }
 
-/// Bind the first posted placeholder. A stale attempt cannot replace a live binding, so callers
-/// edit the returned current message; a binding whose card was answered or lost adopts this one
-/// and keeps its budget.
+/// Binds the first posted card; a live binding is returned so callers edit it. A card answered or
+/// lost is replaced by this one, and the input keeps its retry budget.
 pub(in crate::services::discord) fn bind_notice_if_absent(
     provider: &ProviderKind,
     channel_id: u64,
@@ -511,9 +510,8 @@ fn bind_notice_if_absent_unfenced(
     Ok(state)
 }
 
-/// One real pre-submit failure of `user_msg_id` that cost `attempt`. The spending of every other
-/// id of the same input is carried, and a record that cannot be read refuses the write.
-/// `draft_session` names the pane that refused it to protect a person's draft.
+/// One real pre-submit failure that cost `attempt`, carrying what the input's other ids spent; an
+/// unreadable record refuses it. `draft_session` names a pane that refused it to keep a draft.
 pub(in crate::services::discord) fn record_attempt(
     provider: &ProviderKind,
     (channel_id, user_msg_id, notice_message_id): (u64, u64, u64),

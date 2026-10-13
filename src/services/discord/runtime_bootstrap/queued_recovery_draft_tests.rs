@@ -13,9 +13,8 @@ fn pane_with(row: &str) -> String {
     format!("\u{23fa} Done.\n\n\n{border}\n{row}\n{border}\n{footer}\n")
 }
 
-/// The previous process left an input capped while a person's draft held its pane, and another
-/// capped by busy turns. The restore protects that pane again and watches it: while the draft
-/// shows nothing is reset or taken, and once it is gone the held input alone runs, once.
+/// A restore re-protects the pane of an input a person's draft capped: nothing resets or runs while
+/// the draft shows, then that input alone runs once; a busy-capped input stays parked.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_restored_draft_hold_lifts_only_when_its_pane_shows_the_draft_gone() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
