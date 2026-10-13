@@ -33,6 +33,18 @@ MUTANTS = [
      "test_synthetic_commit_has_fail_precedence_over_partial_residue"),
     ("successful-placeholder-ignored", "audit.py", 'failures.append("placeholder_created")', 'pass',
      "test_successful_direct_placeholder_fails_even_when_deleted_or_patched"),
+    ("past-posted-lookup-skipped", "delivery.py", 'historical_unverified.add(msg_id)', 'continue',
+     "test_past_posted_lookup_missing_is_unresolved_not_zero"),
+    ("past-uncertainty-discarded", "delivery.py", 'if uncertain:', 'if uncertain and not old:',
+     "test_past_ambiguous_then_posted_remains_uncertain"),
+    ("past-unresolved-not-old-restored", "delivery.py", 'if uncertain:', 'if uncertain and not old:',
+     "test_past_unresolved_then_posted_retains_reason"),
+    ("past-ambiguous-candidates-discarded", "delivery.py", 'opened["candidates"] = entry["candidates"]', 'pass',
+     "test_past_ambiguous_then_posted_remains_uncertain"),
+    ("past-unresolved-reason-discarded", "delivery.py", 'opened["reason"] = entry["reason"]', 'pass',
+     "test_past_unresolved_then_posted_retains_reason"),
+    ("individual-human-origin-excluded", "audit.py", 'values["discord"].get("individual", {}).items()', '{}.items()',
+     "test_past_discord_input_lookup_supports_current_tty_fifty"),
 ]
 
 

@@ -25,14 +25,21 @@ def origins(native, legacy, values, manifest):
         known[physical] = proof
     human_ids = {m["id"] for m in values["discord"]["messages"]
                  if m["author"]["id"] not in {str(i) for i in manifest["discord"]["bot_author_ids"]}}
-    inputs, logical, eligible = set(), set(), []
+    current_messages = {m["id"]: m for m in values["discord"]["messages"]}
+    origin_ids = human_ids | {mid for mid, m in values["discord"].get("individual", {}).items()
+                 if message_valid(m, scope["channel_id"]) and m["id"] == mid
+                 and m["author"]["id"] not in {str(i) for i in manifest["discord"]["bot_author_ids"]}
+                 and (mid not in current_messages or current_messages[mid] == m)}
+    inputs, window_inputs, logical, eligible = set(), set(), set(), []
     for turn in native["observations"]:
         physical = canonical(turn["physical_observation_key"])
         proof = known.pop(physical, None)
         require(proof is not None and proof["native_record_digest"] == turn["native_record_digest"], "native_origin_unverified")
         if proof["input_kind"] == "discord":
-            require(snowflake(proof["discord_message_id"]) and proof["discord_message_id"] in human_ids, "native_origin_unverified")
+            require(snowflake(proof["discord_message_id"]) and proof["discord_message_id"] in origin_ids, "native_origin_unverified")
             inputs.add(proof["discord_message_id"])
+            if proof["discord_message_id"] in human_ids:
+                window_inputs.add(proof["discord_message_id"])
         else:
             require(proof["discord_message_id"] is None, "native_origin_conflict")
         logical_key = canonical(turn["logical_turn_key"])
@@ -41,7 +48,7 @@ def origins(native, legacy, values, manifest):
         if (first and turn["outcome"] == "completed" and proof["input_kind"] != "discord"
                 and turn["physical_observation_key"]["start_offset"] >= scope["baseline_offset"]):
             eligible.append(turn)
-    require(not known and human_ids == inputs, "native_origin_inventory_incomplete")
+    require(not known and human_ids == window_inputs, "native_origin_inventory_incomplete")
     for row in values["pg"]["intake_outbox"]:
         require(row.get("channel_id") == scope["channel_id"] and str(row.get("user_msg_id")) in inputs, "pg_origin_unverified")
     for row in values["pg"]["turn_lifecycle_events"]:

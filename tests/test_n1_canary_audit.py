@@ -518,6 +518,77 @@ class AuditCLI(unittest.TestCase):
         self.assertIn("audit_event_invalid", result["reasons"])
         self.assertEqual(result["failures"], [])
 
+    def test_past_posted_lookup_missing_is_unresolved_not_zero(self):
+        self.historical_prefix(2)
+        self.manifest["discord"]["individual_ids"].remove("98")
+        del self.values["discord"]["individual"]["98"]
+        result = self.run_cli(2)
+        self.assertFalse(result["audit"]["stages"]["debt"])
+        self.assertEqual(result["failures"], [])
+        self.assertIn("historical_message_unverified", result["reasons"])
+        self.assertEqual(result["historical_debt"]["unverified_messages"], ["98"])
+        self.assertEqual(result["historical_debt"]["unresolved"], 1)
+        self.assertIsNone(result["historical_debt"]["duplicates"])
+        shipped = self.run_cli(2, supported=False)
+        self.assertIn("unknown_outcome_unproduced", shipped["reasons"])
+        self.assertFalse(shipped["audit"]["stages"]["debt"])
+
+    def past_uncertain_attempt(self, outcome):
+        self.historical_prefix(1)
+        prepared = copy.deepcopy(self.values["o_ledger"][0])
+        prepared["at"] = "2026-10-12T23:20:00Z"
+        terminal = dict(at=prepared["at"], entry=dict(type=outcome, serial=1))
+        if outcome == "ambiguous":
+            terminal["entry"]["candidates"] = [97, 98]
+        else:
+            terminal["entry"]["reason"] = "effect could not be settled"
+        for row in self.values["o_ledger"]:
+            row["entry"]["serial"] += 1
+        self.values["o_ledger"][:0] = [prepared, terminal]
+
+    def test_past_ambiguous_then_posted_remains_uncertain(self):
+        self.past_uncertain_attempt("ambiguous")
+        result = self.run_cli(2)
+        self.assertFalse(result["audit"]["stages"]["debt"])
+        self.assertEqual(result["failures"], [])
+        self.assertIn("historical_delivery_uncertain", result["reasons"])
+        self.assertEqual(result["historical_debt"]["unresolved"], 1)
+        self.assertEqual(result["historical_debt"]["uncertain_attempts"][0].get("candidates"), [97, 98])
+        self.assertIsNone(result["historical_debt"]["duplicates"])
+
+    def test_past_unresolved_then_posted_retains_reason(self):
+        self.past_uncertain_attempt("unresolved")
+        result = self.run_cli(2)
+        self.assertFalse(result["audit"]["stages"]["debt"])
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(result["historical_debt"]["unresolved"], 1)
+        self.assertEqual(result["historical_debt"]["uncertain_attempts"][0].get("reason"), "effect could not be settled")
+
+    def historical_discord_input(self):
+        self.historical_prefix(1)
+        self.inputs[0].update(input_kind="discord", discord_message_id="95")
+        self.manifest["discord"]["individual_ids"].append("95")
+        self.values["discord"]["individual"]["95"] = dict(id="95", channel_id="123", author={"id": "777"}, content="past input")
+
+    def test_past_discord_input_lookup_supports_current_tty_fifty(self):
+        self.historical_discord_input()
+        result = self.run_cli(0)
+        self.assertEqual(result["turns"]["completed_distinct"], 50)
+        self.assertTrue(result["audit"]["stages"]["native"])
+        self.assertEqual(result["historical_debt"]["unresolved"], 0)
+
+    def test_past_discord_input_missing_lookup_remains_unknown(self):
+        self.historical_discord_input()
+        self.manifest["discord"]["individual_ids"].remove("95")
+        del self.values["discord"]["individual"]["95"]
+        self.assertIn("native_origin_unverified", self.run_cli(2)["reasons"])
+
+    def test_past_input_does_not_explain_unrelated_current_human(self):
+        self.historical_discord_input()
+        self.messages.append(dict(id="300", channel_id="123", author={"id": "777"}, content="unexplained current input"))
+        self.refresh_history()
+        self.assertIn("native_origin_inventory_incomplete", self.run_cli(2)["reasons"])
+
 
 if __name__ == "__main__":
     unittest.main()

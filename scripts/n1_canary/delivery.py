@@ -93,8 +93,10 @@ def replay(rows, init, manifest, transcript):
                 opened["status"] = entry["status"]
             elif kind == "ambiguous":
                 require(isinstance(entry["candidates"], list) and all(uint(i) and i > 0 for i in entry["candidates"]), "o_ledger_invalid")
+                opened["candidates"] = entry["candidates"]
             elif kind == "unresolved":
                 require(text(entry["reason"]), "o_ledger_invalid")
+                opened["reason"] = entry["reason"]
             opened["outcome"] = kind
             opened = None
         else:
@@ -114,6 +116,7 @@ def compare(native, pieces, excluded, values, manifest, legacy, debt, messages, 
         if unit["excluded"] and excluded.get(identity) != unit["excluded"]:
             reasons.append("o_exclusion_unverified")
     seen, old_seen, sent_order = defaultdict(set), defaultdict(set), []
+    historical_unverified, historical_attempts = set(), []
     if not current:
         reasons.append("native_no_publishable_units")
     for piece in pieces:
@@ -121,15 +124,20 @@ def compare(native, pieces, excluded, values, manifest, legacy, debt, messages, 
         pair = (identity, piece["piece_index"])
         old = instant(piece.get("posted_at", piece["at"])) < instant(scope["start_at"])
         if piece["outcome"] != "posted":
-            if piece.get("status", 0) >= 500:
-                reasons.append("o_delivery_uncertain")
-            if not old and piece["outcome"] in {None, "ambiguous", "unresolved"}:
-                reasons.append("o_delivery_uncertain")
+            uncertain = piece["outcome"] in {None, "ambiguous", "unresolved"} or piece.get("status", 0) >= 500
+            if uncertain:
+                if old:
+                    historical_attempts.append({k: piece[k] for k in ("serial", "unit_key", "piece_index", "at", "outcome",
+                                                "candidates", "reason", "status") if k in piece})
+                    reasons.append("historical_delivery_uncertain")
+                else:
+                    reasons.append("o_delivery_uncertain")
             continue
         msg_id = str(piece["msg_id"])
         message = messages.get(msg_id)
         if message is None:
             if pair in historical or old:
+                historical_unverified.add(msg_id)
                 continue
             failures.append("delivery_missing")
             continue
@@ -239,6 +247,8 @@ def compare(native, pieces, excluded, values, manifest, legacy, debt, messages, 
     old_duplicates = sum(max(0, len(ids) - 1) for ids in old_seen.values())
     if old_missing or old_duplicates:
         reasons.append("historical_debt_unresolved")
+    if historical_unverified:
+        reasons.append("historical_message_unverified")
     for baseline in debt["baseline_messages"]:
         require(isinstance(baseline, dict) and set(baseline) == {"message_id", "payload_hash", "last_changed_seq"}
                 and snowflake(baseline["message_id"]) and uint(baseline["last_changed_seq"]), "baseline_message_unverified")
@@ -257,4 +267,8 @@ def compare(native, pieces, excluded, values, manifest, legacy, debt, messages, 
     delivery = dict(expected_pieces=len(current), delivered_pieces=sum(bool(seen[p]) for p in current))
     historical_result = dict(expected_pieces=len(historical), undelivered=old_missing, duplicates=old_duplicates,
                              inventory_ranges=len(debt["undelivered"]) + len(debt["abandoned"]), unresolved=unresolved + old_missing + old_duplicates)
+    if historical_unverified or historical_attempts:
+        historical_result.update(duplicates=None, duplicates_confirmed=old_duplicates,
+                                 unverified_messages=sorted(historical_unverified, key=int), uncertain_attempts=historical_attempts)
+        historical_result["unresolved"] += len(historical_unverified) + len(historical_attempts)
     return delivery, historical_result, explained, reasons, failures

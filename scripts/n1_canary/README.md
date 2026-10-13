@@ -18,6 +18,13 @@ The native transcript, O init and ledger retain their independent native/store f
 Unknown ledger variants, malformed rows and incomplete results yield `[U]`. Existing init
 records may belong to an earlier build. The current process/build proof is a separate input.
 
+Every past Posted ID needs captured message evidence. Missing past lookups and uncertain
+past attempts remain unresolved debt; a later Posted receipt does not settle an earlier
+Ambiguous or Unresolved attempt. Candidate IDs and unresolved reasons remain in the report.
+When that audit is incomplete, `duplicates` is null and `duplicates_confirmed` gives the
+observed lower bound. Historical input provenance can use consistent individual human
+message lookups; current input inventory still covers only messages in the current window.
+
 The Legacy, debt and residue inputs use capture schema 1. Each capture has exactly
 `schema_version`, `complete`, `scope` and the fields below. Scope binds the boot, channel,
 provider, full SourceId, closing observation seq and closing source offset. `complete` must
