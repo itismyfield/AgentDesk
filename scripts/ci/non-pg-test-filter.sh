@@ -132,6 +132,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::recovery_engine::restore_inflight::replay_hold_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  --skip services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
   --skip services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   --skip services::discord::recovery_engine::routing_orphan::host_guard_tests
   --skip services::discord::relay_recovery::apply::host_deferred_tests
@@ -1021,6 +1022,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::recovery_engine::restore_inflight::replay_hold_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+  services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
   services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
   services::discord::recovery_engine::routing_orphan::host_guard_tests
   services::discord::relay_recovery::apply::host_deferred_tests

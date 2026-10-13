@@ -1332,7 +1332,8 @@ src/
 │   │   │   │   ├── replay_hold.rs
 │   │   │   │   ├── replay_hold_tests.rs
 │   │   │   │   ├── scoped_policy_receipt_tests.rs
-│   │   │   │   └── scoped_restore.rs
+│   │   │   │   ├── scoped_restore.rs
+│   │   │   │   └── scoped_restore_claim_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -2910,6 +2911,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
+│   │   ├── scoped_claim.rs
+│   │   ├── scoped_claim_tests.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
