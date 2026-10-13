@@ -1833,9 +1833,16 @@ src/
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
+│   │   │   │   ├── bridge_handoff/
+│   │   │   │   │   ├── reown/
+│   │   │   │   │   │   └── reown_tests.rs
+│   │   │   │   │   └── reown.rs
+│   │   │   │   ├── non_bridge_claim/
+│   │   │   │   │   └── strict_yield_tests.rs
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
+│   │   │   │   ├── non_bridge_claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/

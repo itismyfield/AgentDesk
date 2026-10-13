@@ -697,6 +697,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim/strict_yield_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown/reown_tests.rs",
     }
 )
 
@@ -782,6 +784,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
     }
 )
 

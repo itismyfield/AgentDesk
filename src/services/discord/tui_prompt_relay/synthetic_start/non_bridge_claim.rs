@@ -4,6 +4,9 @@ use super::bridge_handoff::reown::{ObservedTurn, reown_refused_delegation};
 use super::*;
 use crate::services::discord::inflight::InflightEpisodePin;
 
+#[cfg(test)]
+mod strict_yield_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord::tui_prompt_relay) enum SourceMatch {
     Match,

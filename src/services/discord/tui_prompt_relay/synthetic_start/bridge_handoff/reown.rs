@@ -2,6 +2,9 @@
 //! session-bound row ends in the state a BridgeAdapter claim would have left.
 use super::*;
 
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay::synthetic_start) mod reown_tests;
+
 /// One prompt as the idle observer saw it: its source `E`, the prompt end in `E`,
 /// and the lease the observer recorded for it.
 pub(in crate::services::discord::tui_prompt_relay) struct ObservedTurn<'a> {
