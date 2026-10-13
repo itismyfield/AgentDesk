@@ -4470,7 +4470,6 @@ services::discord::inflight::rebind_reap::tests::dead_watcher_rebind_reap_unlink
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_delegates_signals
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_preserves_probe_error
 services::discord::inflight::rebind_reap::tests::runtime_watcher_proven_dead_skips_probes_without_session
-services::discord::inflight::receipt_boundary_tests::receipt_row_refuses_stream_loop_marker_and_load_backfill_write
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_clear_and_boot_recovery_observe_fresh_receipt_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_clear_entrypoint_matrix_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_generation_and_loader_protect_receipt_pg
@@ -4479,12 +4478,13 @@ services::discord::inflight::receipt_boundary_tests::s3act_b3b_generic_store_can
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_rebind_gc_preserves_receipt_under_lock_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_commit_wins_concurrent_clear_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_free_reaper_results_and_logs_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_survives_all_legacy_deletes_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_scoped_invalidation_preserves_receipt_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unknown_receipt_json_shape_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unparseable_receipt_row_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_writer_matrix_carries_raw_receipt_pg
-services::discord::inflight::receipt_boundary_tests::status_writers_preserve_receipt_subtree_and_anchor
 services::discord::inflight::recovery_relay_attempts_tests::budget_is_three_restarts
 services::discord::inflight::recovery_relay_attempts_tests::counter_round_trips_through_serde
 services::discord::inflight::recovery_relay_attempts_tests::counter_survives_disk_round_trip_in_isolated_root

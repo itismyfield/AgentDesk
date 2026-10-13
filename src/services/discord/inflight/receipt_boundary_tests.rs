@@ -863,9 +863,10 @@ async fn s3act_b3b_clear_and_boot_recovery_observe_fresh_receipt_pg() {
 
 /// A receipt row refuses the stream-loop restart patch and is served by load without a backfill
 /// write, byte-identical; a receipt-free row still takes both.
-#[test]
-fn receipt_row_refuses_stream_loop_marker_and_load_backfill_write() {
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg() {
     let f = Fixture::new();
+    let (_db, pool) = pg().await;
     let old_format = |f: &Fixture| {
         let mut raw: serde_json::Value = serde_json::from_slice(&f.bytes().unwrap()).unwrap();
         raw.as_object_mut().unwrap().remove("finalizer_turn_id");
@@ -910,13 +911,15 @@ fn receipt_row_refuses_stream_loop_marker_and_load_backfill_write() {
             "only a receipt-free row is rewritten: {shape:?}"
         );
     }
+    pool.close().await;
 }
 
 /// Status writers keep every raw receipt shape and the episode and anchor (a placeholder clear may
 /// zero the anchor, which settlement refuses); a malformed receipt row is never rewritten.
-#[test]
-fn status_writers_preserve_receipt_subtree_and_anchor() {
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg() {
     let f = Fixture::new();
+    let (_db, pool) = pg().await;
     let pinned = |row: &InflightTurnState| {
         (
             row.turn_nonce.clone(),
@@ -1050,4 +1053,5 @@ fn status_writers_preserve_receipt_subtree_and_anchor() {
         Some(malformed),
         "malformed receipt row untouched"
     );
+    pool.close().await;
 }
