@@ -21,6 +21,7 @@ pub(in crate::services::discord) use host_recovery_guard::{
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
+pub(crate) mod read_only_owner_snapshot;
 #[cfg(test)]
 #[path = "inflight/restart_mark_fence_tests.rs"]
 mod restart_mark_fence_tests;

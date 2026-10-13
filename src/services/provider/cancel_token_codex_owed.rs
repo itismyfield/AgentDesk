@@ -15,14 +15,23 @@ impl CancelToken {
 
     /// Binds the token's one record under the publication lock; a token already cancelled
     /// revokes it at once.
-    #[cfg(test)]
-    pub(crate) fn attach_codex_owed(&self, record: std::sync::Arc<Record>) {
+    pub(crate) fn attach_codex_owed(
+        &self,
+        record: std::sync::Arc<Record>,
+    ) -> Result<(), &'static str> {
         let _publication = (self.cancellation_publication)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
-            record.lock().get_or_insert("cancelled_before_attach");
+            return Err("cancelled_before_attach");
         }
-        let _ = self.codex_owed.set(record);
+        if let Some(existing) = self.codex_owed.get() {
+            return std::sync::Arc::ptr_eq(existing, &record)
+                .then_some(())
+                .ok_or("episode_permit_conflict");
+        }
+        self.codex_owed
+            .set(record)
+            .map_err(|_| "episode_permit_conflict")
     }
 }
