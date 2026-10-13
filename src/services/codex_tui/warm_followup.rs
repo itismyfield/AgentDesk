@@ -1298,7 +1298,7 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     {
         return Err("verified warm incarnation mismatch".into());
     }
-    crate::services::codex::pinned_verified_warm_preflight(request.options, source.context())
+    crate::services::codex::verified_warm_preflight(request.options, source.context())
         .map_err(|reason| format!("verified warm ineligible: {reason:?}"))?;
     let ready = host::process_readiness();
     let port = ready
@@ -1327,7 +1327,7 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     let guard = |send: &mut dyn FnMut() -> host_input::InputRun| {
         let refused = || host_input::InputRun::Refused(host_input::InputRefusal::Conflict);
         // Probe outside source/Live locks; both payload and Enter use this callback.
-        let eligibility = match crate::services::codex::pinned_verified_warm_preflight(
+        let eligibility = match crate::services::codex::verified_warm_preflight(
             request.options,
             source.context(),
         ) {

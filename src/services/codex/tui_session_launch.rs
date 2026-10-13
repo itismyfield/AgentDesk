@@ -49,7 +49,7 @@ pub(crate) fn tui_preflight(
 
 /// A warm incarnation keeps its verified policy when the next launch mode changes.
 #[cfg(unix)]
-pub(crate) fn pinned_verified_warm_preflight<'a>(
+pub(crate) fn verified_warm_preflight<'a>(
     options: &CodexLaunchOptions,
     context: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
 ) -> Result<VerifiedWarmEligibility<'a>, CodexTuiLaunchRefused> {
@@ -768,20 +768,20 @@ mod tests {
             Some(id.as_str())
         );
         assert_eq!(prepared.context.launch_mode, "resume");
-        pinned_verified_warm_preflight(&options, &prepared.context)
+        verified_warm_preflight(&options, &prepared.context)
             .unwrap()
             .recheck()
             .unwrap();
         let mut fresh = prepared.context.clone();
         fresh.launch_mode = "fresh".into();
         assert!(matches!(
-            pinned_verified_warm_preflight(&options, &fresh),
+            verified_warm_preflight(&options, &fresh),
             Err(CodexTuiLaunchRefused::HooksUnavailable)
         ));
         fresh.launch_mode = "resume".into();
         fresh.expected_native_session_id = Some(uuid::Uuid::new_v4().to_string());
         assert!(matches!(
-            pinned_verified_warm_preflight(&options, &fresh),
+            verified_warm_preflight(&options, &fresh),
             Err(CodexTuiLaunchRefused::HooksUnavailable)
         ));
         assert!(
