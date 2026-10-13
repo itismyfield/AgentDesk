@@ -1,12 +1,27 @@
 use super::*;
 
 pub(crate) struct TakeNextSoftResult {
+    pub(crate) selection_stale: bool,
     pub(crate) intervention: Option<Intervention>,
     pub(crate) dispatch_lease: Option<Arc<DispatchLease>>,
     pub(crate) has_more: bool,
     pub(crate) queue_len_after: usize,
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     pub(crate) persistence_error: Option<String>,
+}
+
+impl TakeNextSoftResult {
+    pub(super) fn stale(queue: &[Intervention]) -> Self {
+        Self {
+            selection_stale: true,
+            intervention: None,
+            dispatch_lease: None,
+            has_more: queue.iter().any(|item| item.mode == InterventionMode::Soft),
+            queue_len_after: queue.len(),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        }
+    }
 }
 
 pub(crate) fn has_soft_intervention_at(
@@ -47,6 +62,7 @@ pub(crate) fn dequeue_next_soft_intervention(
         .map(|index| queue.remove(index));
     let has_more = queue.iter().any(|item| item.mode == InterventionMode::Soft);
     TakeNextSoftResult {
+        selection_stale: false,
         intervention,
         dispatch_lease: None,
         has_more,

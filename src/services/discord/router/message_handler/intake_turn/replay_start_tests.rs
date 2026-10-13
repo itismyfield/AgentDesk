@@ -698,7 +698,7 @@ mod kickoff_tests {
             };
             let finish = async {
                 let (result, ()) = tokio::join!(
-                    crate::services::discord::router::finish_admitted_queued_intake(&deps, admitted, &dequeued),
+                    crate::services::discord::router::finish_admitted_queued_intake(&deps, admitted),
                     arm,
                 );
                 result
@@ -1003,7 +1003,7 @@ mod kickoff_tests {
                     );
                 };
                 let entry = crate::services::discord::router::finish_admitted_queued_intake(
-                    &deps, admitted, &dequeued,
+                    &deps, admitted,
                 );
                 let (raw, submitted) = start(channel, entry).await;
                 let calls: (i64, bool) =

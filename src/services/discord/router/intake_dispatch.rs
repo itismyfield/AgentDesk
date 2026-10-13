@@ -9,12 +9,26 @@ use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 
+#[derive(Debug)]
+pub(in crate::services::discord::router) struct QueuedTransitionBusyHandoff {
+    pub(in crate::services::discord::router) owned_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+}
+impl std::fmt::Display for QueuedTransitionBusyHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("queued intake transition busy")
+    }
+}
+impl std::error::Error for QueuedTransitionBusyHandoff {}
+
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
+#[cfg(test)]
+pub(super) use queued::transition_busy_tests::after_upload_take;
 pub(crate) mod replay_admission;
 #[cfg(test)]
 mod replay_admission_tests;
