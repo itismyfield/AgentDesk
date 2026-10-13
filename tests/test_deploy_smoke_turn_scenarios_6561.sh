@@ -9,6 +9,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEPLOY_SH="${DEPLOY_SH_OVERRIDE:-$REPO_ROOT/scripts/deploy-release.sh}"
+# Bash 3.2 aborts on an empty [@] expansion under nounset, even inside an OR guard.
+# Check the optional expansions before exercising empty E-51 arguments and draft sections.
+python3 - "$DEPLOY_SH" <<'PY_COMPAT'
+import re, sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for name in ("classification_args", "POST_DEPLOY_SMOKE_KNOWN_GAPS", "POST_DEPLOY_SMOKE_UNEXPECTED_PASSES"):
+    guarded = '${' + name + '[@]+"${' + name + '[@]}"}'
+    remaining = source.replace(guarded, "")
+    if re.search(r"\$\{" + re.escape(name) + r"\[@\]\}", remaining):
+        raise SystemExit("FAIL: Bash 3.2 optional array expansion is unguarded: " + name)
+PY_COMPAT
+
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-smoke-turns-test.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
