@@ -305,4 +305,235 @@ pub(super) mod window {
             Window::Incomplete(gaps)
         }
     }
+
+    use chrono::{DateTime, TimeZone, Utc};
+
+    use super::super::EventKind;
+
+    const CH: u64 = 5_713_000_000_000_201;
+
+    fn renewed() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    fn start(incarnation: &str, instance_id: &str, allowlist: &[u64]) -> Record {
+        Record::Start {
+            incarnation: incarnation.into(),
+            instance_id: instance_id.into(),
+            build: "build-1".into(),
+            bot: "bot-1".into(),
+            provider: "claude".into(),
+            generation: 1,
+            allowlist: allowlist.to_vec(),
+            at: renewed(),
+        }
+    }
+
+    fn judged(incarnation: &str, sequence: u64, source: u64, verdict: &str, epoch: i64) -> Record {
+        Record::Observed(Box::new(Observed {
+            incarnation: incarnation.into(),
+            instance_id: incarnation.trim_end_matches(char::is_numeric).into(),
+            generation: 1,
+            bot: "bot-1".into(),
+            provider: "claude".into(),
+            sequence,
+            kind: EventKind::Message,
+            channel: CH,
+            source_id: source,
+            application_id: None,
+            queued_ms: 0,
+            lookup_ms: 0,
+            sample_ms: 0,
+            lookup: "row".into(),
+            sampler: "sampled".into(),
+            row_epoch: Some(epoch),
+            local_epoch: None,
+            verdict: verdict.into(),
+            reason: None,
+            holder: None,
+        }))
+    }
+
+    fn close(incarnation: &str, last: u64, completed: u64, lost: u64, unknown: u64) -> Record {
+        Record::Close {
+            incarnation: incarnation.into(),
+            last_sequence: last,
+            completed,
+            lost,
+            unknown,
+            excluded: 0,
+            terminal: true,
+            at: renewed(),
+        }
+    }
+
+    fn expected(nodes: &[(&str, &str)]) -> Expected {
+        let node = |(instance_id, incarnation): &(&str, &str)| ExpectedNode {
+            instance_id: (*instance_id).into(),
+            incarnation: (*incarnation).into(),
+            build: "build-1".into(),
+        };
+        Expected {
+            nodes: nodes.iter().map(node).collect(),
+            bot: "bot-1".into(),
+            provider: "claude".into(),
+            allowlist: BTreeSet::from([CH]),
+        }
+    }
+
+    /// Node a holds the channel; node b sees the same three sources as foreign.
+    fn paired_window() -> Vec<Record> {
+        let mut records = vec![start("a1", "a", &[CH]), start("b1", "b", &[CH])];
+        for sequence in 1..=3 {
+            records.push(judged("a1", sequence, 80 + sequence, "local_candidate", 4));
+            records.push(judged("b1", sequence, 80 + sequence, "ignore_foreign", 4));
+        }
+        records.extend([close("a1", 3, 3, 0, 0), close("b1", 3, 3, 0, 0)]);
+        records
+    }
+
+    fn without(records: &[Record], drop: impl Fn(&Record) -> bool) -> Vec<Record> {
+        records
+            .iter()
+            .filter(|record| !drop(record))
+            .cloned()
+            .collect()
+    }
+
+    fn is_judged(record: &Record, incarnation: &str, sequence: u64) -> bool {
+        matches!(record, Record::Observed(o) if o.incarnation == incarnation && o.sequence == sequence)
+    }
+
+    #[test]
+    fn a_window_passes_only_when_every_observer_and_source_joined_to_a_finished_close() {
+        let nodes = expected(&[("a", "a1"), ("b", "b1")]);
+        let window = paired_window();
+        assert_eq!(evaluate_window(&nodes, &window), Window::Pass { paired: 3 });
+        let incomplete = |records: Vec<Record>, gaps: Vec<Gap>| {
+            assert_eq!(evaluate_window(&nodes, &records), Window::Incomplete(gaps));
+        };
+        let a1 = || "a1".to_owned();
+        incomplete(
+            without(&window, |r| is_judged(r, "a1", 2)),
+            vec![Gap::MissingSequence(a1(), 2), Gap::Unpaired(CH, 82)],
+        );
+        incomplete(
+            without(&window, |r| is_judged(r, "a1", 3) || is_judged(r, "b1", 3)),
+            vec![
+                Gap::MissingSequence(a1(), 3),
+                Gap::MissingSequence("b1".into(), 3),
+            ],
+        );
+        incomplete(
+            without(
+                &window,
+                |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1"),
+            ),
+            vec![
+                Gap::MissingClose(a1()),
+                Gap::AfterClose(a1(), 1),
+                Gap::AfterClose(a1(), 2),
+                Gap::AfterClose(a1(), 3),
+            ],
+        );
+        let only_a = without(&window, |r| match r {
+            Record::Start { incarnation, .. } | Record::Close { incarnation, .. } => {
+                incarnation == "b1"
+            }
+            Record::Observed(o) => o.incarnation == "b1",
+        });
+        incomplete(
+            only_a,
+            vec![
+                Gap::MissingStart("b1".into()),
+                Gap::MissingClose("b1".into()),
+                Gap::Unpaired(CH, 81),
+                Gap::Unpaired(CH, 82),
+                Gap::Unpaired(CH, 83),
+                Gap::NoPairs,
+            ],
+        );
+        let mut wider = window.clone();
+        wider[1] = start("b1", "b", &[CH, CH + 1]);
+        incomplete(wider, vec![Gap::StartMismatch("b1".into())]);
+        let mut tail = window.clone();
+        tail.push(judged("a1", 4, 84, "local_candidate", 4));
+        incomplete(tail, vec![Gap::AfterClose(a1(), 4), Gap::Unpaired(CH, 84)]);
+        let mut stray = window.clone();
+        stray.push(judged("a2", 1, 81, "ignore_foreign", 4));
+        incomplete(
+            stray,
+            vec![
+                Gap::UnexpectedIncarnation("a2".into()),
+                Gap::Unpaired(CH, 81),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_lost_unknown_or_unfinished_sequence_or_no_pair_never_certifies() {
+        let nodes = expected(&[("a", "a1"), ("b", "b1")]);
+        let window = paired_window();
+        let with_close = |last, completed, lost, unknown| {
+            let mut records = without(
+                &window,
+                |r| matches!(r, Record::Close { incarnation, .. } if incarnation == "a1"),
+            );
+            records.push(close("a1", last, completed, lost, unknown));
+            evaluate_window(&nodes, &records)
+        };
+        let a1 = || "a1".to_owned();
+        assert_eq!(
+            with_close(4, 3, 1, 0),
+            Window::Incomplete(vec![Gap::Unfinished(a1()), Gap::MissingSequence(a1(), 4)])
+        );
+        assert_eq!(
+            with_close(3, 3, 0, 1),
+            Window::Incomplete(vec![Gap::Unfinished(a1())])
+        );
+        assert_eq!(
+            with_close(3, 2, 0, 0),
+            Window::Incomplete(vec![Gap::Unfinished(a1())])
+        );
+        let idle = vec![
+            start("a1", "a", &[CH]),
+            start("b1", "b", &[CH]),
+            close("a1", 0, 0, 0, 0),
+            close("b1", 0, 0, 0, 0),
+        ];
+        assert_eq!(
+            evaluate_window(&nodes, &idle),
+            Window::Incomplete(vec![Gap::NoPairs])
+        );
+    }
+
+    #[test]
+    fn two_processes_judging_one_source_their_own_is_a_conflict_across_ids_and_epochs() {
+        // Two processes run as instance `a`: same id, different incarnations.
+        let twins = expected(&[("a", "a1"), ("a", "a2")]);
+        let mut records = vec![start("a1", "a", &[CH]), start("a2", "a", &[CH])];
+        records.push(judged("a1", 1, 91, "local_candidate", 4));
+        records.push(judged("a2", 1, 91, "local_candidate", 4));
+        records.extend([close("a1", 1, 1, 0, 0), close("a2", 1, 1, 0, 0)]);
+        assert_eq!(
+            evaluate_window(&twins, &records),
+            Window::Conflict(vec![(CH, 91)])
+        );
+
+        let nodes = expected(&[("a", "a1"), ("b", "b1")]);
+        let mut moved = paired_window();
+        moved.retain(|r| !is_judged(r, "b1", 2));
+        moved.push(judged("b1", 2, 82, "local_candidate", 5));
+        assert_eq!(
+            evaluate_window(&nodes, &moved),
+            Window::Conflict(vec![(CH, 82)])
+        );
+        let mut handed = paired_window();
+        handed.retain(|r| !is_judged(r, "b1", 2));
+        handed.push(judged("b1", 2, 82, "ignore_foreign", 5));
+        assert_eq!(
+            evaluate_window(&nodes, &handed),
+            Window::Incomplete(vec![Gap::EpochSplit(CH, 82)])
+        );
+    }
 }

@@ -1663,10 +1663,6 @@ services::discord::router::intake_dispatch::tests::replay_hold::replay_admission
 services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
 services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
-services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
-services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_components_byte_identical
-services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_live_messages_byte_identical
-services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg

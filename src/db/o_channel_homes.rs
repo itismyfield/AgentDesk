@@ -234,9 +234,11 @@ pub(crate) async fn read_home_at(
     pool: &PgPool,
     channel_id: &str,
 ) -> Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError> {
-    let row = sqlx::query(&format!(
-        "SELECT {COLUMNS}, statement_timestamp() AS read_at FROM o_channel_homes WHERE channel_id = $1"
-    ))
+    let row = sqlx::query(
+        "SELECT channel_id, provider, state, holder, target, epoch, renewed_at, updated_at, detail,
+                statement_timestamp() AS read_at
+         FROM o_channel_homes WHERE channel_id = $1",
+    )
     .bind(channel_id)
     .fetch_optional(pool)
     .await?;

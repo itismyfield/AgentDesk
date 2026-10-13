@@ -430,10 +430,7 @@ fn queued(queue: &[crate::services::turn_orchestrator::Intervention]) -> String 
     queue.iter().map(item).collect::<Vec<_>>().join("\n")
 }
 
-async fn dm_reply(pool: Option<&sqlx::PgPool>) -> Value {
-    let Some(pool) = pool else {
-        return Value::Null;
-    };
+async fn dm_reply(pool: &sqlx::PgPool) -> Value {
     let row: (String, String, Option<String>, String, String, bool) = sqlx::query_as(
         "SELECT source_agent, user_id, channel_id, context::text, status, consumed_at IS NOT NULL
          FROM pending_dm_replies",
@@ -459,30 +456,53 @@ async fn record_error(error: poise::FrameworkError<'_, Data, crate::services::di
         .push(format!("{error}{inner}"));
 }
 
+/// One run inside a child process, given the shared state its test built.
+type Runner = fn(Case, Run, PathBuf) -> futures::future::BoxFuture<'static, Outcome>;
+
+fn without_storage(
+    case: Case,
+    run: Run,
+    root: PathBuf,
+) -> futures::future::BoxFuture<'static, Outcome> {
+    Box::pin(async move {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        invoke(case, run, &root, shared).await
+    })
+}
+
+/// The run with a database holding one pending DM reply from the owner, read back afterwards.
+fn with_pending_dm_reply(
+    case: Case,
+    run: Run,
+    root: PathBuf,
+) -> futures::future::BoxFuture<'static, Outcome> {
+    Box::pin(async move {
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let pending = crate::services::discord_dm_reply_store::register_pending_dm_reply_db(
+            Some(&pool),
+            "shadow-compat",
+            &USER.to_string(),
+            Some(&CHANNEL.to_string()),
+            r#"{"question":"ship?"}"#,
+            0,
+        )
+        .await;
+        assert!(pending.is_ok(), "fixture registers a pending DM reply");
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let mut outcome = invoke(case, run, &root, shared).await;
+        outcome.effects.dm_reply = dm_reply(&pool).await;
+        pool.close().await;
+        db.drop().await;
+        outcome
+    })
+}
+
 /// One run in this process: the fixture, every event through Poise dispatch with the production
 /// framework options, and what it left behind.
-async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
+async fn invoke(case: Case, run: Run, root: &Path, shared: Arc<SharedData>) -> Outcome {
     let channel = serenity::ChannelId::new(CHANNEL);
-    let pg = match case {
-        Case::PendingDmReply => {
-            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-            let pool = db.connect_and_migrate().await;
-            let pending = crate::services::discord_dm_reply_store::register_pending_dm_reply_db(
-                Some(&pool),
-                "shadow-compat",
-                &USER.to_string(),
-                Some(&CHANNEL.to_string()),
-                r#"{"question":"ship?"}"#,
-                0,
-            )
-            .await;
-            assert!(pending.is_ok(), "fixture registers a pending DM reply");
-            Some((db, pool))
-        }
-        _ => None,
-    };
-    let pool = pg.as_ref().map(|(_, pool)| pool.clone());
-    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pool.clone());
     {
         let mut settings = shared.settings.write().await;
         settings.owner_user_id = Some(USER);
@@ -587,17 +607,13 @@ async fn invoke(case: Case, run: Run, root: &Path) -> Outcome {
         queue: queued(&snapshot.intervention_queue),
         checkpoint: shared.last_message_ids.get(&channel).map(|entry| *entry),
         session: session(&shared).await,
-        dm_reply: dm_reply(pool.as_ref()).await,
+        dm_reply: Value::Null,
     };
     let (submitted, completed, dropped) = probe.as_ref().map_or((0, 0, 0), |probe| {
         (probe.submitted(), probe.completed(), probe.dropped())
     });
     shared.mailboxes.remove_fixture_for_test(channel);
     drop(data);
-    if let Some((db, pool)) = pg {
-        pool.close().await;
-        db.drop().await;
-    }
     Outcome {
         effects,
         submitted,
@@ -621,7 +637,7 @@ fn root_of(test: &str) -> PathBuf {
 }
 
 /// In a child process: runs the one case and run its parent named, and writes the outcome.
-fn child(test: &str) -> bool {
+fn child(test: &str, runner: Runner) -> bool {
     let Ok(spec) = std::env::var(RUN_ENV) else {
         return false;
     };
@@ -659,7 +675,7 @@ fn child(test: &str) -> bool {
         .enable_all()
         .build()
         .unwrap();
-    let outcome = runtime.block_on(Box::pin(invoke(case, run, &root)));
+    let outcome = runtime.block_on(runner(case, run, root.clone()));
     drop(runtime);
     std::fs::write(
         std::env::var(OUT_ENV).unwrap(),
@@ -800,8 +816,8 @@ fn expect_off(case: Case, off: &Effects) -> Vec<String> {
 
 /// Every case off twice, then on with each observer: the shadow took one submission per raw event,
 /// the answering one judged them all, and every effect equals the off run.
-fn compare(test: &str, cases: &[Case]) {
-    if child(test) {
+fn compare(test: &str, cases: &[Case], runner: Runner) {
+    if child(test, runner) {
         return;
     }
     let mut problems = Vec::new();
@@ -846,6 +862,7 @@ fn ingress_shadow_keeps_live_messages_byte_identical() {
     compare(
         "ingress_shadow_keeps_live_messages_byte_identical",
         &[Case::Message, Case::Thread, Case::Duplicate, Case::Queued],
+        without_storage,
     );
 }
 
@@ -854,6 +871,7 @@ fn ingress_shadow_keeps_attachment_messages_byte_identical() {
     compare(
         "ingress_shadow_keeps_attachment_messages_byte_identical",
         &[Case::Image, Case::File, Case::AttachmentOnly],
+        without_storage,
     );
 }
 
@@ -867,6 +885,7 @@ fn ingress_shadow_keeps_components_byte_identical() {
             Case::NodePicker,
             Case::Sidecar,
         ],
+        without_storage,
     );
 }
 
@@ -875,6 +894,7 @@ fn ingress_shadow_keeps_poise_commands_byte_identical() {
     compare(
         "ingress_shadow_keeps_poise_commands_byte_identical",
         &[Case::HelpAllowed, Case::HelpRefused],
+        without_storage,
     );
 }
 
@@ -883,5 +903,6 @@ fn ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg() {
     compare(
         "ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg",
         &[Case::PendingDmReply],
+        with_pending_dm_reply,
     );
 }

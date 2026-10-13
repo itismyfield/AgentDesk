@@ -11439,6 +11439,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:790155523cc4ce25bbdfdfb91226ad7b6289b1c3128795996cd134470a57d8d8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:ced95432b0988d2c3ddc2614fbc8d8fea21ec775388f0f0ad3872ff1d5ce5fde"
     },
     {
@@ -11548,6 +11557,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:1d9fce9c9730375e2b16b2da833f6817b2669634fe243a8b4d2e4c624211f021"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:aa8b7780d5b8e3d2bd5e0f8e2f9a8e55c946587f742b0ec8e2c5f8718a012891"
     },
     {
       "root": "src",
@@ -30511,6 +30529,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:fbc5ce28a421762a6d96e5c042d2ccd6da70302d317612cf7d3bbcf7768caa36"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/router/intake_gate/ingress_shadow_compat_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:da7b7c7d0b6caafd6658a0ca4f14eb4736aa44388f028595903fb01431fb7e9b"
     },
     {
       "root": "src",
