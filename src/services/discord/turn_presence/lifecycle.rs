@@ -49,6 +49,8 @@ impl Drop for Lifetime {
 
 pub(super) struct Registration {
     token: Arc<()>,
+    /// Survives adoption advances; only a reset or retire starts a new generation.
+    generation: Arc<()>,
     pub(super) incarnation: Arc<Incarnation>,
     pub(super) activity: Activity,
     pub(super) deadline: Option<Instant>,
@@ -60,6 +62,7 @@ impl Default for Registration {
     fn default() -> Self {
         Self {
             token: Arc::new(()),
+            generation: Arc::new(()),
             incarnation: Arc::default(),
             activity: Activity::Unknown,
             deadline: None,
@@ -275,6 +278,43 @@ impl super::entrypoints::Fence for Runtime {
                     "presence gateway approval withdrawn"
                 );
             }
+        }
+    }
+
+    fn withdraw_unmounted(
+        &self,
+        channel: u64,
+        mount: Option<&Arc<crate::services::cluster::channel_home::HomeGate>>,
+        cause: &'static str,
+    ) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(registration) = state.channels.get_mut(&channel) else {
+            return;
+        };
+        if !registration.retired && registration.incarnation.rests_off(mount) {
+            registration.reset();
+            tracing::debug!(
+                channel_id = channel,
+                cause,
+                "presence approval withdrawn on home change"
+            );
+        }
+    }
+
+    fn generation(&self, channel: u64) -> Option<Arc<()>> {
+        let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let registration = state.channels.get(&channel).filter(|r| !r.retired)?;
+        Some(registration.generation.clone())
+    }
+
+    fn withdraw_generation(&self, channel: u64, generation: &Arc<()>, cause: &'static str) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(registration) = state.channels.get_mut(&channel) else {
+            return;
+        };
+        if !registration.retired && Arc::ptr_eq(&registration.generation, generation) {
+            registration.reset();
+            tracing::debug!(channel_id = channel, cause, "presence lease withdrawn");
         }
     }
 

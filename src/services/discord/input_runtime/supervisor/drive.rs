@@ -270,6 +270,8 @@ pub(crate) struct ChannelDrive<D: DrivePorts> {
     lost: bool,
     pub(super) clearing: Option<Clearing>,
     hold: Option<(&'static str, Instant)>,
+    /// The presence registrations this drive started under; a later one is not its to withdraw.
+    presence: crate::services::discord::PresenceLease,
     #[cfg(test)]
     pub(crate) counts: Counts,
 }
@@ -282,8 +284,10 @@ impl<D: DrivePorts> ChannelDrive<D> {
 
 /// A drive dropped without [`Supervisor::stop_drive`], by cancellation or a panic, still holds an
 /// open gate. A loan it abandoned keeps the slot lent, so that worker's writes stay its own.
+/// Every end, `stop_drive` included, withdraws the presence lease.
 impl<D: DrivePorts> Drop for ChannelDrive<D> {
     fn drop(&mut self) {
+        self.presence.withdraw("input_drive_ended");
         if self.ready {
             let _ = self.closing.hold();
         }
@@ -530,6 +534,10 @@ impl<P: Ports> Supervisor<P> {
             lost: false,
             clearing: None,
             hold: None,
+            presence: crate::services::discord::PresenceLease::take(
+                &self.config.provider,
+                self.config.channel,
+            ),
             #[cfg(test)]
             counts: Counts::default(),
         };
@@ -574,6 +582,8 @@ impl<P: Ports> Supervisor<P> {
                 }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
+                    // Close is no parent Idle; it only takes back what this drive's approvals rested on.
+                    drive.presence.withdraw("input_close");
                     self.close_command(ack).await;
                     drive.ready = false;
                 }

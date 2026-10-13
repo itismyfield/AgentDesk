@@ -206,7 +206,7 @@ where
         if let Some(reason) = refusal(shared, provider, channel_id, true, true, None).await {
             return Ok(Err(reason));
         }
-        super::super::turn_presence::entrypoints::withdraw(channel_id.get(), "restart");
+        super::super::turn_presence::entrypoints::withdraw(shared, channel_id.get(), "restart");
 
         // Warn if a turn is in flight, then cancel it via the same path /stop uses.
         if mailbox_has_active_turn(shared, channel_id).await {

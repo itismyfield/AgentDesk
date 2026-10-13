@@ -59,9 +59,12 @@ impl Owner {
             (Self::Home(home, expected), Some(current)) if Arc::ptr_eq(home, &current) => home
                 .admit_post(|epoch| (epoch == *expected).then(hand_off))
                 .flatten(),
-            (Self::Gateway(gate, expected), None) => gate
-                .admit(|epoch| (epoch == *expected).then(hand_off))
-                .flatten(),
+            // A Home mounting meanwhile waits on the registry this check holds through the poll.
+            (Self::Gateway(gate, expected), None) => channel_home::admit_unhomed(channel, || {
+                gate.admit(|epoch| (epoch == *expected).then(hand_off))
+                    .flatten()
+            })
+            .flatten(),
             _ => None,
         }
     }
@@ -155,6 +158,17 @@ impl Incarnation {
                 });
             })
             .is_some()
+    }
+
+    /// Whether the approval rests on an owner other than `mount`, the channel's Home or `None`
+    /// for the Gateway rules.
+    pub(super) fn rests_off(&self, mount: Option<&Arc<HomeGate>>) -> bool {
+        let current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match (current.as_ref().map(|current| &current.owner), mount) {
+            (None, _) | (Some(Owner::Gateway(..)), None) => false,
+            (Some(Owner::Home(home, _)), Some(mount)) => !Arc::ptr_eq(home, mount),
+            (Some(_), _) => true,
+        }
     }
 
     pub(super) fn rests_on(&self, gate: &Arc<OwnershipGate>) -> bool {
