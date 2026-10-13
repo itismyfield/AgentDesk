@@ -78,7 +78,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="direct_discord_sends",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"direct Discord send/edit call: `{match_text}`",

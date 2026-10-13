@@ -575,6 +575,8 @@ impl std::fmt::Display for RebindError {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use rebind_runtime::codex_rebind_complete_for_tests;
 #[cfg(test)]
 pub(crate) use rebind_runtime::codex_rebind_spawn_for_tests;
 #[cfg(test)]

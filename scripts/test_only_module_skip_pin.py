@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
@@ -97,6 +98,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_io/cancel_backstop_tests.rs",
         "src/services/discord/queue_io/idle_queue_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs",
+        "src/services/discord/tui_prompt_relay/relay_e2e/cold_start_incident_e2e_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
         "src/services/discord/zombie_foreground_release/cancel_backstop_tests.rs",
         "src/services/discord/health/recovery/legacy_send_tests.rs",
@@ -693,6 +695,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
+        "src/services/tui_prompt_dedupe/handoff_tests.rs",
+        "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
     }
