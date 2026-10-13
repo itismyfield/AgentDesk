@@ -10,6 +10,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 TEST = "tests.test_n1_canary_producer.ProducerCLI."
 MUTANTS = [
+    ("candidate-build-check-removed", "producer.py", 'release.get("repo_head") == proof["build_commit"]', 'True',
+     "test_candidate_requires_build_hash_schema_and_positive_capabilities"),
+    ("candidate-executable-check-removed", "producer.py", 'digest(executable) == proof["executable_sha256"]', 'True',
+     "test_candidate_requires_build_hash_schema_and_positive_capabilities"),
+    ("candidate-positive-capabilities-removed", "producer.py", 'if not unknown & confirmed:', 'if False:',
+     "test_candidate_requires_build_hash_schema_and_positive_capabilities"),
     ("capability-always-approved", "manifest.py", 'return any(c["build_commit"]', 'return True or any(c["build_commit"]',
      "test_t9_unapproved_pair_or_capability_never_becomes_zero"),
     ("old-digest-approved", "manifest.py", 'c["executable_sha256"] == runtime["executable_sha256"]', 'True',

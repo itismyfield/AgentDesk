@@ -3,6 +3,7 @@ import copy
 import json
 import re
 import subprocess
+import sys
 import unittest
 
 from tests import test_n1_canary_audit as fixture
@@ -20,6 +21,56 @@ class ProducerCLI(unittest.TestCase):
         runtime = self.manifest["runtime"]
         return dict(build_commit=runtime["build_commit"], executable_sha256=runtime["executable_sha256"],
                     event_schema=2, unknown_outcome_produced=True, actual_confirmation_produced=True)
+
+    def candidate_cli(self, expected=0):
+        self.save()
+        release = self.base / "release-source.json"
+        release.write_text(json.dumps(getattr(self, "release", dict(
+            repo_head=self.manifest["runtime"]["build_commit"], repo_dirty="false"))))
+        log = self.base / "producer-verification.jsonl"
+        rows = getattr(self, "verification", [self.values["log"][0], self.witness()])
+        log.write_bytes(b"".join(fixture.canonical(row) + b"\n" for row in rows))
+        process = subprocess.run([sys.executable, "-m", "n1_canary.producer", "--process-proof",
+            str(self.base / self.manifest["files"]["process_proof"]["path"]), "--executable",
+            str(self.base / self.manifest["files"]["executable"]["path"]), "--release-source", str(release),
+            "--verification-log", str(log)], cwd=self.copy, capture_output=True, text=True, timeout=20)
+        self.assertEqual(process.returncode, expected, process.stdout + process.stderr)
+        return json.loads(process.stdout)
+
+    def test_verified_candidate_registration_pass_and_removal_refuses(self):
+        candidate = self.candidate_cli()
+        self.assertEqual(candidate, self.approval())
+        self.producer_capabilities = [candidate]
+        self.run_cli(0)
+        self.producer_capabilities = []
+        self.assertIn("unknown_outcome_unproduced", self.run_cli(2)["reasons"])
+
+    def test_candidate_requires_build_hash_schema_and_positive_capabilities(self):
+        original = copy.deepcopy(self.values["process_proof"])
+        for changes in ({"build_commit": "0" * 40}, {"build_commit": "short"},
+                        {"boot_id": 123}, {"pid": False},
+                        {"executable_sha256": "0" * 64}, {"executable_path": "/installed/agentdesk"}):
+            self.values["process_proof"] = {**original, **changes}
+            with self.subTest(changes=changes):
+                self.assertEqual(self.candidate_cli(2)["reason"], "producer_identity_unverified")
+        self.values["process_proof"] = original
+        self.release = dict(repo_head=original["build_commit"], repo_dirty="true")
+        self.assertEqual(self.candidate_cli(2)["reason"], "producer_identity_unverified")
+        del self.release
+        valid = [copy.deepcopy(self.values["log"][0]), self.witness()]
+        for rows in ([], valid[:1], valid[1:], [{**valid[0], "actual_confirmed_at_us": None}, valid[1]],
+                     [{**valid[0], "actual_confirmed_at_us": 1001}, valid[1]],
+                     [valid[0], {**valid[1], "schema_version": 1}],
+                     [valid[0], {**valid[1], "schema_version": True}],
+                     [valid[0], {**valid[1], "logical_turn_key": {}}],
+                     [valid[0], {**valid[1], "source_id": {}}],
+                     [valid[0], {**valid[1], "provider": {}}],
+                     [valid[0], {**valid[1], "reason": ""}],
+                     [valid[0], {**valid[1], "boot_id": "other"}],
+                     [valid[0], {**valid[1], "channel_id": 124}]):
+            self.verification = rows
+            with self.subTest(rows=rows):
+                self.assertEqual(self.candidate_cli(2)["reason"], "producer_capabilities_unverified")
 
     def witness(self, **changes):
         value = dict(event="n1_outcome_unknown", seq=52, schema_version=2, observed_at_us=100,
