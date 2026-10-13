@@ -45,6 +45,31 @@ class ProducerCLI(unittest.TestCase):
         self.producer_capabilities = []
         self.assertIn("unknown_outcome_unproduced", self.run_cli(2)["reasons"])
 
+    def test_candidate_accepts_interleaved_channel_sequences(self):
+        confirmed = copy.deepcopy(self.values["log"][0])
+        for other_seq in (1, 7):
+            self.verification = [confirmed, {**confirmed, "channel_id": 124, "seq": other_seq},
+                                 self.witness(seq=2)]
+            with self.subTest(other_seq=other_seq):
+                self.assertEqual(self.candidate_cli(), self.approval())
+
+    def test_candidate_rejects_duplicate_or_regressing_channel_sequences(self):
+        confirmed = copy.deepcopy(self.values["log"][0])
+        other_channel = {**confirmed, "channel_id": 124}
+        for seq in (0, 1):
+            for provider in ("codex", "claude"):
+                self.verification = [confirmed, other_channel, self.witness(seq=seq, provider=provider),
+                                     self.witness(seq=2)]
+                with self.subTest(seq=seq, provider=provider):
+                    self.assertEqual(self.candidate_cli(2)["reason"], "producer_capabilities_unverified")
+
+    def test_candidate_never_combines_different_channel_or_provider_capabilities(self):
+        confirmed = copy.deepcopy(self.values["log"][0])
+        for changes in ({"channel_id": 124, "seq": 1}, {"provider": "claude", "seq": 2}):
+            self.verification = [confirmed, self.witness(**changes)]
+            with self.subTest(changes=changes):
+                self.assertEqual(self.candidate_cli(2)["reason"], "producer_capabilities_unverified")
+
     def test_candidate_requires_build_hash_schema_and_positive_capabilities(self):
         original = copy.deepcopy(self.values["process_proof"])
         for changes in ({"build_commit": "0" * 40}, {"build_commit": "short"},

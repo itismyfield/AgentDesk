@@ -27,12 +27,15 @@ def candidate(proof, executable, release, rows):
                        or row["schema_version"] != 2 or row.get("boot_id") != proof["boot_id"]
                        or not uint(row.get("channel_id")) or row["channel_id"] == 0
                        or row.get("provider") not in ("claude", "codex")
-                       or not uint(row.get("seq")) or not uint(row.get("observed_at_us")) for row in rows)
-            or any(a["seq"] >= b["seq"] for a, b in zip(rows, rows[1:]))):
+                       or not uint(row.get("seq")) or not uint(row.get("observed_at_us")) for row in rows)):
         raise Unknown("producer_capabilities_unverified")
-    unknown, confirmed = set(), set()
+    unknown, confirmed, sequences = set(), set(), {}
     logical_spec = {"provider": text, "channel_id": uint, "provider_session_id": text, "native_turn_id": text}
     for row in rows:
+        sequence_scope = (row["boot_id"], row["channel_id"])
+        if row["seq"] <= sequences.get(sequence_scope, -1):
+            raise Unknown("producer_capabilities_unverified")
+        sequences[sequence_scope] = row["seq"]
         key = (row["channel_id"], row["provider"])
         if row.get("event") == "n1_outcome_unknown":
             logical = row.get("logical_turn_key")

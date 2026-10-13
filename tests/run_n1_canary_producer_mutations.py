@@ -10,6 +10,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 TEST = "tests.test_n1_canary_producer.ProducerCLI."
 MUTANTS = [
+    ("candidate-global-sequence-reverted", "producer.py", 'row["seq"] <= sequences.get(sequence_scope, -1)',
+     'any(a["seq"] >= b["seq"] for a, b in zip(rows, rows[1:]))', "test_candidate_accepts_interleaved_channel_sequences"),
+    ("candidate-provider-splits-sequence", "producer.py", '(row["boot_id"], row["channel_id"])',
+     '(row["boot_id"], row["channel_id"], row["provider"])', "test_candidate_rejects_duplicate_or_regressing_channel_sequences"),
+    ("candidate-sequence-guard-removed", "producer.py", 'row["seq"] <= sequences.get(sequence_scope, -1)',
+     'False', "test_candidate_rejects_duplicate_or_regressing_channel_sequences"),
     ("candidate-build-check-removed", "producer.py", 'release.get("repo_head") == proof["build_commit"]', 'True',
      "test_candidate_requires_build_hash_schema_and_positive_capabilities"),
     ("candidate-executable-check-removed", "producer.py", 'digest(executable) == proof["executable_sha256"]', 'True',

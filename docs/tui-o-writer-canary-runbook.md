@@ -347,6 +347,9 @@ every unregistered build/hash, old schema or false capability (P43:
 2. In a separate producer verification run of those exact executable bytes, capture real schema 2
    `n1_outcome_unknown` and successful `n1_mode_confirmed` events with actual confirmation time
    and its window. Preserve that run's process proof and complete raw verification log/hash.
+   The original log may interleave channels. Sequence increases per boot/channel, including
+   across provider changes; preserve those rows without manual filtering. The observer owns
+   sequence per channel (`src/services/tui_o/n1_observation.rs:128–142,205–268`).
    Both events must name the same boot/channel/provider; the unknown witness belongs to this
    verification run, not the clean 50-turn canary. Do not induce an unknown event in the canary
    to demonstrate the capability. Review the build's producer paths at
