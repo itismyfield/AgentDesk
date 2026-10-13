@@ -936,3 +936,16 @@ async fn b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner() {
     );
     channel_home::unregister(&channel);
 }
+
+// Before any Home was ever registered, an unhomed admission still holds off the first mount.
+#[test]
+fn b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount() {
+    use crate::services::cluster::channel_home::tests::mount_waits;
+    std::thread::spawn(|| {
+        let held = channel_home::admit_unhomed(6_325_950, mount_waits);
+        assert_eq!(held, Some(true));
+        assert!(!mount_waits(), "released when the admission returns");
+    })
+    .join()
+    .unwrap();
+}

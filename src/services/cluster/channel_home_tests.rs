@@ -808,14 +808,3 @@ pub(crate) fn mount_waits() -> bool {
         None => FIRST_MOUNT.try_lock().is_err(),
     })
 }
-
-// Before any Home was ever registered, an unhomed admission still holds off the first mount.
-#[test]
-fn b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount() {
-    std::thread::spawn(|| {
-        assert_eq!(admit_unhomed(6_325_950, mount_waits), Some(true));
-        assert_eq!(mount_waits(), false, "released when the admission returns");
-    })
-    .join()
-    .unwrap();
-}

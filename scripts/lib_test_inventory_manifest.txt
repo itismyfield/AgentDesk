@@ -2389,7 +2389,6 @@ services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retire
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
 services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
-services::cluster::channel_home::tests::b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount
 services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
 services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
 services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
@@ -10191,6 +10190,7 @@ services::discord::turn_presence::admission::tests::b2_unchanged_identity_and_ow
 services::discord::turn_presence::admission::tests::b2b1_reading_kept_across_resume_cannot_seed_or_approve_the_new_ticket
 services::discord::turn_presence::admission::tests::b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_approvals
 services::discord::turn_presence::admission::tests::b2b2_a_gateway_first_poll_holds_off_a_home_mount
+services::discord::turn_presence::admission::tests::b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount
 services::discord::turn_presence::admission::tests::b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner
 services::discord::turn_presence::admission::tests::fresh_busy_admits_one_first_poll_and_response_waits_outside_locks
 services::discord::turn_presence::admission::tests::gateway_epoch_unknown_and_loss_refuse_previously_approved_requests
