@@ -121,6 +121,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::ingress_shadow::compat_tests
   --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
@@ -146,7 +147,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::intake_dispatch::home_order_tests
   --skip services::discord::router::intake_dispatch::replay_admission_tests
   --skip services::discord::router::intake_dispatch::tests
-  --skip services::discord::router::intake_gate::ingress_shadow_compat_tests
   --skip services::discord::router::intake_gate::stale_turn::host_tests
   --skip services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   --skip services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
@@ -493,6 +493,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_live_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
   services::discord::ingress_shadow::shadow_tests::a_full_or_closed_queue_drops_and_counts_without_waiting
   services::discord::ingress_shadow::shadow_tests::an_event_is_described_by_its_own_channel_and_ids
   services::discord::ingress_shadow::shadow_tests::an_unreadable_gate_holds_and_counts_as_unknown
@@ -603,10 +607,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_live_local_pending_open_route_runs_locally_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_local_accepted_route_stays_fenced_5040
   services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknown_owner_authority_keeps_local_fence_5040
-  services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
-  services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_components_byte_identical
-  services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_live_messages_byte_identical
-  services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
   services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
@@ -1027,6 +1027,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::inflight::receipt_boundary_tests
   services::discord::inflight::removal::custody_notice_tests
   services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  services::discord::ingress_shadow::compat_tests
   services::discord::ingress_shadow::shadow_tests
   services::discord::input_runtime::supervisor::runtime::ports::tests
   services::discord::placeholder_sweeper::abandon_guard::tests
@@ -1052,7 +1053,6 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::discord::router::intake_dispatch::home_order_tests
   services::discord::router::intake_dispatch::replay_admission_tests
   services::discord::router::intake_dispatch::tests
-  services::discord::router::intake_gate::ingress_shadow_compat_tests
   services::discord::router::intake_gate::stale_turn::host_tests
   services::discord::router::message_handler::goal_lifecycle::host_guard_tests
   services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests

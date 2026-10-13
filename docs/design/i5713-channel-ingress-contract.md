@@ -220,7 +220,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 비간섭 시험이 실제로 부르는 진입점: `admit_unattributed`, `admit_command`, `refusal`, `turn_host::refusal_before_turn`, `intake_hold`(epoch 있음·없음), `HomeGate::{admit, admit_post, ownership, expiry, commands_in_flight}`, `intake_held_channels`, `health`.
 열린 gate, drain 중 gate, 한 번도 잡지 않은 gate, 미등록 채널 네 경우를 모두 부르고, 기대값(열린 채널 permit, drain 거절, 미등록 Legacy)을 먼저 단언해 빈 기록끼리의 비교를 막는다.
 
-Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 바이트 비교 하네스(`ingress_shadow_compat_tests`)가 증명한다.
+Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 바이트 비교 하네스(`ingress_shadow::compat_tests`)가 증명한다.
 
 ## 7. 미확보 항목 [U]
 
@@ -275,7 +275,7 @@ Discord 앞단 `handle_event`와 Poise 명령 경로의 비간섭은 §9.4의 �
 
 ### 9.2 경로
 
-1. hook: `handle_event`의 기존 cleanup·TUI shadow 호출 직후, `match event` 전에 `ingress_shadow::observe`를 한 번 부른다. 모든 early return 앞이다. Poise `command_check`에는 붙이지 않는다(raw `InteractionCreate`에서 이미 제출한다).
+1. hook: gateway framework의 event handler(`gateway_runtime::run_bot_framework_options`)가 `handle_event`를 부르기 직전에 `ingress_shadow::observe`를 한 번 부른다. 이 handler가 `handle_event`의 유일한 운영 호출자라 `handle_event` 첫 줄과 같은 지점이고 모든 early return 앞이다. giant 파일 순증 0 게이트 때문에 `router/intake_gate.rs`가 아닌 이 자리에 둔다. Poise `command_check`에는 붙이지 않는다(raw `InteractionCreate`에서 이미 제출한다).
 2. 제출: 원본 이벤트를 빌려 종류·실제 channel·원본 ID·application ID만 복사한다. 채널은 thread parent·policy channel이 아니라 이벤트의 channel이다. allowlist 밖이면 아무것도 하지 않는다. `try_send` 한 번이며 DB·HTTP·lock·`await`·task spawn이 없다. 실행 ingress가 아닌 이벤트(edit·delete·ping·presence 등)는 `excluded`로 센다.
 3. queue: 256개 bounded queue, worker 1개. full·closed면 그 descriptor를 버리고 센다. 버린 것도 sequence를 하나 받으므로 기록에서 빈 번호로 드러난다.
 4. 조회: observer 전용 pool(최대 연결 1, 기존 runtime pool의 연결 옵션 복사, 첫 조회 전 연결 없음)로 `o_channel_homes::read_home_at`을 부른다. row와 PG `statement_timestamp()`를 한 SELECT로 읽는다. `started`는 pool acquire 전에 잡고 acquire+query 전체를 250ms로 자른다. timeout·DB 오류·decode 실패는 `Unreadable`, row 없음은 `Missing`이며 retry·cached row는 없다. worker가 끝나면 pool을 닫는다.
@@ -317,7 +317,7 @@ singleton 운영에서는 paired 분모가 0이므로 결과는 INCOMPLETE이며
 | AC12 | 새 직접 소비자가 §4.4에 분류됨 | `home_authority_inventory_lists_every_direct_consumer` | worker 행 삭제 |
 | U3 | observer pool은 연결 1개, 첫 조회 전 연결 없음, worker 종료 때 닫힘 | `the_observer_pool_reads_rows_on_one_connection_and_closes_pg` | — |
 
-호환 하네스(`router/intake_gate/ingress_shadow_compat_tests.rs`)는 case마다 off를 두 번, 응답·timeout·full·closed observer로 한 번씩 각각 별도 자식 프로세스에서 돌린다.
+호환 하네스(`ingress_shadow/compat_tests.rs`)는 case마다 off를 두 번, 응답·timeout·full·closed observer로 한 번씩 각각 별도 자식 프로세스에서 돌린다.
 이벤트는 생산 `run_bot_framework_options`(command check·event handler)로 실제 Poise `dispatch_event`를 거친다. 기록은 Discord 요청의 method·path·raw body, runtime root 아래 모든 파일 bytes, mailbox queue, checkpoint, session, DM 회신 행, handler 오류다.
 비교 전에 off 실행의 기대 효과(큐 경로의 reaction·checkpoint·durable queue 본문, DM 회신 소비, component callback 1, `/help` callback 1·follow-up 1, 거절 0)를 먼저 단언한다.
 한계: 시계를 고정할 seam이 없어 durable queue의 `created_at_wall_time_ms`·`enqueued_at_epoch_us`와 mailbox의 도착 `Instant`만 값 대신 존재로 비교한다.

@@ -158,7 +158,11 @@ pub(in crate::services::discord) fn run_bot_framework_options(
                 Ok(allowed)
             })
         }),
-        event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
+        event_handler: |ctx, event, _framework, data| {
+            // handle_event's only production caller, so every gateway event is observed before any branch.
+            super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
+            Box::pin(handle_event(ctx, event, data))
+        },
         ..Default::default()
     }
 }

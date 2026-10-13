@@ -350,7 +350,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/channel_home_claim_tests.rs",
         "src/services/cluster/channel_ingress/tests.rs",
         "src/services/discord/ingress_shadow/shadow_tests.rs",
-        "src/services/discord/router/intake_gate/ingress_shadow_compat_tests.rs",
+        "src/services/discord/ingress_shadow/compat_tests.rs",
         "src/services/discord/router/intake_dispatch/home_order_tests.rs",
         "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",

@@ -1125,6 +1125,7 @@ src/
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   └── watcher_state.rs
 │   │   ├── ingress_shadow/
+│   │   │   ├── compat_tests.rs
 │   │   │   ├── shadow_tests.rs
 │   │   │   ├── telemetry.rs
 │   │   │   └── worker.rs
@@ -1457,7 +1458,6 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
-│   │   │   │   ├── ingress_shadow_compat_tests.rs
 │   │   │   │   ├── ledger.rs
 │   │   │   │   ├── ledger_io_tests.rs
 │   │   │   │   ├── ledger_tests.rs

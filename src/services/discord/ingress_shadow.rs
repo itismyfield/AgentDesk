@@ -192,3 +192,6 @@ fn spawn(channels: &BTreeSet<u64>, scope: Scope, source: HomeSource) -> IngressS
 
 #[cfg(test)]
 pub(super) mod shadow_tests;
+
+#[cfg(all(test, unix))]
+mod compat_tests;

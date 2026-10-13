@@ -151,6 +151,7 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/receipt_boundary_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs
+src/services/discord/ingress_shadow/compat_tests.rs
 src/services/discord/ingress_shadow/shadow_tests.rs
 src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
@@ -178,7 +179,6 @@ src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/replay_admission_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
-src/services/discord/router/intake_gate/ingress_shadow_compat_tests.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
@@ -471,6 +471,7 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::receipt_boundary_tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+services::discord::ingress_shadow::compat_tests
 services::discord::ingress_shadow::shadow_tests
 services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
@@ -499,7 +500,6 @@ services::discord::router::intake_dispatch::home_order_tests::source_forwarding_
 services::discord::router::intake_dispatch::replay_admission_tests
 services::discord::router::intake_dispatch::tests
 services::discord::router::intake_dispatch::tests::replay_hold
-services::discord::router::intake_gate::ingress_shadow_compat_tests
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
@@ -1574,6 +1574,7 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
+services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
 services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_clear_move_fail_closed_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
@@ -1692,7 +1693,6 @@ services::discord::router::intake_dispatch::tests::raw_attachment_foreign_owner_
 services::discord::router::intake_dispatch::tests::replay_hold::replay_admission_dormant_and_other_identity_keeps_local_policy_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_live_absorbed_sources_cannot_forward_and_keep_original_pg
 services::discord::router::intake_dispatch::tests::replay_hold::replay_queued_whole_consumed_and_mixed_original_restored_pg
-services::discord::router::intake_gate::ingress_shadow_compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keeps_a_stale_turn_on_an_unconfirmed_host_pg
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
