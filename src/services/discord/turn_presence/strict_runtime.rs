@@ -152,9 +152,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A strict supervisor's task, keyed by the shared data it serves.
+type Running = Vec<(Weak<SharedData>, AbortHandle)>;
+
 /// Strict supervisors by the runtime they serve, so a second start closes the first.
-static RUNNING: LazyLock<Mutex<Vec<(Weak<SharedData>, AbortHandle)>>> =
-    LazyLock::new(Default::default);
+static RUNNING: LazyLock<Mutex<Running>> = LazyLock::new(Default::default);
 
 /// Until handed off, dropping this closes the runtime it started, even before its first poll.
 #[must_use]
