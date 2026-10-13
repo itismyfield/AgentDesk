@@ -11,7 +11,7 @@ use super::legacy_restart_replay::{
     ClaimRecheck, CoordinateHold, CoordinateRecoveryDisposition as D, NormalizedOutputProbe,
     ReplayTally, SourcePolicy, classify, probe_normalized_output, recheck_before_claim,
 };
-use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::provider::ProviderKind;
 
@@ -104,9 +104,11 @@ fn proof_aligns_the_stored_prefix_in_the_selected_native_turn_and_hands_over_the
     assert_eq!(plan.residual_text, "");
     let mut next = String::new();
     plan.reader.read_line(&mut next).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&next).unwrap(),
-        assistant("TAIL\n")
+    let tail = serde_json::from_str::<Value>(&next).unwrap();
+    assert_eq!(tail, assistant("TAIL\n"));
+    assert!(
+        matches!(plan.decoder.decode(&tail).as_deref(), Some([StreamMessage::Text { content }]) if content == "TAIL\n"),
+        "the handed-over decoder continues the same turn without a message-boundary reset"
     );
 
     // A boundary inside a Text event splits at the UTF-8 boundary and keeps the rest.
@@ -358,6 +360,12 @@ fn classification_owns_only_coordinate_targets_and_yields_to_existing_authority(
         Missing
     );
     assert_eq!(probe_normalized_output(dir.path().to_str()), Unreadable);
+    #[cfg(unix)]
+    assert_eq!(
+        probe_normalized_output(file.join("child").to_str()),
+        Unreadable,
+        "a metadata error other than NotFound is never read as a missing or empty source"
+    );
 }
 
 #[test]
@@ -366,7 +374,8 @@ fn held_attempts_are_neither_recoveries_nor_a_drained_backlog() {
     tally.record(Ok(()));
     tally.record(Err(CoordinateHold::AwaitEvidence("partial_record")));
     tally.record(Err(CoordinateHold::NeedsEvidence("native_turn_unknown")));
-    assert_eq!((tally.recovered, tally.held), (1, 2));
+    tally.record(Err(CoordinateHold::RetryInstall("persist_failed")));
+    assert_eq!((tally.recovered, tally.held), (1, 3));
     assert!(!tally.backlog_drained());
     let mut drained = ReplayTally::default();
     drained.record(Ok(()));

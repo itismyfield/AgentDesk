@@ -63,17 +63,6 @@ pub(super) enum CoordinateHold {
     NeedsEvidence(&'static str),
 }
 
-impl CoordinateHold {
-    /// The slug stored under the `p5925_coordinate:` hold namespace.
-    pub(super) fn slug(self) -> &'static str {
-        match self {
-            Self::AwaitEvidence(slug) | Self::RetryInstall(slug) | Self::NeedsEvidence(slug) => {
-                slug
-            }
-        }
-    }
-}
-
 const NEEDS_EVIDENCE_SLUGS: &[&str] = &[
     "native_turn_unknown",
     "session_unknown",

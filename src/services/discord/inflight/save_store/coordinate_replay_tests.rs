@@ -220,10 +220,11 @@ fn coordinate_rmw_refuses_a_plan_the_locked_row_no_longer_matches() {
     };
     let hold = || CoordinateChange::Hold("incomplete_prefix");
 
-    // A write between the scan snapshot and the lock makes the plan stale.
+    // A write between the scan snapshot and the lock makes the plan stale even when it leaves
+    // the identity and seed alone.
     let stale = CoordinateExpectation::of(&durable).unwrap();
     let mut progressed = durable.clone();
-    progressed.full_response.push_str(" TAIL");
+    progressed.current_tool_line = Some("tool".to_string());
     let mut locked = lock(&durable);
     assert_eq!(
         locked.persist_verified_under_guard(&progressed, "test progress"),
