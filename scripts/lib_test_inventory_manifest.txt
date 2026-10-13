@@ -6598,6 +6598,7 @@ services::discord::router::intake_gate::gate::tests::live_known_automation_is_ex
 services::discord::router::intake_gate::ledger::io_tests::c2b_actual_enrich_fetches_two_attachments_and_retains_whole_source_after_kind_labeling
 services::discord::router::intake_gate::ledger::io_tests::c2b_actual_reply_and_download_cancellation_keep_original_pending_without_success_effects
 services::discord::router::intake_gate::ledger::io_tests::c2b_actual_reply_and_download_failure_keep_original_pending_without_success_effects
+services::discord::router::intake_gate::ledger::io_tests::c2b_io_fixtures_keep_global_registry_unused_before_standby_health
 services::discord::router::intake_gate::ledger::ledger_tests::c2b_live_gate_holds_busy_active_turn_before_legacy_effects
 services::discord::router::intake_gate::ledger::ledger_tests::c2b_live_gate_holds_dispatch_guard_before_legacy_effects
 services::discord::router::intake_gate::ledger::ledger_tests::c2b_live_gate_holds_drain_mode_before_legacy_effects
