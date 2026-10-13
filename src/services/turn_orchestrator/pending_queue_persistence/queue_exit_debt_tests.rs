@@ -654,7 +654,7 @@ fn the_metadata_free_test_writer_refuses_v1_and_unparseable_files() {
     }
 
     fs::remove_file(path(channel)).unwrap();
-    save(&[y.clone()]).unwrap();
+    save(std::slice::from_ref(&y)).unwrap();
     assert_eq!(disk(channel)[0]["message_id"], 122);
     save(&[x, y]).unwrap();
     assert_eq!(disk(channel)[1]["message_id"], 122);
@@ -717,22 +717,27 @@ fn a_transition_refuses_exits_its_debts_do_not_match() {
         "removal without a debt"
     );
     assert!(
-        from(&[z.clone()], &[cx.clone()]).is_err(),
+        from(std::slice::from_ref(&z), std::slice::from_ref(&cx)).is_err(),
         "one exit missing"
     );
     assert!(
-        from(&original, &[cx.clone()]).is_err(),
+        from(&original, std::slice::from_ref(&cx)).is_err(),
         "exit of a kept item"
     );
     let both = [cx, cy];
-    let mut swapped = from(&[z.clone()], &both).unwrap();
+    let mut swapped = from(std::slice::from_ref(&z), &both).unwrap();
     let first = swapped.exits[0].debt.clone();
     swapped.exits[0].debt = std::mem::replace(&mut swapped.exits[1].debt, first);
     assert!(swapped.check(EPISODE).is_err(), "swapped payloads");
-    let mut kind = from(&[z.clone()], &both).unwrap();
+    let mut kind = from(std::slice::from_ref(&z), &both).unwrap();
     kind.exits[0].debt.kind = QueueExitDebtKind::Expired;
     assert!(kind.check(EPISODE).is_err(), "another kind");
-    assert!(from(&[z.clone()], &both).unwrap().check("other").is_err());
+    assert!(
+        from(std::slice::from_ref(&z), &both)
+            .unwrap()
+            .check("other")
+            .is_err()
+    );
 
     let mut merged = human(151, 8, "a\nb", 5);
     merged.source_message_ids = vec![MessageId::new(150), MessageId::new(151)];

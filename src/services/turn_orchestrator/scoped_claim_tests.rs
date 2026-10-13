@@ -247,7 +247,8 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     let exact = proof(fx.channel, 221);
     fx.installed(&exact).await;
     let held = fx.seen().await;
-    let tampered: [(&str, fn(&mut Installation)); 6] = [
+    type Tamper = (&'static str, fn(&mut Installation));
+    let tampered: [Tamper; 6] = [
         ("token", |p| p.token = Arc::new(CancelToken::new())),
         ("episode", |p| p.episode = "another".into()),
         ("owner", |p| p.owner = UserId::new(8)),
@@ -523,7 +524,11 @@ async fn pending_prevents_idle_tombstone() {
         outcome,
         MailboxPurgeOutcome::RefusedLiveWork("installed_pending")
     );
-    assert!(fx.claim(&proof).await.is_refused_with_pending());
+    let again = refused(fx.claim(&proof).await);
+    assert!(
+        matches!(again, ScopedClaimRefusal::PendingHeld),
+        "{again:?}"
+    );
 
     let mut pending = fx.handle.installed_pending().await.unwrap();
     for feedback in [PendingFeedback::Owed, PendingFeedback::Reserved] {
@@ -541,11 +546,5 @@ async fn pending_prevents_idle_tombstone() {
             assert_eq!(verdict, Err("installed_pending"), "{feedback:?} {driver:?}");
             assert!(!state.closed);
         }
-    }
-}
-
-impl ScopedClaimOutcome {
-    fn is_refused_with_pending(self) -> bool {
-        matches!(self, Self::Refused(ScopedClaimRefusal::PendingHeld))
     }
 }
