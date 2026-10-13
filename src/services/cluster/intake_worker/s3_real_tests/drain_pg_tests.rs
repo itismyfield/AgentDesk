@@ -608,9 +608,8 @@ pub(super) async fn settles_unresolved_node(env: &Env) {
     node.stop().await;
 }
 
-/// Holds on the unsent Prepared, then appends the row that derives its unit again, which is what
-/// starts the settlement; waits for it and the leave, with nothing posted. Returns when the row
-/// was appended, on the clock history reads are stamped with.
+/// Holds on the unsent Prepared, then appends the row that derives its unit again, starting the
+/// settlement; waits for it and the leave, nothing posted, and returns when it appended the row.
 async fn settled_on_replay(env: &Env, discord: Discord) -> (Booted, std::time::Instant) {
     let node = holds_on_prepared(env, discord).await;
     assert_eq!(settled(&node), [], "settled before the row came again");
