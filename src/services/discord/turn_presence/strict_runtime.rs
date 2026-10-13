@@ -202,3 +202,38 @@ pub(in crate::services::discord) async fn spawn(
     lock(&RUNNING).push((Arc::downgrade(&shared), task.abort_handle()));
     Ok(Boot(Some(task)))
 }
+
+mod tests {
+    use super::*;
+
+    /// A client whose bot id read returns the given result.
+    struct Named(Result<u64, String>);
+
+    #[async_trait]
+    impl Transport for Named {
+        async fn bot_id(&self) -> Result<u64, String> {
+            self.0.clone()
+        }
+
+        async fn typing(&self, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A zero or unreadable bot id leaves no client, so no runtime starts or installs.
+    #[tokio::test]
+    async fn b2b3_a_client_without_its_own_bot_id_starts_and_installs_nothing() {
+        for read in [Ok(0), Err("401 Unauthorized".to_string())] {
+            let named = Arc::new(Named(read.clone()));
+            let verified = Client::verify(named.clone()).await;
+            assert!(verified.is_err(), "{read:?} left a client");
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let boot = spawn(shared.clone(), ProviderKind::Claude, named).await;
+            assert!(boot.is_err(), "{read:?} started a runtime");
+            let installed = super::super::entrypoints::installed_for(&shared);
+            assert_eq!(installed, 0, "{read:?} installed a runtime");
+        }
+        let client = Client::verify(Arc::new(Named(Ok(7)))).await.unwrap();
+        assert_eq!(client.bot_id, 7, "the client keeps the id read through it");
+    }
+}
