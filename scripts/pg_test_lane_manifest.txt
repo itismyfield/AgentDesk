@@ -164,6 +164,7 @@ src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs
 src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs
 src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs
 src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs
+src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs
 src/services/discord/recovery_engine/routing_orphan_tests.rs
 src/services/discord/relay_recovery/tests/host_deferred.rs
 src/services/discord/relay_recovery_circuit_alert_producer.rs
@@ -476,6 +477,7 @@ services::discord::recovery_engine::restore_inflight::kickoff_identity_tests
 services::discord::recovery_engine::restore_inflight::replay_hold_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests
 services::discord::recovery_engine::routing_orphan::host_guard_tests
 services::discord::relay_recovery::apply::host_deferred_tests
@@ -1598,7 +1600,7 @@ services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_projected_read_errors_keep_bytes_until_authority_recovers_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_read_error_is_not_a_durable_hold_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg
-services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_fresh_progress_can_transfer_only_pending_responsibility_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_fresh_progress_cannot_inherit_pending_responsibility_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_checks_actual_actor_before_feedback_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_rechecks_exact_row_before_feedback_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a1_tests::s3act_b3a1_handoff_rechecks_generation_before_feedback_pg
@@ -1616,6 +1618,10 @@ services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_hydrate_releases_lock_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_resume_snapshot_change_is_preserved_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::b3a2_tests::s3act_b3a2_uncertain_output_is_preserved_without_admission_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_driver_waits_for_its_exact_ready_confirm_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_handoff_refuses_every_inexact_proof_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_install_cancelled_around_its_claim_commit_pg
+services::discord::recovery_engine::restore_inflight::scoped_restore::claim_tests::s3b_install_writes_queue_and_debt_in_one_snapshot_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g1_current_generation_receipt_is_held_without_actor_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g2_unverified_replay_authority_holds_the_receipt_pg
 services::discord::recovery_engine::restore_inflight::scoped_restore::policy_receipt_tests::s3act_b3b3_g3_receipt_free_rows_keep_their_class_pg

@@ -79,8 +79,10 @@ pub(crate) enum ScopedClaimOutcome {
     /// The actor and its pending debts were installed; the event ids recorded on disk.
     Installed(Vec<String>),
     /// The exact actor already holds the slot; its pending record follows the newer generation
-    /// and keeps the episode its debts were issued under.
-    Inherited,
+    /// and keeps the episode its debts were issued under. Carries the driver it reached.
+    Inherited(PendingDriver),
+    /// The exact token holds the slot with no pending record; nothing changed.
+    Observed,
     Refused(ScopedClaimRefusal),
 }
 
@@ -188,13 +190,16 @@ fn claim(
         let holds = Arc::ptr_eq(active, &proof.token)
             && state.active_request_owner == Some(proof.owner)
             && state.active_user_message_id == Some(proof.message);
+        if holds && state.installed_pending.is_none() {
+            return Ok(ScopedClaimOutcome::Observed);
+        }
         let pending = state.installed_pending.as_mut();
         let Some(pending) = pending.filter(|pending| holds && exact(pending, proof)) else {
             return Err(R::ForeignActor);
         };
         pending.generation = proof.generation;
         pending.current = proof.current.clone();
-        return Ok(ScopedClaimOutcome::Inherited);
+        return Ok(ScopedClaimOutcome::Inherited(pending.driver));
     }
     if state.installed_pending.is_some() {
         return Err(R::PendingHeld);

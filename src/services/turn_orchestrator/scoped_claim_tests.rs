@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
+use crate::services::turn_orchestrator::installed_actor_handoff::{HandoffOutcome, Intent};
 use crate::services::turn_orchestrator::pending_queue_persistence::{
     QueueExitDebt, pending_queue_file_path, pending_queue_item_from_intervention, post_save_fault,
     read_back_fault, save_fault,
@@ -7,7 +8,9 @@ use crate::services::turn_orchestrator::pending_queue_persistence::{
 use crate::services::turn_orchestrator::policy_close::{
     PolicyClear, PolicyCloseRequest, PolicyMailboxOutcome, PolicyReceipt, PolicyRetain, test_hooks,
 };
-use crate::services::turn_orchestrator::queued_head::{SnapshotMeta, snapshot_json};
+use crate::services::turn_orchestrator::queued_head::{
+    SnapshotMeta, parse_snapshot, snapshot_json,
+};
 use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
 use std::sync::atomic::AtomicUsize;
 use std::time::SystemTime;
@@ -165,7 +168,8 @@ impl Fixture {
     async fn installed(&self, proof: &Installation) -> Vec<String> {
         match self.claim(proof).await {
             ScopedClaimOutcome::Installed(ids) => ids,
-            ScopedClaimOutcome::Inherited => panic!("inherited"),
+            ScopedClaimOutcome::Inherited(_) => panic!("inherited"),
+            ScopedClaimOutcome::Observed => panic!("observed"),
             ScopedClaimOutcome::Refused(refusal) => panic!("refused: {refusal:?}"),
         }
     }
@@ -199,11 +203,47 @@ impl PolicyReceipt for Receipt {
     }
 }
 
+/// The installed actor's own checks alone, with a row check that reads nothing.
+async fn handoff(fx: &Fixture, proof: &Installation, intent: Intent) -> HandoffOutcome {
+    let pass = || Ok(Box::new(()) as Box<dyn Send>);
+    fx.handle
+        .handoff_installed(proof.clone(), intent, pass)
+        .await
+}
+
+/// Each debt's id, issuing episode and the text its event is rebuilt with, as the typed snapshot
+/// reader returns it from the file and as the actor's record holds it.
+async fn debts_read_and_held(
+    fx: &Fixture,
+) -> (Vec<(String, String, String)>, Vec<(String, String, String)>) {
+    let content = String::from_utf8(bytes(fx.channel).unwrap()).unwrap();
+    let (_, meta) = parse_snapshot(&content).unwrap();
+    let debts = meta.unwrap().queue_exit_debts;
+    let read = debts.iter().map(|debt| {
+        (
+            debt.event_id.clone(),
+            debt.episode.clone(),
+            debt.event().intervention.text,
+        )
+    });
+    let record = fx.handle.installed_pending().await.unwrap();
+    let held = record.exits.iter().map(|exit| {
+        let debt = &exit.debt;
+        (
+            debt.event_id.clone(),
+            debt.episode.clone(),
+            exit.event.intervention.text.clone(),
+        )
+    });
+    (read.collect(), held.collect())
+}
+
 fn refused(outcome: ScopedClaimOutcome) -> ScopedClaimRefusal {
     match outcome {
         ScopedClaimOutcome::Refused(refusal) => refusal,
         ScopedClaimOutcome::Installed(_) => panic!("installed"),
-        ScopedClaimOutcome::Inherited => panic!("inherited"),
+        ScopedClaimOutcome::Inherited(_) => panic!("inherited"),
+        ScopedClaimOutcome::Observed => panic!("observed"),
     }
 }
 
@@ -328,9 +368,8 @@ async fn scoped_claim_whose_caller_leaves_mid_commit_installs_all_or_nothing() {
     }
 }
 
-/// Only the installed actor's exact identity and episode at its current generation inherits; any
-/// other claim, another episode at a newer generation included, and an idle claim that is stale or
-/// over an unreadable file, is refused with nothing changed.
+/// Only the installed actor's exact identity and episode at its current generation inherits;
+/// another episode at a newer generation and a stale or unreadable idle claim change nothing.
 #[tokio::test(flavor = "current_thread")]
 async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -371,7 +410,7 @@ async fn scoped_claim_refuses_foreign_identity_and_stale_generation() {
     };
     assert!(matches!(
         fx.claim(&fresh).await,
-        ScopedClaimOutcome::Inherited
+        ScopedClaimOutcome::Inherited(PendingDriver::NotScheduled)
     ));
     let inherited = fx.seen().await;
     let (episode, _, ids, feedback, driver) = held.pending.clone().unwrap();
@@ -640,6 +679,90 @@ async fn input_fence_scoped_refusal() {
         let fenced = matches!(refusal, ScopedClaimRefusal::InputFence(seen) if seen == expected);
         assert!(fenced, "{case}: {refusal:?}");
         assert_eq!(fx.seen().await, before, "{case}");
+    }
+}
+
+/// What an installed actor owes outlives its exact release in every state: record and debt stay,
+/// its handoffs and the idle tombstone are refused, and a stale release leaves the next actor be.
+#[tokio::test(flavor = "current_thread")]
+async fn pending_outlives_an_exact_release_in_every_state() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let reached: [(&str, &[Intent]); 3] = [
+        ("owed", &[]),
+        ("reserved", &[Intent::Feedback, Intent::Driver]),
+        ("ready", &[Intent::Driver, Intent::Ready]),
+    ];
+    for (n, (case, intents)) in reached.into_iter().enumerate() {
+        let fx = actor(&registry, 5_342_951 + n as u64, &[321]).await;
+        let proof = proof(fx.channel, 321);
+        let ids = fx.installed(&proof).await;
+        for intent in intents {
+            let outcome = handoff(&fx, &proof, *intent).await;
+            assert!(
+                !matches!(outcome, HandoffOutcome::Refused(_)),
+                "{case} {intent:?}"
+            );
+        }
+        let installed = fx.seen().await;
+        let (read, held) = debts_read_and_held(&fx).await;
+        assert_eq!((read.len(), &read), (1, &held), "{case}");
+        assert_eq!(
+            (&read[0].0, read[0].1.as_str()),
+            (&ids[0], EPISODE),
+            "{case}"
+        );
+
+        let closed = fx.close(&proof, PolicyClear::Cleared).await;
+        assert!(
+            matches!(closed, PolicyMailboxOutcome::Committed(_)),
+            "{case}"
+        );
+        let released = fx.seen().await;
+        assert!(released.slot.is_none(), "{case}");
+        assert_eq!(
+            (&released.pending, &released.bytes),
+            (&installed.pending, &installed.bytes),
+            "{case}"
+        );
+        assert_eq!(
+            debts_read_and_held(&fx).await,
+            (read.clone(), held),
+            "{case}"
+        );
+        for intent in [Intent::Feedback, Intent::Driver, Intent::Ready] {
+            let outcome = handoff(&fx, &proof, intent).await;
+            assert!(
+                matches!(outcome, HandoffOutcome::Refused(_)),
+                "{case} {intent:?}"
+            );
+        }
+        assert_eq!(fx.seen().await, released, "{case}");
+        let tombstone = registry.remove_idle_entry(fx.channel).await;
+        assert_eq!(
+            tombstone,
+            MailboxPurgeOutcome::RefusedLiveWork("installed_pending")
+        );
+
+        let next = Arc::new(CancelToken::from_persisted_turn_nonce(Some(format!(
+            "next-{n}"
+        ))));
+        let kind = ActiveTurnKind::UserOrAgent;
+        let start = (fx.handle).restore_active_turn_kinded(
+            next.clone(),
+            proof.owner,
+            MessageId::new(323),
+            kind,
+        );
+        start.await;
+        let occupied = fx.seen().await;
+        assert_eq!(occupied.slot, Some(Arc::as_ptr(&next) as usize), "{case}");
+        let stale = fx.close(&proof, PolicyClear::Cleared).await;
+        assert!(
+            !matches!(stale, PolicyMailboxOutcome::Committed(_)),
+            "{case}"
+        );
+        assert_eq!(fx.seen().await, occupied, "{case}");
     }
 }
 
