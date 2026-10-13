@@ -975,7 +975,7 @@ pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
 
 #[cfg(test)]
 #[path = "channel_home_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "channel_home_claim_tests.rs"]

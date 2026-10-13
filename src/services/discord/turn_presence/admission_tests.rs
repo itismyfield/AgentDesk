@@ -866,3 +866,73 @@ async fn b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_appro
     assert!(attempt.await.is_none());
     assert_eq!(polls.load(Ordering::SeqCst), 0);
 }
+
+// A Gateway first poll holds the Home registry, so no Home mounts between its check and the poll.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_a_gateway_first_poll_holds_off_a_home_mount() {
+    let fixture = Fixture::new();
+    channel_home::unregister_if_same(&fixture.home);
+    let gateway = ownership::gate("claude");
+    gateway.acquired();
+    let seated = fixture
+        .incarnation
+        .replace(&fixture.ticket(), fixture.identity.clone());
+    assert!(seated);
+    let started = fixture
+        .approval()
+        .await
+        .start(42, fixture.identity.channel, || {
+            let waits = crate::services::cluster::channel_home::tests::mount_waits();
+            assert!(waits, "a Home could mount inside the first poll");
+            std::future::ready(())
+        });
+    assert!(started.await.is_some());
+    gateway.lost();
+}
+
+// A Home mounting over a Gateway approval, replacing an older Home or leaving withdraws the
+// approval resting on the owner it displaced.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner() {
+    let fixture = Fixture::new();
+    let fence =
+        Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
+    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let channel = fixture.identity.channel.to_string();
+    let home = |epoch| {
+        let home = Arc::new(HomeGate::new(&channel, "b1-worker"));
+        let held = HeldHome::for_test(&channel, "b1-worker", epoch, HomeState::Worker);
+        home.confirm(&held, tokio::time::Instant::now()).unwrap();
+        home
+    };
+    let seat = || {
+        let ticket = fixture.ticket();
+        let incarnation = ticket.incarnation().unwrap();
+        assert!(incarnation.replace(&ticket, fixture.identity.clone()));
+        fixture.ticket()
+    };
+    let on_old = fixture.ticket();
+    let replacement = home(8);
+    channel_home::register(replacement.clone());
+    assert!(
+        on_old.incarnation().is_none(),
+        "the replaced Home's approval"
+    );
+    let on_replacement = seat();
+    channel_home::unregister_if_same(&replacement);
+    assert!(
+        on_replacement.incarnation().is_none(),
+        "the unmounted Home's approval"
+    );
+    let ticket = fixture.ticket();
+    let gateway = ownership::gate("b2b2-home-mount");
+    let incarnation = ticket.incarnation().unwrap();
+    assert!(incarnation.seat_gateway_for_tests(&ticket, fixture.identity.clone(), gateway));
+    let on_gateway = fixture.ticket();
+    channel_home::register(home(9));
+    assert!(
+        on_gateway.incarnation().is_none(),
+        "the Gateway approval a Home mounted over"
+    );
+    channel_home::unregister(&channel);
+}

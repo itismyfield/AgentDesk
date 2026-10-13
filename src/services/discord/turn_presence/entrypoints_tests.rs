@@ -112,3 +112,69 @@ async fn b2b1_suspend_and_resume_reach_only_the_runtime_installed_for_that_share
     assert!(!Probe::current(&ticket_a), "no earlier approval comes back");
     assert!(probe_a.open(channel_a));
 }
+
+/// Polls until `done` holds, within a few seconds.
+async fn until(done: impl Fn() -> bool) {
+    for _ in 0..800 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("never got there");
+}
+
+// A relay the cluster loop drops, by an update, a removal or its final drain, withdraws its
+// channel in its provider's runtime only.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b2_a_removed_cluster_relay_withdraws_only_its_provider_runtime() {
+    use crate::services::cluster::session_matcher::{self, MatchedChannel};
+    use crate::services::cluster::watcher_supervisor as relays;
+    use crate::services::cluster::{relay_producer_registry, session_registry, stream_relay};
+    use crate::services::provider::ProviderKind;
+    let claude = crate::services::discord::make_shared_data_for_tests();
+    let mut codex = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut codex).expect("unshared").provider = ProviderKind::Codex;
+    let (probe, other) = (Probe::install(&claude), Probe::install(&codex));
+    let channel = 6_325_931_u64;
+    let session = ProviderKind::Claude.build_tmux_session_name("b2b2-relay");
+    let matched = |agent: &str| MatchedChannel {
+        channel_id: channel.to_string(),
+        agent_id: agent.to_string(),
+        provider: ProviderKind::Claude,
+        expected_session_name: session.clone(),
+        expected_rollout_path: session_matcher::expected_rollout_path_for(&session),
+    };
+    let registry = Arc::new(session_registry::SessionRegistry::new());
+    let producers = Arc::new(relay_producer_registry::RelayProducerRegistry::new());
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run = tokio::spawn(
+        relays::run_watcher_supervisor_loop_with_registry_and_producers(
+            relays::SupervisorConfig::for_test(),
+            Arc::new(stream_relay::DiscardSink),
+            shutdown.clone(),
+            registry.clone(),
+            producers.clone(),
+        ),
+    );
+    let relayed = || producers.get_producer(&session).is_some();
+    registry.upsert(matched("a"), Some("mac-mini"));
+    until(relayed).await;
+    let foreign = other.arm(channel);
+    let ticket = probe.arm(channel);
+    registry.upsert(matched("b"), Some("mac-mini"));
+    until(|| !Probe::current(&ticket)).await;
+    let ticket = probe.arm(channel);
+    registry.remove(&session);
+    until(|| !Probe::current(&ticket)).await;
+    registry.upsert(matched("c"), Some("mac-mini"));
+    until(relayed).await;
+    let ticket = probe.arm(channel);
+    shutdown.store(true, Ordering::Release);
+    run.await.unwrap();
+    assert!(!Probe::current(&ticket), "the final drain withdraws");
+    assert!(
+        Probe::current(&foreign),
+        "another provider's runtime keeps the channel"
+    );
+}

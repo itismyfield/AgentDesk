@@ -10,6 +10,7 @@ use crate::services::discord::input_runtime::supervisor::admission::Admission;
 pub(crate) use crate::services::discord::input_runtime::supervisor::command::SupervisorCmd;
 
 use super::{BUDGET, Cursor, Landing, Ports, Supervisor, clear_loan, held, loan};
+use crate::services::discord::PresenceLease;
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
 use crate::services::discord::input_runtime::reconcile::{self, HoldCause};
@@ -270,8 +271,8 @@ pub(crate) struct ChannelDrive<D: DrivePorts> {
     lost: bool,
     pub(super) clearing: Option<Clearing>,
     hold: Option<(&'static str, Instant)>,
-    /// The presence registrations this drive started under; a later one is not its to withdraw.
-    presence: crate::services::discord::PresenceLease,
+    /// Withdrawn at Close and at every end; a presence registration made later is not its own.
+    presence: PresenceLease,
     #[cfg(test)]
     pub(crate) counts: Counts,
 }
@@ -284,7 +285,6 @@ impl<D: DrivePorts> ChannelDrive<D> {
 
 /// A drive dropped without [`Supervisor::stop_drive`], by cancellation or a panic, still holds an
 /// open gate. A loan it abandoned keeps the slot lent, so that worker's writes stay its own.
-/// Every end, `stop_drive` included, withdraws the presence lease.
 impl<D: DrivePorts> Drop for ChannelDrive<D> {
     fn drop(&mut self) {
         self.presence.withdraw("input_drive_ended");
@@ -534,10 +534,7 @@ impl<P: Ports> Supervisor<P> {
             lost: false,
             clearing: None,
             hold: None,
-            presence: crate::services::discord::PresenceLease::take(
-                &self.config.provider,
-                self.config.channel,
-            ),
+            presence: PresenceLease::take(&self.config.provider, self.config.channel),
             #[cfg(test)]
             counts: Counts::default(),
         };

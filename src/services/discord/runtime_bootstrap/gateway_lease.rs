@@ -611,13 +611,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             if let Some(lease) = current_lease.take() {
                                 let _ = release_gateway(&gate, lease.unlock()).await;
                             }
-                            self_fence_gateway(
-                                &shared_for_lease,
-                                &provider_for_lease,
-                                &gate,
-                                &shard_manager,
-                            )
-                            .await;
+                            let (shared, provider) = (&shared_for_lease, &provider_for_lease);
+                            self_fence_gateway(shared, provider, &gate, &shard_manager).await;
                             return;
                         }
                     }
@@ -687,13 +682,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         provider_for_lease.display_name()
                     );
                     gate.lost();
-                    self_fence_gateway(
-                        &shared_for_lease,
-                        &provider_for_lease,
-                        &gate,
-                        &shard_manager,
-                    )
-                    .await;
+                    let (shared, provider) = (&shared_for_lease, &provider_for_lease);
+                    self_fence_gateway(shared, provider, &gate, &shard_manager).await;
                     return;
                 }
             }
