@@ -298,6 +298,22 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         writer
     }
 
+    /// As [`Self::with_receipts`] over the receipts `repost` reads first, then gives it the turn.
+    pub(crate) async fn hosted(
+        store: ChannelStore,
+        gate: Arc<OwnershipGate>,
+        port: Arc<P>,
+        lease: L,
+        alarms: A,
+        mut repost: Option<Box<dyn RepostHook<Self>>>,
+    ) -> Self {
+        let receipts = match repost.as_mut() {
+            Some(turn) => turn.receipts().await,
+            None => ReceiptOverlay::Disabled,
+        };
+        Self::with_receipts(store, gate, port, lease, alarms, receipts).with_repost(repost)
+    }
+
     /// Gives the writer its re-post turn, if its host has one.
     pub(crate) fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
         self.repost = hook;
@@ -344,6 +360,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     pub fn store(&mut self) -> &mut ChannelStore {
         &mut self.store
+    }
+
+    /// The ledger's approved retries less those a shared receipt already settled.
+    pub(super) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
+        let ledger = self.store.ledger();
+        let open = |piece: &PieceRecord| {
+            let at = (&piece.unit_key, piece.piece_index);
+            self.receipts.disposition(ledger, at.0, at.1) != PieceDisposition::Settled
+        };
+        let pieces = ledger.resume_pieces().filter(|(_, piece)| open(piece));
+        pieces
+            .map(|(serial, piece)| (serial, piece.clone()))
+            .collect()
     }
 
     pub fn channel(&self) -> u64 {
