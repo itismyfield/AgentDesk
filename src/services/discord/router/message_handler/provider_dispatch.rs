@@ -237,30 +237,38 @@ pub(super) fn execute(
                 claude_tui::submission_fence::with_scope(
                     turn.submission.map(ManagedSubmission::fence),
                     || {
-                        #[cfg(test)]
-                        if let Some(result) = claude_legacy_probe(turn.channel_id) {
-                            return result;
-                        }
-                        claude::execute_command_streaming(
-                            turn.prompt,
-                            turn.session_id,
-                            turn.working_dir,
-                            sender,
-                            turn.system_prompt,
-                            Some(turn.allowed_tools),
-                            Some(turn.cancel),
-                            turn.remote_profile,
-                            turn.tmux_session_name,
-                            turn.teardown,
-                            Some(turn.channel_id),
-                            Some(turn.provider.clone()),
-                            turn.model,
-                            turn.native_fast_mode,
-                            turn.compact_percent,
-                            turn.compact_lower_bound_tokens,
-                            turn.cache_ttl_minutes,
-                            turn.dispatch_type,
-                        )
+                        claude_tui::submit_canary::with_channel(turn.channel_id, || {
+                            #[cfg(all(test, unix))]
+                            submission_tests::observe_owner(
+                                turn.channel_id,
+                                turn.submission,
+                                turn.prompt,
+                            );
+                            #[cfg(test)]
+                            if let Some(result) = claude_legacy_probe(turn.channel_id) {
+                                return result;
+                            }
+                            claude::execute_command_streaming(
+                                turn.prompt,
+                                turn.session_id,
+                                turn.working_dir,
+                                sender,
+                                turn.system_prompt,
+                                Some(turn.allowed_tools),
+                                Some(turn.cancel),
+                                turn.remote_profile,
+                                turn.tmux_session_name,
+                                turn.teardown,
+                                Some(turn.channel_id),
+                                Some(turn.provider.clone()),
+                                turn.model,
+                                turn.native_fast_mode,
+                                turn.compact_percent,
+                                turn.compact_lower_bound_tokens,
+                                turn.cache_ttl_minutes,
+                                turn.dispatch_type,
+                            )
+                        })
                     },
                 )
             },

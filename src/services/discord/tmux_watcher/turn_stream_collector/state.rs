@@ -168,6 +168,9 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream 
     pub(in crate::services::discord::tmux::tmux_watcher) found_result: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_kind: Option<WatcherTerminalKind>,
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_evidence_offset: Option<u64>,
+    #[cfg(unix)]
+    pub(in crate::services::discord::tmux::tmux_watcher) injected_candidates:
+        Vec<crate::services::discord::replay_policy::injected::Candidate>,
     pub(in crate::services::discord::tmux::tmux_watcher) is_prompt_too_long: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) stale_resume_detected: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) task_notification_kind:
