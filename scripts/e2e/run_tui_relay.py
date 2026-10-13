@@ -5174,6 +5174,7 @@ def main() -> int:
             "id": scenario_id, "cell": partial.get("cell", cell), "provider": partial.get("provider", cell_provider(cell)),
             "runtime": partial.get("runtime", cell_runtime(cell)), "status": "fail", "reason": reason,
             "durable_record_probe": {"status": "unevaluable", "reason": reason},
+            "failure_attribution": _failure_attribution("harness", reason, record=partial),
             "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
         })
     finally:
