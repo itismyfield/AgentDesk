@@ -1,6 +1,5 @@
-//! Recovery custody: one shared PG row per channel names the single consumer — scoped recovery
-//! install or legacy consumption — that may consume the channel's pending input, and keeps an
-//! undecided result until it is reconciled. Only tests connect it.
+//! Recovery custody: one shared PG row per channel names the single consumer of its pending
+//! input and keeps an undecided result until reconciled. Only tests connect it.
 
 pub(crate) mod capability;
 pub(crate) mod denial_index;

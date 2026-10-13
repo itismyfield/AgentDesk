@@ -1,6 +1,5 @@
-//! Channel recovery custody rows (`channel_recovery_custody`). Every write is one statement
-//! conditioned on the expected revision and format; nothing here deletes a row or takes one over
-//! by age, and a stale condition leaves the row unchanged.
+//! Channel recovery custody rows: every write is one statement conditioned on the expected
+//! revision and format; nothing deletes a row or takes one over by age.
 
 use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, Row};

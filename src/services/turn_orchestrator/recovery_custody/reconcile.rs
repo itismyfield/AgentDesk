@@ -1,6 +1,5 @@
-//! Reconciliation of a custody row's operation from three facts: how far its durable progress let
-//! it go, what the canonical owner observes now, and whether the earlier execution can still run.
-//! Only a truly undecided case holds; a known old or new state resumes, returns or closes.
+//! Reconciles an operation from its durable progress, the canonical owner's observation and
+//! whether the earlier execution can still run; only a truly undecided case holds.
 
 use super::model::{CanonicalSeal, CustodyRecord, IssuedEpisode, Observed, Phase};
 use super::operation::{ActiveOperation, OperationKind, Root, Stage, StageStatus};

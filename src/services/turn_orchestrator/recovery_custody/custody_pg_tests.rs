@@ -359,7 +359,17 @@ async fn s3act_b3b4a1_a00_transition_busy_ends_only_an_unapplied_reservation_pg(
 async fn s3act_b3b4a1_l01_legacy_needs_no_home_and_read_errors_never_mean_unmanaged_pg() {
     let fx = Fx::create().await;
     let (no_home, homed, scoped_ch, broken) = (channel(11), channel(12), channel(13), channel(14));
-    fx.reserve(legacy(&no_home, seal("q1", None, None))).await;
+    let reserved = fx
+        .custody
+        .reserve(
+            fx.admit(&no_home).await,
+            legacy(&no_home, seal("q1", None, None)),
+        )
+        .await;
+    assert!(
+        matches!(reserved, Ok(Reservation::Reserved { .. })),
+        "a no-home legacy consumer keeps its admission: {reserved:?}"
+    );
     let stored_epoch: Option<i64> =
         sqlx::query_scalar("SELECT home_epoch FROM channel_recovery_custody WHERE channel_id = $1")
             .bind(&no_home)
@@ -1085,7 +1095,16 @@ mod dormant {
     const NO_PG: &str = "1486723324259370005";
 
     /// Recorded at base 945aac2668ce010b92053fdb39f541ae51629e20 by running `observe` there.
-    const ORACLE: &[&str] = &[];
+    const ORACLE: &[&str] = &[
+        "success-no-home admit=Ok(admission_locks=1) home=Ok(None)",
+        "home-held admit=Ok(admission_locks=1) home=Ok(Some(ChannelHome { channel_id: \"1486723324259370002\", provider: \"claude\", state: Worker, holder: Some(\"node-b\"), target: None, epoch: 41, renewed_at: Some(2026-10-14T00:00:00Z), updated_at: 2026-10-14T00:00:01Z, detail: None }))",
+        "home-off admit=Ok(admission_locks=1) home=Ok(Some(ChannelHome { channel_id: \"1486723324259370003\", provider: \"claude\", state: Released, holder: None, target: Some(\"node-gw\"), epoch: 42, renewed_at: None, updated_at: 2026-10-14T00:00:02Z, detail: Some(\"off\") }))",
+        "fenced admit=Err(channel is fenced by another recovery lease or a pending handoff) home=Ok(None)",
+        "no-pg admit=Ok(admission_locks=0) home=Ok(None)",
+        "agent_recovery_channel_state=[\"{\\\"channel_id\\\":\\\"1486723324259370004\\\",\\\"status\\\":\\\"fallback_done\\\",\\\"owner_agent_id\\\":\\\"owner\\\",\\\"fallback_agent_id\\\":\\\"fallback\\\",\\\"active_writer_agent_id\\\":\\\"fallback\\\",\\\"workspace\\\":\\\"inherit\\\",\\\"primary_turn_id\\\":\\\"turn-1\\\",\\\"next_seq\\\":3,\\\"updated_at\\\":\\\"2026-10-14T00:00:03+00:00\\\",\\\"generation\\\":5,\\\"recovery_context\\\":null}\"]",
+        "agent_recovery_checkpoint_events=[]",
+        "o_channel_homes=[\"{\\\"channel_id\\\":\\\"1486723324259370002\\\",\\\"provider\\\":\\\"claude\\\",\\\"state\\\":\\\"worker\\\",\\\"holder\\\":\\\"node-b\\\",\\\"target\\\":null,\\\"epoch\\\":41,\\\"renewed_at\\\":\\\"2026-10-14T00:00:00+00:00\\\",\\\"updated_at\\\":\\\"2026-10-14T00:00:01+00:00\\\",\\\"detail\\\":null}\", \"{\\\"channel_id\\\":\\\"1486723324259370003\\\",\\\"provider\\\":\\\"claude\\\",\\\"state\\\":\\\"released\\\",\\\"holder\\\":null,\\\"target\\\":\\\"node-gw\\\",\\\"epoch\\\":42,\\\"renewed_at\\\":null,\\\"updated_at\\\":\\\"2026-10-14T00:00:02+00:00\\\",\\\"detail\\\":\\\"off\\\"}\"]",
+    ];
 
     async fn seed(pool: &PgPool) {
         sqlx::raw_sql(&format!(
