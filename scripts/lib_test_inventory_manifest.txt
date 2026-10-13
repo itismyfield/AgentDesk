@@ -8921,6 +8921,14 @@ services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idl
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_slash_raw_and_wrapper_post_one_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_manual_rebind_creates_rows_only_on_unconfirmed_channels
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_without_a_lease
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::accepted_claim_emits_one_pending_then_post_failure_releases
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::late_rollback_preserves_newly_admitted_successor_pending
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::lost_mailbox_claim_has_only_queue_effects
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::merged_runtime_refusal_has_only_plus_effects
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::persistence_refusal_never_emits_pending
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::purge_closed_actor_cannot_claim_or_erase_successor_pending
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::runtime_transition_refusal_has_only_queue_effects
+services::discord::tui_prompt_relay::relay_e2e::pending_admission_e2e::synthetic_inputs_keep_their_no_discord_reaction_policy
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_announced_prompt_is_not_reannounced_by_the_idle_scanner
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_hook_resent_after_a_relay_without_a_post_is_announced_once
 services::discord::tui_prompt_relay::relay_e2e::prompt_identity_e2e::a_primary_send_to_another_waiter_does_not_claim_observer_receipt

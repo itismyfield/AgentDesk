@@ -812,17 +812,10 @@ async fn handle_text_message_admitted(
                 }
             }
         };
-    let turn_start_attempt = if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
+    let add_turn_pending = should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
         && !(_queued_drain
             && super::super::intake_dispatch::checkpoint_waits_for_admission(channel_id))
-        && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
-    {
-        tv_start_current_with_attempt(shared, http, channel_id, user_msg_id, "intake_start")
-            .await
-            .attempt()
-    } else {
-        None
-    };
+        && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id);
 
     // ── Dispatch thread auto-creation ──────────────────────────────
     // When a dispatch message arrives, create a Discord thread for
@@ -972,7 +965,7 @@ async fn handle_text_message_admitted(
         (
             reply_to_user_message,
             &dispatch_id_for_thread,
-            turn_start_attempt,
+            None,
             preserve_on_cancel,
             _queued_drain,
         ),
@@ -1433,13 +1426,7 @@ async fn handle_text_message_admitted(
         );
     }
 
-    // codex review P1/P2: when this turn lost the race, drive the entire
-    // race-loss path (placeholder POST, mapping insert, enqueue, idle-drain
-    // safety net, queued-card edit) here and return. Splitting into a
-    // dedicated `if !started` block — instead of folding it into the
-    // `placeholder_msg_id` let-binding below — keeps the started==true
-    // path linear and lets us bail out without the post-let main flow ever
-    // running on a non-active turn.
+    // A refused claim owns no start attempt; publish only its durable queue view.
     if !started {
         return race_loss::handle_race_loss_enqueue(
             http,
@@ -1459,12 +1446,21 @@ async fn handle_text_message_admitted(
             &voice_announcement,
             reply_to_user_message,
             &dispatch_id_for_thread,
-            turn_start_attempt,
+            None,
             preserve_on_cancel,
             race_loss::QueuedIntakeCause::RaceLoss,
         )
         .await.map(|_| IntakeExecution::deferred(channel_id));
     }
+
+    // Dispatch redirects keep the reaction on the original Discord message.
+    let _turn_start_attempt = if add_turn_pending {
+        tv_start_current_with_attempt(shared, http, original_channel_id, user_msg_id, "intake_start")
+            .await
+            .attempt()
+    } else {
+        None
+    };
 
     let reusable_busy_notice = placeholder_handoff::reuse_bound_busy_notice(
         http,
@@ -2133,7 +2129,7 @@ async fn handle_text_message_admitted(
                 channel_id,
                 user_msg_id,
                 placeholder_msg_id,
-                turn_start_attempt,
+                turn_start_attempt: _turn_start_attempt,
                 session_retry_context: session_retry_context.as_ref(),
                 feedback_reminder: feedback_reminder.as_deref(),
                 wip_warning: wip_warning.as_deref(),
