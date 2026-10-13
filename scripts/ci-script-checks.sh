@@ -486,6 +486,11 @@ if run_check contracts "Script checks shard ownership + result mirror contract";
 "$PYTHON" -m unittest tests.test_ci_script_check_shards
 fi
 
+if run_check contracts "Giant deadline warning reporter contract"; then
+# Verbose output lets the shard contract confirm every acceptance test ran unskipped.
+"$PYTHON" -m unittest -v tests.test_report_giant_deadlines
+fi
+
 if run_check contracts "Rust test-lane coverage ratchet (#4846/#4910)"; then
 if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
   echo "ERROR: TEST_LANE_BASELINE_REF must name an immutable comparison snapshot" >&2
