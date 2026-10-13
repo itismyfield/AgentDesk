@@ -59,6 +59,10 @@ impl RemintFence {
     }
 }
 
+/// A fence reading: raised, and the latest started episode.
+#[cfg(test)]
+pub(super) type FenceSnapshot = (bool, Option<(Option<MessageId>, Option<String>)>);
+
 /// The channel's fence, shared by every actor incarnation the registry spawns
 /// for it, so a purge that recreates the actor does not forget a release. Only
 /// the live actor writes: a purged actor holds no token and refuses starts.
@@ -97,7 +101,7 @@ impl FenceCell {
 
     /// Whether the fence is raised and which episode it last saw start.
     #[cfg(test)]
-    pub(super) fn snapshot(&self) -> (bool, Option<(Option<MessageId>, Option<String>)>) {
+    pub(super) fn snapshot(&self) -> FenceSnapshot {
         self.with(|fence| (fence.raised, fence.latest_started.clone()))
     }
 

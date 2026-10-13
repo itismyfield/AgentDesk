@@ -302,6 +302,10 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             matches!(outcome, BeforeStartRestartReport::Retained(_)),
             "{case}"
         );
+        if case.contains("message") {
+            let held = BeforeStartRestartReport::Retained("no message to show the stop on");
+            assert_eq!(outcome, held, "{case}: held before any later step");
+        }
         assert_eq!(fixture.bytes(), before, "{case}");
         assert!(discord.calls().is_empty(), "{case}: {:?}", discord.calls());
         if case == "delivered without its message" {

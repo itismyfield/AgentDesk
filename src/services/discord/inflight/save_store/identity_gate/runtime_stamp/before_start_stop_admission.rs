@@ -371,6 +371,8 @@ mod fault {
     static FAULTS: Mutex<Vec<(u64, bool)>> = Mutex::new(Vec::new());
     /// Rename faults handed to the atomic writer, kept until their evidence is read.
     static RENAMES: Mutex<Vec<(u64, rename_fault::Armed)>> = Mutex::new(Vec::new());
+    /// Channels with a rename fault armed, each to be matched by one handed-over fault.
+    static RENAMES_ARMED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
     impl InflightTurnState {
         pub(in crate::services::discord) fn arm_before_start_receipt_fault(
@@ -378,6 +380,9 @@ mod fault {
             rename: bool,
         ) {
             FAULTS.lock().unwrap().push((channel_id, rename));
+            if rename {
+                RENAMES_ARMED.lock().unwrap().push(channel_id);
+            }
         }
 
         /// Whether every armed fault of `channel_id` was consumed by a receipt write, a rename
@@ -386,7 +391,17 @@ mod fault {
             channel_id: u64,
         ) -> bool {
             let mut renames = RENAMES.lock().unwrap();
-            let mut renamed = true;
+            let mut armed_here = RENAMES_ARMED.lock().unwrap();
+            let requested = armed_here
+                .iter()
+                .filter(|channel| **channel == channel_id)
+                .count();
+            armed_here.retain(|channel| *channel != channel_id);
+            let handed = renames
+                .iter()
+                .filter(|(channel, _)| *channel == channel_id)
+                .count();
+            let mut renamed = handed == requested;
             renames.retain(|(channel, armed)| {
                 if *channel != channel_id {
                     return true;

@@ -601,8 +601,9 @@ pub(crate) mod policy_op_unlink_hook {
     use std::cell::RefCell;
     use std::path::Path;
 
+    type Hook = Box<dyn Fn(&Path)>;
     thread_local! {
-        static HOOK: RefCell<Option<Box<dyn Fn(&Path)>>> = RefCell::new(None);
+        static HOOK: RefCell<Option<Hook>> = RefCell::new(None);
         static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
     /// Runs `hook` on this thread right before the unlink, and counts the attempts.

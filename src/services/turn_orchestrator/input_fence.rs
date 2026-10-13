@@ -143,9 +143,12 @@ impl StepGuard {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PolicyMailboxView {
     marker: Option<Vec<u8>>,
-    reservation: (Option<MessageId>, Vec<MessageId>, bool, bool),
-    fence: (bool, Option<(Option<MessageId>, Option<String>)>),
+    reservation: Reservation,
+    fence: super::remint_fence::FenceSnapshot,
 }
+/// The dispatch reservation, its source ids, its lease and the injection reservation.
+#[cfg(test)]
+type Reservation = (Option<MessageId>, Vec<MessageId>, bool, bool);
 #[cfg(test)]
 impl PolicyMailboxView {
     fn of(

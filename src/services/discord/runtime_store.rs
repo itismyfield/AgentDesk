@@ -950,7 +950,8 @@ pub(in crate::services::discord) mod rename_fault {
     use std::sync::Mutex;
 
     /// (path, fault still pending, rename attempts, their OS errors)
-    static ARMED: Mutex<Vec<(PathBuf, bool, usize, Vec<String>)>> = Mutex::new(Vec::new());
+    type Entry = (PathBuf, bool, usize, Vec<String>);
+    static ARMED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
     /// Fails the next rename onto its path; records that path's renames until dropped.
     pub(in crate::services::discord) struct Armed(PathBuf);
