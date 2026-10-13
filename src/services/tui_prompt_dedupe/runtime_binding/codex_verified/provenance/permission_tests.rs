@@ -45,6 +45,7 @@ impl Fixture {
             captured_through: header.len() as u64,
             prefix_hash: hex::encode(Sha256::digest(header.as_bytes())),
             retired: false,
+            transition_cleanup: None,
         };
         let context = BindingContext {
             schema: 1,
