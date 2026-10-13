@@ -43,25 +43,33 @@ Herdr 로 띄운 Claude 채널(P9 대상: adk-dash-cc)의 운영 절차다. 5a�
 ## 2a. 첫 E2E gate와 운영자 재시작 관측
 
 - 하네스와 `--herdr-status-bin` CLI는 API 대상 노드에서 실행한다. `--base-url`은 그 노드 loopback이고 지정 endpoint는 `local=true`여야 한다.
+- `--herdr-status-bin`은 `--base-url`과 **같은 runtime**의 바이너리·환경이어야 한다. 한 노드에 dev(8797)와 release(8791)가 함께 있으면 다른 runtime의 row를 읽는다.
+- `<common-args>` = `--cell claude-herdr --channel-id <channel> --base-url http://127.0.0.1:<port> --herdr-endpoint <endpoint> --herdr-status-bin <cli>`.
 - health·Discord 요청에는 같은 scheme·host·port의 loopback `Origin`을 자동 적용한다. 토큰 인자·환경변수나 설정 파일 탐색은 사용하지 않는다.
 - detail의 readiness·admission·필수 필드와 캐시 `input_holds=0`을 확인한 뒤, 현재 CLI row·hold도 검사한다. 관측 실패 시 SETUP/프롬프트를 보내지 않는다.
 - cold에서는 row가 없어도 되지만 응답 뒤에는 대상 channel/provider의 유일한 정상 row·launch 증거·hold 0이 필요하다. 최초 실행에 `published>0`은 요구하지 않는다.
 - 첫 gate는 `claude-herdr`로 **E-1 → E-3 → E-2 → E-15 → E-50**을 각각 한 번씩 실행한다. 하나라도 `status=pass`가 아니면 다음 입력을 보내지 않는다.
 - 아래 명령에서 `<scenario>`는 위 순서로 하나씩 바꾸고 `<run>`·`<output>`은 실행마다 고유하게 지정한다.
-  `python3 scripts/e2e/run_tui_relay.py --cell claude-herdr --channel-id <channel> --base-url http://127.0.0.1:<port> --herdr-endpoint <endpoint> --herdr-status-bin <cli> --no-reset-before-each --filter <scenario> --run-id <run> --output <output>`
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --no-reset-before-each --filter <scenario> --run-id <run> --output <output>`
+- E-50 판정: `python3 scripts/e2e/post_deploy_turn_smoke.py judge --report <output>/report.claude-herdr.json --scenarios tests/e2e/tui_relay/scenarios --scenario E-50 --cell claude-herdr --channel-id <channel> --driver-rc <rc>`
+- 관측은 노드 전체 상태에 묶여 있어 대상 채널과 무관하게 멈출 수 있다: detail `status≠healthy`, `degraded_reasons` 비어 있지 않음, 다른 채널 row의 hold·unreadable 또는 `other_input_holds`.
+  멈추면 report의 `herdr_observations[-1].readiness`와 `reason`을 보고, 원인을 정리한 뒤 같은 시나리오부터 다시 실행한다.
 - 종료 코드 0만으로 수용하지 않는다. **첫 gate는 시나리오별 `status=pass`를 직접 확인해야 한다**. `known_gap`·`unexpected_pass`·`not_applicable`은 gate 통과가 아니다.
 - E-50 smoke judge는 T1·T2·AFTER_CLEAR가 각각 1회이고 detail/CLI 관측이 있어야 통과한다. Herdr에서는 tmux 로그·legacy queue 파일을 읽지 않는다.
 - 재시작(E-8/19)·stop(E-18)·terminate(E-12)·E-35/36 원래 수용 기준은 이 첫 gate 밖이다.
 - 공유 운영 dcserver에는 `--herdr-isolated-server`를 쓰지 않는다. 재시작은 운영자가 수행하고 하네스는 아래 두 관측만 담당한다.
+- mark·verify도 실행마다 고유한 `--output`을 준다. gate 출력 디렉터리를 쓰면 gate의 `report.claude-herdr.json`을 덮어쓴다.
 - 첫 gate 뒤 정상 row가 있는 상태에서 공통 인자를 유지하고 표식을 만든다(Discord 전송 없음, 기존 표식 덮어쓰기 거부).
-  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only mark --herdr-restart-mark <mark.json>`
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only mark --herdr-restart-mark <mark.json> --output <mark-output>`
 - 표식에는 실행 run ID·target row/nonce·UTC 관측 시각·detail herdr 요약·서버가 제공한 시각/uptime 값이 저장된다.
 - 운영자가 dcserver 재시작을 마친 다음 같은 노드·channel·endpoint와 같은 표식으로 검증한다.
-  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only verify --herdr-restart-mark <mark.json>`
-- verify는 reconnect의 published>0, channels=published, withheld/unknown/pending=0, row nonce 연속성, 현재 hold 0, admission open을 확인한 뒤 후속 턴을 보낸다.
+  `python3 scripts/e2e/run_tui_relay.py <common-args> --herdr-restart-observe-only verify --herdr-restart-mark <mark.json> --output <verify-output>`
+- verify는 일반 실행과 같은 셀 lease를 잡고, reconnect의 published>0, channels=published, withheld/unknown/pending=0, row nonce 연속성, 현재 hold 0, admission open을 확인한 뒤 후속 턴을 보낸다.
+- detail에 `uptime_secs`(0 이상 정수)가 있으면 `uptime_secs < (요청 직전 시각 − 표식 시각) − 2초`일 때만 재시작으로 보고(`restart_evidence: server_uptime`), 아니면 후속 턴 없이 실패한다(`not_observed`).
+  `uptime_secs`가 없거나 형식이 다르면 `not_proven`으로 기록하고 나머지 판정만 한다.
 - 기본 후속 턴은 `E-19-observe-only`로 기록한다. `--filter E-1`처럼 재시작 단계가 없는 시나리오를 지정할 수도 있다. 원래 E-19의 비밀값 회상 기준을 충족했다고 주장하지 않는다.
 - mark/verify에는 launchctl·재시작 명령이 없다. `--herdr-isolated-server`·`--restart-script` 병용 및 재시작 단계가 포함된 후속 시나리오는 거부한다.
-- report는 전후 관측 시각과 서버 제공 값을 보존하지만 **실제 dcserver incarnation 변경을 증명하지 못한다**. 운영자의 별도 재시작 증거가 필요하다.
+- report는 전후 관측 시각과 서버 제공 값을 보존한다. `server_uptime`도 시계 기반 추정이라 boot id 수준의 incarnation 증명은 아니다. `not_proven`이면 운영자의 별도 재시작 증거가 필요하다.
 
 ## 3. 비상 정지
 
