@@ -75,7 +75,9 @@ pub(super) fn merge_runtime_stamp_progress(
     durable: &mut InflightTurnState,
     local: &InflightTurnState,
 ) -> bool {
-    if !durable.merge_replay_projection(local) {
+    // A stamp planned against another coordinate source must not move this source's runtime,
+    // cursor or body; it is refused like a diverged response.
+    if !durable.same_coordinate_source(local) || !durable.merge_replay_projection(local) {
         return false;
     }
     let Some((full_response, response_sent_offset)) = merge_forward_response_progress(
@@ -102,9 +104,7 @@ pub(super) fn merge_runtime_stamp_progress(
     preserve_tool_field!(task_notification_kind);
     durable.any_tool_used |= local.any_tool_used;
     durable.has_post_tool_text |= local.has_post_tool_text;
-    if durable.same_coordinate_source(local) {
-        durable.last_offset = durable.last_offset.max(local.last_offset);
-    }
+    durable.last_offset = durable.last_offset.max(local.last_offset);
     for frozen_id in &local.streaming_rollover_frozen_msg_ids {
         if !durable
             .streaming_rollover_frozen_msg_ids

@@ -18,6 +18,9 @@ mod create_monotonic_observer;
 
 // Dormant until the legacy restart replay installer calls it.
 #[cfg(test)]
+#[path = "save_store/coordinate_merge_tests.rs"]
+mod coordinate_merge_tests;
+#[cfg(test)]
 #[path = "save_store/coordinate_replay.rs"]
 pub(in crate::services::discord) mod coordinate_replay;
 #[cfg(test)]

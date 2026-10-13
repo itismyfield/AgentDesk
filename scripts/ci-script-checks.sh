@@ -642,6 +642,10 @@ if run_check contracts "CI macOS Trusted Rust path filter"; then
 "$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
 fi
 
+if run_check contracts "Legacy restart replay activation validator (#5925)"; then
+"$PYTHON" -m unittest tests.test_check_p5925_activation
+fi
+
 if run_check contracts "PG tunnel supervisor and retired relay cleanup tests"; then
 "$PYTHON" -m unittest tests.test_pg_tunnel
 bash tests/test_deploy_retired_relay_watchdog_6597.sh
