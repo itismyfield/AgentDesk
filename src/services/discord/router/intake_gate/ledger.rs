@@ -15,62 +15,67 @@ fn derived_targets_enabled() -> bool {
 }
 
 /// Ledger guards refuse destinations whose Legacy fence is closed.
-pub(in crate::services::discord) async fn legacy_allowed(
-    shared: &Arc<SharedData>,
-    http: &Arc<Http>,
-    provider: &ProviderKind,
+/// Keep HTTP and voice state out of the enclosing intake futures.
+pub(in crate::services::discord) fn legacy_allowed<'a>(
+    shared: &'a Arc<SharedData>,
+    http: &'a Arc<Http>,
+    provider: &'a ProviderKind,
     channel: ChannelId,
-) -> Result<(), Error> {
-    #[cfg(test)]
-    if runtime::supervisor::mutant("c2b_skip_final_legacy_checks") {
-        return Ok(());
-    }
-    let unprotected = |channel: ChannelId| {
-        if runtime::fence::channel_gate(channel.get()).is_some_and(|gate| {
-            let held = gate.mode() != runtime::fence::Mode::LegacyOpen;
-            #[cfg(test)]
-            let held = if runtime::supervisor::mutant("c2b_final_guard_ignores_mode") {
-                true
-            } else if runtime::supervisor::mutant("c2b_final_guard_only_legacy_open") {
-                !held
-            } else {
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), Error>> + Send + 'a>> {
+    Box::pin(async move {
+        #[cfg(test)]
+        if runtime::supervisor::mutant("c2b_skip_final_legacy_checks") {
+            return Ok(());
+        }
+        let unprotected = |channel: ChannelId| {
+            if runtime::fence::channel_gate(channel.get()).is_some_and(|gate| {
+                let held = gate.mode() != runtime::fence::Mode::LegacyOpen;
+                #[cfg(test)]
+                let held = if runtime::supervisor::mutant("c2b_final_guard_ignores_mode") {
+                    true
+                } else if runtime::supervisor::mutant("c2b_final_guard_only_legacy_open") {
+                    !held
+                } else {
+                    held
+                };
                 held
-            };
-            held
-        }) {
-            Err::<(), Error>("input source remains pending; ledger admission is required".into())
-        } else {
-            Ok(())
+            }) {
+                Err::<(), Error>(
+                    "input source remains pending; ledger admission is required".into(),
+                )
+            } else {
+                Ok(())
+            }
+        };
+        unprotected(channel)?;
+        if !derived_targets_enabled() {
+            return Ok(());
         }
-    };
-    unprotected(channel)?;
-    if !derived_targets_enabled() {
-        return Ok(());
-    }
-    let actual = channel.to_channel(http).await?;
-    if let Channel::Guild(actual) = actual {
-        if matches!(
-            actual.kind,
-            ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
-        ) {
-            unprotected(actual.parent_id.ok_or("thread target unavailable")?)?;
+        let actual = channel.to_channel(http).await?;
+        if let Channel::Guild(actual) = actual {
+            if matches!(
+                actual.kind,
+                ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+            ) {
+                unprotected(actual.parent_id.ok_or("thread target unavailable")?)?;
+            }
         }
-    }
-    for target in [
-        shared
-            .voice_barge_in
-            .text_reply_target(channel, provider)
-            .await,
-        shared
-            .voice_barge_in
-            .announcement_target(channel, provider)
-            .await,
-    ] {
-        if let Some(target) = target.map_err(std::io::Error::other)? {
-            unprotected(target)?;
+        for target in [
+            shared
+                .voice_barge_in
+                .text_reply_target(channel, provider)
+                .await,
+            shared
+                .voice_barge_in
+                .announcement_target(channel, provider)
+                .await,
+        ] {
+            if let Some(target) = target.map_err(std::io::Error::other)? {
+                unprotected(target)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn draft(message: &Message, execution: u64, prompt: String) -> SourceDraft {

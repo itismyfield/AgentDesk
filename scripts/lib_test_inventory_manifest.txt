@@ -6601,6 +6601,7 @@ services::discord::router::intake_dispatch::replay_admission_tests::prepare_comm
 services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
+services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
