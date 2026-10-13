@@ -699,9 +699,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/services/tui_o/writer/transition_cleanup.rs",
-        "src/services/tui_o/writer/transition_observe.rs",
-        "src/services/discord/turn_bridge/replay_policy.rs",
+                "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
