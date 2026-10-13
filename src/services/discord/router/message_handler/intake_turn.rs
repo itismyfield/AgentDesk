@@ -558,6 +558,8 @@ async fn handle_text_message_admitted(
             pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
         pending_uploads.splice(0..0, taken_uploads);
         session_was_cleared = Some(cleared);
+        #[cfg(test)]
+        super::super::intake_dispatch::after_upload_take(original_channel_id).await;
     }
     let provider = settings_provider;
     let parsed_dispatch = super::super::super::adk_session::parse_dispatch_id(user_text);
@@ -966,12 +968,13 @@ async fn handle_text_message_admitted(
         (channel_id, original_channel_id),
         (turn_kind, original_request_owner, user_msg_id, user_text),
         (&reply_context, has_reply_boundary, merge_consecutive),
-        (&pending_uploads, &voice_announcement),
+        (&mut pending_uploads, &voice_announcement),
         (
             reply_to_user_message,
             &dispatch_id_for_thread,
             turn_start_attempt,
             preserve_on_cancel,
+            _queued_drain,
         ),
         (session_id, memento_context_loaded, current_path),
     )

@@ -2,16 +2,15 @@ use super::*;
 mod backstop;
 pub(in crate::services) use backstop::BackstopSlot;
 pub(in crate::services::discord) use backstop::spawn_turn_completion_idle_queue_listener;
-#[cfg(test)]
-use backstop::{
-    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
-    deferred_idle_queue_initial_presleep, emit_idle_queue_backstop_warn,
-    idle_queue_backstop_backlog_units,
-};
 pub(super) use backstop::{
-    arm_event_backstop_after_no_start_if_queue_nonempty,
+    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, arm_event_backstop_after_no_start_if_queue_nonempty,
     arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
     schedule_deferred_idle_queue_kickoff_immediate,
+};
+#[cfg(test)]
+use backstop::{
+    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY, deferred_idle_queue_initial_presleep,
+    emit_idle_queue_backstop_warn, idle_queue_backstop_backlog_units,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use backstop::{

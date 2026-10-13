@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""D4-B acceptance manifest: structure check, then separate `now` and `full` verdicts.
+"""D4-B acceptance manifest: `--structure-only`, or a `--require now|full` verdict on `--results`.
 
 `implemented` only means a row's lib tests are registered; a verdict needs a results file
 (`{"cases": {id: "PASS"|"FAIL"}, "mutants": {name: "KILLED"|"SURVIVED"|"TIMEOUT"}}`).
-`now` needs every required now row implemented and PASS and each of its mutants KILLED. `full`
-needs that for every required row and mutant, so any pending or blocked row, any missing result,
-and a TIMEOUT in place of a kill all fail it.
+`now` needs every required now row implemented and PASS, and every required mutant naming one of
+them KILLED. `full` needs that for every required row and mutant, so any pending or blocked row,
+any missing result and a TIMEOUT in place of a kill all fail it. The committed required rosters
+are pinned in tests/test_herdr_s3_d4b_manifest.py.
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ def status_ok(status: object) -> bool:
 
 def structure_errors(manifest: dict, inventory: set[str]) -> list[str]:
     errors: list[str] = []
+    for key in ("required_cases", "required_mutants"):
+        roster = manifest.get(key) or []
+        if not roster:
+            errors.append(f"{key} is empty")
+        for name in sorted({name for name in roster if roster.count(name) > 1}):
+            errors.append(f"{key} lists {name} twice")
     rows: dict[str, dict] = {}
     for case in manifest.get("cases", []):
         missing = [field for field in CASE_FIELDS if field not in case]
@@ -75,8 +82,10 @@ def verdict(manifest: dict, results: dict, level: str) -> list[str]:
     rows = {case["id"]: case for case in manifest["cases"]}
     mutants = {mutant["name"]: mutant for mutant in manifest["mutants"]}
 
+    required_now = {cid for cid in manifest["required_cases"] if rows[cid]["profile"] == "now"}
+
     def counted(cases: list[str]) -> bool:
-        return level == "full" or all(rows[cid]["profile"] == "now" for cid in cases)
+        return level == "full" or bool(required_now.intersection(cases))
 
     reasons = []
     for cid in manifest["required_cases"]:
@@ -100,9 +109,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
     parser.add_argument("--inventory", type=Path, default=INVENTORY)
-    parser.add_argument("--results", type=Path, help="results JSON; without it only the structure is checked")
-    parser.add_argument("--require", choices=LEVELS, default="full", help="level whose FAIL sets rc 1")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--structure-only", action="store_true", help="check the manifest alone")
+    mode.add_argument("--require", choices=LEVELS, help="level whose FAIL sets rc 1; needs --results")
+    parser.add_argument("--results", type=Path, help="results JSON for --require")
     args = parser.parse_args(argv)
+    if args.require and args.results is None:
+        parser.error("--require needs --results; without results nothing is accepted")
+    if args.structure_only and args.results is not None:
+        parser.error("--structure-only takes no --results")
     manifest = json.loads(args.manifest.read_text())
     lines = args.inventory.read_text().splitlines()
     inventory = {line.strip() for line in lines if line.strip() and not line.startswith("#")}
@@ -112,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     if errors:
         return 1
     print("manifest: ok")
-    if args.results is None:
+    if args.structure_only:
         return 0
     results = json.loads(args.results.read_text())
     failed = {}

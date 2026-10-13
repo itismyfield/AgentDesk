@@ -984,6 +984,8 @@ src/
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
+│   │   │   │   ├── inject/
+│   │   │   │   │   └── names.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -1404,6 +1406,8 @@ src/
 │   │   │       └── values.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
+│   │   │   │   ├── queued/
+│   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
@@ -1647,7 +1651,8 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── host_guard.rs
 │   │   │   ├── host_guard_tests.rs
-│   │   │   └── retirement_await_tests.rs
+│   │   │   ├── retirement_await_tests.rs
+│   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
 │   │   │   └── input_fence_tests.rs
 │   │   ├── tmux_watcher/
@@ -1877,6 +1882,8 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── o_panel_below.rs
 │   │   │   │   └── o_panel_below_tests.rs
+│   │   │   ├── finalize_epilogue/
+│   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
 │   │   │   │   └── tests/
 │   │   │   │       └── person_draft_tests.rs
@@ -2092,6 +2099,7 @@ src/
 │   │   │   │   ├── claude_restore.rs
 │   │   │   │   ├── liveness.rs
 │   │   │   │   ├── liveness_tests.rs
+│   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── n4d2_o_writer_test.rs
@@ -2103,6 +2111,7 @@ src/
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
+│   │   │   │   ├── restore_core.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
@@ -2327,6 +2336,8 @@ src/
 │   ├── health_diagnostics/
 │   │   └── session_state.rs
 │   ├── imsg_reply/
+│   │   ├── contract.rs
+│   │   ├── episode.rs
 │   │   └── mod.rs
 │   ├── kakao/
 │   │   ├── account.rs
