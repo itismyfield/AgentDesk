@@ -17,7 +17,7 @@ use poise::serenity_prelude::{Channel, ChannelId, Http};
 use super::status_panel::StatusPanelState;
 use crate::services::discord::is_synthetic_headless_message_id_raw;
 
-const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+pub(super) const CHANNEL_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Builds the `턴 트리거:` original-request deeplink, or `None` when no real
 /// Discord user message backs the turn (headless / synthetic / voice / id-0) or
@@ -94,9 +94,14 @@ impl super::PlaceholderLiveEvents {
         let real_id =
             user_msg_id.filter(|id| *id != 0 && !is_synthetic_headless_message_id_raw(*id));
         let guild_id = if real_id.is_some() {
-            match tokio::time::timeout(CHANNEL_LOOKUP_TIMEOUT, channel_id.to_channel(http)).await {
-                Ok(Ok(Channel::Guild(channel))) => Some(channel.guild_id.to_string()),
-                Ok(Ok(Channel::Private(_))) => Some("@me".into()),
+            let lookup = tokio::time::timeout(CHANNEL_LOOKUP_TIMEOUT, channel_id.to_channel(http))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            self.observe_panel_channel_kind(channel_id, None, lookup.as_ref());
+            match lookup {
+                Some(Channel::Guild(channel)) => Some(channel.guild_id.to_string()),
+                Some(Channel::Private(_)) => Some("@me".into()),
                 _ => None,
             }
         } else {
