@@ -1099,11 +1099,15 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<L: Into<PaneL
                     return Ok((result, outcome(&state, seek_offset)));
                 }
                 // Rollout activity resets the no-text deadline; post-text completion uses its own drain.
+                // Confirm clean negatives and consume unread growth before synthesizing a timeout.
                 let idle_elapsed =
                     last_output_at.map_or_else(|| started_at.elapsed(), |at| at.elapsed());
+                let unread_growth = file.metadata().is_ok_and(|m| m.len() > current_offset);
                 if !state.saw_assistant_text
                     && let Some(deadline) = assistant_response_deadline
                     && idle_elapsed >= deadline
+                    && !death.is_confirming_death()
+                    && !unread_growth
                 {
                     let elapsed_secs = idle_elapsed.as_secs();
                     tracing::warn!(
@@ -1479,6 +1483,162 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::mpsc;
+
+    fn idle_deadline_probe(
+        path: &Path,
+        deadline: Duration,
+        probe: impl FnMut() -> PaneLiveness,
+    ) -> (ReadOutputResult, Vec<StreamMessage>) {
+        let (tx, rx) = mpsc::channel();
+        let (result, _) = tail_rollout_file_until_assistant_response(
+            path,
+            0,
+            None,
+            &tx,
+            None,
+            probe,
+            Duration::ZERO,
+            Some(deadline),
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        drop(tx);
+        (result, rx.into_iter().collect())
+    }
+
+    #[test]
+    fn codex_idle_deadline_waits_for_each_death_confirmation() {
+        for deadline in [
+            Duration::ZERO,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let mut observed = Vec::new();
+            let started = Instant::now();
+            let (result, messages) = idle_deadline_probe(file.path(), deadline, || {
+                calls += 1;
+                assert!(calls <= 3, "death confirmation must be bounded");
+                observed.push(started.elapsed());
+                PaneLiveness::DeadOrAbsent
+            });
+            println!("deadline={deadline:?} probe_elapsed={observed:?}");
+            assert!(
+                matches!(result, ReadOutputResult::SessionDied { offset: 0 }),
+                "{deadline:?}: {result:?}"
+            );
+            assert_eq!(
+                calls, 3,
+                "{deadline:?}: idle timeout preempted confirmation"
+            );
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_resumes_after_alive_or_probe_error() {
+        for (recovery_at, recovery) in [
+            (2, PaneLiveness::Live),
+            (3, PaneLiveness::Live),
+            (2, PaneLiveness::ProbeError),
+            (3, PaneLiveness::ProbeError),
+            (1, PaneLiveness::ProbeError),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= recovery_at,
+                    "recovery must release the expired deadline"
+                );
+                if calls == recovery_at {
+                    recovery
+                } else {
+                    PaneLiveness::DeadOrAbsent
+                }
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset: 0 }),
+                "{recovery:?} at {recovery_at}: {result:?}"
+            );
+            assert_eq!(calls, recovery_at);
+            assert_eq!(messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result.contains("timed out"))).count(), 1);
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_reads_growth_during_confirmation() {
+        let reasoning = "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n";
+        for growth_at in [2, 3] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= growth_at + 1,
+                    "growth must reset confirmation and be read"
+                );
+                if calls == growth_at {
+                    std::fs::write(file.path(), reasoning).unwrap();
+                }
+                if calls > growth_at {
+                    PaneLiveness::Live
+                } else {
+                    PaneLiveness::DeadOrAbsent
+                }
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset } if offset == reasoning.len() as u64),
+                "growth at {growth_at}: {result:?}"
+            );
+            assert_eq!(calls, growth_at + 1);
+            assert_eq!(messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result.contains("timed out"))).count(), 1);
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_native_terminal_preempts_confirmation() {
+        let final_record = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"late answer\"}}\n";
+        for final_at in [2, 3] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= final_at,
+                    "native terminal must complete before another probe"
+                );
+                if calls == final_at {
+                    std::fs::write(file.path(), final_record).unwrap();
+                }
+                PaneLiveness::DeadOrAbsent
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset } if offset == final_record.len() as u64),
+                "final at {final_at}: {result:?}"
+            );
+            assert_eq!(calls, final_at);
+            let done: Vec<_> = messages
+                .iter()
+                .filter_map(|m| match m {
+                    StreamMessage::Done { result, .. } => Some(result.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(done, ["late answer"]);
+        }
+    }
 
     #[test]
     fn codex_liveness_probe_timeout_and_spawn_failure_preserve_tail() {

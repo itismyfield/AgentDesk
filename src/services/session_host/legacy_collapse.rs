@@ -27,6 +27,10 @@ impl ConfirmedDeadPane {
         self.0 = 0;
     }
 
+    pub(crate) fn is_confirming_death(&self) -> bool {
+        self.0 > 0 && self.0 < DEAD_PANE_CONFIRMATIONS
+    }
+
     pub(crate) fn observe(
         &mut self,
         liveness: crate::services::platform::tmux::PaneLiveness,

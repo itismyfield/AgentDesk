@@ -2980,6 +2980,10 @@ services::codex_tui::rollout_tail::provenance::tests::t0d_two_named_openers_are_
 services::codex_tui::rollout_tail::provenance::tests::t5_eof_and_composer_ready_leave_span_open
 services::codex_tui::rollout_tail::tests::always_fresh_pane_signal_reaches_hard_veto_cap_and_emits_done
 services::codex_tui::rollout_tail::tests::assistant_response_deadline_emits_timeout_done
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_native_terminal_preempts_confirmation
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_reads_growth_during_confirmation
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_resumes_after_alive_or_probe_error
+services::codex_tui::rollout_tail::tests::codex_idle_deadline_waits_for_each_death_confirmation
 services::codex_tui::rollout_tail::tests::codex_liveness_alive_or_unknown_before_threshold_resets_death
 services::codex_tui::rollout_tail::tests::codex_liveness_confirmed_death_requires_three_probes
 services::codex_tui::rollout_tail::tests::codex_liveness_explicit_final_completes_before_failed_probe
