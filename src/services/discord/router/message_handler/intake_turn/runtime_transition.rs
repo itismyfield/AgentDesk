@@ -12,13 +12,14 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     request: (TurnKind, UserId, MessageId, &str),
     reply: (&Option<String>, bool, bool),
     uploads: (
-        &[crate::services::cluster::attachment_transfer::uploads::Upload],
+        &mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
         &Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
     ),
     requeue: (
         bool,
         &Option<String>,
         Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
+        bool,
         bool,
     ),
     fallback_state: (Option<String>, bool, String),
@@ -28,20 +29,15 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     let (turn_kind, original_request_owner, user_msg_id, user_text) = request;
     let (reply_context, has_reply_boundary, merge_consecutive) = reply;
     let (pending_uploads, voice_announcement) = uploads;
-    let (reply_to_user_message, dispatch_id_for_thread, turn_start_attempt, preserve_on_cancel) =
-        requeue;
-    // Redirect resolution is complete. Never wait outside durable storage for a
-    // concurrent `/resume`: if the channel transition is already held, enqueue
-    // immediately and let the normal queued consumer retry after the transition.
-    // This removes the process-crash loss window that existed while intake waited
-    // up to three seconds with the event only on this task's stack.
-    //
-    // #5170: the enqueue is unchanged, but it is NOT a race loss. Nothing
-    // claimed the mailbox here — the transition lock was simply held at this
-    // instant — so the requeue is tagged `SessionTransitionBusy` and takes the
-    // deferred wake policy (the fixed 60s fail-open backstop) rather than the race-loss
-    // edge-trigger recheck, whose own transition wait re-entered intake against
-    // a lock it had itself made unacquirable, requeueing on every rotation.
+    let (
+        reply_to_user_message,
+        dispatch_id_for_thread,
+        turn_start_attempt,
+        preserve_on_cancel,
+        queued_drain,
+    ) = requeue;
+    // Busy queued drains return their already owned uploads to the restore owner.
+    // Fresh input keeps the durable tail enqueue and slow wake policy.
     let admits = crate::services::discord::commands::native_clear_admits;
     let admitted = match try_intake_runtime_transition_after_redirect(
         shared,
@@ -65,6 +61,13 @@ pub(super) async fn acquire_after_redirect_or_requeue(
     match admitted {
         Some(transition) => Ok(Some(transition)),
         None => {
+            if queued_drain {
+                return Err(Box::new(
+                    super::super::super::intake_dispatch::QueuedTransitionBusyHandoff {
+                        owned_uploads: std::mem::take(pending_uploads),
+                    },
+                ));
+            }
             tracing::warn!(
                 channel_id = channel_id.get(),
                 "session transition is busy; preserving intake immediately as a durable queued intervention"
@@ -115,7 +118,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
         let (shared, channel) = fixture(Some(session_with(&["U1"], true))).await;
-        let (owned, was_cleared) = take_channel_input_state(&shared, channel).await;
+        let (mut owned, was_cleared) = take_channel_input_state(&shared, channel).await;
         assert!(was_cleared);
         let mut core = shared.core.lock().await;
         assert!(!core.sessions[&channel].cleared, "R1 consumes the original cleared state");
@@ -130,8 +133,8 @@ mod tests {
             acquire_after_redirect_or_requeue(
                 (&http, &shared, "test-token", &ProviderKind::Codex), (channel, channel),
                 (TurnKind::Foreground, UserId::new(1), MessageId::new(566_003), "A"),
-                (&None, false, false), (&owned, &None),
-                (false, &None, None, false), (None, false, String::new()),
+                (&None, false, false), (&mut owned, &None),
+                (false, &None, None, false, false), (None, false, String::new()),
             )).await.expect("busy handoff must finish").expect("busy enqueue must succeed");
         assert!(transition.is_none(), "held transition must requeue, not acquire");
         let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
@@ -144,7 +147,50 @@ mod tests {
         assert!(core.sessions[&channel].cleared, "busy handoff must preserve cleared");
         let src = include_str!("runtime_transition.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!src.contains("take_channel_input_state"), "handoff must not take session state");
-        assert!(!src.contains("mem::take"), "handoff forwards only already-owned uploads");
         assert!(src.contains("                pending_uploads,"));
+    }
+    #[tokio::test]
+    async fn queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads() {
+        let (shared, channel) = fixture(Some(session_with(&["U2"], true))).await;
+        let _held = shared.session_transition_lock(channel).lock_owned().await;
+        let http = Arc::new(serenity::Http::new("test-token"));
+        let mut owned = vec!["U1".into(), "Q".into()];
+        let result = acquire_after_redirect_or_requeue(
+            (&http, &shared, "test-token", &ProviderKind::Codex),
+            (channel, channel),
+            (
+                TurnKind::Foreground,
+                UserId::new(1),
+                MessageId::new(566_004),
+                "A",
+            ),
+            (&None, false, false),
+            (&mut owned, &None),
+            (false, &None, None, false, true),
+            (None, false, String::new()),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("queued busy returns owned handoff"),
+        };
+        let handoff = error
+            .downcast::<super::super::super::super::intake_dispatch::QueuedTransitionBusyHandoff>()
+            .expect("typed handoff");
+        assert_eq!(handoff.owned_uploads, ["U1", "Q"]);
+        assert!(owned.is_empty());
+        assert_eq!(
+            shared.core.lock().await.sessions[&channel].pending_uploads,
+            ["U2"]
+        );
+        assert!(
+            shared
+                .mailbox(channel)
+                .snapshot()
+                .await
+                .intervention_queue
+                .is_empty()
+        );
+        shared.mailboxes.remove_fixture_for_test(channel);
     }
 }

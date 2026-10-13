@@ -43,7 +43,7 @@ struct IdleQueueBackstopRearm {
 
 pub(super) const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
-pub(super) const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration =
+pub(in crate::services::discord) const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration =
     std::time::Duration::from_secs(60);
 const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_backstop";
 

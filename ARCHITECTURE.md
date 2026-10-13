@@ -776,6 +776,7 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
+│   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
@@ -1097,6 +1098,7 @@ src/
 │   │   │   ├── o_seed_observation_tests.rs
 │   │   │   ├── orphan_relay_reclaim.rs
 │   │   │   ├── ownership_ops.rs
+│   │   │   ├── read_only_owner_snapshot.rs
 │   │   │   ├── rebind_reap.rs
 │   │   │   ├── receipt_boundary_tests.rs
 │   │   │   ├── removal.rs
@@ -1119,7 +1121,12 @@ src/
 │   │   │   │   ├── modes.rs
 │   │   │   │   └── modes_tests.rs
 │   │   │   ├── intake/
+│   │   │   │   ├── admit.rs
+│   │   │   │   ├── admit_tests.rs
 │   │   │   │   ├── classify.rs
+│   │   │   │   ├── client.rs
+│   │   │   │   ├── client_tests.rs
+│   │   │   │   ├── skills.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
@@ -1402,7 +1409,10 @@ src/
 │   │   │       └── values.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
+│   │   │   │   ├── queued/
+│   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
@@ -1419,6 +1429,9 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_io_tests.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   └── stale_turn_host_tests.rs
@@ -1872,6 +1885,8 @@ src/
 │   │   │   │   ├── contracts.rs
 │   │   │   │   ├── o_panel_below.rs
 │   │   │   │   └── o_panel_below_tests.rs
+│   │   │   ├── finalize_epilogue/
+│   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
 │   │   │   │   └── tests/
 │   │   │   │       └── person_draft_tests.rs
@@ -1968,6 +1983,7 @@ src/
 │   │   │   ├── before_start_stop.rs
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
+│   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2876,6 +2892,7 @@ src/
 │   │   ├── overflow.rs
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
+│   │   ├── policy_close.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs

@@ -4,6 +4,9 @@ use serenity::ChannelId;
 use std::sync::Arc;
 
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::policy_close::{
+    PolicyCloseRequest, PolicyMailboxOutcome, PolicyStage,
+};
 use crate::services::turn_orchestrator::registry_purge::{MailboxRefusal, retry_while_closed};
 use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
@@ -187,6 +190,22 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
         );
     }
     result
+}
+
+/// The policy close's mailbox commit, on the actor the bridge captured and no other: a lost
+/// actor is a typed stage, never a retry on the registry's successor.
+pub(in crate::services::discord) async fn policy_close_on_captured(
+    shared: &SharedData,
+    handle: &ChannelMailboxHandle,
+    channel_id: ChannelId,
+    request: PolicyCloseRequest,
+) -> Result<PolicyMailboxOutcome, PolicyStage> {
+    let outcome = handle.commit_policy_close(request).await?;
+    if let PolicyMailboxOutcome::Committed(finish) = &outcome {
+        apply_queue_exit_feedback(shared, channel_id, &finish.queue_exit_events).await;
+        handle.recovery_done().mark_done();
+    }
+    Ok(outcome)
 }
 
 /// Releases only the admitted token when setup ends before bridge guards exist.

@@ -86,7 +86,10 @@ async fn g1b_snapshot_conflict_holds_aliases_and_actor() {
         let mut supervisor = admitted(&rig, &[]).await;
         let ledger = supervisor.slot().get().unwrap();
         let identity = ReceiptIdentity::new(41, vec![41, 42], 7, rig.channel, rig.channel);
-        let input = json!({"text":"input 41","receipt_identity":identity.unwrap()});
+        let mut input = json!({"text":"input 41","source_message_ids":[41,42],"receipt_identity":identity.unwrap()});
+        if mutant("c2b_g1b_control_omits_source_ids") {
+            input.as_object_mut().unwrap().remove("source_message_ids");
+        }
         let received = Entry::Received { key: 41, input };
         let received_seq = ledger.append_entry(&received, &[]).unwrap();
         if conflict {
@@ -413,6 +416,65 @@ async fn g1b_exhausted_admission_cannot_reopen_on_boot() {
         assert_eq!(screen.sent.lock().unwrap().len(), 0);
         assert!(supervisor.release());
     }
+}
+
+#[tokio::test]
+async fn g1b_running_order_exhaustion_closes_submit_without_boot() {
+    let rig = Rig::new(6_326_430);
+    let screen = Arc::new(Screen::default());
+    let mut supervisor = admitted(&rig, &[]).await;
+    let (mut drive, _) = supervisor.start_drive(DriveFake(screen.clone())).unwrap();
+    supervisor.gate(&mut drive, true);
+    assert!(supervisor.admission_open());
+    assert!(
+        supervisor
+            .receipt_admission(&drive, Some(rig.gate.mode()))
+            .receipt_open
+    );
+    let before = supervisor
+        .slot()
+        .get()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .folded_seq();
+    let stages = rig.world.log();
+    let generation = supervisor.admission_gen;
+
+    // Keep the running admission state so only dirty exhaustion can close it.
+    super::super::super::super::ordering::g1b_tests::exhaust_dirty(&mut supervisor.order);
+    assert!(supervisor.order.admit_pending(&[11]).is_err());
+    assert!(supervisor.order.exhausted());
+    assert!(supervisor.admitted);
+    assert!(!supervisor.closed);
+    assert!(!supervisor.admission_open());
+    assert!(supervisor.start_drive(DriveFake(screen.clone())).is_none());
+    assert!(
+        !supervisor
+            .receipt_admission(&drive, Some(rig.gate.mode()))
+            .receipt_open
+    );
+    assert_eq!(
+        external_receipt(&mut supervisor, &rig, "running-exhausted-new").await,
+        super::super::super::super::external::ExternalReceipt::Deferred(Deferred::Closed)
+    );
+    assert_eq!(
+        supervisor
+            .slot()
+            .get()
+            .unwrap()
+            .rows()
+            .unwrap()
+            .folded_seq(),
+        before
+    );
+    assert!(supervisor.admitted);
+    assert!(!supervisor.closed);
+    assert_eq!(supervisor.admission_gen, generation);
+    assert_eq!(rig.world.log(), stages);
+    assert_eq!(screen.sent.lock().unwrap().len(), 0);
+    drop(drive);
+    assert!(supervisor.release());
 }
 
 async fn external_receipt(

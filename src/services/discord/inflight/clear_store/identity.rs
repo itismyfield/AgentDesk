@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::turn_orchestrator::policy_close::{PolicyClear, PolicyReceipt};
 
 #[path = "operator_disposition.rs"]
 mod operator_disposition;
@@ -348,57 +349,97 @@ impl InflightTurnState {
         &self,
         current_generation: u64,
     ) -> GuardedClearOutcome {
-        self.clear_before_start_receipt_matching(|fresh| {
+        self.clear_before_start_receipt_matching(true, |fresh| {
             self.before_start_receipt_clearable(fresh, current_generation)
         })
+        .unwrap_or(GuardedClearOutcome::IoError)
     }
 
-    /// Clear only the exact live policy receipt returned by the shown notice's ACK.
-    pub(in crate::services::discord) fn clear_before_start_policy_receipt(
-        &self,
+    /// Hands the row the shown notice's ACK returned to the policy close's mailbox step, the
+    /// only place its receipt clears.
+    pub(in crate::services::discord) fn into_policy_receipt(
+        self,
         generation: u64,
-    ) -> GuardedClearOutcome {
-        self.clear_before_start_receipt_matching(|fresh| {
-            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-                && self.before_start_policy_receipt_clearable(fresh, generation)
+    ) -> Box<dyn PolicyReceipt> {
+        Box::new(AckedPolicyReceipt {
+            acked: self,
+            generation,
         })
     }
 
+    /// `None` only when `wait` is false and another handle holds the row lock.
     fn clear_before_start_receipt_matching(
         &self,
+        wait: bool,
         clearable: impl FnOnce(&InflightTurnState) -> bool,
-    ) -> GuardedClearOutcome {
+    ) -> Option<GuardedClearOutcome> {
         let (Some(root), Some(provider)) = (inflight_runtime_root(), self.provider_kind()) else {
-            return GuardedClearOutcome::Missing;
+            return Some(GuardedClearOutcome::Missing);
         };
         let path = inflight_state_path(&root, &provider, self.channel_id);
-        let Ok(_lock) = lock_inflight_state_path(&path) else {
-            return GuardedClearOutcome::IoError;
+        use super::super::store::TryLockRefusal;
+        let lock = if wait {
+            lock_inflight_state_path(&path).map_err(TryLockRefusal::Failed)
+        } else {
+            super::super::store::try_lock_inflight_state_path_typed(&path)
+        };
+        let _lock = match lock {
+            Ok(lock) => lock,
+            Err(TryLockRefusal::Contended) => return None,
+            Err(TryLockRefusal::Failed(_)) => return Some(GuardedClearOutcome::IoError),
         };
         let Some(fresh) = fs::read_to_string(&path)
             .ok()
             .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
         else {
-            return GuardedClearOutcome::Missing;
+            return Some(GuardedClearOutcome::Missing);
         };
         if !clearable(&fresh) {
-            return GuardedClearOutcome::UserMsgMismatch;
+            return Some(GuardedClearOutcome::UserMsgMismatch);
         }
         let expected = InflightTurnIdentity::from_state(self);
         let outcome = guarded_identity_clear_outcome(&fresh, &expected, self.turn_nonce.as_deref());
         if outcome != GuardedClearOutcome::Cleared {
-            return outcome;
+            return Some(outcome);
         }
         let reason = "clear_before_start_receipt";
-        remove_identity_matched_state_unchecked(
+        let removed = remove_identity_matched_state_unchecked(
             &path,
             &provider,
             self.channel_id,
             &expected,
             fresh,
             reason,
-        )
-        .0
+        );
+        Some(removed.0)
+    }
+}
+
+/// The exact live receipt a policy close may clear: the acked row and its admitting generation.
+struct AckedPolicyReceipt {
+    acked: InflightTurnState,
+    generation: u64,
+}
+
+impl PolicyReceipt for AckedPolicyReceipt {
+    fn channel(&self) -> u64 {
+        self.acked.channel_id
+    }
+
+    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue.
+    fn try_clear(&self) -> PolicyClear {
+        let outcome = self.acked.clear_before_start_receipt_matching(false, |fresh| {
+            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                && self.acked.before_start_policy_receipt_clearable(fresh, self.generation)
+        });
+        match outcome {
+            None => PolicyClear::LockBusy,
+            Some(GuardedClearOutcome::Cleared) => PolicyClear::Cleared,
+            Some(GuardedClearOutcome::Missing) => PolicyClear::Missing,
+            Some(GuardedClearOutcome::UserMsgMismatch) => PolicyClear::Mismatch,
+            Some(GuardedClearOutcome::IoError) => PolicyClear::Io,
+            Some(_) => PolicyClear::Skipped,
+        }
     }
 }
 
