@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::harness::*;
-use super::route_pg::{owner, replies, routed, tick};
+use super::route_pg::{lock_home_row, owner, replies, replies_tagged, routed, tick};
 use crate::db::o_channel_homes::HomeState;
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home_drain::Owed;
@@ -317,5 +317,254 @@ pub(super) async fn role_gateway_node(env: &Env) {
         Vec::<Seen>::new(),
         "no delegated POST started"
     );
+    node.stop().await;
+}
+
+/// The window both nodes watch while the holder's POST is in flight: two renewal periods and a
+/// margin.
+const TWO_ROUNDS: Duration = Duration::from_secs(12);
+
+/// The PG row as `(state, holder, target, epoch)`.
+async fn home_row(scene: &Scene) -> (HomeState, Option<String>, Option<String>, i64) {
+    let row = scene.row().await.expect("the home row");
+    (row.state, row.holder, row.target, row.epoch)
+}
+
+/// Waits for this generation's `name` from each node.
+async fn from_both(nodes: [&mut Node; 2], name: &str, generation: u32) {
+    for node in nodes {
+        let signal = format!("{name}.g{generation}.{}", node.role());
+        node.wait_signal(&signal, WITHIN).await;
+    }
+}
+
+/// T-H6 both restart: the two nodes boot together on one PG, and again on the same roots after
+/// both were killed; each time only the PG holder opens and posts, and no two processes' POSTs
+/// overlap in the shared lifecycle.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_both_restart_only_one_owner_pg() {
+    let scene = Scene::new().await;
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    let held = (HomeState::Worker, Some(MINI.to_string()), None, epoch);
+    for generation in [1, 2] {
+        put(scene.dir(), "generation", generation);
+        let to_both = |name: &str| signal(scene.dir(), &format!("{name}.g{generation}"));
+        let lock = lock_home_row(&scene.pool).await;
+        let mut mini = Node::spawn(&scene, "th6_both_holder", MINI);
+        let mut gw = Node::spawn(&scene, "th6_both_gateway", GW);
+        let (m, g) = ((mini.name(), mini.pid()), (gw.name(), gw.pid()));
+        eprintln!("[s3] generation {generation}: {m:?} and {g:?}");
+        from_both([&mut mini, &mut gw], "ready_to_boot", generation).await;
+        to_both("boot_go");
+        from_both([&mut mini, &mut gw], "boot_observed", generation).await;
+        assert_eq!(home_row(&scene).await, held, "booted under the row lock");
+        lock.rollback().await.unwrap();
+        from_both([&mut mini, &mut gw], "in_flight", generation).await;
+        to_both("window");
+        from_both([&mut mini, &mut gw], "window_done", generation).await;
+        to_both("release");
+        from_both([&mut mini, &mut gw], "quiescent", generation).await;
+        for node in [&mini, &gw] {
+            let seen = get(
+                scene.dir(),
+                &format!("window.g{generation}.{}", node.role()),
+            );
+            eprintln!("[s3] {} window: {}", node.name(), seen.unwrap());
+        }
+        let events = post_lifecycle(scene.dir());
+        assert_eq!(
+            open_posts(&events),
+            0,
+            "a POST open before the kill: {events:#?}"
+        );
+        assert_eq!(
+            home_row(&scene).await,
+            held,
+            "generation {generation} moved PG"
+        );
+        if generation == 1 {
+            mini.kill();
+            gw.kill();
+        } else {
+            mini.finish(WITHIN).await;
+            gw.finish(WITHIN).await;
+        }
+    }
+    let events = post_lifecycle(scene.dir());
+    for event in &events {
+        eprintln!("[s3] lifecycle {}", serde_json::to_string(event).unwrap());
+    }
+    let spans = post_spans(&events).unwrap_or_else(|error| panic!("{error}\n{events:#?}"));
+    let posted: Vec<_> = spans
+        .iter()
+        .map(|span| (span.node.as_str(), span.content.as_str(), span.accepted))
+        .collect();
+    let replies = [(MINI, "g1-reply-1", true), (MINI, "g2-reply-1", true)];
+    assert_eq!(posted, replies, "one new POST per generation, all MINI's");
+    let spawns: Vec<_> = spans.iter().map(|span| span.spawn.as_str()).collect();
+    assert_ne!(spawns[0], spawns[1], "each generation is its own process");
+    for span in &spans {
+        assert_eq!(
+            span.observed,
+            Some(epoch),
+            "{span:?} posted outside the held epoch"
+        );
+    }
+    let started = events.iter().filter(|e| e.step == PostStep::Started);
+    for event in started {
+        let fixed = (event.epoch, event.epoch_source.as_deref());
+        assert_eq!(fixed, (Some(epoch), Some("scene")));
+    }
+    scene.drop_db().await;
+}
+
+fn generation_of(env: &Env) -> String {
+    get(&env.dir, "generation").unwrap()
+}
+
+/// This node's signal `name` in the running generation.
+fn step(env: &Env, name: &str) -> String {
+    format!("{name}.g{}.{}", generation_of(env), env.role)
+}
+
+/// The parent's signal `name` to both nodes in the running generation.
+fn both_step(env: &Env, name: &str) -> String {
+    format!("{name}.g{}", generation_of(env))
+}
+
+/// Boots with every other node of the generation once the parent says so; the row lock keeps
+/// the holder's renewal waiting until both report what they booted into.
+async fn boot_together(env: &Env) -> Booted {
+    signal(&env.dir, &step(env, "ready_to_boot"));
+    wait_signal(&env.dir, &both_step(env, "boot_go"), WITHIN).await;
+    Booted::boot_on(env, Discord::default().recording(env)).await
+}
+
+/// The holder in either generation: Lost until its renewal, then it posts the reply to what the
+/// gateway routed, held in flight through the window, and ends with nothing open or owed.
+pub(super) async fn both_holder_node(env: &Env) {
+    let (epoch, generation) = (epoch_of(env), generation_of(env));
+    let node = boot_together(env).await;
+    let gate = node.gate().expect("the row names MINI its holder");
+    assert_eq!(gate.ownership(), HomeOwnership::Lost, "before any renewal");
+    assert!(!node.accepts());
+    signal(&env.dir, &step(env, "boot_observed"));
+    until("the renewal opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    let shared = owner().await;
+    let (_hook, recorder) = replies_tagged(&node, &format!("g{generation}-"));
+    signal(&env.dir, &step(env, "holder_ready"));
+    let routed = format!("gw_routed.g{generation}.{GW}");
+    wait_signal(&env.dir, &routed, WITHIN).await;
+    node.discord().hold();
+    assert_eq!(tick(&node, &shared, MINI).await, TickOutcome::Processed);
+    assert_eq!(recorder.channels(), [C]);
+    let reply = format!("g{generation}-reply-1");
+    until("the reply's POST starts", WITHIN, || {
+        node.discord().started(&reply)
+    })
+    .await;
+    signal(&env.dir, &step(env, "in_flight"));
+    wait_signal(&env.dir, &both_step(env, "window"), WITHIN).await;
+    let flying = || node.discord().running() == 1 && node.home_epoch() == Some(epoch);
+    let window = watch_window(env, flying).await;
+    assert_eq!(window, None, "the held POST left the window");
+    signal(&env.dir, &step(env, "window_done"));
+    wait_signal(&env.dir, &both_step(env, "release"), WITHIN).await;
+    node.discord().release();
+    node.until_posts(&[reply.as_str()]).await;
+    until("the request ends", WITHIN, || node.discord().running() == 0).await;
+    let posting = crate::services::tui_o::writer::deliver::posts_in_flight;
+    until("no POST in flight", WITHIN, || posting(C) == Some(0)).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("nothing owed", WITHIN, clear).await;
+    each_once(&node, &[reply.as_str()], epoch);
+    if generation == "2" {
+        assert!(node.accepts(), "the restarted holder takes work");
+        let readiness = crate::services::tui_o::writer::host::process_readiness();
+        // No await until the refusal, so this current-thread runtime cannot run the publisher.
+        gate.close();
+        assert!(
+            readiness.is_ready(C),
+            "the publisher has not seen the close"
+        );
+        assert!(
+            !node.accepts(),
+            "a restarted ready writer re-reads its closed home"
+        );
+    }
+    signal(&env.dir, &step(env, "quiescent"));
+    finish_generation(env, node).await;
+}
+
+/// The gateway in either generation: no gate and no writer, a probe row it must never post, and
+/// the message it routes to MINI; it stays shut through the window MINI's POST is in flight.
+pub(super) async fn both_gateway_node(env: &Env) {
+    let generation = generation_of(env);
+    let node = boot_together(env).await;
+    assert!(node.gates.is_empty(), "the row names GW nowhere");
+    assert!(node.writers.is_empty(), "no delegated writer");
+    assert!(!node.accepts());
+    signal(&env.dir, &step(env, "boot_observed"));
+    let probe = format!("gw-must-not-post-g{generation}");
+    append(&node.transcript, &row(&format!("gw{generation}"), &probe));
+    let ready = format!("holder_ready.g{generation}.{MINI}");
+    wait_signal(&env.dir, &ready, WITHIN).await;
+    let message = format!("70{generation}1");
+    let routed = route_as(&node.pool, GW, ShadowProvider::Claude, &message).await;
+    assert!(
+        matches!(&routed, IntakeRouterDecision::Forwarded { target_instance_id, .. }
+            if target_instance_id == MINI),
+        "{routed:?}"
+    );
+    signal(&env.dir, &step(env, "gw_routed"));
+    signal(&env.dir, &step(env, "in_flight"));
+    wait_signal(&env.dir, &both_step(env, "window"), WITHIN).await;
+    let shut = || node.gate().is_none() && !node.accepts() && node.discord().seen().is_empty();
+    let window = watch_window(env, shut).await;
+    assert_eq!(window, None, "the gateway opened or posted");
+    signal(&env.dir, &step(env, "window_done"));
+    wait_signal(&env.dir, &both_step(env, "release"), WITHIN).await;
+    assert!(node.gate().is_none() && !node.accepts());
+    assert_eq!(node.discord().seen(), Vec::<Seen>::new(), "no POST started");
+    signal(&env.dir, &step(env, "quiescent"));
+    finish_generation(env, node).await;
+}
+
+/// Samples `holds` every 100 ms for [`TWO_ROUNDS`]; the first sample it failed sticks. The count
+/// and largest gap go to the parent.
+async fn watch_window(env: &Env, holds: impl Fn() -> bool) -> Option<String> {
+    let start = tokio::time::Instant::now();
+    let (mut samples, mut gap, mut last, mut failed) = (0, Duration::ZERO, start, None);
+    while start.elapsed() < TWO_ROUNDS {
+        samples += 1;
+        if !holds() && failed.is_none() {
+            failed = Some(format!("sample {samples} at {:?}", start.elapsed()));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        gap = gap.max(last.elapsed());
+        last = tokio::time::Instant::now();
+    }
+    let seen = format!(
+        "{samples} samples over {:?}, largest gap {gap:?}",
+        start.elapsed()
+    );
+    put(
+        &env.dir,
+        &format!("window.g{}.{}", generation_of(env), env.role),
+        seen,
+    );
+    failed
+}
+
+/// Generation 1 waits to be killed; generation 2 stops and ends.
+async fn finish_generation(env: &Env, node: Booted) {
+    if generation_of(env) == "1" {
+        std::future::pending::<()>().await;
+    }
     node.stop().await;
 }

@@ -48,14 +48,23 @@ async fn rows(pool: &PgPool) -> String {
 /// The holder's executor stand-in: each turn it runs writes one assistant row to the channel's
 /// transcript, which only the real actor turns into a POST.
 pub(super) fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
-    let transcript = node.transcript.clone();
+    replies_tagged(node, "")
+}
+
+/// As [`replies`], with `tag` before each row id and reply, so a later generation's turns are new.
+pub(super) fn replies_tagged(
+    node: &Booted,
+    tag: &str,
+) -> (test_executor::Hook, test_executor::Recorder) {
+    let (transcript, tag) = (node.transcript.clone(), tag.to_string());
     let turns = Arc::new(AtomicUsize::new(0));
     let hook = test_executor::hook(Box::new(move |seen| {
-        let (transcript, turns) = (transcript.clone(), Arc::clone(&turns));
+        let (transcript, turns, tag) = (transcript.clone(), Arc::clone(&turns), tag.clone());
         Box::pin(async move {
             if seen == Checkpoint::FinalDb {
                 let n = turns.fetch_add(1, Ordering::SeqCst) + 1;
-                append(&transcript, &row(&format!("r{n}"), &format!("reply-{n}")));
+                let line = row(&format!("{tag}r{n}"), &format!("{tag}reply-{n}"));
+                append(&transcript, &line);
             }
         })
     }));
@@ -323,12 +332,7 @@ async fn th8_candidate_is_not_home_authority_pg() {
         .finish(Duration::from_secs(120))
         .await;
     // The row lock keeps the restarted holder's renewal waiting, so its gate stays Lost.
-    let mut lock = scene.pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
-        .bind(C.to_string())
-        .execute(&mut *lock)
-        .await
-        .unwrap();
+    let lock = lock_home_row(&scene.pool).await;
     let id = seed(&scene.pool, "4001", Some(epoch)).await;
     put(scene.dir(), "phase", 2);
     let mut mini = Node::spawn(&scene, "th8_candidate", MINI);
@@ -338,6 +342,17 @@ async fn th8_candidate_is_not_home_authority_pg() {
     let done = ("done".to_string(), Some("o-mini-s3".to_string()), true);
     assert_eq!(stored(&scene.pool, id).await, done);
     scene.drop_db().await;
+}
+
+/// Locks the home row until the returned transaction ends; renewals wait, reads do not.
+pub(super) async fn lock_home_row(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
+        .bind(C.to_string())
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    lock
 }
 
 pub(super) async fn candidate_node(env: &Env) {
