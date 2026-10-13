@@ -4,8 +4,7 @@ Covers ``scripts/generate_inventory_docs.py``:
   * ``test_line_count`` only counts lines inside ``#[cfg(test)] mod`` blocks
     (inline ``#[cfg(test)]`` guards on production items stay production);
   * the giant-file flag keys off production LoC;
-  * the registry loader and validator reject ghosts, unregistered new giants,
-    and deadline-less entries.
+  * registry planning drift warns while malformed input remains fatal.
 """
 
 from __future__ import annotations
@@ -16,10 +15,12 @@ import subprocess
 import sys
 import textwrap
 import unittest
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "generate_inventory_docs.py"
@@ -810,12 +811,8 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         )
         self.assertIn(1, issues)
 
-    def test_stale_snapshot_fails_generator(self) -> None:
-        """Snapshot freshness is fatal for the offline gate (#5234).
-
-        The gate always checks snapshot age, independently of the closed-issue
-        pointer handling it also performs. 30-day stale threshold.
-        """
+    def test_stale_snapshot_warns_generator(self) -> None:
+        """Staleness warns and requires a live refresh without blocking generation."""
         refreshed = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         rc, stderr = self._run_generator(
             self._snapshot(
@@ -823,7 +820,8 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
             ),
             now=refreshed + timedelta(days=30, seconds=1),
         )
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARNING", stderr)
         self.assertIn("older than 30 days", stderr)
         self.assertIn("2026-08-12T12:00:00Z", stderr)
         self.assertIn("refresh_giant_file_issue_metadata.py", stderr)
@@ -839,8 +837,30 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(stderr, "")
 
+    def test_malformed_snapshot_generator_still_fails_closed(self) -> None:
+        rc, stderr = self._run_generator([], now=datetime(2026, 8, 12, tzinfo=timezone.utc))
+        self.assertEqual(rc, 2)
+        self.assertIn("must be a JSON object", stderr)
+        self.assertNotIn("WARNING", stderr)
 
-class RegistryValidationTest(unittest.TestCase):
+    def test_measurement_exception_is_never_converted_to_warning(self) -> None:
+        with patch.object(GEN, "generated_documents", side_effect=RuntimeError("measurement crashed")), \
+             patch.object(sys, "argv", [str(SCRIPT_PATH)]), self.assertRaisesRegex(RuntimeError, "measurement crashed"):
+            GEN.main()
+
+
+class MetadataWarningAssertions:
+    @contextmanager
+    def assertWarning(self):
+        stderr = io.StringIO()
+        result = SimpleNamespace(exception="")
+        with redirect_stderr(stderr):
+            yield result
+        result.exception = stderr.getvalue()
+        self.assertIn("WARNING", result.exception)
+
+
+class RegistryValidationTest(MetadataWarningAssertions, unittest.TestCase):
     def setUp(self) -> None:
         self._valid_shrink_deadline = (GEN.today_utc() + timedelta(days=1)).isoformat()
         self._original_issue_metadata = GEN.load_giant_file_issue_metadata
@@ -893,44 +913,42 @@ class RegistryValidationTest(unittest.TestCase):
             )
         )
 
-    def test_unregistered_giant_fails(self) -> None:
+    def test_unregistered_giant_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("unregistered giant", str(ctx.exception))
 
-    def test_ghost_registration_fails(self) -> None:
+    def test_ghost_registration_warns(self) -> None:
         modules = [self._module("src/a.rs", 200, giant=False)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry(["src/a.rs"], [])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("ghost registration", str(ctx.exception))
 
-    def test_entry_missing_deadline_fails(self) -> None:
+    def test_entry_missing_deadline_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {"file": "src/a.rs", "owner": "team", "decompose_issue": "#1"}
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("deadline", str(ctx.exception))
 
-    def test_grandfather_swap_in_outside_baseline_fails(self) -> None:
-        # `src/b.rs` is a current giant grandfathered in, but it is NOT in the
-        # frozen baseline (a swap-in for the retired `src/a.rs`). Even though the
-        # count did not grow, this must fail: new giants need an [[entry]].
+    def test_grandfather_swap_in_outside_baseline_warns(self) -> None:
+        # Planning warns about baseline swaps; the size gate rejects new giants.
         modules = [
             self._module("src/b.rs", 1500, giant=True),
         ]
@@ -939,7 +957,7 @@ class RegistryValidationTest(unittest.TestCase):
             ["src/b.rs"], [], baseline_paths=["src/a.rs"]
         )
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -953,29 +971,29 @@ class RegistryValidationTest(unittest.TestCase):
             ["src/a.rs"], [], baseline_paths=["src/a.rs", "src/retired.rs"]
         )
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("metadata backfill is closed", str(ctx.exception))
 
-    def test_missing_baseline_paths_fails(self) -> None:
+    def test_missing_baseline_paths_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = lambda: (["src/a.rs"], [], None)
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("grandfathered_baseline_paths", str(ctx.exception))
 
-    def test_awaiting_backfill_records_are_rejected_after_4519(self) -> None:
+    def test_awaiting_backfill_records_are_warned_after_4519(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry(["src/a.rs"], [])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1034,7 +1052,7 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         self.assertEqual(regs[0].keep_reason, "protocol | schema authority")
 
-    def test_shrink_missing_owner_fails(self) -> None:
+    def test_shrink_missing_owner_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1045,13 +1063,13 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("real owner", str(ctx.exception))
 
-    def test_keep_missing_owner_fails(self) -> None:
+    def test_keep_missing_owner_warns(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1061,7 +1079,7 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1080,7 +1098,7 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1116,7 +1134,7 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1125,7 +1143,7 @@ class RegistryValidationTest(unittest.TestCase):
         self.assertIn("forbids deadline", error)
         self.assertIn("forbids decompose_issue", error)
 
-    def test_shrink_rejects_malformed_calendar_deadline(self) -> None:
+    def test_shrink_warns_for_malformed_calendar_deadline(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1137,7 +1155,7 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1160,14 +1178,14 @@ class RegistryValidationTest(unittest.TestCase):
             self.assertEqual(len(GEN.build_giant_registrations(modules)), 1)
             overdue = dict(same_day, deadline="2026-08-30")
             GEN.load_giant_file_registry = self._patch_registry([], [overdue])
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig_registry
             GEN.today_utc = orig_today
         self.assertIn("overdue", str(ctx.exception))
 
-    def test_shrink_rejects_fake_or_self_referential_issues(self) -> None:
+    def test_shrink_warns_for_fake_or_self_referential_issues(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         orig = GEN.load_giant_file_registry
         try:
@@ -1180,13 +1198,13 @@ class RegistryValidationTest(unittest.TestCase):
                     "decompose_issue": issue,
                 }
                 GEN.load_giant_file_registry = self._patch_registry([], [entry])
-                with self.assertRaises(GEN.ParseError) as ctx:
+                with self.assertWarning() as ctx:
                     GEN.build_giant_registrations(modules)
                 self.assertIn("decompose_issue", str(ctx.exception), issue)
         finally:
             GEN.load_giant_file_registry = orig
 
-    def test_shrink_rejects_issue_absent_from_checked_in_metadata(self) -> None:
+    def test_shrink_warns_for_issue_absent_from_checked_in_metadata(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1198,13 +1216,13 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("absent from checked-in issue metadata", str(ctx.exception))
 
-    def test_shrink_rejects_issue_outside_owner_scope(self) -> None:
+    def test_shrink_warns_for_issue_outside_owner_scope(self) -> None:
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1216,13 +1234,13 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
         self.assertIn("outside decompose_issue #1 owner scope", str(ctx.exception))
 
-    def test_shrink_rejects_file_absent_from_issue_candidate_scope(self) -> None:
+    def test_shrink_warns_for_file_absent_from_issue_candidate_scope(self) -> None:
         modules = [self._module("src/not-listed.rs", 1500, giant=True)]
         entry = {
             "file": "src/not-listed.rs",
@@ -1234,7 +1252,7 @@ class RegistryValidationTest(unittest.TestCase):
         orig = GEN.load_giant_file_registry
         GEN.load_giant_file_registry = self._patch_registry([], [entry])
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = orig
@@ -1292,8 +1310,8 @@ class RegistryValidationTest(unittest.TestCase):
         self.assertIn("src/first.rs", warning)
         self.assertEqual(warning.count("has a dead deadline"), 2)
 
-    def test_closed_deadline_growth_blocks_unconditionally(self) -> None:
-        """A newly closed deadline is fatal with no env opt-out (#5234)."""
+    def test_closed_deadline_growth_warns(self) -> None:
+        """Closed issue debt is reported without rejecting measured code."""
         modules = [self._module("src/a.rs", 1500, giant=True)]
         entry = {
             "file": "src/a.rs",
@@ -1320,7 +1338,7 @@ class RegistryValidationTest(unittest.TestCase):
             "transition_list_entries": 1,
         }
         try:
-            with self.assertRaises(GEN.ParseError) as ctx:
+            with self.assertWarning() as ctx:
                 GEN.build_giant_registrations(modules)
         finally:
             GEN.load_giant_file_registry = original_registry
@@ -1397,7 +1415,7 @@ class RegistryValidationTest(unittest.TestCase):
         self.assertEqual(by_path["src/tracked.rs"].owner, "team")
 
 
-class GiantFileClosedIssueTest(unittest.TestCase):
+class GiantFileClosedIssueTest(MetadataWarningAssertions, unittest.TestCase):
     """Tests for closed-issue ratchet logic (#5234)."""
 
     def _module(self, path: str, prod: int, *, giant: bool) -> "GEN.ModuleEntry":
@@ -1505,8 +1523,8 @@ class GiantFileClosedIssueTest(unittest.TestCase):
                 GEN.GIANT_FILE_ISSUE_METADATA = orig_path
                 GEN.now_utc = orig_now
 
-    def test_issue_metadata_snapshot_staleness_fails(self) -> None:
-        """Verify that stale snapshots (>30 days) cause failure."""
+    def test_issue_metadata_snapshot_staleness_warns(self) -> None:
+        """Verify that stale snapshots (>30 days) remain visible warnings."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             metadata_file = root / "issue_metadata.json"
@@ -1536,7 +1554,7 @@ class GiantFileClosedIssueTest(unittest.TestCase):
                 GEN.GIANT_FILE_ISSUE_METADATA = metadata_file
                 # Now is 31 days after refreshed_at
                 GEN.now_utc = lambda: datetime(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc)
-                with self.assertRaises(GEN.ParseError) as cm:
+                with self.assertWarning() as cm:
                     GEN.load_giant_file_issue_metadata()
                 self.assertIn("older than 30 days", str(cm.exception))
             finally:
@@ -1636,8 +1654,8 @@ src/c.rs
                     problems[0],
                 )
 
-    def test_orphan_transition_list_entries_fatal(self) -> None:
-        """Verify that transition list entries not in registry cause fatal error."""
+    def test_orphan_transition_list_entries_warn(self) -> None:
+        """Orphan planning rows warn without corrupting measurements."""
         modules = [self._module("src/tracked.rs", 1500, giant=True)]
         entries = [
             {
@@ -1664,7 +1682,7 @@ src/c.rs
         }
 
         try:
-            with self.assertRaises(GEN.ParseError) as cm:
+            with self.assertWarning() as cm:
                 GEN.build_giant_registrations(modules)
             self.assertIn("orphan", str(cm.exception).lower())
             self.assertIn("src/orphan_entry.rs", str(cm.exception))

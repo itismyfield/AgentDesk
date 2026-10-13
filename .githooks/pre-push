@@ -23,7 +23,11 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
     diff_base="$remote_sha"
   fi
 
-  if git diff --name-only "$diff_base" "$local_sha" -- src scripts/generate_inventory_docs.py | grep -q .; then
+  changed=$(git diff --name-only "$diff_base" "$local_sha" -- src \
+    scripts/generate_inventory_docs.py scripts/generate_env_reference.py scripts/generate_cli_reference.py \
+    ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md \
+    docs/generated/env-reference.md docs/generated/cli-reference.md)
+  if [ -n "$changed" ]; then
     regen_needed=1
     break
   fi
@@ -31,27 +35,16 @@ done
 
 [ "$regen_needed" -eq 1 ] || exit 0
 
-if ! regen_output=$(agentdesk_run_python scripts/generate_inventory_docs.py 2>&1); then
-  printf '%s\n' "$regen_output" >&2
-  exit 1
-fi
-printf '%s\n' "$regen_output"
+for generator in generate_inventory_docs.py generate_env_reference.py generate_cli_reference.py; do
+  set -- "scripts/$generator"
+  if [ "$generator" = generate_inventory_docs.py ]; then
+    set -- "$@" --review-docs-only
+  fi
+  if ! regen_output=$(agentdesk_run_python "$@" 2>&1); then
+    printf '%s\n' "$regen_output" >&2
+    exit 1
+  fi
+  printf '%s\n' "$regen_output"
+done
 
-if git diff --quiet -- ARCHITECTURE.md docs/generated; then
-  exit 0
-fi
-
-cat <<'EOF'
-docs regen이 필요합니다. 자동 amend 하시겠습니까?
-  GIT_AUTO_REGEN_DOCS=1 git push
-EOF
-git status --short -- ARCHITECTURE.md docs/generated
-
-if [ "${GIT_AUTO_REGEN_DOCS:-0}" != "1" ]; then
-  exit 1
-fi
-
-git add ARCHITECTURE.md docs/generated
-git -c user.name="${GIT_AUTO_REGEN_DOCS_NAME:-AgentDesk Auto Regen}" \
-  -c user.email="${GIT_AUTO_REGEN_DOCS_EMAIL:-agentdesk@users.noreply.github.com}" \
-  commit --amend --no-edit --no-verify
+agentdesk_run_python scripts/check_generated_doc_drift.py
