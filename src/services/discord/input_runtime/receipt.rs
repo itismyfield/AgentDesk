@@ -42,6 +42,8 @@ fn known(rows: &Rows, key: u64, received_seq: u64) -> Option<DurableReceipt> {
 pub(super) fn commit(lease: &mut LedgerLease, source: Source, permits_new: bool) -> Receipt {
     let result = (|| {
         #[cfg(test)]
+        let mut source = source;
+        #[cfg(test)]
         if super::mutant("second_open") {
             lease.reopen()?;
         }
@@ -51,11 +53,19 @@ pub(super) fn commit(lease: &mut LedgerLease, source: Source, permits_new: bool)
         let permits_new = permits_new || super::mutant("skip_receipt_permit");
         match rows.responsibility(source.identity()) {
             Responsibility::Known { key, received_seq } => {
+                #[cfg(test)]
+                if super::mutant("c2_duplicate_repins") {
+                    source.pin_staged(ledger)?;
+                }
                 return Ok(known(&rows, key, received_seq)
                     .map(Receipt::DuplicateQueued)
                     .unwrap_or(Receipt::Deferred(Deferred::Unknown)));
             }
             Responsibility::Legacy { key, received_seq } => {
+                #[cfg(test)]
+                if super::mutant("c2_duplicate_repins") {
+                    source.pin_staged(ledger)?;
+                }
                 return Ok(known(&rows, key, received_seq)
                     .map(Receipt::LegacyResponsibility)
                     .unwrap_or(Receipt::Deferred(Deferred::Unknown)));
@@ -93,9 +103,10 @@ pub(super) fn commit(lease: &mut LedgerLease, source: Source, permits_new: bool)
     finish(lease, result)
 }
 
-fn append_active(ledger: &mut Ledger, source: Source) -> std::io::Result<DurableReceipt> {
+fn append_active(ledger: &mut Ledger, mut source: Source) -> std::io::Result<DurableReceipt> {
     let key = source.key();
     let identity = source.identity().clone();
+    source.pin_staged(ledger)?;
     let (entry, pins) = source.into_entry();
     let received_seq = ledger.append_entry(&entry, &pins)?;
     #[cfg(test)]

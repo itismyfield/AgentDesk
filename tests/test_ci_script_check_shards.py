@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,6 +117,39 @@ class ScriptCheckShardOwnership(unittest.TestCase):
                         self.assertNotEqual(result.returncode, 0, result.stdout)
                         self.assertIn("unassigned fixture", result.stderr)
                         self.assertNotIn("unassigned fixture", result.stdout.splitlines())
+
+
+GIANT_DEADLINE_CHECK = "Giant deadline warning reporter contract"
+GIANT_DEADLINE_ACS = [f"c1_{number:02d}" for number in range(1, 14)]
+
+
+def check_block(script: Path, title: str) -> str:
+    lines = script.read_text(encoding="utf-8").splitlines()
+    start = lines.index(f'if run_check contracts "{title}"; then') + 1
+    return "\n".join(lines[start:lines.index("fi", start)])
+
+
+class GiantDeadlineReporterRegistration(unittest.TestCase):
+    """The reporter suite must stay registered and actually execute every acceptance test."""
+
+    def test_reporter_suite_is_a_contracts_check(self) -> None:
+        self.assertIn(("contracts", GIANT_DEADLINE_CHECK), listed(list_checks(SCRIPT)))
+
+    def test_registered_block_runs_every_acceptance_test_unskipped(self) -> None:
+        done = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", check_block(SCRIPT, GIANT_DEADLINE_CHECK)],
+            cwd=REPO_ROOT, env=clean_env(PYTHON=sys.executable), capture_output=True, text=True, timeout=300,
+        )
+        output = done.stdout + done.stderr
+        self.assertEqual(done.returncode, 0, output[-4000:])
+        ran = re.search(r"^Ran (\d+) tests?", output, re.MULTILINE)
+        self.assertTrue(ran and int(ran.group(1)) > 0, output[-4000:])
+        results = re.findall(r"^(test_\w+) \([^)]*\) \.\.\. (\w+)", output, re.MULTILINE)
+        for ac in GIANT_DEADLINE_ACS:
+            with self.subTest(ac=ac):
+                outcomes = [outcome for name, outcome in results if name.startswith(f"test_{ac}_")]
+                self.assertTrue(outcomes, f"no {ac} test ran")
+                self.assertEqual(set(outcomes), {"ok"})
 
 
 class ScriptChecksMirrorAggregation(unittest.TestCase):
