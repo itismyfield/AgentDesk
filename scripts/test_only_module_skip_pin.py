@@ -606,6 +606,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/ledger_io_tests.rs",
         "src/services/discord/router/intake_gate/ledger_tests.rs",
+        "src/services/discord/router/intake_dispatch/ledger_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
