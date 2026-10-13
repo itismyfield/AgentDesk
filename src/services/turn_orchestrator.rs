@@ -1239,6 +1239,7 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 pub(crate) mod installed_actor_handoff;
+mod scoped_claim;
 
 enum ChannelMailboxMsg {
     FreezeInput {
@@ -1349,6 +1350,8 @@ enum ChannelMailboxMsg {
     },
     #[cfg(test)]
     InstalledActorHandoff(installed_actor_handoff::Request),
+    #[cfg(test)]
+    ScopedClaim(scoped_claim::ScopedMsg),
     ClearRecoveryMarker {
         reply: closed_verdict::VerdictReply<()>,
     },
@@ -1615,6 +1618,9 @@ struct ChannelMailboxState {
     policy_witness: Option<policy_close::PolicyWitness>,
     /// The queue snapshot's head reservation and submitted sources; see `queued_head.rs`.
     queued_head: queued_head::HeadLedger,
+    /// What an actor a scoped claim installed still owes; see `scoped_claim.rs`.
+    #[cfg(test)]
+    installed_pending: Option<scoped_claim::InstalledPending>,
 }
 
 fn finalize_turn_state(
@@ -2118,6 +2124,8 @@ fn input_mailbox_step(
         ChannelMailboxMsg::InstalledActorHandoff(request) => {
             installed_actor_handoff::step(&mut state, channel_id, own_recovery_done, request);
         }
+        #[cfg(test)]
+        ChannelMailboxMsg::ScopedClaim(msg) => scoped_claim::step(&mut state, channel_id, msg),
         ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
             state.recovery_started_at = None;
             let _ = reply.send(());

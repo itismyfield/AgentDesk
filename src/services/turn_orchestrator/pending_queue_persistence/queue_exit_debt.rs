@@ -4,15 +4,16 @@
 use super::PendingQueueItem;
 #[cfg(test)]
 use super::{
-    ChannelId, ChannelMailboxState, Instant, Intervention, Path, PendingQueueSourceTextSegment,
-    ProviderKind, QueuePersistenceContext, SystemTime, fs, parse_snapshot, pending_queue_file_path,
-    pending_queue_item_from_intervention, pending_queue_item_to_intervention, pending_queue_root,
-    persist_queue,
+    ChannelId, ChannelMailboxState, Instant, Intervention, MessageId, Path,
+    PendingQueueSourceTextSegment, ProviderKind, QueuePersistenceContext, SystemTime, fs,
+    parse_snapshot, pending_queue_file_path, pending_queue_item_from_intervention,
+    pending_queue_item_to_intervention, pending_queue_root, persist_queue,
 };
 #[cfg(test)]
 use crate::services::turn_orchestrator::{
     QueueExitEvent, QueueExitKind,
-    queued_head::{SnapshotMeta, meta_value, record_write},
+    active_source_dedup::purge_active_source_from_queue,
+    queued_head::{SnapshotMeta, adopt, meta_value, record_write},
 };
 
 /// One removed intervention whose exit feedback is still owed, under the event id minted when it
@@ -120,6 +121,20 @@ impl QueueExitDebt {
             QueueExitDebtKind::Overflow => QueueExitKind::Overflow,
         };
         QueueExitEvent { intervention, kind }
+    }
+}
+
+/// Lets a metadata-free test write replace only a missing file or a legacy array.
+#[cfg(test)]
+pub(crate) fn refuse_metadata_loss(path: &Path) -> Result<(), String> {
+    match fs::read_to_string(path) {
+        Ok(content) if !matches!(parse_snapshot(&content), Ok((_, None))) => {
+            Err(format!("refusing to overwrite {}", path.display()))
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("read {}: {error}", path.display()))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -236,18 +251,135 @@ pub(crate) enum QueueExitCommitError {
     Indeterminate(String),
 }
 
-/// Writes the queue a claim left and one debt per removed item as a single snapshot. A failed
-/// write is settled by re-reading the file, so a published debt is kept and never rolled back.
+/// One event a transition removed and the single debt minted for it.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ExitWithDebt {
+    pub(crate) event: QueueExitEvent,
+    pub(crate) debt: QueueExitDebt,
+}
+
+/// The queue one step leaves and one debt per item it removed, checked against the queue it was
+/// prepared from; the event ids are minted here once, so a retry writes the same ids.
+#[cfg(test)]
+pub(crate) struct PreparedQueueExitTransition {
+    original: QueueIdentities,
+    remaining: Vec<Intervention>,
+    exits: Vec<ExitWithDebt>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct QueueExitPrepareError(pub(crate) String);
+
+#[cfg(test)]
+impl PreparedQueueExitTransition {
+    /// Removes `source` from `original` as a claim of that message does, with a debt per exit.
+    pub(crate) fn from_scoped_purge(
+        original: &[Intervention],
+        source: MessageId,
+        episode: &str,
+        channel_id: ChannelId,
+    ) -> Result<Self, QueueExitPrepareError> {
+        let mut remaining = original.to_vec();
+        let events = purge_active_source_from_queue(&mut remaining, source);
+        let foreign = events.iter().any(|event| {
+            let (_, _, sources) = &identities(std::slice::from_ref(&event.intervention))[0];
+            event.kind != QueueExitKind::Superseded || sources.iter().any(|s| *s != source.get())
+        });
+        if foreign {
+            return Err(QueueExitPrepareError(format!(
+                "an exit of the purge of {source} is not that source superseded"
+            )));
+        }
+        Self::from_exits(original, remaining, events, episode, channel_id)
+    }
+
+    fn from_exits(
+        original: &[Intervention],
+        remaining: Vec<Intervention>,
+        events: Vec<QueueExitEvent>,
+        episode: &str,
+        channel_id: ChannelId,
+    ) -> Result<Self, QueueExitPrepareError> {
+        let exits = events.into_iter().map(|event| ExitWithDebt {
+            debt: QueueExitDebt::new(episode, &event, channel_id),
+            event,
+        });
+        let transition = Self {
+            original: identities(original),
+            remaining,
+            exits: exits.collect(),
+        };
+        transition.check(episode)?;
+        Ok(transition)
+    }
+
+    /// Each debt reports its own event under `episode`, and the sources the queue lost are
+    /// exactly the sources of the exits.
+    fn check(&self, episode: &str) -> Result<(), QueueExitPrepareError> {
+        let refuse = |why: &str| Err(QueueExitPrepareError(why.into()));
+        let debts: Vec<QueueExitDebt> = self.exits.iter().map(|e| e.debt.clone()).collect();
+        check_queue_exit_debts(&debts).map_err(QueueExitPrepareError)?;
+        for ExitWithDebt { event, debt } in &self.exits {
+            let stored = debt.event().intervention;
+            let item = &event.intervention;
+            let one = |item: &Intervention| identities(std::slice::from_ref(item));
+            if debt.episode != episode
+                || debt.kind != QueueExitDebtKind::from(event.kind)
+                || one(&stored) != one(item)
+                || (stored.author_id, &stored.text) != (item.author_id, &item.text)
+            {
+                return refuse("a debt does not report its own exit");
+            }
+        }
+        let sources = |rows: &QueueIdentities| -> Vec<u64> {
+            rows.iter()
+                .flat_map(|(_, _, s)| s.iter().copied())
+                .collect()
+        };
+        let mut removed = sources(&self.original);
+        for kept in sources(&identities(&self.remaining)) {
+            let Some(index) = removed.iter().position(|s| *s == kept) else {
+                return refuse("the remaining queue holds a source the original did not");
+            };
+            removed.swap_remove(index);
+        }
+        let exits = self.exits.iter().map(|e| e.event.intervention.clone());
+        let mut exited = sources(&identities(&exits.collect::<Vec<_>>()));
+        removed.sort();
+        exited.sort();
+        if removed != exited {
+            return refuse("the removed sources and the exit events differ");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exits(&self) -> &[ExitWithDebt] {
+        &self.exits
+    }
+}
+
+/// Writes the prepared queue and its debts as a single snapshot. A failed write is settled by
+/// re-reading the file, so a published debt is kept and never rolled back.
 #[cfg(test)]
 pub(crate) fn commit_queue_exit(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: &QueuePersistenceContext,
-    remaining: Vec<Intervention>,
-    debts: Vec<QueueExitDebt>,
+    transition: &PreparedQueueExitTransition,
 ) -> Result<(), QueueExitCommitError> {
-    let previous_queue = std::mem::replace(&mut state.intervention_queue, remaining);
+    // Adoption refuses a ledger already holding metadata, so it runs before the debts enter it.
+    adopt(state, channel_id, persistence).map_err(QueueExitCommitError::NotCommitted)?;
+    if identities(&state.intervention_queue) != transition.original {
+        return Err(QueueExitCommitError::NotCommitted(
+            "the queue changed after the transition was prepared".into(),
+        ));
+    }
+    let previous_queue =
+        std::mem::replace(&mut state.intervention_queue, transition.remaining.clone());
     let previous_meta = state.queued_head.meta.clone();
+    let debts = transition.exits.iter().map(|exit| exit.debt.clone());
     state.queued_head.meta.queue_exit_debts.extend(debts);
     let restore = |state: &mut ChannelMailboxState| {
         state.intervention_queue = previous_queue.clone();
@@ -275,6 +407,7 @@ pub(crate) fn commit_queue_exit(
         identities(&previous_queue),
         state.queued_head.persisted_meta.clone(),
     );
+    read_back_fault::run();
     match read_back(persistence, channel_id) {
         Ok(disk) if disk == new => {
             tracing::warn!(channel_id = channel_id.get(), %error, "queue exit commit was published");
@@ -291,6 +424,26 @@ pub(crate) fn commit_queue_exit(
             Err(QueueExitCommitError::Indeterminate(format!(
                 "{error}; file holds {found}"
             )))
+        }
+    }
+}
+
+/// Runs a test's file change between a failed save and the commit's re-read of the file.
+#[cfg(test)]
+pub(crate) mod read_back_fault {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static NEXT: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+    }
+
+    pub(crate) fn before_next(change: impl FnOnce() + 'static) {
+        NEXT.with(|next| *next.borrow_mut() = Some(Box::new(change)));
+    }
+
+    pub(super) fn run() {
+        if let Some(change) = NEXT.with(|next| next.borrow_mut().take()) {
+            change();
         }
     }
 }
