@@ -417,14 +417,14 @@ fn transition_cleanup_needs_a_captured_successor_which_the_gc_ledger_may_show() 
 
 #[test]
 fn transition_cleanup_present_file_must_stay_at_its_verified_end() {
-    let mut fixture = Fixture::synthetic();
-    fixture.later_present(8).fingerprint.len += 10;
-    only(fixture, 8, refused(Refusal::Growing));
     // Grown before the first probe and quiet since: only the end check sees it.
     let mut fixture = Fixture::synthetic();
     fixture.later_present(8).fingerprint.len += 10;
     let earlier = fixture.facts(8).earlier.as_mut().unwrap();
     present_mut(earlier).fingerprint.len += 10;
+    only(fixture, 8, refused(Refusal::Growing));
+    let mut fixture = Fixture::synthetic();
+    fixture.later_present(8).fingerprint.len += 10;
     only(fixture, 8, refused(Refusal::Growing));
     let mut fixture = Fixture::synthetic();
     fixture.later_present(9).fingerprint.modified = at(1_500_000);
