@@ -181,7 +181,7 @@ impl Fx {
 
     pub(super) async fn record(&self, channel_id: &str) -> CustodyRecord {
         match self.custody.inspect(channel_id).await.expect("inspect") {
-            Inspection::Row(record) => record,
+            Inspection::Row(record) => *record,
             other => panic!("no decodable row: {other:?}"),
         }
     }
@@ -238,7 +238,7 @@ impl Fx {
             )
             .await;
         armed.report.send(StepOutcome::Applied {
-            after,
+            after: Box::new(after),
             handoff: None,
         });
         armed.collector.await.unwrap().expect("recorded")
@@ -802,7 +802,7 @@ async fn s3act_b3b4a1_f04_off_closes_new_admission_and_keeps_armed_results_pg() 
     ));
     assert_eq!(fx.raw(&other).await, None);
     armed.report.send(StepOutcome::Applied {
-        after,
+        after: Box::new(after),
         handoff: None,
     });
     armed.collector.await.unwrap().expect("recorded after off");
@@ -841,7 +841,7 @@ async fn s3act_b3b4a1_owned_outcome_is_recorded_after_the_caller_leaves_pg() {
         async move {
             capability.check(&ch, capability.operation_id(), capability.stage())?;
             report.send(StepOutcome::Applied {
-                after,
+                after: Box::new(after),
                 handoff: None,
             });
             Ok::<_, CapabilityRefusal>(capability)

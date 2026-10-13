@@ -464,7 +464,7 @@ pub(crate) fn settled_record(
         StepOutcome::Applied { after, handoff } => {
             if matches!(op.stage, Stage::SourceReturn | Stage::ExactRelease) {
                 return Some(CustodyRecord {
-                    canonical_seal: after.clone(),
+                    canonical_seal: (**after).clone(),
                     ..closed(record)
                 });
             }
@@ -475,7 +475,7 @@ pub(crate) fn settled_record(
             op.status = StageStatus::KnownOutcome;
             Some(CustodyRecord {
                 phase: working_phase(&op),
-                canonical_seal: after.clone(),
+                canonical_seal: (**after).clone(),
                 active_operation: Some(op),
                 ..record.clone()
             })

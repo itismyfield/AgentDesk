@@ -238,7 +238,7 @@ impl CustodyStore {
             .map_err(store_error)?
             .map(CustodyRecord::decode)
         {
-            Some(Inspection::Row(record)) if record.revision == expected_revision => record,
+            Some(Inspection::Row(record)) if record.revision == expected_revision => *record,
             Some(Inspection::Unsupported { .. }) => return Err(refused(Refusal::Held)),
             _ => return Err(refused(Refusal::Stale)),
         };

@@ -85,7 +85,7 @@ impl ActiveOperation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StepOutcome {
     Applied {
-        after: CanonicalSeal,
+        after: Box<CanonicalSeal>,
         handoff: Option<String>,
     },
     NotApplied,

@@ -265,7 +265,7 @@ async fn install_armed(fx: &Fx, ch: &str, crash: bool) -> (i64, Option<Armed>) {
         )
         .await;
     armed.report.send(StepOutcome::Applied {
-        after: seal("q0", None, None),
+        after: Box::new(seal("q0", None, None)),
         handoff: None,
     });
     let revision = armed.collector.await.unwrap().unwrap();

@@ -129,7 +129,7 @@ pub(crate) struct CustodyRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Inspection {
     Absent,
-    Row(CustodyRecord),
+    Row(Box<CustodyRecord>),
     Unsupported { revision: i64, detail: String },
 }
 
@@ -158,7 +158,7 @@ impl CustodyRecord {
     pub(crate) fn decode(stored: StoredCustody) -> Inspection {
         let revision = stored.revision;
         match Self::decode_fields(stored) {
-            Ok(record) => Inspection::Row(record),
+            Ok(record) => Inspection::Row(Box::new(record)),
             Err(detail) => Inspection::Unsupported { revision, detail },
         }
     }
