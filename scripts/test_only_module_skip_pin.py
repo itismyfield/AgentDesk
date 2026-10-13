@@ -691,6 +691,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
+        "src/services/tui_o/repost/projection_tests.rs",
+        "src/services/tui_o/repost/pg_statements_tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
     }
