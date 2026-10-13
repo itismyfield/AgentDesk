@@ -694,6 +694,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
         "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
         "src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs",
+        "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
+        "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
         "src/services/tui_prompt_dedupe/handoff_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
@@ -791,6 +794,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/turn_orchestrator/recovery_custody/model.rs",
         "src/services/turn_orchestrator/recovery_custody/operation.rs",
         "src/services/turn_orchestrator/recovery_custody/reconcile.rs",
+        "src/services/discord/inflight/save_store/coordinate_replay.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
     }
 )
 
