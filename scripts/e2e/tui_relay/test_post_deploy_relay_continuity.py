@@ -19,6 +19,9 @@ class ConfigResolution(unittest.TestCase):
 agents:
   - id: adk-claude-tui-e2e
     channels:
+      claude: {id: "111"}
+  - id: adk-claude-tui-2-e2e
+    channels:
       claude: {id: "222"}
   - id: adk-codex-tui-e2e
     channels:
@@ -36,11 +39,12 @@ agents:
                 smoke.load_channel_id_from_config(path, "codex-tui"),
                 "555",
             )
+            self.assertEqual(smoke.load_channel_id_from_config(path, "claude-herdr"), "111")
 
     def test_herdr_mapping_uses_exact_cell_channel_and_one_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fixture.yaml"
-            config = "agents: [{id: adk-claude-tui-e2e, channels: {claude: {id: '222'}}}]\n"
+            config = "agents: [{id: adk-claude-tui-2-e2e, channels: {claude: {id: '222'}}}]\n"
             for mapping in ("{222: local}", "{'222': local}"):
                 path.write_text(config + "session_hosts: {herdr: {channels: " + mapping + "}}")
                 self.assertTrue(smoke.channel_is_herdr(path, "claude-tui", "222"))
@@ -58,7 +62,7 @@ agents:
             config.write_text(
                 """
 agents:
-  - id: adk-claude-tui-e2e
+  - id: adk-claude-tui-2-e2e
     channels:
       claude: {id: "222"}
 """,

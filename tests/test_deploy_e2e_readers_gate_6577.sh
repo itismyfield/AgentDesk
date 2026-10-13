@@ -40,6 +40,9 @@ cat > "$CONFIG" <<'YAML'
 agents:
   - id: adk-claude-tui-e2e
     channels:
+      claude: {id: "444"}
+  - id: adk-claude-tui-2-e2e
+    channels:
       claude: {id: "111"}
   - id: adk-codex-tui-e2e
     channels:
@@ -52,6 +55,7 @@ YAML
 echo "§1 the smoke cells resolve to their channels through the smoke's own resolver"
 
 ids=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "$CONFIG" claude-tui codex-tui)
+# claude-tui takes its tmux agent's channel, never the Herdr agent's 444.
 if [ "$ids" = "111|222" ]; then pass "both smoke cells resolve ($ids)"; else fail "expected '111|222', got '$ids'"; fi
 
 echo "§2 a smoke E2E channel's reader-count alarm does not fail a deploy or a rollback"
@@ -87,7 +91,7 @@ fi
 echo "§5 a config that does not resolve accepts nothing"
 
 printf 'agents: [unterminated\n' > "$TMP_ROOT/broken.yaml"
-printf 'agents:\n  - id: adk-claude-tui-e2e\n    channels:\n      claude: {id: "111"}\n' \
+printf 'agents:\n  - id: adk-claude-tui-2-e2e\n    channels:\n      claude: {id: "111"}\n' \
     > "$TMP_ROOT/claude-only.yaml"
 for case in "missing:$TMP_ROOT/absent.yaml" "malformed:$TMP_ROOT/broken.yaml"; do
     DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "${case#*:}" claude-tui codex-tui)

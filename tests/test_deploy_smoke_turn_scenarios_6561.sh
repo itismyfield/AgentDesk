@@ -144,7 +144,7 @@ run_case() {
             POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY="$root/detail"
             POST_DEPLOY_SMOKE_SESSIONS_BODY="$root/sessions"
             printf '{"mailboxes": []}' > "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY"
-            printf '[]' > "$POST_DEPLOY_SMOKE_SESSIONS_BODY"
+            printf '%s' "${FAKE_SESSIONS:-[]}" > "$POST_DEPLOY_SMOKE_SESSIONS_BODY"
             printf '{}' > "$POST_DEPLOY_SMOKE_HEALTH_BODY"
             _post_deploy_smoke_resolve_cluster_standby() { echo false; }
             _post_deploy_smoke_check_relay_round_trip || rc=$?
@@ -155,6 +155,8 @@ run_case() {
             _post_deploy_smoke_check_turn_scenarios || rc=$?
             _run_post_deploy_functional_smoke() { return "$rc"; }
             eval "$DISPOSITION"
+        elif [[ "$name" == e1_turns_* ]]; then
+            _post_deploy_smoke_check_turn_scenarios || rc=$?
         fi
         if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -gt 0 ]; then
             _report_post_deploy_smoke_failure > /dev/null
@@ -164,13 +166,16 @@ run_case() {
     printf '%s' "$root"
 }
 
+# claude-tui runs on its own tmux agent; adk-claude-tui-e2e is the claude-herdr worker.
 two_cells='agents:
   - id: adk-claude-tui-e2e
+    channels: {claude: {id: "1509350490461180100"}}
+  - id: adk-claude-tui-2-e2e
     channels: {claude: {id: "1509350490461180105"}}
   - id: adk-codex-tui-e2e
     channels: {codex: {id: "1509350778043895902"}}'
 claude_only='agents:
-  - id: adk-claude-tui-e2e
+  - id: adk-claude-tui-2-e2e
     channels: {claude: {id: "1509350490461180105"}}'
 export FIXTURES
 
@@ -254,6 +259,37 @@ for mode in e1_gap e1_other; do
         grep -q '^FAIL: relay E-1 round-trip failed' "$root/evidence" || fail_test "e1_other: FAIL"
     fi
 done
+
+# The live layout maps only the Herdr worker's channel: claude-tui is a plain tmux PASS whose
+# channel, tmux session and workspace tag all come from adk-claude-tui-2-e2e.
+split_cells="$two_cells
+session_hosts:
+  herdr:
+    channels: {1509350490461180100: local}"
+herdr_agent_busy='[{"status":"turn_active","channel_id":"1509350490461180100","session_key":"claude/h/n:AgentDesk-claude-adk-claude-tui-e2e"}]'
+root=$(run_case e1_turns_split "" "$split_cells" 0 "FAKE_SESSIONS=$herdr_agent_busy")
+grep -q '^RC=0$' "$root/out" || fail_test "split: rc $(cat "$root/out")"
+grep -q '^relay E-1 round-trip=pass$' "$root/evidence" || fail_test "split: the Herdr agent's session must not hold claude-tui's E-1"
+grep -q -- '--cell claude-tui --channel-id 1509350490461180105 .*--filter E-1 ' "$root/argv" || fail_test "split: E-1 channel $(cat "$root/argv")"
+grep -q -- '--cell claude-tui --channel-id 1509350490461180105 .*--filter E-50 ' "$root/argv" || fail_test "split: E-50 channel"
+grep -q '^COVERAGE=E-50=pass E-51=pass$' "$root/out" || fail_test "split: coverage $(cat "$root/out")"
+grep -q '^relay E-50 cell=claude-tui result=pass .* warm_followup_kill=0 ' "$root/evidence" \
+    || fail_test "split: the Herdr agent's tmux kill counted against claude-tui"
+root=$(run_case e1_tmux_agent_busy "" "$split_cells" 0 \
+    'FAKE_SESSIONS=[{"status":"turn_active","channel_id":"999","session_key":"claude/h/n:AgentDesk-claude-adk-claude-tui-2-e2e-t999"}]')
+grep -q '^relay E-1=skipped: foreign active turn on cell$' "$root/evidence" || fail_test "tmux agent busy: not detected"
+[ ! -s "$root/argv" ] || fail_test "tmux agent busy: driver ran"
+# Without its own agent, claude-tui fails instead of falling back to the Herdr worker's channel.
+old_agent_only='agents:
+  - id: adk-claude-tui-e2e
+    channels: {claude: {id: "1509350490461180100"}}
+  - id: adk-codex-tui-e2e
+    channels: {codex: {id: "1509350778043895902"}}'
+root=$(run_case e1_old_agent_only "" "$old_agent_only" 0)
+grep -q '^RC=1$' "$root/out" || fail_test "old agent only: rc $(cat "$root/out")"
+grep -q '^FAIL: relay E-1: could not resolve claude-tui channel' "$root/evidence" || fail_test "old agent only: not a FAIL"
+grep -q "'adk-claude-tui-2-e2e' not found" "$root/evidence" || fail_test "old agent only: missing agent unnamed"
+[ ! -s "$root/argv" ] || fail_test "old agent only: driver ran $(cat "$root/argv")"
 
 root=$(run_case both_classifications 1509350490461180105 "$herdr_cells" 0 FAKE_MODE_E_1=e1_gap)
 grep -q '^RC=0$' "$root/out" || fail_test "both classifications: rc"

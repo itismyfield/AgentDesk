@@ -305,7 +305,7 @@ class ConfiguredHerdrClassification(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.config = Path(self.tmp.name) / "fixture.yaml"
-        self.config.write_text("agents:\n  - id: adk-claude-tui-e2e\n    channels: {claude: {id: '222'}}\nsession_hosts:\n  herdr:\n    endpoints: {local: {}}\n    channels: {222: local}\n")
+        self.config.write_text("agents:\n  - id: adk-claude-tui-2-e2e\n    channels: {claude: {id: '222'}}\nsession_hosts:\n  herdr:\n    endpoints: {local: {}}\n    channels: {222: local}\n")
         self.markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
         self.logs = {"cell_lines": 1, **dict.fromkeys(turn_smoke.LOG_COUNTERS, 0)}
 
