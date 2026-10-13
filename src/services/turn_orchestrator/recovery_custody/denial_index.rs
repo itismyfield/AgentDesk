@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use super::capability::ApplyCapability;
 use super::operation::Stage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,17 +62,22 @@ impl DenialIndex {
         );
     }
 
-    /// A sync writer's check: it passes only as the published exact operation's stage.
+    /// A sync writer's check: it passes only with an unrevoked capability for the published exact
+    /// operation's stage; copied identifiers are not a capability.
     pub(crate) fn admit_write(
         &self,
         channel_id: &str,
-        exact: Option<(&str, Stage)>,
+        capability: Option<&ApplyCapability>,
     ) -> Result<(), Denial> {
         match self.state(channel_id) {
             IndexState::ExactOperation {
                 operation_id,
                 stage,
-            } if exact == Some((operation_id.as_str(), stage)) => Ok(()),
+            } if capability
+                .is_some_and(|cap| cap.check(channel_id, &operation_id, stage).is_ok()) =>
+            {
+                Ok(())
+            }
             state => Err(Denial(state)),
         }
     }

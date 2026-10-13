@@ -66,6 +66,9 @@ pub(crate) struct ActiveOperation {
     /// Follow-up effects or handoffs already granted (e.g. a queue-exit debt event-id); reused,
     /// never re-issued.
     pub(crate) handoffs: Vec<String>,
+    /// The grant a resumed stage must reuse; arming it with any other grant is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reuse: Option<String>,
 }
 
 impl ActiveOperation {
