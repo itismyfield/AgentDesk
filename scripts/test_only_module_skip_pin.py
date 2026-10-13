@@ -36,6 +36,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_draft_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
@@ -73,6 +75,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/replay_disposition/write_tests.rs",
         "src/services/discord/replay_policy/permit_tests.rs",
         "src/services/discord/replay_policy/policy_tests.rs",
+        "src/services/discord/busy_followup_retry_store/policy_tests.rs",
         "src/services/discord/replay_policy/live_tests.rs",
         "src/services/discord/replay_policy/injected/test_support_tests.rs",
         "src/services/discord/tmux_watcher/injected_watcher_tests.rs",

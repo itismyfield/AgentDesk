@@ -71,6 +71,11 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     .await;
 
                 restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
+                super::turn_bridge::followup_requeue::rewatch_legacy_draft_holds(
+                    &shared_for_tmux2,
+                    &provider_for_restore,
+                )
+                .await;
                 cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
 
                 // Clean up recovery markers
