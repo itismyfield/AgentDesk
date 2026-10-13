@@ -71,6 +71,19 @@ def bundle_digest():
     return digest(b"".join(p.name.encode() + b"\0" + p.read_bytes() + b"\0" for p in paths))
 
 
+def producer_supported(runtime, table):
+    spec = {"build_commit": lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) is not None,
+            "executable_sha256": sha, "event_schema": uint,
+            "unknown_outcome_produced": lambda v: type(v) is bool,
+            "actual_confirmation_produced": lambda v: type(v) is bool}
+    capabilities = table.get("producer_capabilities")
+    if not shape(capabilities, [spec]):
+        raise Unknown("producer_capabilities_invalid")
+    return any(c["build_commit"] == runtime["build_commit"]
+               and c["executable_sha256"] == runtime["executable_sha256"] and c["event_schema"] == 2
+               and c["unknown_outcome_produced"] and c["actual_confirmation_produced"] for c in capabilities)
+
+
 def validate(manifest):
     if not shape(manifest, SCHEMA):
         raise Unknown("manifest_invalid")
@@ -102,4 +115,4 @@ def validate(manifest):
         valid = valid and 0 < interval["seq_start"] <= interval["seq_end"]
     if not valid:
         raise Unknown("manifest_invalid")
-    return table
+    return producer_supported(runtime, table)

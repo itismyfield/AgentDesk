@@ -1,6 +1,6 @@
 //! Prompt submission guards; the caller holds its composer lock across every callback.
 
-use super::actor::gate::{PaneVerdict, judge_pane, own_draft};
+use super::actor::gate::own_draft;
 use super::actor::pane::MAX_PROMPT_BYTES;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun, StopCause};
 use crate::services::provider::{CancelToken, cancel_requested};
@@ -19,6 +19,18 @@ pub(crate) enum Refusal {
     Confirmation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubmitContext {
+    Idle,
+    ClaudeSteering,
+}
+
+impl SubmitContext {
+    pub(crate) fn permits_busy(self, provider: ShadowProvider) -> bool {
+        self == Self::ClaudeSteering && provider == ShadowProvider::Claude
+    }
+}
+
 pub(crate) struct Submission<'a> {
     pub provider: ShadowProvider,
     pub frame: &'a str,
@@ -30,6 +42,24 @@ pub(crate) struct Submission<'a> {
 pub(crate) fn run_prompt_submission_using(
     submission: Submission<'_>,
     cancel_token: Option<&CancelToken>,
+    payload: impl FnOnce() -> InputRun,
+    after: impl FnOnce() -> Option<String>,
+    enter: impl FnOnce() -> InputRun,
+) -> InputRun {
+    run_prompt_submission_in_context_using(
+        submission,
+        cancel_token,
+        SubmitContext::Idle,
+        payload,
+        after,
+        enter,
+    )
+}
+
+pub(crate) fn run_prompt_submission_in_context_using(
+    submission: Submission<'_>,
+    cancel_token: Option<&CancelToken>,
+    context: SubmitContext,
     payload: impl FnOnce() -> InputRun,
     after: impl FnOnce() -> Option<String>,
     enter: impl FnOnce() -> InputRun,
@@ -47,7 +77,7 @@ pub(crate) fn run_prompt_submission_using(
     let Some(before) = submission.before else {
         return refused(Refusal::CaptureUnavailable);
     };
-    if judge_pane(submission.provider, before) != PaneVerdict::Ready {
+    if !super::actor::gate::submission_admits(submission.provider, before, context) {
         return refused(Refusal::NotReady);
     }
     if cancel_requested(cancel_token) {
@@ -78,7 +108,12 @@ pub(crate) fn run_prompt_submission_using(
     let canonical = submission.frame.replace("\r\n", "\n").replace('\r', "\n");
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&after);
     let busy = super::actor::gate::submission_busy(submission.provider, &plain);
-    if busy || !own_draft(submission.provider, &after, &canonical, true) {
+    let owns = if context.permits_busy(submission.provider) {
+        super::actor::gate::own_steering_draft(&after, &canonical)
+    } else {
+        own_draft(submission.provider, &after, &canonical, true)
+    };
+    if (busy && !context.permits_busy(submission.provider)) || !owns {
         return late_refusal(Refusal::OwnDraft);
     }
     if cancel_requested(cancel_token) {
@@ -105,6 +140,7 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::atomic::Ordering;
 
+    use super::super::actor::gate::{PaneVerdict, judge_pane};
     use super::*;
 
     const IDLE: &str = include_str!("../../../tests/fixtures/tui_input/claude-2.1.293-idle.txt");
@@ -134,6 +170,132 @@ mod tests {
             frame,
             before: Some(IDLE),
             mutations: 2,
+        }
+    }
+
+    #[test]
+    fn cg_b3_only_claude_steering_admits_busy_at_both_submission_boundaries() {
+        let before = "✳ Architecting…\n────────────────────\n❯ \n────────────────────\n";
+        let after = "✳ Architecting…\n────────────────────\n❯ own\n────────────────────\n";
+        for context in [SubmitContext::Idle, SubmitContext::ClaudeSteering] {
+            let events = RefCell::new(Vec::new());
+            let run = run_prompt_submission_in_context_using(
+                Submission {
+                    provider: ShadowProvider::Claude,
+                    frame: "own",
+                    before: Some(before),
+                    mutations: 1,
+                },
+                None,
+                context,
+                || {
+                    events.borrow_mut().push("payload");
+                    InputRun::Applied
+                },
+                || Some(after.into()),
+                || {
+                    events.borrow_mut().push("enter");
+                    InputRun::Applied
+                },
+            );
+            if context == SubmitContext::ClaudeSteering {
+                assert_eq!(run, InputRun::Applied);
+                assert_eq!(*events.borrow(), ["payload", "enter"]);
+            } else {
+                assert_eq!(
+                    run,
+                    InputRun::Refused(InputRefusal::Composer(Refusal::NotReady))
+                );
+                assert!(events.borrow().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cg_b3_idle_and_codex_keep_the_post_payload_busy_veto() {
+        let codex_idle = include_str!("../../../tests/fixtures/tui_input/codex-idle-dim.ansi");
+        let claude_after = "✳ Architecting…\n────────────────────\n❯ own\n────────────────────\n";
+        let codex_after = "• Working (1s • esc to interrupt)\n› own\n\n  gpt-5.5 xhigh · Fast off · /fixture/workspace · Context 100% left";
+        for (provider, before, after, context) in [
+            (
+                ShadowProvider::Claude,
+                IDLE,
+                claude_after,
+                SubmitContext::Idle,
+            ),
+            (
+                ShadowProvider::Codex,
+                codex_idle,
+                codex_after,
+                SubmitContext::Idle,
+            ),
+            (
+                ShadowProvider::Codex,
+                codex_idle,
+                codex_after,
+                SubmitContext::ClaudeSteering,
+            ),
+        ] {
+            assert_eq!(judge_pane(provider, before), PaneVerdict::Ready);
+            assert!(
+                own_draft(provider, after, "own", true),
+                "the draft must admit Enter without the Busy veto"
+            );
+            assert!(super::super::actor::gate::submission_busy(provider, after));
+            let enters = RefCell::new(0);
+            let run = run_prompt_submission_in_context_using(
+                Submission {
+                    provider,
+                    frame: "own",
+                    before: Some(before),
+                    mutations: 1,
+                },
+                None,
+                context,
+                || InputRun::Applied,
+                || Some(after.into()),
+                || {
+                    *enters.borrow_mut() += 1;
+                    InputRun::Applied
+                },
+            );
+            assert_eq!(
+                run,
+                InputRun::Indeterminate {
+                    confirmed: 1,
+                    cause: StopCause::Refused(InputRefusal::Composer(Refusal::OwnDraft)),
+                }
+            );
+            assert_eq!(*enters.borrow(), 0);
+        }
+    }
+
+    #[test]
+    fn cg_b3_steering_never_relaxes_exact_draft_or_modal_checks() {
+        let before = "✳ Architecting…\n────────────────────\n❯ \n────────────────────\n";
+        for after in [
+            "✳ Architecting…\n────────────────────\n❯ o wn\n────────────────────\n",
+            "Do you want to proceed?\n1. Yes\n2. No\nEnter to confirm · esc to cancel\n────────────────────\n❯ own\n────────────────────\n",
+        ] {
+            let enters = RefCell::new(0);
+            let run = run_prompt_submission_in_context_using(
+                Submission {
+                    provider: ShadowProvider::Claude,
+                    frame: "own",
+                    before: Some(before),
+                    mutations: 1,
+                },
+                None,
+                SubmitContext::ClaudeSteering,
+                || InputRun::Applied,
+                || Some(after.into()),
+                || {
+                    *enters.borrow_mut() += 1;
+                    InputRun::Applied
+                },
+            );
+            assert!(matches!(run, InputRun::Indeterminate { confirmed: 1, .. }));
+            assert_eq!(*enters.borrow(), 0);
         }
     }
 
