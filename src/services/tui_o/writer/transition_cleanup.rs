@@ -237,8 +237,8 @@ fn hop(snapshot: &Snapshot, key: &str, next: &Successor) -> Result<(u64, Option<
         return Ok((seq, next.tmux_session.clone()));
     }
     let history = (snapshot.legacy_hops.as_ref()).map_err(|e| Unclear::HistoryUnread(e.clone()))?;
-    let found: BTreeSet<&(u64, String)> = history.get(key).into_iter().flatten().collect();
-    match found.into_iter().collect::<Vec<_>>().as_slice() {
+    // Every candidate counts, a repeated one too: only a single history match fixes the hop.
+    match history.get(key).map_or(&[][..], Vec::as_slice) {
         [] => Err(Unclear::NoHistory),
         [(seq, pane)] => Ok((*seq, Some(pane.clone()))),
         _ => Err(Unclear::AmbiguousHistory),
@@ -338,17 +338,19 @@ fn end_seen<'a>(cursor: &Cursor, facts: Option<&'a SourceFacts>) -> Option<&'a F
         FileSeen::Present(present) if present.same_file && present.prefix_matches => {
             Some(&present.fingerprint)
         }
-        FileSeen::Missing => facts
-            .witness
-            .as_ref()
-            .filter(|w| {
-                w.source == cursor.source
-                    && w.captured_through == cursor.captured_through
-                    && w.prefix_hash == cursor.prefix_hash
-            })
+        FileSeen::Missing => (facts.witness.as_ref())
+            .filter(|w| same_end(w, cursor))
             .map(|w| &w.fingerprint),
         _ => None,
     }
+}
+
+/// The witness checked this cursor's source, offset and hash. Unlike `bound_to` it asks nothing
+/// of the cursor's lifecycle, so a retired cursor's own record still compares.
+fn same_end(witness: &CleanupWitness, cursor: &Cursor) -> bool {
+    witness.source == cursor.source
+        && witness.captured_through == cursor.captured_through
+        && witness.prefix_hash == cursor.prefix_hash
 }
 
 fn not_current(snapshot: &Snapshot, cursor: &Cursor) -> Result<(), Verdict> {
@@ -464,7 +466,7 @@ fn settled_file(
                 return Err(unclear(Unclear::MissingWithOpenFd));
             }
             let witness = facts.witness.as_ref().ok_or(Verdict::Refused(NoWitness))?;
-            if !witness.bound_to(cursor) {
+            if !same_end(witness, cursor) {
                 return Err(Verdict::Refused(WitnessUnbound));
             }
             if !witness.eligible(later.at) {

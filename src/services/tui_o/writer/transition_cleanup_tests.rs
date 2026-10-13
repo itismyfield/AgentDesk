@@ -583,15 +583,26 @@ fn transition_cleanup_first_version_refuses_codex_moving_homes_and_bad_requests(
 
 #[test]
 fn transition_cleanup_seqless_hop_takes_its_seq_only_from_one_validated_history_match() {
+    // Without a match the hop is unknown even where any seq and its stored pane would pass.
     let mut fixture = Fixture::synthetic();
     let history = fixture.snapshot.legacy_hops.as_mut().unwrap();
     history.remove(&key(31));
+    let next = fixture.snapshot.rotation.successors.get_mut(&key(31));
+    next.unwrap().tmux_session = Some(PANE.into());
+    let from_zero = ExecutionEnd {
+        first_seq: 0,
+        ..ended()
+    };
+    fixture.request.termination = Some(Termination::Confirmed(from_zero));
     only(fixture, 31, unknown(Unclear::NoHistory));
-    let mut fixture = Fixture::synthetic();
-    let history = fixture.snapshot.legacy_hops.as_mut().unwrap();
-    let candidates = history.get_mut(&key(32)).unwrap();
-    candidates.push((hop_seq(32) + 1, PANE.to_string()));
-    only(fixture, 32, unknown(Unclear::AmbiguousHistory));
+    let pair = (hop_seq(32), PANE.to_string());
+    let other_pane = (hop_seq(32), "AgentDesk-claude-other".to_string());
+    for second in [pair.clone(), (hop_seq(32) + 1, PANE.into()), other_pane] {
+        let mut fixture = Fixture::synthetic();
+        let history = fixture.snapshot.legacy_hops.as_mut().unwrap();
+        history.insert(key(32), vec![pair.clone(), second]);
+        only(fixture, 32, unknown(Unclear::AmbiguousHistory));
+    }
     let mut fixture = Fixture::synthetic();
     fixture.snapshot.legacy_hops = Err("binding log gap".into());
     let judgment = fixture.judge();
@@ -600,11 +611,25 @@ fn transition_cleanup_seqless_hop_takes_its_seq_only_from_one_validated_history_
         assert_eq!(verdict(&judgment, n), &gap);
     }
     assert_eq!(judgment.summary.eligible, 56);
-    // The mapped seq is what the cutoff and the termination range are checked against.
-    let mut fixture = Fixture::synthetic();
-    let history = fixture.snapshot.legacy_hops.as_mut().unwrap();
-    history.insert(key(30), vec![(hop_seq(OLD) + 1, PANE.to_string())]);
-    only(fixture, 30, refused(Refusal::AfterCutoff));
+}
+
+#[test]
+fn transition_cleanup_mapped_seq_and_pane_meet_cutoff_range_and_pane_each() {
+    let mapped = |seq: u64, pane: &str| {
+        let mut fixture = Fixture::synthetic();
+        let history = fixture.snapshot.legacy_hops.as_mut().unwrap();
+        history.insert(key(30), vec![(seq, pane.to_string())]);
+        fixture
+    };
+    only(
+        mapped(hop_seq(OLD) + 1, PANE),
+        30,
+        refused(Refusal::AfterCutoff),
+    );
+    // Seq 0 is within the cutoff but before the termination range, which starts at 1.
+    only(mapped(0, PANE), 30, unknown(Unclear::TerminationOutOfRange));
+    let other = mapped(hop_seq(30), "AgentDesk-claude-other");
+    only(other, 30, unknown(Unclear::TerminationOtherPane));
 }
 
 #[test]
@@ -654,6 +679,56 @@ fn transition_cleanup_past_audit_settles_only_its_own_job_on_an_unchanged_snapsh
     done(&mut fixture);
     fixture.later_present(6).fingerprint.len += 1;
     only(fixture, 6, refused(Refusal::Growing));
+}
+
+#[test]
+fn transition_cleanup_missing_file_retry_compares_the_retired_cursor_with_its_witness() {
+    let base = Fixture::synthetic().judge();
+    let Verdict::Eligible(draft) = verdict(&base, MISSING).clone() else {
+        panic!("the missing hop is eligible in the base fixture");
+    };
+    let done = |fixture: &mut Fixture| {
+        let cursor = fixture.cursor(MISSING);
+        cursor.retired = true;
+        cursor.transition_cleanup = Some(*draft.clone());
+    };
+    let mut fixture = Fixture::synthetic();
+    done(&mut fixture);
+    only(fixture, MISSING, Verdict::AlreadyDone);
+    // Another job is judged on the current conditions, not waved through by the record.
+    let mut fixture = Fixture::synthetic();
+    done(&mut fixture);
+    fixture.request.job_id = "hrot-e2e-2".into();
+    let judgment = fixture.judge();
+    let Verdict::Eligible(again) = verdict(&judgment, MISSING) else {
+        panic!("{:?}", verdict(&judgment, MISSING));
+    };
+    assert_eq!(
+        (again.job_id.as_str(), &again.verified),
+        ("hrot-e2e-2", &draft.verified)
+    );
+    let mut fixture = Fixture::synthetic();
+    done(&mut fixture);
+    fixture.request.job_id = "hrot-e2e-2".into();
+    fixture.snapshot.obligations = Ok(Obligations {
+        owed: 1,
+        ..Default::default()
+    });
+    let judgment = fixture.judge();
+    let held = refused(Refusal::OutputOwed(Owed::Queue));
+    assert_eq!(verdict(&judgment, MISSING), &held);
+    // A witness of another offset or hash neither settles the job nor passes again.
+    for moved_offset in [true, false] {
+        let mut fixture = Fixture::synthetic();
+        done(&mut fixture);
+        let witness = fixture.facts(MISSING).witness.as_mut().unwrap();
+        if moved_offset {
+            witness.captured_through -= 1;
+        } else {
+            witness.prefix_hash = "f".repeat(64);
+        }
+        only(fixture, MISSING, refused(Refusal::WitnessUnbound));
+    }
 }
 
 #[cfg(unix)]
