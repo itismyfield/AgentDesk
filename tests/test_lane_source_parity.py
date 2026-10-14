@@ -209,6 +209,15 @@ def findings(output: str, kind: str) -> list[str]:
     return [line for line in output.splitlines() if kind in line]
 
 
+def guarded_repo() -> Repo:
+    """`delta` is an existing id the justfile filters and one required job alone selects."""
+    repo = Repo()
+    repo.modules["delta"] = NAME_SKIPPED
+    repo.just.append("cargo test --lib delta")
+    repo.pr["delta_job"], repo.mirrors["delta_job"] = ["cargo test --lib delta"], None
+    return repo
+
+
 class RequiredPrParityTests(unittest.TestCase):
     def assert_clean(self, repo: Repo) -> None:
         result, output = repo.check()
@@ -250,6 +259,85 @@ class RequiredPrParityTests(unittest.TestCase):
         self.assertIn("OK: all_coverage", output)
         self.assertIn("required-pr-uncovered", output)
         self.assertIn("  + delta (e.g. delta::reads_pg_env)", output)
+
+    def test_skippable_step_or_conditional_mirror_is_no_required_run_for_an_existing_id(
+        self,
+    ) -> None:
+        repo = guarded_repo()
+        self.assert_clean(repo)
+        conditional = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        cases = {
+            "if: false": lambda r: r.step_keys.update(delta_job="        if: false\n"),
+            "continue-on-error: true": lambda r: r.step_keys.update(
+                delta_job="        continue-on-error: true\n"),
+            "job continue-on-error: true": lambda r: r.keys.update(
+                delta_job="    continue-on-error: true\n"),
+            "mirror if: false": lambda r: r.mirror_text.update(delta_job=conditional),
+            "mirror job continue-on-error: true": lambda r: r.mirror_text.update(
+                delta_job=mirror("delta_job").replace(
+                    "    runs-on:", "    continue-on-error: true\n    runs-on:")),
+        }
+        for case, change in cases.items():
+            with self.subTest(case=case):
+                result, output = guarded_repo().delta(change)
+                self.assertRegex(output, r"OK: new_required_test_ids: base=\w+ added=0 ")
+                self.assertIn("OK: all_coverage", output)
+                self.assertRegex(output, r"FAIL: required_pr_coverage: required-pr-uncovered: "
+                                         r".*\n  \+ delta \(e\.g\. delta::reads_pg_env\)\n")
+                missing = findings(output, "FAIL: pr_filter_parity: pr-parity-missing: ")
+                self.assertEqual(len(missing), 1, output)
+                self.assertIn("justfile:3: [test-non-pg] lib `delta`", missing[0])
+                self.assertIn("delta::reads_pg_env", missing[0])
+                unproven = findings(output, "pr-context-unproven")
+                self.assertEqual(len(unproven), case.startswith("mirror"), output)
+                if unproven:
+                    self.assertIn("FAIL: required_pr_coverage: pr-context-unproven: "
+                                  ".github/workflows/ci-pr.yml:delta_job_required_context: "
+                                  "every proven mirror of delta_job may skip or swallow",
+                                  unproven[0])
+                self.assertEqual(result, 1)
+
+    def test_running_step_and_unconditional_mirror_keep_required_evidence(self) -> None:
+        live = mirror("delta_job").replace("delta_job_required_context:", "delta_job_live:")
+        conditional = mirror("delta_job").replace(
+            "    runs-on:", "    if: ${{ github.event_name == 'push' }}\n    runs-on:")
+        cases = {
+            "if: true": lambda r: r.step_keys.update(delta_job="        if: true\n"),
+            "if: !cancelled()": lambda r: r.step_keys.update(
+                delta_job="        if: ${{ !cancelled() }}\n"),
+            "continue-on-error: false": lambda r: r.step_keys.update(
+                delta_job="        continue-on-error: false\n"),
+            "job continue-on-error: false": lambda r: r.keys.update(
+                delta_job="    continue-on-error: false\n"),
+            "mirror if: !cancelled()": lambda r: r.mirror_text.update(delta_job=mirror(
+                "delta_job").replace("    runs-on:", "    if: ${{ !cancelled() }}\n    runs-on:")),
+            "a live mirror beside a conditional one": lambda r: r.mirror_text.update(
+                delta_job=conditional + live),
+            # A job that selects no test loses nothing when only conditional mirrors report it.
+            "conditional mirror of a job without tests": lambda r: (
+                r.pr.update(compile=["echo compile"]),
+                r.mirrors.update(compile=None),
+                r.mirror_text.update(compile=mirror("compile").replace(
+                    "      - env:", "      - if: false\n        env:")),
+            ),
+        }
+        for case, change in cases.items():
+            with self.subTest(case=case):
+                repo = guarded_repo()
+                change(repo)
+                self.assert_clean(repo)
+
+    def test_unreadable_command_in_a_conditionally_mirrored_job_stays_unresolved(self) -> None:
+        repo = guarded_repo()
+        repo.pr["delta_job"].append('cargo test --lib "$FILTER"')
+        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        result, output = repo.check()
+        unresolved = findings(output, "source-command-unresolved")
+        self.assertEqual(len(unresolved), 1, output)
+        self.assertIn("cargo test --lib '$FILTER'", unresolved[0])
+        self.assertEqual(result, 1)
 
     def test_exception_for_a_removed_filter_is_stale(self) -> None:
         repo = Repo()
@@ -651,7 +739,11 @@ class NewRequiredIdTests(unittest.TestCase):
                 result, output = debt_repo().delta(change)
                 context = new_findings(output, "new-id-context-unproven")
                 self.assertEqual(len(context), 1, output)
-                self.assertIn("every mirror reporting it runs under an `if:`", context[0])
+                self.assertIn("targeted's mirror targeted_required_context is unproven",
+                              context[0])
+                self.assertIn("pr-context-unproven: .github/workflows/ci-pr.yml:targeted_"
+                              "required_context: every proven mirror of targeted may skip",
+                              output)
                 self.assertNotIn("delta::reads_pg_env -> ", output)
                 self.assertEqual(result, 1)
 
