@@ -110,7 +110,7 @@ impl Geometry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaneIdentity {
     session: String,
@@ -123,7 +123,7 @@ pub(crate) struct PaneIdentity {
 pub(crate) struct GuardedPane {
     session: String,
     geometry: Geometry,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     stash_attempted: bool,
 }
 
@@ -173,7 +173,7 @@ impl SubmissionTmux {
         Ok(GuardedPane {
             session: session.to_owned(),
             geometry,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             stash_attempted: false,
         })
     }
@@ -202,7 +202,7 @@ impl GuardedPane {
         capture_guarded(&self.geometry)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn identity(&self) -> PaneIdentity {
         PaneIdentity {
             session: self.geometry.session.clone(),
@@ -213,12 +213,12 @@ impl GuardedPane {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn dimensions(&self) -> (usize, usize) {
         (self.geometry.width, self.geometry.height)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn stash(&mut self) -> EffectOutcome {
         if std::mem::replace(&mut self.stash_attempted, true) {
             return EffectOutcome::Held;

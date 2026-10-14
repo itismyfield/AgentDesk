@@ -46,6 +46,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_s2a_tests.rs",
         "src/services/claude_tui/host_input/guarded_submission/executor_tests.rs",
+        "src/services/claude_tui/host_input/guarded_submission/idle_stash/idle_stash_tests.rs",
         "src/services/tui_input/actor/gate/claude_guarded/acceptance_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/protocol_tests.rs",
         "src/services/tui_input/submission_tmux/guarded/transport_tests.rs",
@@ -723,6 +724,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/claude_tui/host_input/guarded_submission/idle_stash.rs",
+        "src/services/claude_tui/host_input/guarded_submission/idle_stash/receipt.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",

@@ -34,12 +34,17 @@ fn view(text: &str, stashed: bool) -> String {
 fn quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
-fn wait(mut ready: impl FnMut() -> bool) {
+fn wait(phase: &str, mut ready: impl FnMut() -> bool) {
+    eprintln!("fixture phase={phase} waiting");
     let deadline = Instant::now() + Duration::from_secs(4);
     while !ready() {
-        assert!(Instant::now() < deadline, "fixture did not become ready");
+        assert!(
+            Instant::now() < deadline,
+            "fixture phase={phase} did not become ready"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
+    eprintln!("fixture phase={phase} reached");
 }
 
 struct Authority {
@@ -118,8 +123,10 @@ while True:
         &command,
     ]);
     f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
-    wait(|| root.join("ready").exists());
-    wait(|| f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("js"));
+    wait("renderer-started", || root.join("ready").exists());
+    wait("renderer-capture", || {
+        f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("js")
+    });
     root
 }
 fn events(root: &Path) -> Vec<String> {
@@ -157,6 +164,40 @@ fn missing_capability_and_off_do_no_preparation_or_io() {
     assert!(!composer_lock::draft_guarded(
         "nonexistent-idle-stash-target"
     ));
+
+    let f = Fixture::new();
+    let root = renderer(&f, "idle-off", "normal");
+    let authority = Authority {
+        identity: SubmissionTmux.pin_guarded("idle-off").unwrap().identity(),
+        admitted: Cell::new(true),
+    };
+    let target = InputTarget::legacy_tmux("idle-off");
+    let transcript = root.join("transcript");
+    let request = Request {
+        target: &target,
+        gate: &LegacyTmuxGate,
+        prompt: PROMPT,
+        transcript: &transcript,
+        cancel: None,
+        timing: &FAST,
+    };
+    let shim = f.root.path().join("tmux");
+    let tape = root.join("io");
+    let original = fs::read_to_string(&shim).unwrap();
+    fs::write(
+        &shim,
+        original.replacen(
+            "#!/bin/sh\n",
+            &format!("#!/bin/sh\nprintf x >> {}\n", quote(&tape)),
+            1,
+        ),
+    )
+    .unwrap();
+    assert_eq!(run(None, true, &request), None);
+    assert_eq!(run(Some(&authority), false, &request), None);
+    assert!(!tape.exists(), "OFF/None queried the pane");
+    assert!(events(&root).is_empty());
+    assert!(!composer_lock::draft_guarded("idle-off"));
 }
 
 #[test]
@@ -356,7 +397,7 @@ fn pinned_stash_is_single_attempt_even_when_acknowledgement_is_lost() {
             assert!(matches!(first, EffectOutcome::Unknown(_)));
         }
         assert_eq!(pane.stash(), EffectOutcome::Held);
-        wait(|| f.received(&name).contains(&0x13));
+        wait("stash-key-received", || f.received(&name).contains(&0x13));
         assert_eq!(f.received(&name).iter().filter(|b| **b == 0x13).count(), 1);
         fs::remove_file(f.root.path().join("mode")).ok();
     }
@@ -408,7 +449,7 @@ fn each_lost_acknowledgement_stops_without_retry_or_cleanup() {
             },
             "{stage}"
         );
-        wait(|| events(&root).len() >= expected.len());
+        wait("lost-ack-effects", || events(&root).len() >= expected.len());
         assert_eq!(events(&root), expected);
         assert!(composer_lock::draft_guarded("lost-ack"));
     }
@@ -484,7 +525,8 @@ fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
     let shim = f.root.path().join("tmux");
     let original = fs::read_to_string(&shim).unwrap();
     let hook = format!(
-        "for effect in \"$@\"; do\n if [ \"$effect\" = capture-pane ] && grep -q Enter {}; then\n  touch {}\n  while [ ! -f {} ]; do sleep 0.01; done\n fi\ndone\n",
+        "for effect in \"$@\"; do\n if [ \"$effect\" = capture-pane ] && [ -f {} ] && grep -q Enter {}; then\n  touch {}\n  while [ ! -f {} ]; do sleep 0.01; done\n fi\ndone\n",
+        quote(&root.join("events")),
         quote(&root.join("events")),
         quote(&root.join("observing")),
         quote(&root.join("release"))
@@ -495,6 +537,7 @@ fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
     )
     .unwrap();
     let worker_root = root.clone();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let target = InputTarget::legacy_tmux("restore-barrier");
         let authority = Authority {
@@ -513,19 +556,52 @@ fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
             cancel: None,
             timing: &FAST,
         };
-        run(Some(&authority), true, &request).unwrap()
+        let got = run(Some(&authority), true, &request).unwrap();
+        let _ = finished_tx.send(format!("{got:?}"));
+        got
     });
-    wait(|| root.join("observing").exists());
-    let got = super::super::run(
-        &InputTarget::legacy_tmux("restore-barrier"),
-        &LegacyTmuxGate,
-        "competing input",
-        None,
-    );
-    let other = composer_lock::try_with_composer_permit("other-idle-barrier-pane", |_| 7);
+    let while_observing = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait("restore-observation", || {
+            if let Ok(ended) = finished_rx.try_recv() {
+                let probe = std::process::Command::new(&shim)
+                    .args(["capture-pane", "-p", "-t", "=restore-barrier:"])
+                    .output()
+                    .unwrap();
+                eprintln!(
+                    "fixture capture status={} stderr={:?}",
+                    probe.status,
+                    String::from_utf8_lossy(&probe.stderr)
+                );
+                panic!(
+                    "worker ended before restore barrier: {ended}; effects={:?}",
+                    events(&root)
+                );
+            }
+            root.join("observing").exists()
+        });
+        let got = super::super::run(
+            &InputTarget::legacy_tmux("restore-barrier"),
+            &LegacyTmuxGate,
+            "competing input",
+            None,
+        );
+        let calls = Cell::new(0);
+        let same = composer_lock::try_with_composer_permit("restore-barrier", |_| {
+            calls.set(calls.get() + 1);
+            7
+        });
+        let other = composer_lock::try_with_composer_permit("other-idle-barrier-pane", |_| 7);
+        (got, same, calls.get(), other)
+    }));
     fs::write(root.join("release"), "release").unwrap();
     let ended = worker.join().unwrap();
+    let (got, same, calls, other) = match while_observing {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     assert_eq!(got, refused(Refusal::WriterContended));
+    assert_eq!(same, None);
+    assert_eq!(calls, 0);
     assert_eq!(other, Some(7));
     assert_eq!(ended.delivery, Delivery::Observed);
     assert_eq!(ended.draft, DraftState::RestoredObserved);
