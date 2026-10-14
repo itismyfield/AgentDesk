@@ -137,7 +137,7 @@ fn with_runtime_binding_authority<R>(
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn assert_marker_publication_unlocked_for_tests() {
     assert!(
         STATE.try_lock().is_ok(),

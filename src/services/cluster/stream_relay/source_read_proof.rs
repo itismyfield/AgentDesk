@@ -243,7 +243,7 @@ impl PrefixSeal {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn assert_revision_unlocked_for_tests() {
     assert!(
         REVISIONS.try_lock().is_ok(),
