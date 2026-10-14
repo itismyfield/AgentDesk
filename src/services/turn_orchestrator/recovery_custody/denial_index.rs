@@ -4,8 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::capability::{ApplyCapability, ApplyGuard};
+use super::capability::{ApplyCapability, ApplyGuard, Carrier, Unapplied, Unsent};
 use super::operation::Stage;
+#[cfg(test)]
+use super::seam::{self, Point};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IndexState {
@@ -57,6 +59,12 @@ impl DenialIndex {
         states
             .get(channel_id)
             .map_or(IndexState::Unknown, |(_, state)| state.clone())
+    }
+
+    /// The channel's entry without creating one; `None` means nothing here has attached it.
+    pub(crate) fn entry(&self, channel_id: &str) -> Option<IndexState> {
+        let states = self.states();
+        states.get(channel_id).map(|(_, state)| state.clone())
     }
 
     /// Mirrors the row a commit left at `revision`; a mirror of an earlier commit that arrives
@@ -120,5 +128,35 @@ impl DenialIndex {
             return Ok(entered);
         }
         Err(Denial(state.cloned().unwrap_or(IndexState::Unknown)))
+    }
+
+    /// An applier's entry with a carried capability: the carrier leaves the queue as its apply is
+    /// counted, and a refusal hands it back still queued with its payload.
+    pub(crate) fn admit_carried<P>(
+        &self,
+        channel_id: &str,
+        mut carrier: Carrier<P>,
+    ) -> Result<(ApplyGuard, P), Unapplied<P>> {
+        let entered = {
+            let states = self.states();
+            let state = states.get(channel_id).map(|(_, state)| state);
+            let entered = match state {
+                Some(IndexState::ExactOperation {
+                    operation_id,
+                    stage,
+                    arm_id,
+                }) => carrier.enter(channel_id, (operation_id, *stage, arm_id)),
+                _ => None,
+            };
+            entered.ok_or_else(|| Denial(state.cloned().unwrap_or(IndexState::Unknown)))
+        };
+        match entered {
+            Ok(entered) => {
+                #[cfg(test)]
+                seam::hit(channel_id, Point::Active);
+                Ok(entered)
+            }
+            Err(denial) => Err(carrier.refuse(Unsent::Denied(denial))),
+        }
     }
 }

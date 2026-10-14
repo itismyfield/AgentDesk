@@ -4,10 +4,13 @@
 Checked together: module declarations, re-exports and aliases, references from other files (a
 field, a constructor call, a wiring point), the test-only seams the bodies use, gate shape
 (`cfg(any(test, ..))`, `cfg_attr`, a feature), the 0140 migration staying additive, and files that
-must not change. `--diff-base REF` adds the changed-file check; `--forbid GLOB` extends its list.
+must not change. `--diff-base REF` adds the changed-file check under `--policy NAME` (or the
+default list); `--forbid GLOB` extends it. In CI (`--ci` or CI=true) a run without both a base and
+a policy fails as unverified instead of passing.
 """
 import argparse
 import fnmatch
+import os
 import re
 import subprocess
 import sys
@@ -39,7 +42,7 @@ SEAMS = {
 # Names that may exist only inside the gated scoped_restore block.
 SCOPED_ONLY = ("AttemptIdentity", "ExactWitness", "Installed,")
 # Test fixtures inside the bodies; each needs its own `#[cfg(test)]`.
-TEST_ONLY = ("fn isolated(", "fn unlocked(", "mod commit_fault {", "mod custody_pg_tests;",
+TEST_ONLY = ("fn isolated(", "fn unlocked(", "mod commit_fault {", "mod seam {", "mod custody_pg_tests;",
              "mod reconcile_pg_tests;", "mod registry_pg_tests;")
 OPEN_GATE = re.compile(r"cfg\(\s*any\(|cfg_attr|feature\s*=|#!?\[allow\(|env::var|env!\(")
 MIGRATION = "migrations/postgres/0140_channel_recovery_custody.sql"
@@ -50,6 +53,19 @@ FORBIDDEN = (
     "src/services/discord/queue_dispatch/kickoff.rs", "src/services/discord/queue_io.rs",
     "src/services/discord/mod.rs",
 )
+# policy -> (globs that must not change, files that may change only in their DECLARATIONS lines).
+POLICIES = {
+    # The feature PR against its base branch: what no B3b-4 slice changes.
+    "b3b4": (FORBIDDEN + ("src/services/discord/runtime_bootstrap*", "migrations/*", "src/db/*"),
+             (PURGE,)),
+    # Slice 4a2b-0 against its start head: only the dormant bodies, this gate and registrations.
+    "4a2b-0": (FORBIDDEN + (
+        "src/services/turn_orchestrator.rs", "src/services/turn_orchestrator/incarnation.rs", PURGE,
+        "src/services/cluster/channel_home_port.rs",
+        "src/services/turn_orchestrator/pending_queue_persistence.rs",
+        "src/services/turn_orchestrator/queued_head.rs", "src/services/turn_orchestrator/queue_enqueue.rs",
+        "src/services/discord/*", ".github/workflows/*", "src/db/*", "migrations/*"), ()),
+}
 NAMED = re.compile(r"\b(?:%s)\b" % "|".join(MODULES))
 
 
@@ -126,23 +142,46 @@ def check(root):
     return errors
 
 
-def changed_forbidden(root, base, extra):
-    names = subprocess.run(["git", "-C", str(root), "diff", "--name-only", f"{base}...HEAD"],
-                           capture_output=True, text=True, check=True).stdout.split()
-    globs = FORBIDDEN + tuple(extra)
-    return [f"{name}: changed against {base} but must stay as it is"
-            for name in names if any(fnmatch.fnmatch(name, glob) for glob in globs)]
+def git(root, *args):
+    done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    if done.returncode:
+        raise RuntimeError(done.stderr.strip() or f"git {args[0]} failed")
+    return done.stdout
+
+
+def changed_forbidden(root, base, policy, extra):
+    forbidden, declared_only = POLICIES[policy] if policy else (FORBIDDEN, ())
+    globs = forbidden + tuple(extra)
+    errors = []
+    for name in git(root, "diff", "--name-only", f"{base}...HEAD").split():
+        if any(fnmatch.fnmatch(name, glob) for glob in globs):
+            errors.append(f"{name}: changed against {base} but must stay as it is")
+        elif name in declared_only:
+            allowed = DECLARATIONS[name] + ("#[cfg(test)]",)
+            diff = git(root, "diff", "-U0", f"{base}...HEAD", "--", name).splitlines()
+            lines = [line[1:].strip() for line in diff
+                     if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+            errors.extend(f"{name}: `{line}` changed; only its gated declarations may"
+                          for line in lines if line not in allowed)
+    return errors
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--diff-base")
+    parser.add_argument("--policy", choices=sorted(POLICIES))
     parser.add_argument("--forbid", action="append", default=[])
+    parser.add_argument("--ci", action="store_true")
     args = parser.parse_args(argv)
     errors = check(args.root)
-    if args.diff_base:
-        errors += changed_forbidden(args.root, args.diff_base, args.forbid)
+    if (args.ci or os.environ.get("CI") == "true") and not (args.diff_base and args.policy):
+        errors.append("unverified: CI needs --diff-base and --policy for the changed-file check")
+    elif args.diff_base:
+        try:
+            errors += changed_forbidden(args.root, args.diff_base, args.policy, args.forbid)
+        except RuntimeError as error:
+            errors.append(f"unverified: no diff against {args.diff_base}: {error}")
     print("\n".join(errors) if errors else "B3b-4 dormancy: PASS")
     return 1 if errors else 0
 

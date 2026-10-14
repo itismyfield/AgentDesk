@@ -12,6 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use self::entry::Slot;
 use super::recovery_custody::CustodyStore;
+use super::recovery_custody::denial_index::{DenialIndex, IndexState};
 use super::recovery_custody::model::{Inspection, Phase};
 
 /// Initial policy constants, not measurements: slots keeping install responsibility, and
@@ -40,6 +41,16 @@ pub(crate) enum RegistryRefusal {
     NotClosed,
     /// The slot was reclaimed; the channel resolves a new one.
     Retired,
+}
+
+/// What a request finds for a channel. Asked again on every request: a channel nothing answers
+/// for now is attached once its row is rehydrated or its attempt begins.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Binding {
+    /// No recovery slot and no custody entry: the legacy path runs as before.
+    Unmanaged,
+    /// A slot or a custody entry exists; `Unknown` when a slot has nothing decided yet.
+    Attached(IndexState),
 }
 
 /// What a core's slots share: the process identity, the identities issued so far and the install
@@ -141,6 +152,15 @@ impl RecoveryRegistry {
     /// The channel's slot, without creating one.
     pub(crate) fn peek(&self, channel: u64) -> Option<Arc<Slot>> {
         self.slots().get(&channel).cloned()
+    }
+
+    /// The channel's binding, without creating a slot or an index entry.
+    pub(crate) fn binding(&self, index: &DenialIndex, channel: u64) -> Binding {
+        match index.entry(&channel.to_string()) {
+            Some(state) => Binding::Attached(state),
+            None if self.peek(channel).is_some() => Binding::Attached(IndexState::Unknown),
+            None => Binding::Unmanaged,
+        }
     }
 
     /// The channel's slot, created on first use. At the limit a new channel is refused; no

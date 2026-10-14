@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::super::recovery_custody::capability::{EndProof, RevokeHandle};
-use super::super::recovery_custody::model::{CustodyRecord, Inspection, Phase};
-use super::super::recovery_custody::operation::StageStatus;
+use super::super::recovery_custody::capability::{AttemptKey, EndProof, RevokeHandle};
+use super::super::recovery_custody::model::{CustodyRecord, Inspection, Namespace, Phase};
+use super::super::recovery_custody::operation::{StageStatus, StepOutcome};
 use super::super::recovery_custody::reconcile::{LiveOwner, PriorExecution};
-use super::super::recovery_custody::{Armed, CustodyStore};
+use super::super::recovery_custody::{
+    ArmStep, Armed, CustodyError, CustodyStore, QuiescencePermit,
+};
 use super::witness::{WitnessCell, WitnessReader, WitnessWriter};
 use super::{RegistryRefusal, Shared};
 use crate::services::cluster::channel_home_port::scoped_restore::{AttemptIdentity, RestoreScope};
@@ -20,6 +22,8 @@ struct Attempt {
     workers: usize,
     /// Its latest arm and every earlier one that has not drained, each under its own arm id.
     arms: HashMap<String, RevokeHandle>,
+    /// The namespace its first kept arm committed in; every later arm must share it.
+    namespace: Option<Namespace>,
 }
 
 impl Attempt {
@@ -121,6 +125,7 @@ impl Slot {
             open: true,
             workers: 0,
             arms: HashMap::new(),
+            namespace: None,
         });
         Ok(AttemptHandle {
             slot: self.clone(),
@@ -181,6 +186,52 @@ impl Slot {
         }
         attempt.map_or(Ok(()), Attempt::quiescent)?;
         Ok(current)
+    }
+
+    /// The permit a successor's owner change needs: the current attempt is closed, its workers are
+    /// gone and every arm drained. It holds no lock and is asked again at the successor's commit.
+    pub(crate) fn quiesce(self: &Arc<Self>) -> Result<QuiescencePermit, RegistryRefusal> {
+        let ended = self.drained()?.ok_or(RegistryRefusal::Foreign)?;
+        let slot = self.clone();
+        let still = move || slot.still_drained(&slot.state(), Some(Some(ended))).is_ok();
+        let incarnation = self.shared.process_incarnation.clone();
+        let permit = QuiescencePermit::issue(self.channel.to_string(), incarnation, still);
+        Ok(permit)
+    }
+
+    fn key(&self, attempt: u64) -> AttemptKey {
+        AttemptKey {
+            process_incarnation: self.shared.process_incarnation.clone(),
+            attempt,
+        }
+    }
+
+    /// Keeps a just-issued arm's lifetime with attempt `id`, under its own arm id. Only an arm
+    /// issued to that attempt on this channel and in the attempt's namespace is kept; an attempt
+    /// closed meanwhile still counts the arm and revokes it at once.
+    fn keep(&self, id: u64, armed: &Armed) -> Result<(), RegistryRefusal> {
+        let arm = &armed.revoke;
+        let mut state = self.state();
+        let attempt = state.attempt.as_mut();
+        let Some(attempt) = attempt.filter(|attempt| attempt.identity.attempt == id) else {
+            arm.revoke();
+            return Err(RegistryRefusal::Foreign);
+        };
+        let namespace = attempt.namespace.as_ref();
+        let bound = arm.attempt() == Some(&self.key(id))
+            && arm.channel_id() == self.channel.to_string()
+            && namespace.is_none_or(|namespace| namespace == arm.namespace());
+        if !bound {
+            return Err(RegistryRefusal::Foreign);
+        }
+        attempt.namespace = Some(arm.namespace().clone());
+        attempt.arms.retain(|_, kept| kept.end_proof().is_none());
+        attempt.arms.insert(arm.arm_id().to_string(), arm.clone());
+        if !attempt.open {
+            arm.revoke();
+            return Err(RegistryRefusal::AdmissionClosed);
+        }
+        Ok(())
     }
 
     /// Replaces an ended attempt with the next one. Nothing is written and nothing new runs while
@@ -276,24 +327,17 @@ impl AttemptHandle {
         Ok(permit)
     }
 
-    /// Keeps a just-issued arm's lifetime with the attempt, under its own arm id. An attempt
-    /// closed meanwhile still counts the arm and revokes it at once.
-    pub(crate) fn keep_arm(&self, armed: &Armed) -> Result<(), RegistryRefusal> {
-        let mut state = self.slot.state();
-        let attempt = state.attempt.as_mut();
-        let Some(attempt) = attempt.filter(|attempt| attempt.identity == self.identity) else {
-            armed.revoke.revoke();
-            return Err(RegistryRefusal::Foreign);
-        };
-        attempt.arms.retain(|_, arm| arm.end_proof().is_none());
-        let arm = armed.revoke.clone();
-        attempt.arms.insert(arm.arm_id().to_string(), arm);
-        if !attempt.open {
-            armed.revoke.revoke();
-            return Err(RegistryRefusal::AdmissionClosed);
-        }
-        Ok(())
+    /// Keeps an arm with this attempt; outside the registry, arms are made by
+    /// [`WorkerPermit::arm`], which keeps them itself.
+    pub(super) fn keep_arm(&self, armed: &Armed) -> Result<(), RegistryRefusal> {
+        self.slot.keep(self.identity.attempt, armed)
     }
+}
+
+#[derive(Debug)]
+pub(crate) enum ArmRefusal {
+    Registry(RegistryRefusal),
+    Custody(CustodyError),
 }
 
 /// One running install worker of an attempt.
@@ -301,6 +345,33 @@ pub(crate) struct WorkerPermit {
     slot: Arc<Slot>,
     attempt: u64,
     counted: bool,
+}
+
+impl WorkerPermit {
+    /// Arms one stage for this worker's open attempt and keeps it there before returning, so the
+    /// worker's place covers the arm from its commit to its keeping. A refused keep settles the
+    /// stage as not applied; nothing received its capability.
+    pub(crate) async fn arm(
+        &self,
+        custody: &CustodyStore,
+        step: ArmStep<'_>,
+    ) -> Result<Armed, ArmRefusal> {
+        let open = match &self.slot.state().attempt {
+            Some(attempt) if attempt.identity.attempt == self.attempt => attempt.open,
+            _ => return Err(ArmRefusal::Registry(RegistryRefusal::Foreign)),
+        };
+        if !open {
+            return Err(ArmRefusal::Registry(RegistryRefusal::AdmissionClosed));
+        }
+        let attempt = self.slot.key(self.attempt);
+        let armed = custody.arm_for(step, attempt).await;
+        let armed = armed.map_err(ArmRefusal::Custody)?;
+        if let Err(refusal) = self.slot.keep(self.attempt, &armed) {
+            armed.report.send(StepOutcome::NotApplied);
+            return Err(ArmRefusal::Registry(refusal));
+        }
+        Ok(armed)
+    }
 }
 
 impl Drop for WorkerPermit {
