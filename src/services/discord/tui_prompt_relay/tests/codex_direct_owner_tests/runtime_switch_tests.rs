@@ -55,8 +55,8 @@ fn channel(
     codex
 }
 
-/// The hook records the prompt, the loop scans past it, the observer claims, and the answer
-/// lands: the claimed row's repair tail delivers it.
+/// The hook records the prompt, the loop scans past it, and the observer claims: the claimed
+/// row's repair tail delivers the answer once it lands.
 async fn hook_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u64) {
     crate::services::tui_prompt_dedupe::observe_hook_prompt_by_tmux_with_prompt_id_at(
         "codex",
@@ -80,11 +80,10 @@ async fn hook_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u64)
     );
     let lease = codex.lease(shared);
     assert!(codex.claim(shared, anchor, &lease).await.claimed);
-    append(&codex.rollout, &answer_lines());
 }
 
 /// The loop publishes the rollout prompt, the observer claims it, and the loop's own tail
-/// delivers the answer.
+/// delivers the answer once it lands.
 async fn rollout_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u64) {
     append(&codex.rollout, &user_line());
     let channel = codex.channel.get();
@@ -107,10 +106,14 @@ async fn rollout_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u
     )
     .expect("published lease");
     assert!(codex.claim(shared, anchor, &lease).await.claimed);
-    append(&codex.rollout, &answer_lines());
 }
 
-async fn delivered(requests: &Requests, codex: &CodexChannel) {
+/// The answer, then the turn end once the answer's progress edit is on Discord. Landing both
+/// at once lets thread timing decide whether the bridge sends that progress edit.
+async fn answer_in_two_passes(requests: &Requests, codex: &CodexChannel) {
+    let lines = answer_lines();
+    let (answer, end) = lines.split_at(lines.find('\n').expect("answer line") + 1);
+    append(&codex.rollout, answer);
     assert!(
         wait_for(Duration::from_secs(20), || !deliveries(
             requests,
@@ -118,6 +121,22 @@ async fn delivered(requests: &Requests, codex: &CodexChannel) {
         )
         .is_empty())
         .await,
+        "{} answer's progress edit never reached Discord: {:?}",
+        codex.tmux,
+        requests.lock().unwrap()
+    );
+    append(&codex.rollout, end);
+}
+
+/// Waits for the final answer edit, not only an earlier progress edit.
+async fn delivered(requests: &Requests, codex: &CodexChannel) {
+    let answered = || {
+        deliveries(requests, codex.channel)
+            .iter()
+            .any(|(_, _, body)| content(body) == RESPONSE)
+    };
+    assert!(
+        wait_for(Duration::from_secs(20), answered).await,
         "{} answer never reached Discord: {:?}",
         codex.tmux,
         requests.lock().unwrap()
@@ -170,6 +189,7 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
             .lock()
             .unwrap() = Some((parked.channel.get(), entered.clone(), resume.clone()));
         hook_first(&shared_a, parked, 7_632_520_301_001).await;
+        append(&parked.rollout, &answer_lines());
         tokio::time::timeout(Duration::from_secs(15), entered.notified())
             .await
             .expect("A's tail reaches bridge capture");
@@ -183,8 +203,10 @@ async fn run(root: &Path, replaced: bool) -> (Output, Output) {
         delivered(&requests, parked).await;
     }
     hook_first(&shared_b, &b_hook, 7_632_520_401_001).await;
+    answer_in_two_passes(&requests, &b_hook).await;
     delivered(&requests, &b_hook).await;
     rollout_first(&shared_b, &b_rollout, 7_632_520_402_001).await;
+    answer_in_two_passes(&requests, &b_rollout).await;
     delivered(&requests, &b_rollout).await;
 
     // Two more polls of each session past every delivery: nothing is sent twice.
