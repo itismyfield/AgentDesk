@@ -3421,6 +3421,8 @@ services::discord::catch_up::classification_order_tests::unavailable_utility_id_
 services::discord::catch_up::classification_order_tests::unconfigured_utility_id_is_stable_absence_not_a_retry_loop
 services::discord::catch_up::frontier_evidence::tests::an_absorbed_active_turn_refusal_is_not_evidence
 services::discord::catch_up::frontier_evidence::tests::only_the_active_turn_arm_is_dispatch_evidence
+services::discord::catch_up::g2d_tests::classification_matches_common_intake
+services::discord::catch_up::g2d_tests::raw_pages_require_contiguous_coverage
 services::discord::codex_adoption_runtime::boot::tests::boot_wait_is_bounded_and_cancel_safe
 services::discord::codex_adoption_runtime::boot::tests::codex_history_flag_defaults_off
 services::discord::codex_adoption_runtime::boot::tests::ended_runtime_is_not_found_and_reads_gone

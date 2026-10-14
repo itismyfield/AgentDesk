@@ -17,11 +17,7 @@ use super::*;
 
 const CATCH_UP_RETRY_QUEUE_THRESHOLD: usize = MAX_INTERVENTIONS_PER_CHANNEL / 2;
 const CATCH_UP_RETRY_FETCH_FAILURE_LIMIT: u8 = 4;
-// #4156: a channel whose fetch keeps SUCCEEDING but whose messages keep being
-// Deferred (persistently busy / repeated ActorUnreachable) re-arms the catch-up
-// retry every scan. Without a bound that cycle is unbounded and unlogged. Cap
-// the consecutive Deferred re-arms (independently of the fetch-failure budget)
-// and emit a giving-up WARN at the cap, mirroring the fetch-failure path.
+// Bound deferred re-arms independently of fetch failures to avoid unbounded busy-channel retries.
 const CATCH_UP_RETRY_DEFERRED_REARM_LIMIT: u8 = 8;
 
 fn catch_up_source_generation(
@@ -77,8 +73,12 @@ mod clock;
 pub(in crate::services::discord) mod consumed_commands;
 mod deps;
 mod frontier_evidence;
+#[cfg(test)]
+mod g2d_tests;
 pub(in crate::services::discord) mod handled_command;
 mod held_range;
+#[cfg(test)]
+mod ledger;
 mod phase2;
 pub(in crate::services::discord) mod retry_state;
 mod settled_frontier;
