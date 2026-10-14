@@ -652,6 +652,34 @@ impl PopulationScope {
         }
         PopulationGuard::writer(root, provider, channel, permit).map(Self::install)
     }
+    /// One writer attempt for a step that must keep serving its queue: contention is `Busy`.
+    pub(crate) fn try_writer(
+        root: &Path,
+        provider: &ProviderKind,
+        channel: u64,
+        permit: &Permit,
+    ) -> Result<Self, Failure> {
+        if scope_held() {
+            return Err(Failure::Busy);
+        }
+        permit.validate(provider, channel)?;
+        let guard = PopulationGuard::try_acquire(root, provider, channel)?;
+        permit.validate(provider, channel)?;
+        Ok(Self::install(guard))
+    }
+    /// Runs `work` under this thread's held guard, and only for that guard's exact row.
+    pub(crate) fn borrowed<T>(
+        &self,
+        root: &Path,
+        provider: &ProviderKind,
+        channel: u64,
+        work: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        POPULATION.with(|held| match held.borrow().as_ref() {
+            Some(guard) => guard.borrowed(root, provider, channel, work),
+            None => Err(io::Error::other("population scope not held")),
+        })
+    }
     fn install(guard: PopulationGuard) -> Self {
         POPULATION.with(|held| {
             assert!(held.borrow().is_none(), "nested population scope");
