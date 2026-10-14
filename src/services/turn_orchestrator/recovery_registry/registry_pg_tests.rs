@@ -19,7 +19,7 @@ use super::super::recovery_custody::reconcile::{
 use super::super::recovery_custody::seam::{self, Point};
 use super::super::recovery_custody::{ArmStep, Armed, CustodyStore, Reservation, ReserveRequest};
 use super::super::recovery_custody::{CustodyError, Refusal};
-use super::entry::{AttemptHandle, Begun, Slot};
+use super::entry::{ArmRefusal, AttemptHandle, Begun, Slot};
 use super::rehydrate::{EarlierProcess, Next, Rehydrated, rehydrate, settle};
 use super::witness::Superseded;
 use super::{Binding, RecoveryRegistry, RegistryRefusal};
@@ -879,6 +879,23 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
     let worker = attempt.worker().expect("a worker place");
     let (revision, op) = fx.reserve(scoped(&ch, seal("q1", None, None), EPOCH)).await;
     let exited = seal("q0", None, None);
+    // A custody refusal comes back as such and keeps nothing.
+    let stale = arm_step(
+        &ch,
+        revision + 1,
+        &op,
+        Stage::QueueCommit,
+        exited.clone(),
+        None,
+    );
+    let stale = worker.arm(&fx.custody, stale).await.map(drop);
+    assert!(
+        matches!(
+            stale,
+            Err(ArmRefusal::Custody(CustodyError::Refused(Refusal::Stale)))
+        ),
+        "{stale:?}"
+    );
     let step = arm_step(&ch, revision, &op, Stage::QueueCommit, exited.clone(), None);
     let first = worker.arm(&fx.custody, step).await.expect("armed and kept");
     let own = AttemptKey {
@@ -901,6 +918,13 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
         other_slot.quiesce().is_ok(),
         "the refused arm counted there"
     );
+    // Giving a refused carrier up returns its payload and ends the arm's count of it.
+    let carried = first.capability.carry(Payload(1));
+    let Err(refused) = fx.index.admit_carried(&other, carried) else {
+        panic!("a carrier entered another channel");
+    };
+    assert_eq!(refused.carrier.into_payload(), Some(Payload(1)));
+    assert_eq!(first.revoke.load(), load(false, 0, 0));
     first.report.send(StepOutcome::Applied {
         after: Box::new(exited),
         handoff: None,
@@ -976,6 +1000,22 @@ async fn s3act_b3b4a2b0_f_an_owner_change_waits_for_the_registry_quiescence_perm
     );
     slot.close_admission();
     let (raw, earlier) = (fx.raw(&ch).await, attempt.identity().attempt);
+    let step = arm_step(
+        &ch,
+        closed.revision,
+        &op,
+        Stage::QueueCommit,
+        seal("q0", None, None),
+        None,
+    );
+    let late = worker.arm(&custody, step).await.map(drop);
+    assert!(
+        matches!(
+            late,
+            Err(ArmRefusal::Registry(RegistryRefusal::AdmissionClosed))
+        ),
+        "a closed attempt armed: {late:?}"
+    );
     // Another store of this node takes the closed row over while A's guard, capability and worker
     // live: no owner change, no write, no new attempt and no new worker.
     let successor = || scoped(&ch, seal("q9", None, None), EPOCH);
