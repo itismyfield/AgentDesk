@@ -565,21 +565,22 @@ new_shard_case
 mv "$E2E_CASE/job-902.log" "$E2E_CASE/unavailable.log"
 assert_e2e "one unknown log blocks both shards" "no-op:unknown" "unknown"
 
+# BSD sed (macOS prepush) needs a backup suffix for -i, so write one and drop it.
 new_shard_case
-sed -i 's/"total_count":2/"total_count":3/' "$E2E_CASE/jobs.json"
+sed -i.bak 's/"total_count":2/"total_count":3/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
 out="$(PATH="$E2E_BIN:$PATH" GH_FIXTURE_DIR="$E2E_CASE" GITHUB_REPOSITORY=itismyfield/AgentDesk RUN_ID=31116949449 RUN_ATTEMPT=1 RERUN_DRY_RUN=1 bash "$SCRIPT")"
 [[ "$out" == 'decision=no-op:incomplete-jobs' ]] && pass "incomplete jobs block all retries" || fail "incomplete jobs accepted"
 
 new_shard_case
-sed -i 's/shard 1/shard 0/' "$E2E_CASE/jobs.json"
+sed -i.bak 's/shard 1/shard 0/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
 assert_e2e "duplicate shard names remain ambiguous" "no-op:unknown" "infra-shutdown"
 
 new_shard_case
-sed -i 's/shard 0/shard 00/;s/shard 1/shard 01/' "$E2E_CASE/jobs.json"
+sed -i.bak 's/shard 0/shard 00/;s/shard 1/shard 01/' "$E2E_CASE/jobs.json" && rm -f "$E2E_CASE/jobs.json.bak"
 assert_e2e "near-match names cannot become PG jobs" "no-op:no-pg-failure" "infra-unrelated"
 
 new_shard_case
-sed -i 's/"run_attempt":1/"run_attempt":2/' "$E2E_CASE/latest.json"
+sed -i.bak 's/"run_attempt":1/"run_attempt":2/' "$E2E_CASE/latest.json" && rm -f "$E2E_CASE/latest.json.bak"
 GH_TEST_DRY_RUN=0 GH_ALLOW_RERUN=1 assert_e2e "stale attempt blocks both retry requests" "no-op:stale-attempt" "infra-shutdown"
 [[ ! -e "$E2E_CASE/rerun.log" ]] || fail "stale attempt made a retry request"
 

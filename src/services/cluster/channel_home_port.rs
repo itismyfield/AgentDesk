@@ -233,6 +233,8 @@ pub(crate) mod scoped_restore {
     pub(crate) enum RestoreStatus {
         Pending,
         Restoring,
+        /// The four stores are installed; effects and Pending completion are still owed.
+        Installed,
         Restored,
         Blocked(RestoreFailure),
     }
@@ -301,6 +303,19 @@ pub(crate) mod scoped_restore {
     }
     pub(crate) fn mutant(name: &str) -> bool {
         std::env::var("ADK_S3ACT_B2_MUTANT").ok().as_deref() == Some(name)
+    }
+    /// One attempt of one lane in one process; a matching generation alone is not this identity.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct AttemptIdentity {
+        pub(crate) scope: RestoreScope,
+        pub(crate) generation: u64,
+        pub(crate) process_incarnation: String,
+        pub(crate) attempt: u64,
+    }
+    /// Reads one exact attempt's witness; `None` once another attempt answers for the channel.
+    pub(crate) trait ExactWitness {
+        fn identity(&self) -> &AttemptIdentity;
+        fn read(&self) -> Option<RestoreWitness>;
     }
 }
 

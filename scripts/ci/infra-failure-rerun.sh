@@ -11,7 +11,7 @@ source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
 PG_JOB_NAMES_TEXT="$(python3 "$REPO_ROOT/scripts/check_pg_test_lane_membership.py" --pg-job-names)"
-mapfile -t PG_JOB_NAMES <<< "$PG_JOB_NAMES_TEXT"
+PG_JOB_NAMES=(); while IFS= read -r l; do PG_JOB_NAMES+=("$l"); done <<< "$PG_JOB_NAMES_TEXT"
 PG_JOB_NAME="${PG_JOB_NAMES[0]}"
 WINDOWS_ADVISORY_JOB_NAME="Fast check + non-PG tests (windows-latest)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -608,7 +608,8 @@ run_classifier() {
   local regression_count=0
   local unknown_count=0
   local -a pg_job_ids=()
-  local -A seen_pg_names=()
+  # Newline-delimited name set: bash 3.2 (macOS prepush) has no associative arrays.
+  local seen_pg_names=$'\n'
   local job_id job_name log_path job_class executed_steps
 
   while IFS=$'\t' read -r job_id executed_steps job_name; do
@@ -629,10 +630,10 @@ run_classifier() {
     fi
 
     if is_pg_job "$job_name"; then
-      if [[ -n "${seen_pg_names[$job_name]-}" ]]; then
+      if [[ "$seen_pg_names" == *$'\n'"$job_name"$'\n'* ]]; then
         unknown_count=$((unknown_count + 1))
       fi
-      seen_pg_names[$job_name]=1
+      seen_pg_names+="$job_name"$'\n'
       pg_failed_count=$((pg_failed_count + 1))
       if job_is_infra_failure "$log_path" "$executed_steps"; then
         pg_classified_count=$((pg_classified_count + 1))
@@ -680,7 +681,7 @@ run_classifier() {
     return 0
   fi
 
-  for job_id in "${pg_job_ids[@]}"; do
+  for job_id in ${pg_job_ids[@]+"${pg_job_ids[@]}"}; do
     if ! gh run rerun "$run_id" --repo "$repo" --job "$job_id"; then
       decision="no-op:rerun-request-failed"
       write_summary "$run_id" "$run_attempt" "$decision"

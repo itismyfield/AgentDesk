@@ -136,6 +136,13 @@ pub struct RuntimeSettingsConfig {
     /// delegated homes; unset or false refuses or skips them before any database access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_home_delegation_enabled: Option<bool>,
+    /// Boot switch for the gateway's ingress ownership shadow, which only logs; it also needs a
+    /// non-empty `channel_ingress_shadow_channels`. Unset or false starts nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_ingress_shadow_enabled: Option<bool>,
+    /// The actual channels the shadow observes; unset or empty observes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_ingress_shadow_channels: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub reset_overrides_on_restart: bool,
 }
@@ -195,6 +202,8 @@ impl RuntimeSettingsConfig {
             && self.herdr_cancel_enabled.is_none()
             && self.herdr_terminate_enabled.is_none()
             && self.channel_home_delegation_enabled.is_none()
+            && self.channel_ingress_shadow_enabled.is_none()
+            && self.channel_ingress_shadow_channels.is_none()
             && !self.reset_overrides_on_restart
     }
 

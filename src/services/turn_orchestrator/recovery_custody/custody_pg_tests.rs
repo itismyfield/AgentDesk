@@ -3,37 +3,39 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
-use super::capability::CapabilityRefusal;
+use super::capability::{CapabilityRefusal, EndProof};
 use super::denial_index::{Denial, IndexState};
 use super::model::{CanonicalSeal, IssuedEpisode, Namespace, Observed};
-use super::reconcile::{Action, Evidence, PriorExecution, Verdict};
+use super::reconcile::{
+    Action, Evidence, LegacyResult, LiveOwner, NoApplyReason, PriorExecution, Verdict,
+};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::agent_recovery::{RecoveryCatalog, admission, test_store};
 use crate::services::provider::ProviderKind;
 
-pub(super) const NODE: &str = "node-a";
-pub(super) const INCARNATION: &str = "incarnation-1";
+pub(crate) const NODE: &str = "node-a";
+pub(crate) const INCARNATION: &str = "incarnation-1";
 
-pub(super) fn channel(n: u32) -> String {
+pub(crate) fn channel(n: u32) -> String {
     format!("14867233242593{n:05}")
 }
 
-pub(super) fn namespace() -> Namespace {
+pub(crate) fn namespace() -> Namespace {
     Namespace {
         provider: "claude".into(),
         token_hash: "token-a".into(),
     }
 }
 
-pub(super) fn stored(identity: &str) -> Observed {
+pub(crate) fn stored(identity: &str) -> Observed {
     Observed::Present {
         identity: identity.into(),
         digest: format!("sha256:{identity}"),
     }
 }
 
-pub(super) fn seal(queue: &str, marker: Option<&str>, inflight: Option<&str>) -> CanonicalSeal {
+pub(crate) fn seal(queue: &str, marker: Option<&str>, inflight: Option<&str>) -> CanonicalSeal {
     CanonicalSeal {
         owner_node: NODE.into(),
         namespace: namespace(),
@@ -44,7 +46,7 @@ pub(super) fn seal(queue: &str, marker: Option<&str>, inflight: Option<&str>) ->
     }
 }
 
-pub(super) fn episode(nonce: Option<&str>) -> IssuedEpisode {
+pub(crate) fn episode(nonce: Option<&str>) -> IssuedEpisode {
     IssuedEpisode::V1 {
         provider: "claude".into(),
         channel: 1,
@@ -56,7 +58,7 @@ pub(super) fn episode(nonce: Option<&str>) -> IssuedEpisode {
     }
 }
 
-pub(super) fn legacy(channel_id: &str, before: CanonicalSeal) -> ReserveRequest {
+pub(crate) fn legacy(channel_id: &str, before: CanonicalSeal) -> ReserveRequest {
     ReserveRequest {
         channel_id: channel_id.to_string(),
         root: Root::Legacy,
@@ -74,7 +76,7 @@ pub(super) fn legacy(channel_id: &str, before: CanonicalSeal) -> ReserveRequest 
     }
 }
 
-pub(super) fn scoped(channel_id: &str, before: CanonicalSeal, epoch: i64) -> ReserveRequest {
+pub(crate) fn scoped(channel_id: &str, before: CanonicalSeal, epoch: i64) -> ReserveRequest {
     ReserveRequest {
         root: Root::Scoped,
         allowed: vec![
@@ -90,7 +92,7 @@ pub(super) fn scoped(channel_id: &str, before: CanonicalSeal, epoch: i64) -> Res
     }
 }
 
-pub(super) fn evidence(observed: CanonicalSeal, prior: PriorExecution) -> Evidence {
+pub(crate) fn evidence(observed: CanonicalSeal, prior: PriorExecution) -> Evidence {
     Evidence {
         observed: Some(observed),
         prior,
@@ -101,21 +103,51 @@ pub(super) fn evidence(observed: CanonicalSeal, prior: PriorExecution) -> Eviden
     }
 }
 
-pub(super) fn live() -> PriorExecution {
-    PriorExecution::SameOwnerLive {
-        process_incarnation: INCARNATION.into(),
-    }
+/// A proof naming no row yet; [`Fx::reconcile`] names the row's operation and arm when it runs.
+fn unbound() -> EndProof {
+    let before = seal("unbound", None, None);
+    EndProof::of_lost_process(&ActiveOperation {
+        operation_id: "unbound".into(),
+        root: Root::Legacy,
+        kind: OperationKind::LegacyConsume,
+        allowed: Vec::new(),
+        target: namespace(),
+        sources: Vec::new(),
+        issued_revision: 0,
+        stage: Stage::Reserved,
+        status: StageStatus::ReservedNotArmed,
+        applied: Vec::new(),
+        before,
+        expected_after: None,
+        handoffs: Vec::new(),
+        reuse: None,
+        arm_id: None,
+    })
 }
 
-pub(super) struct Fx {
+/// "The process that armed the row is lost", for tests that do not examine the proof itself.
+pub(crate) fn lost() -> PriorExecution {
+    PriorExecution::Ended(unbound())
+}
+
+/// This process still serves `operation_id` and its armed applier has finished.
+pub(crate) fn live(operation_id: &str) -> PriorExecution {
+    PriorExecution::SameOwnerLive(LiveOwner {
+        process_incarnation: INCARNATION.into(),
+        operation_id: operation_id.into(),
+        applier_ended: Some(unbound()),
+    })
+}
+
+pub(crate) struct Fx {
     db: TestPostgresDb,
-    pub(super) pool: PgPool,
-    pub(super) index: Arc<DenialIndex>,
-    pub(super) custody: CustodyStore,
+    pub(crate) pool: PgPool,
+    pub(crate) index: Arc<DenialIndex>,
+    pub(crate) custody: CustodyStore,
 }
 
 impl Fx {
-    pub(super) async fn create() -> Self {
+    pub(crate) async fn create() -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate_with_max_connections(6).await;
         let index = Arc::new(DenialIndex::default());
@@ -133,12 +165,12 @@ impl Fx {
         }
     }
 
-    pub(super) async fn close(self) {
+    pub(crate) async fn close(self) {
         self.pool.close().await;
         self.db.drop().await;
     }
 
-    pub(super) async fn admit(&self, channel_id: &str) -> AdmissionGuard {
+    pub(crate) async fn admit(&self, channel_id: &str) -> AdmissionGuard {
         test_store::with_store(
             self.pool.clone(),
             RecoveryCatalog::default(),
@@ -149,7 +181,7 @@ impl Fx {
     }
 
     /// A worker home row held by `holder` at `epoch`.
-    pub(super) async fn home(&self, channel_id: &str, holder: &str, epoch: i64) {
+    pub(crate) async fn home(&self, channel_id: &str, holder: &str, epoch: i64) {
         sqlx::query(
             "INSERT INTO o_channel_homes (channel_id, provider, state, holder, epoch, renewed_at)
              VALUES ($1, 'claude', 'worker', $2, $3, NOW())",
@@ -162,7 +194,7 @@ impl Fx {
         .unwrap();
     }
 
-    pub(super) async fn reserve(&self, request: ReserveRequest) -> (i64, String) {
+    pub(crate) async fn reserve(&self, request: ReserveRequest) -> (i64, String) {
         let guard = self.admit(&request.channel_id).await;
         match self
             .custody
@@ -179,14 +211,46 @@ impl Fx {
         }
     }
 
-    pub(super) async fn record(&self, channel_id: &str) -> CustodyRecord {
+    /// Reconciles after binding an end proof in `evidence` to the row as it is now; a test of the
+    /// proof itself calls the store directly.
+    pub(crate) async fn reconcile(
+        &self,
+        channel_id: &str,
+        revision: i64,
+        action: Action,
+        evidence: &Evidence,
+    ) -> Result<(Verdict, i64), CustodyError> {
+        let mut evidence = evidence.clone();
+        let proof = match &mut evidence.prior {
+            PriorExecution::Ended(proof) => Some(proof),
+            PriorExecution::SameOwnerLive(live) => live.applier_ended.as_mut(),
+            PriorExecution::Unknown => None,
+        };
+        if let Some(proof) = proof
+            && let Ok(Inspection::Row(row)) = self.custody.inspect(channel_id).await
+            && let Some(op) = &row.active_operation
+        {
+            *proof = EndProof::of_lost_process(op);
+        }
+        self.custody
+            .reconcile(channel_id, revision, action, &evidence)
+            .await
+    }
+
+    /// The end proof of the row's current arm, as after the process that armed it was lost.
+    pub(crate) async fn over(&self, channel_id: &str) -> PriorExecution {
+        let op = self.record(channel_id).await.active_operation;
+        PriorExecution::Ended(EndProof::of_lost_process(&op.expect("an operation")))
+    }
+
+    pub(crate) async fn record(&self, channel_id: &str) -> CustodyRecord {
         match self.custody.inspect(channel_id).await.expect("inspect") {
             Inspection::Row(record) => *record,
             other => panic!("no decodable row: {other:?}"),
         }
     }
 
-    pub(super) async fn raw(&self, channel_id: &str) -> Option<String> {
+    pub(crate) async fn raw(&self, channel_id: &str) -> Option<String> {
         sqlx::query_scalar(
             "SELECT row_to_json(c)::text FROM channel_recovery_custody c WHERE channel_id = $1",
         )
@@ -196,7 +260,7 @@ impl Fx {
         .unwrap()
     }
 
-    pub(super) async fn arm(
+    pub(crate) async fn arm(
         &self,
         channel_id: &str,
         revision: i64,
@@ -219,7 +283,7 @@ impl Fx {
     }
 
     /// Arms `stage` and reports it applied; returns the recorded revision.
-    pub(super) async fn apply(
+    pub(crate) async fn apply(
         &self,
         channel_id: &str,
         revision: i64,
@@ -245,7 +309,7 @@ impl Fx {
     }
 
     /// Arms `stage` and then loses its process: no report and no collector, the row stays armed.
-    pub(super) async fn arm_and_crash(
+    pub(crate) async fn arm_and_crash(
         &self,
         channel_id: &str,
         revision: i64,
@@ -543,12 +607,11 @@ async fn s3act_b3b4a1_cas_stale_writes_and_undecodable_rows_change_nothing_pg() 
     let (revision, op) = fx.reserve(legacy(&ch, before.clone())).await;
     let raw = fx.raw(&ch).await;
     let stale = fx
-        .custody
         .reconcile(
             &ch,
             revision + 1,
             Action::RecheckApply,
-            &evidence(before.clone(), PriorExecution::Ended),
+            &evidence(before.clone(), lost()),
         )
         .await;
     assert!(matches!(stale, Err(CustodyError::Refused(Refusal::Stale))));
@@ -596,12 +659,11 @@ async fn s3act_b3b4a1_cas_stale_writes_and_undecodable_rows_change_nothing_pg() 
         Err(CustodyError::Refused(Refusal::Held))
     ));
     let reconciled = fx
-        .custody
         .reconcile(
             &future,
             1,
             Action::RecheckApply,
-            &evidence(before.clone(), PriorExecution::Ended),
+            &evidence(before.clone(), lost()),
         )
         .await;
     assert!(matches!(
@@ -641,14 +703,13 @@ async fn s3act_b3b4a1_f04_exact_operation_is_published_only_after_the_arm_commit
     let (ch, unattached) = (channel(51), channel(52));
     assert_eq!(fx.index.state(&unattached), IndexState::Unknown);
     assert_eq!(
-        fx.index
-            .admit_write(&unattached, Some(("any", Stage::QueueCommit))),
+        fx.index.admit_write(&unattached, None).map(drop),
         Err(Denial(IndexState::Unknown))
     );
     let before = seal("q1", None, None);
     let (revision, op) = fx.reserve(legacy(&ch, before)).await;
     assert_eq!(
-        fx.index.admit_write(&ch, Some((&op, Stage::MarkerPublish))),
+        fx.index.admit_write(&ch, None).map(drop),
         Err(Denial(IndexState::Blocked))
     );
     let seen = Arc::new(Mutex::new(None));
@@ -686,18 +747,19 @@ async fn s3act_b3b4a1_f04_exact_operation_is_published_only_after_the_arm_commit
         fx.index.state(&ch),
         IndexState::ExactOperation {
             operation_id: op.clone(),
-            stage: Stage::MarkerPublish
+            stage: Stage::MarkerPublish,
+            arm_id: armed.capability.arm_id().into(),
         }
     );
     assert_eq!(
-        fx.index.admit_write(&ch, Some((&op, Stage::MarkerPublish))),
+        fx.index.admit_write(&ch, Some(&armed.capability)).map(drop),
         Ok(())
     );
-    assert!(
-        fx.index
-            .admit_write(&ch, Some((&op, Stage::QueueCommit)))
-            .is_err()
-    );
+    let arm_id = armed.capability.arm_id();
+    let (other_stage, _) = ApplyCapability::issue(&ch, &op, Stage::QueueCommit, arm_id);
+    assert!(fx.index.admit_write(&ch, Some(&other_stage)).is_err());
+    let (other_arm, _) = ApplyCapability::issue(&ch, &op, Stage::MarkerPublish, "another-arm");
+    assert!(fx.index.admit_write(&ch, Some(&other_arm)).is_err());
     assert!(fx.index.admit_write(&ch, None).is_err());
     assert_eq!(
         armed.capability.check(&ch, &op, Stage::MarkerPublish),
@@ -746,22 +808,15 @@ async fn s3act_b3b4a1_f04_an_indeterminate_stage_blocks_and_keeps_its_operation_
         ..seal("unused", None, None)
     };
     let (verdict, revision) = fx
-        .custody
-        .reconcile(
-            &ch,
-            revision,
-            Action::RecheckApply,
-            &evidence(gone, PriorExecution::Ended),
-        )
+        .reconcile(&ch, revision, Action::RecheckApply, &evidence(gone, lost()))
         .await
         .unwrap();
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
     let unread = Evidence {
         observed: None,
-        ..evidence(seal("q1", None, None), PriorExecution::Ended)
+        ..evidence(seal("q1", None, None), lost())
     };
     let (verdict, _) = fx
-        .custody
         .reconcile(&ch, revision, Action::RecheckApply, &unread)
         .await
         .unwrap();
@@ -869,6 +924,780 @@ async fn s3act_b3b4a1_owned_outcome_is_recorded_after_the_caller_leaves_pg() {
         Err(CapabilityRefusal::Revoked)
     );
     assert_eq!(custody_rows(&fx.pool).await, 1);
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f3_arm_issues_each_stage_and_grant_once_and_only_while_open_pg() {
+    let fx = Fx::create().await;
+    let (exit, marker) = (seal("q0", None, None), seal("q1", Some("m1"), None));
+    // An applied queue commit is never armed again.
+    let ch = channel(91);
+    let (revision, id) = fx.reserve(legacy(&ch, seal("q1", None, None))).await;
+    let revision = fx
+        .apply(&ch, revision, &id, Stage::QueueCommit, exit.clone())
+        .await;
+    let again = fx
+        .custody
+        .arm(&ch, revision, &id, Stage::QueueCommit, exit.clone(), None)
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(again, Err(CustodyError::Refused(Refusal::NotArmable))),
+        "{again:?}"
+    );
+    // A resumed exit reuses its debt: another debt is refused, the same one adds nothing.
+    let ch = channel(92);
+    fx.home(&ch, NODE, 41).await;
+    let (revision, id) = fx.reserve(scoped(&ch, seal("q1", None, None), 41)).await;
+    let revision = fx
+        .arm_and_crash(
+            &ch,
+            revision,
+            &id,
+            Stage::QueueCommit,
+            exit.clone(),
+            Some("debt-1"),
+        )
+        .await;
+    let old = evidence(seal("q1", None, None), lost());
+    let (verdict, revision) = fx
+        .reconcile(&ch, revision, Action::RecheckApply, &old)
+        .await
+        .unwrap();
+    assert_eq!(
+        verdict,
+        Verdict::Resume {
+            stage: Stage::QueueCommit,
+            reuse: Some("debt-1".into())
+        }
+    );
+    let other = fx
+        .custody
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::QueueCommit,
+            exit.clone(),
+            Some("debt-2".into()),
+        )
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(other, Err(CustodyError::Refused(Refusal::Unfit(_)))),
+        "{other:?}"
+    );
+    let armed = fx
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::QueueCommit,
+            exit.clone(),
+            Some("debt-1"),
+        )
+        .await;
+    let kept = fx.record(&ch).await.active_operation.unwrap();
+    assert_eq!(kept.handoffs, ["debt-1"]);
+    // The exit reports the debt its arm recorded: still recorded once.
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit.clone()),
+        handoff: Some("debt-1".into()),
+    });
+    armed.collector.await.unwrap().expect("recorded");
+    let mut row = fx.record(&ch).await;
+    assert_eq!(row.active_operation.as_ref().unwrap().handoffs, ["debt-1"]);
+    // At the bound, a granted id armed and reported again settles without growing the list.
+    row.active_operation.as_mut().unwrap().handoffs =
+        (1..=8).map(|i| format!("debt-{i}")).collect();
+    let mut conn = fx.pool.acquire().await.unwrap();
+    let written = crate::db::channel_recovery_custody::replace(
+        &mut conn,
+        row.revision,
+        &row.encode().unwrap(),
+    )
+    .await
+    .unwrap();
+    let CasWrite::Applied { revision } = written else {
+        panic!("{written:?}")
+    };
+    let armed = fx
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::ActorInstall,
+            exit.clone(),
+            Some("debt-8"),
+        )
+        .await;
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit.clone()),
+        handoff: Some("debt-3".into()),
+    });
+    armed
+        .collector
+        .await
+        .unwrap()
+        .expect("recorded at the bound");
+    let kept = fx.record(&ch).await.active_operation.unwrap();
+    assert_eq!(kept.handoffs.len(), 8);
+    // Off refuses a first arm and the next stage's arm alike.
+    let (first, next) = (channel(93), channel(94));
+    let (first_revision, first_id) = fx.reserve(legacy(&first, seal("q1", None, None))).await;
+    let (next_revision, next_id) = fx.reserve(legacy(&next, seal("q1", None, None))).await;
+    let next_revision = fx
+        .apply(
+            &next,
+            next_revision,
+            &next_id,
+            Stage::MarkerPublish,
+            marker.clone(),
+        )
+        .await;
+    fx.custody.close_admission();
+    let arms = [
+        (&first, first_revision, &first_id, Stage::MarkerPublish),
+        (&next, next_revision, &next_id, Stage::QueueCommit),
+    ];
+    for (ch, revision, id, stage) in arms {
+        let raw = fx.raw(ch).await;
+        let refused = fx
+            .custody
+            .arm(ch, revision, id, stage, marker.clone(), None)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(
+                refused,
+                Err(CustodyError::Refused(Refusal::AdmissionClosed))
+            ),
+            "{stage:?}: {refused:?}"
+        );
+        assert_eq!(fx.raw(ch).await, raw);
+    }
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f3_an_off_before_the_arm_commits_refuses_the_arm_pg() {
+    let fx = Fx::create().await;
+    let ch = channel(95);
+    let (revision, id) = fx.reserve(legacy(&ch, seal("q1", None, None))).await;
+    let raw = fx.raw(&ch).await;
+    commit_fault::before_next(&ch, {
+        let custody = fx.custody.clone();
+        move || {
+            custody.close_admission();
+            Ok(())
+        }
+    });
+    let marker = seal("q1", Some("m1"), None);
+    let refused = fx
+        .custody
+        .arm(&ch, revision, &id, Stage::MarkerPublish, marker, None)
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(
+            refused,
+            Err(CustodyError::Refused(Refusal::AdmissionClosed))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    assert_eq!(fx.index.state(&ch), IndexState::Blocked);
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f4_legacy_results_never_overwrite_an_armed_stage_pg() {
+    let fx = Fx::create().await;
+    let ch = channel(96);
+    let (revision, id) = fx.reserve(legacy(&ch, seal("q1", None, None))).await;
+    let exit = seal("q0", None, None);
+    let armed = fx
+        .arm(&ch, revision, &id, Stage::QueueCommit, exit.clone(), None)
+        .await;
+    let raw = fx.raw(&ch).await;
+    let results = [
+        LegacyResult::NoApply(NoApplyReason::Empty),
+        LegacyResult::NoApply(NoApplyReason::StaleSelection),
+        LegacyResult::NoApply(NoApplyReason::TransitionBusy),
+        LegacyResult::ReturnRequired,
+        LegacyResult::LocalClaim {
+            bound_to: Some("actor-1".into()),
+        },
+        LegacyResult::Forwarded {
+            receipt: Some("receipt-1".into()),
+        },
+        LegacyResult::Unknown,
+    ];
+    for result in &results {
+        let refused = fx
+            .custody
+            .record_legacy_result(&ch, revision + 1, &id, result)
+            .await;
+        assert!(
+            matches!(refused, Err(CustodyError::Refused(Refusal::Unfit(_)))),
+            "{result:?}: {refused:?}"
+        );
+        assert_eq!(fx.raw(&ch).await, raw, "{result:?}");
+        assert_eq!(
+            fx.index.admit_write(&ch, Some(&armed.capability)).map(drop),
+            Ok(()),
+            "{result:?}"
+        );
+    }
+    let busy = fx.custody.settle_busy(&ch, revision + 1, &id).await;
+    assert!(
+        matches!(busy, Err(CustodyError::Refused(Refusal::Unfit(_)))),
+        "{busy:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    assert_eq!(
+        fx.index.admit_write(&ch, Some(&armed.capability)).map(drop),
+        Ok(())
+    );
+    let busy = fx
+        .custody
+        .reserve(fx.admit(&ch).await, legacy(&ch, seal("q1", None, None)))
+        .await;
+    assert!(
+        matches!(
+            busy,
+            Err(CustodyError::Refused(Refusal::Busy(Phase::LegacyReserved)))
+        ),
+        "{busy:?}"
+    );
+    // Settled through its own report first, the return keeps the applied exit.
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit),
+        handoff: None,
+    });
+    let revision = armed.collector.await.unwrap().expect("recorded");
+    let (verdict, _) = fx
+        .custody
+        .record_legacy_result(&ch, revision, &id, &LegacyResult::ReturnRequired)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Return { .. }), "{verdict:?}");
+    let kept = fx.record(&ch).await.active_operation.unwrap();
+    assert_eq!(
+        (kept.stage, kept.status, kept.applied),
+        (
+            Stage::SourceReturn,
+            StageStatus::ReservedNotArmed,
+            vec![Stage::QueueCommit]
+        )
+    );
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f6_a_writer_needs_the_live_capability_pg() {
+    let fx = Fx::create().await;
+    let ch = channel(97);
+    let before = seal("q1", None, None);
+    let marker = seal("q1", Some("m1"), None);
+    let (revision, id) = fx.reserve(legacy(&ch, before.clone())).await;
+    let first = fx
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::MarkerPublish,
+            marker.clone(),
+            None,
+        )
+        .await;
+    assert_eq!(
+        fx.index.admit_write(&ch, Some(&first.capability)).map(drop),
+        Ok(())
+    );
+    // Revoked: refused at once, while the index still names the operation and nothing is recorded.
+    first.revoke.revoke();
+    let exact = |armed: &Armed| IndexState::ExactOperation {
+        operation_id: id.clone(),
+        stage: Stage::MarkerPublish,
+        arm_id: armed.capability.arm_id().into(),
+    };
+    assert_eq!(
+        fx.index.admit_write(&ch, Some(&first.capability)).map(drop),
+        Err(Denial(exact(&first)))
+    );
+    assert_eq!(fx.record(&ch).await.revision, revision + 1);
+    // Re-armed after its applier was lost: the old capability is the same stage's earlier arm.
+    drop(first.report);
+    let revision = first.collector.await.unwrap().expect("recorded");
+    let (verdict, revision) = fx
+        .reconcile(
+            &ch,
+            revision,
+            Action::RecheckApply,
+            &evidence(before, lost()),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    let second = fx
+        .arm(&ch, revision, &id, Stage::MarkerPublish, marker, None)
+        .await;
+    assert_eq!(fx.index.state(&ch), exact(&second));
+    assert_eq!(
+        fx.index.admit_write(&ch, Some(&first.capability)).map(drop),
+        Err(Denial(exact(&second)))
+    );
+    assert_eq!(
+        fx.index
+            .admit_write(&ch, Some(&second.capability))
+            .map(drop),
+        Ok(())
+    );
+    fx.close().await;
+}
+
+/// Arms A, revokes it, resumes the stage with the stores as before and arms B in its place.
+async fn rearmed(fx: &Fx, ch: &str) -> (Armed, Armed) {
+    let before = seal("q1", None, None);
+    let marker = seal("q1", Some("m1"), None);
+    let (revision, id) = fx.reserve(legacy(ch, before.clone())).await;
+    let first = fx
+        .arm(
+            ch,
+            revision,
+            &id,
+            Stage::MarkerPublish,
+            marker.clone(),
+            None,
+        )
+        .await;
+    first.revoke.revoke();
+    let ended = evidence(before, lost());
+    let (verdict, revision) = fx
+        .reconcile(ch, revision + 1, Action::RecheckApply, &ended)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    let second = fx
+        .arm(ch, revision, &id, Stage::MarkerPublish, marker, None)
+        .await;
+    (first, second)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f5_a_late_report_settles_only_its_own_arm_pg() {
+    let fx = Fx::create().await;
+    let marker = seal("q1", Some("m1"), None);
+    // B still armed: A's late report is stale and B's writer keeps its index entry.
+    let ch = channel(98);
+    let (first, second) = rearmed(&fx, &ch).await;
+    let raw = fx.raw(&ch).await;
+    first.report.send(StepOutcome::NotApplied);
+    let late = first.collector.await.unwrap();
+    assert!(
+        matches!(late, Err(CustodyError::Refused(Refusal::Stale))),
+        "{late:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    assert_eq!(
+        fx.index
+            .admit_write(&ch, Some(&second.capability))
+            .map(drop),
+        Ok(())
+    );
+    // B held while its applier runs: A's report still records nothing; B's own report settles it.
+    let ch = channel(99);
+    let (first, second) = rearmed(&fx, &ch).await;
+    let unread = Evidence {
+        observed: None,
+        ..evidence(marker.clone(), lost())
+    };
+    let revision = fx.record(&ch).await.revision;
+    let (verdict, _) = fx
+        .reconcile(&ch, revision, Action::RecheckApply, &unread)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
+    let raw = fx.raw(&ch).await;
+    first.report.send(StepOutcome::NotApplied);
+    let late = first.collector.await.unwrap();
+    assert!(
+        matches!(late, Err(CustodyError::Refused(Refusal::Stale))),
+        "{late:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    second.report.send(StepOutcome::Applied {
+        after: Box::new(marker),
+        handoff: None,
+    });
+    second.collector.await.unwrap().expect("recorded");
+    let row = fx.record(&ch).await;
+    let kept = row.active_operation.unwrap();
+    assert_eq!(
+        (row.phase, kept.status, kept.applied),
+        (
+            Phase::LegacyReserved,
+            StageStatus::KnownOutcome,
+            vec![Stage::MarkerPublish]
+        )
+    );
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_a_v1_row_with_one_unreadable_field_is_held_untouched_pg() {
+    let fx = Fx::create().await;
+    let before = seal("q1", None, None);
+    let cases = [
+        ("phase", "'future_phase'"),
+        ("active_operation", "'{\"operation_id\": 7}'::jsonb"),
+        ("issued_episode", "'{\"v\": \"9\"}'::jsonb"),
+        ("canonical_seal", "'{\"next\": true}'::jsonb"),
+    ];
+    for (n, (column, value)) in cases.into_iter().enumerate() {
+        let ch = channel(801 + n as u32);
+        let (revision, id) = fx.reserve(legacy(&ch, before.clone())).await;
+        sqlx::query(&format!(
+            "UPDATE channel_recovery_custody SET {column} = {value} WHERE channel_id = $1"
+        ))
+        .bind(&ch)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+        let raw = fx.raw(&ch).await;
+        let inspected = fx.custody.inspect(&ch).await.unwrap();
+        let Inspection::Unsupported {
+            revision: held,
+            detail,
+        } = &inspected
+        else {
+            panic!("{column}: {inspected:?}");
+        };
+        assert_eq!(*held, revision, "{column}");
+        assert!(detail.starts_with(column), "{column}: {detail}");
+        let reconciled = fx
+            .reconcile(
+                &ch,
+                revision,
+                Action::RecheckApply,
+                &evidence(before.clone(), lost()),
+            )
+            .await;
+        let armed = fx
+            .custody
+            .arm(
+                &ch,
+                revision,
+                &id,
+                Stage::MarkerPublish,
+                before.clone(),
+                None,
+            )
+            .await;
+        let reserved = fx
+            .custody
+            .reserve(fx.admit(&ch).await, legacy(&ch, before.clone()))
+            .await;
+        for result in [
+            reconciled.map(|_| ()),
+            armed.map(|_| ()),
+            reserved.map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(CustodyError::Refused(Refusal::Held))),
+                "{column}: {result:?}"
+            );
+        }
+        let version: i32 = sqlx::query_scalar(
+            "SELECT format_version FROM channel_recovery_custody WHERE channel_id = $1",
+        )
+        .bind(&ch)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!((version, fx.raw(&ch).await), (1, raw), "{column}");
+    }
+    fx.close().await;
+}
+
+async fn pg_text_len(pool: &PgPool, value: &serde_json::Value) -> usize {
+    let len: i32 = sqlx::query_scalar("SELECT octet_length($1::jsonb::text)")
+        .bind(value)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    len as usize
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_bounds_admit_up_to_their_limit_and_refuse_past_it_pg() {
+    let fx = Fx::create().await;
+    let before = seal("q1", None, None);
+    // Sources: 64 at most, refused before any write.
+    for (n, count) in [63u64, 64, 65].into_iter().enumerate() {
+        let ch = channel(811 + n as u32);
+        let request = ReserveRequest {
+            sources: (0..count).collect(),
+            ..legacy(&ch, before.clone())
+        };
+        let reserved = fx.custody.reserve(fx.admit(&ch).await, request).await;
+        assert_eq!(reserved.is_ok(), count <= 64, "{count}: {reserved:?}");
+        assert_eq!(fx.raw(&ch).await.is_some(), count <= 64, "{count}");
+    }
+    let ch = channel(815);
+    fx.home(&ch, NODE, 41).await;
+    fx.reserve(scoped(&ch, before.clone(), 41)).await;
+    // Handoffs: 8 at most.
+    for count in [7usize, 8, 9] {
+        let mut row = fx.record(&ch).await;
+        let op = row.active_operation.as_mut().unwrap();
+        op.handoffs = (0..count).map(|i| format!("debt-{i}")).collect();
+        let stored = row.encode();
+        assert_eq!(stored.is_ok(), count <= 8, "{count}");
+        if let Ok(stored) = stored {
+            let mut conn = fx.pool.acquire().await.unwrap();
+            let written =
+                crate::db::channel_recovery_custody::replace(&mut conn, row.revision, &stored)
+                    .await
+                    .unwrap();
+            assert!(matches!(written, CasWrite::Applied { .. }), "{count}");
+            assert_eq!(
+                fx.record(&ch)
+                    .await
+                    .active_operation
+                    .unwrap()
+                    .handoffs
+                    .len(),
+                count
+            );
+        }
+    }
+    // Each JSON column stores up to its byte limit as PostgreSQL measures it, and not past it.
+    type Pad = fn(&mut CustodyRecord, String);
+    let columns: [(&str, usize, Pad); 3] = [
+        ("issued_episode", 4096, |row, pad| {
+            let Some(IssuedEpisode::V1 { started_at, .. }) = row.issued_episode.as_mut() else {
+                unreachable!()
+            };
+            *started_at = pad;
+        }),
+        ("active_operation", 16384, |row, pad| {
+            row.active_operation.as_mut().unwrap().handoffs = vec![pad];
+        }),
+        ("canonical_seal", 4096, |row, pad| {
+            row.canonical_seal.placeholder = Observed::Present {
+                identity: pad,
+                digest: "d".into(),
+            };
+        }),
+    ];
+    for (column, limit, pad) in columns {
+        let base = fx.record(&ch).await;
+        let mut empty = base.clone();
+        pad(&mut empty, String::new());
+        let measure = |stored: &crate::db::channel_recovery_custody::StoredCustody| match column {
+            "issued_episode" => stored.issued_episode.clone().unwrap(),
+            "active_operation" => stored.active_operation.clone().unwrap(),
+            _ => stored.canonical_seal.clone(),
+        };
+        let floor = pg_text_len(&fx.pool, &measure(&empty.encode().unwrap())).await;
+        for size in [limit - 1, limit, limit + 1] {
+            let row = fx.record(&ch).await;
+            let mut padded = row.clone();
+            pad(&mut padded, "p".repeat(size - floor));
+            let stored = padded.encode().unwrap();
+            assert_eq!(
+                pg_text_len(&fx.pool, &measure(&stored)).await,
+                size,
+                "{column}"
+            );
+            let raw = fx.raw(&ch).await;
+            let mut conn = fx.pool.acquire().await.unwrap();
+            let written =
+                crate::db::channel_recovery_custody::replace(&mut conn, row.revision, &stored)
+                    .await;
+            drop(conn);
+            // Within the limit the padded value is stored; past it the bound's CHECK refuses it.
+            match written {
+                Ok(CasWrite::Applied { revision }) if size <= limit => {
+                    let kept = fx.record(&ch).await;
+                    assert_eq!(revision, row.revision + 1, "{column} {size}");
+                    assert_eq!(
+                        kept,
+                        CustodyRecord { revision, ..padded },
+                        "{column} {size}"
+                    );
+                }
+                Err(sqlx::Error::Database(error)) if size > limit => {
+                    assert_eq!(
+                        (error.code().as_deref(), error.constraint()),
+                        (Some("23514"), Some("channel_recovery_custody_bounded")),
+                        "{column} {size}"
+                    );
+                    assert_eq!(fx.raw(&ch).await, raw, "{column} {size}");
+                }
+                other => panic!("{column} {size}: {other:?}"),
+            }
+        }
+        // Back to the unpadded row for the next column.
+        let row = fx.record(&ch).await;
+        let mut conn = fx.pool.acquire().await.unwrap();
+        let restored = CustodyRecord {
+            revision: row.revision,
+            ..base
+        };
+        crate::db::channel_recovery_custody::replace(
+            &mut conn,
+            row.revision,
+            &restored.encode().unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2a_a_late_index_mirror_never_replaces_a_newer_arm_pg() {
+    let fx = Fx::create().await;
+    let ch = channel(111);
+    let before = seal("q1", None, None);
+    let marker = seal("q1", Some("m1"), None);
+    let (revision, id) = fx.reserve(legacy(&ch, before.clone())).await;
+    let revision = fx
+        .arm_and_crash(
+            &ch,
+            revision,
+            &id,
+            Stage::MarkerPublish,
+            marker.clone(),
+            None,
+        )
+        .await;
+    // A's reconcile commits its resume and is held before it mirrors that into the index.
+    let (committed, release) = commit_fault::hold_after_next(&ch);
+    let ended = evidence(before, fx.over(&ch).await);
+    let late = tokio::spawn({
+        let (custody, ch) = (fx.custody.clone(), ch.clone());
+        async move {
+            custody
+                .reconcile(&ch, revision, Action::RecheckApply, &ended)
+                .await
+        }
+    });
+    committed.await.expect("the reconcile committed");
+    // B arms the resumed stage and publishes while A's mirror is still pending.
+    let second = fx
+        .arm(&ch, revision + 1, &id, Stage::MarkerPublish, marker, None)
+        .await;
+    release.send(()).expect("the reconcile still waits");
+    let (verdict, _) = late.await.unwrap().expect("reconciled");
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    let armed = fx.record(&ch).await.active_operation.unwrap();
+    assert_eq!(
+        (armed.status, armed.arm_id.as_deref()),
+        (StageStatus::ApplyArmed, Some(second.capability.arm_id()))
+    );
+    assert_eq!(
+        fx.index
+            .admit_write(&ch, Some(&second.capability))
+            .map(drop),
+        Ok(()),
+        "the earlier transition's late mirror blocked the newer arm"
+    );
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2a_an_arm_ends_only_revoked_and_drained_and_its_proof_names_it_pg() {
+    let fx = Fx::create().await;
+    let ch = channel(121);
+    let before = seal("q1", None, None);
+    let marker = seal("q1", Some("m1"), None);
+    let reconcile = async |revision, seen: &CanonicalSeal, prior| {
+        let evidence = evidence(seen.clone(), prior);
+        let reconciled = fx
+            .custody
+            .reconcile(&ch, revision, Action::RecheckApply, &evidence);
+        reconciled.await.expect("reconciled")
+    };
+    let (revision, id) = fx.reserve(legacy(&ch, before.clone())).await;
+    let stage = Stage::MarkerPublish;
+    let Armed {
+        capability,
+        report,
+        revoke,
+        collector,
+    } = fx
+        .arm(&ch, revision, &id, stage, marker.clone(), None)
+        .await;
+    // check → pause: A's writer entered and has not returned.
+    let entered = fx.index.admit_write(&ch, Some(&capability));
+    let entered = entered.expect("entered while armed");
+    // revoke: closed to a new apply, but not ended while the entered one runs.
+    revoke.revoke();
+    let again = fx.index.admit_write(&ch, Some(&capability)).map(drop);
+    assert!(again.is_err(), "a new apply entered after the revoke");
+    assert_eq!(revoke.end_proof(), None, "ended with an apply entered");
+    // A succession attempt has no proof to show: it only holds, and arms nothing.
+    let (verdict, held) = reconcile(revision + 1, &before, PriorExecution::Unknown).await;
+    assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
+    let next = fx.custody.arm(&ch, held, &id, stage, marker.clone(), None);
+    let next = next.await.map(|_| ());
+    assert!(
+        matches!(next, Err(CustodyError::Refused(Refusal::NotArmable))),
+        "{next:?}"
+    );
+    // resume: the apply returns, then its capability leaves the worker; only then a proof.
+    drop(entered);
+    assert_eq!(revoke.end_proof(), None, "ended with its capability held");
+    drop(capability);
+    let proof_a = revoke.end_proof().expect("revoked and drained");
+    drop(report);
+    let revision = collector.await.unwrap().expect("recorded");
+    let ended = |proof: &EndProof| PriorExecution::Ended(proof.clone());
+    let live = |proof: &EndProof| {
+        PriorExecution::SameOwnerLive(LiveOwner {
+            process_incarnation: INCARNATION.into(),
+            operation_id: id.clone(),
+            applier_ended: Some(proof.clone()),
+        })
+    };
+    let (verdict, revision) = reconcile(revision, &before, ended(&proof_a)).await;
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    // B, the same stage's next arm, published its Marker and lost its applier.
+    let Armed {
+        capability,
+        report,
+        revoke,
+        collector,
+    } = fx
+        .arm(&ch, revision, &id, stage, marker.clone(), None)
+        .await;
+    drop((capability, report));
+    let mut revision = collector.await.unwrap().expect("recorded");
+    // A's proof, in either form, says nothing about B: the row stays held on B's arm.
+    for stale in [ended(&proof_a), live(&proof_a)] {
+        let (verdict, next) = reconcile(revision, &marker, stale).await;
+        let missing = "the end of the earlier execution";
+        assert_eq!(verdict, Verdict::Held { missing });
+        let row = fx.record(&ch).await;
+        let arm = row.active_operation.unwrap().arm_id;
+        assert_eq!(
+            (row.phase, arm.as_deref()),
+            (Phase::Held, Some(revoke.arm_id()))
+        );
+        revision = next;
+    }
+    let proof_b = revoke.end_proof().expect("B revoked and drained");
+    let (verdict, _) = reconcile(revision, &marker, live(&proof_b)).await;
+    let resumed = Verdict::Resume {
+        stage: Stage::QueueCommit,
+        reuse: None,
+    };
+    assert_eq!(verdict, resumed);
     fx.close().await;
 }
 
@@ -1104,8 +1933,8 @@ mod migration {
     }
 }
 
-/// The two real entry points this slice touches — recovery admission and the home read — return
-/// and store exactly what the base build did, and nothing writes a custody row.
+/// L00-admission/home only: recovery admission and the home read return and store what the base
+/// build did, and nothing writes a custody row. The store-bytes L00 belongs to a later slice.
 mod dormant {
     use sqlx::PgPool;
 
