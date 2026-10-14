@@ -70,7 +70,7 @@ fn request(args: &InspectArgs) -> Result<Value, String> {
     let seq = |value: &str| {
         value
             .parse::<u64>()
-            .map_err(|_| format!("--ended: {value}"))
+            .map_err(|e| format!("--ended {value}: {e}"))
     };
     let termination = match args.ended.as_deref() {
         None => Value::Null,
@@ -88,93 +88,51 @@ fn request(args: &InspectArgs) -> Result<Value, String> {
     }))
 }
 
-const NO_ANSWER: &str =
-    "응답을 받지 못했습니다. 접수된 job은 계속 실행될 수 있으니 쓰기가 없었다고 보지 마세요.";
+const NO_ANSWER: &str = "\
+응답을 받지 못했습니다. 접수된 job은 계속 실행될 수 있으니 쓰기가 없었다고 보지 마세요.";
 
-/// What the operator does next for a refusal or an outcome, as the cleanup's runbook says.
-const NOTICES: &[(&str, &str)] = &[
-    (
-        "ForeignRun",
-        "대상 actor run이 바뀌었습니다. 새 Inspect가 필요합니다.",
-    ),
-    ("CodexDeferred", "이 정리는 Claude 대상으로만 지원합니다."),
-    ("Busy", "다른 job이 실행 중입니다. 완료 후 다시 확인하세요."),
-    (
-        "InProgress",
-        "같은 job이 실행 중입니다. 이 응답은 완료 영수증이 아닙니다.",
-    ),
-    (
-        "JobConflict",
-        "같은 ID의 요청 내용이 다릅니다. 원본 manifest를 확인하세요.",
-    ),
-    (
-        "Held(Stale)",
-        "관측 후 상태가 바뀌었습니다. 다시 Inspect하세요.",
-    ),
-    (
-        "Held(TransitionBusy)",
-        "전환 권위가 사용 중입니다. 같은 job으로 재확인하세요.",
-    ),
-    (
-        "Held(SourceBusy)",
-        "source 권위가 사용 중입니다. 같은 job으로 재확인하세요.",
-    ),
-    (
-        "Held(PriorCleanup)",
-        "기존 정리 이력이 있습니다. 재성장·기존 job을 조사하세요.",
-    ),
-    (
-        "Held(Limit)",
-        "후보·해시·시간 상한으로 보류했습니다. 같은 job으로 반복하세요.",
-    ),
-    (
-        "Held(NotTried)",
-        "앞선 저장 실패로 시도하지 않았습니다. 저장 상태 확인이 먼저입니다.",
-    ),
-    (
-        "Held(Stopping)",
-        "actor가 멈추는 중이라 시도하지 않았습니다. 다시 뜬 뒤 같은 job으로 재확인하세요.",
-    ),
-    (
-        "RetiredThenGrew",
-        "감사는 저장됐지만 source가 다시 활성화됐습니다. clear를 진행하지 마세요.",
-    ),
-    (
-        "Unknown",
-        "저장이 durable했는지 불명입니다. 성공으로 처리하지 마세요.",
-    ),
-];
+/// What the operator does next after a refusal or an outcome, one `tag: notice` a line.
+const NOTICES: &str = "\
+ForeignRun: 대상 actor run이 바뀌었습니다. 새 Inspect가 필요합니다.
+CodexDeferred: 이 정리는 Claude 대상으로만 지원합니다.
+Busy: 다른 job이 실행 중입니다. 완료 후 다시 확인하세요.
+InProgress: 같은 job이 실행 중입니다. 이 응답은 완료 영수증이 아닙니다.
+JobConflict: 같은 ID의 요청 내용이 다릅니다. 원본 manifest를 확인하세요.
+Unread: 상태를 확인할 수 없어 보류했습니다.
+Held(Stale): 관측 후 상태가 바뀌었습니다. 다시 Inspect하세요.
+Held(TransitionBusy): 전환 권위가 사용 중입니다. 같은 job으로 재확인하세요.
+Held(SourceBusy): source 권위가 사용 중입니다. 같은 job으로 재확인하세요.
+Held(PriorCleanup): 기존 정리 이력이 있습니다. 재성장·기존 job을 조사하세요.
+Held(Limit): 후보·해시·시간 상한으로 보류했습니다. 같은 job으로 반복하세요.
+Held(NotTried): 앞선 저장 실패로 시도하지 않았습니다. 저장 상태 확인이 먼저입니다.
+Held(Stopping): actor가 멈추는 중이라 시도하지 않았습니다. 다시 뜬 뒤 같은 job으로 재확인하세요.
+RetiredThenGrew: 감사는 저장됐지만 source가 다시 활성화됐습니다. clear를 진행하지 마세요.
+Unknown: 저장이 durable했는지 불명입니다. 성공으로 처리하지 마세요.";
 
 fn notice(tag: &str) -> Option<String> {
-    if let Some(detail) = tag
-        .strip_prefix("Unread(")
-        .and_then(|t| t.strip_suffix(')'))
-    {
-        return Some(format!("상태를 확인할 수 없어 보류했습니다: {detail}"));
-    }
-    let found = NOTICES.iter().find(|(name, _)| *name == tag);
-    found.map(|(_, text)| (*text).to_owned())
+    let name = if tag.starts_with("Unread(") {
+        "Unread"
+    } else {
+        tag
+    };
+    let line = NOTICES
+        .lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "));
+    line.map(|line| format!("{tag}: {line}"))
 }
 
 /// A serialized enum as `Name(Inner)`; an eligible verdict's draft audit is left out.
 fn tag(value: &Value) -> String {
-    match value {
-        Value::String(name) => name.clone(),
-        Value::Object(map) if map.len() == 1 => match map.iter().next() {
-            Some((name, inner @ (Value::String(_) | Value::Object(_)))) if name != "Eligible" => {
-                format!("{name}({})", tag(inner))
-            }
-            Some((name, _)) => name.clone(),
-            None => String::new(),
-        },
-        other => other.to_string(),
+    let Some((name, inner)) = value.as_object().and_then(|map| map.iter().next()) else {
+        return value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned);
+    };
+    match inner {
+        _ if name == "Eligible" => name.clone(),
+        Value::String(_) | Value::Object(_) => format!("{name}({})", tag(inner)),
+        _ => name.clone(),
     }
-}
-
-fn text(value: &Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
 }
 
 /// The answer for the operator, then the answer itself verbatim.
@@ -183,16 +141,16 @@ fn render(answer: &Result<(u16, Value), http::PostError>) -> String {
         Ok(answer) => answer,
         Err(error) => return format!("no answer: {error}\n{NO_ANSWER}"),
     };
-    let mut lines = vec![format!("HTTP {status} {}", text(&body["result"]))];
+    let mut lines = vec![format!("HTTP {status} {}", tag(&body["result"]))];
     match body["result"].as_str() {
         Some("reply_lost") => lines.push(NO_ANSWER.into()),
-        Some("stale_actor_reply") => lines.push(
-            "응답한 actor run이 이제 현재 run이 아니라 읽지 않았습니다. 다시 Inspect하세요.".into(),
-        ),
         Some("inspected" | "actor_refused") => reply(&body["reply"], &mut lines),
+        Some("stale_actor_reply") => {
+            lines.push("응답한 run이 현재 run이 아니라 읽지 않았습니다.".into())
+        }
         _ => lines.push(format!(
             "actor에 보내지 않았습니다: {}",
-            text(&body["detail"])
+            tag(&body["detail"])
         )),
     }
     lines.push(serde_json::to_string_pretty(body).unwrap_or_default());
@@ -200,90 +158,45 @@ fn render(answer: &Result<(u16, Value), http::PostError>) -> String {
 }
 
 fn reply(reply: &Value, lines: &mut Vec<String>) {
-    if !reply["refused"].is_null() {
-        lines.extend(notice(&tag(&reply["refused"])));
-        return;
-    }
-    match (&reply["execution"]["Ok"], &reply["execution"]["Err"]) {
-        (Value::Array(held), _) => lines.push(format!("execution: {} source(s) held", held.len())),
-        (_, Value::String(error)) => lines.push(format!("execution: ERROR — {error}")),
-        _ => lines.push("execution: unread".into()),
-    }
-    diagnostics(&reply["diagnostics"], lines);
-    let mut outcomes = Vec::new();
-    for hop in reply["hops"].as_array().into_iter().flatten() {
-        let (judged, outcome) = (&hop["judged"], tag(&hop["outcome"]));
-        let (key, seq, verdict) = (
-            text(&judged["key"]),
-            &judged["hop_seq"],
-            tag(&judged["verdict"]),
-        );
-        lines.push(format!("hop {key} seq {seq}: {verdict} -> {outcome}"));
-        if !outcomes.contains(&outcome) {
-            outcomes.push(outcome);
-        }
-    }
-    let summary = &reply["summary"];
-    let counts = [
-        "eligible",
-        "already_done",
-        "refused",
-        "unknown",
-        "not_target",
-        "unsettled",
-    ];
-    let counts = counts.map(|name| format!("{name} {}", summary[name]));
+    let mut tags = vec![tag(&reply["refused"])];
+    lines.push(format!("execution {}", tag(&reply["execution"])));
+    let diagnostics = &reply["diagnostics"];
+    let history = &diagnostics["history"];
+    let sessions = history["Ok"]["sessions"].as_array().map_or(0, Vec::len);
+    let complete = &history["Ok"]["complete"];
     lines.push(format!(
-        "summary: {}; unsettled now {}",
-        counts.join(", "),
-        reply["unsettled"]
+        "history of nonce {}: complete {complete}, {sessions} session(s) {}",
+        diagnostics["nonce"], history["Err"]
     ));
-    lines.extend(outcomes.iter().filter_map(|outcome| notice(outcome)));
-}
-
-fn diagnostics(diagnostics: &Value, lines: &mut Vec<String>) {
-    lines.push(format!("nonce {}", text(&diagnostics["nonce"])));
-    let history = &diagnostics["history"]["Ok"];
-    if history.is_null() {
-        lines.push(format!(
-            "history: ERROR — {}",
-            text(&diagnostics["history"]["Err"])
-        ));
-    }
-    let pin = |pin: &Value| {
-        pin["path"]
-            .as_str()
-            .map_or("no pin".to_owned(), str::to_owned)
-    };
-    lines.push(format!(
-        "history complete {}, pinned {}",
-        history["complete"],
-        pin(&history["pinned"])
-    ));
-    for session in history["sessions"].as_array().into_iter().flatten() {
-        let (role, name) = (text(&session[0]), text(&session[1]));
-        lines.push(format!("  {role} {name}: {}", pin(&session[2])));
-    }
     let mut unpinned = 0;
     for overlap in diagnostics["overlaps"].as_array().into_iter().flatten() {
-        let held: Vec<String> = overlap["held_by"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(pin)
-            .collect();
-        let sessions = overlap["unpinned"].as_array().map_or(0, Vec::len);
-        unpinned += sessions;
-        let key = text(&overlap["key"]);
+        unpinned += overlap["unpinned"].as_array().map_or(0, Vec::len);
         lines.push(format!(
-            "overlap {key}: held by {held:?}, {sessions} unpinned session(s)"
+            "overlap {}: held by {}, unpinned {}",
+            overlap["key"], overlap["held_by"], overlap["unpinned"]
         ));
     }
     if unpinned > 0 {
         lines.push(format!(
-            "Apply 중단: pin 없는 matching session {unpinned}개 — 보호 집합을 확정할 수 없음"
+            "Apply 중단: pin 없는 matching session {unpinned}개, 보호 집합을 확정할 수 없음"
         ));
     }
+    for hop in reply["hops"].as_array().into_iter().flatten() {
+        let (judged, outcome) = (&hop["judged"], tag(&hop["outcome"]));
+        let verdict = tag(&judged["verdict"]);
+        lines.push(format!(
+            "hop {} seq {}: {verdict} -> {outcome}",
+            judged["key"], judged["hop_seq"]
+        ));
+        tags.push(outcome);
+    }
+    lines.push(format!(
+        "summary {} unsettled now {}",
+        reply["summary"], reply["unsettled"]
+    ));
+    tags.sort();
+    tags.dedup();
+    lines.extend(tags.iter().filter_map(|tag| notice(tag)));
 }
 
 #[cfg(test)]
