@@ -698,6 +698,8 @@ async fn s3act_b3b4a1_f04_exact_operation_is_published_only_after_the_arm_commit
     let arm_id = armed.capability.arm_id();
     let (other_stage, _) = ApplyCapability::issue(&ch, &op, Stage::QueueCommit, arm_id);
     assert!(fx.index.admit_write(&ch, Some(&other_stage)).is_err());
+    let (other_arm, _) = ApplyCapability::issue(&ch, &op, Stage::MarkerPublish, "another-arm");
+    assert!(fx.index.admit_write(&ch, Some(&other_arm)).is_err());
     assert!(fx.index.admit_write(&ch, None).is_err());
     assert_eq!(
         armed.capability.check(&ch, &op, Stage::MarkerPublish),
