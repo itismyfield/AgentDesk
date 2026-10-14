@@ -586,11 +586,12 @@ async fn th6_releasing_holder_restart_retries_reset_pg() {
     let mut first = Node::spawn(&scene, "th6_release_first", GW);
     let tag = first.name().to_string();
     let (dir, entered) = (scene.dir(), format!("reset.{tag}.1.entered"));
-    let ready = || {
+    // The child judges its own readiness; here its exit before the call fails with its log.
+    let alive = || {
         first.alive_before(&entered);
-        signalled(dir, &format!("ready.{tag}"))
+        false
     };
-    until_reset_entered(&scene.pool, dir, (&tag, 1), &releasing, ready).await;
+    until_reset_entered(&scene.pool, dir, (&tag, 1), &releasing, alive).await;
     quiet_at_reset(&scene.pool, &samples).await;
     first.kill();
     assert_eq!(reset_returned(dir, &tag, 1), None, "killed inside the call");
@@ -638,17 +639,20 @@ fn holding(node: &Booted, epoch: i64) -> bool {
     node.home_epoch() == Some(epoch) && node.accepts()
 }
 
-/// First generation: its drain's reset holds inside call 1, where the parent kills it.
+/// First generation: its drain's reset holds inside call 1, where the parent kills it; until then
+/// it fails if it stays holding without a break and tries no reset.
 pub(super) async fn release_first_node(env: &Env) {
-    let epoch = epoch_of(env);
+    let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
     let reset = ScriptedReset::in_child(env, vec![ResetAnswer::Apply]);
     let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
     let node = Booted::boot_with_reset(env, reads, reset).await;
-    until("the holder takes the channel", WITHIN, || {
-        holding(&node, epoch)
-    })
-    .await;
-    signal(&env.dir, &format!("ready.{}", env.spawn));
+    let releasing = home_facts(&node.pool).await.expect("the home row");
+    assert_eq!(
+        (releasing.state, releasing.epoch),
+        (HomeState::Releasing, epoch)
+    );
+    let held = || holding(&node, epoch);
+    until_reset_entered(&node.pool, dir, (tag, 1), &releasing, held).await;
     std::future::pending::<()>().await;
 }
 

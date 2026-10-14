@@ -1779,8 +1779,46 @@ pub(super) async fn quiet_at_reset(pool: &PgPool, samples: &[String]) {
 /// How long a holder may be ready before a releasing drain tries its reset: eight renewal periods.
 const RESET_WINDOW: Duration = Duration::from_secs(40);
 
+/// How long `ready` has held without a break at each sample; a false sample ends the stretch.
+#[derive(Default)]
+struct ReadyStretch(Option<std::time::Instant>);
+
+impl ReadyStretch {
+    fn sample(&mut self, ready: bool, at: std::time::Instant) -> Duration {
+        if !ready {
+            self.0 = None;
+            return Duration::ZERO;
+        }
+        at.saturating_duration_since(*self.0.get_or_insert(at))
+    }
+}
+
+#[test]
+fn a_ready_stretch_restarts_after_any_false_sample() {
+    let (t0, s) = (std::time::Instant::now(), Duration::from_secs);
+    let mut stretch = ReadyStretch::default();
+    assert_eq!(stretch.sample(true, t0), Duration::ZERO);
+    assert_eq!(stretch.sample(false, t0 + s(1)), Duration::ZERO);
+    assert_eq!(
+        stretch.sample(true, t0 + s(41)),
+        Duration::ZERO,
+        "a new stretch"
+    );
+    assert_eq!(stretch.sample(true, t0 + s(80)), s(39));
+}
+
+#[test]
+fn an_unbroken_ready_stretch_reaches_the_window() {
+    let (t0, s) = (std::time::Instant::now(), Duration::from_secs);
+    let mut stretch = ReadyStretch::default();
+    let held: Vec<_> = [0, 20, 40]
+        .map(|at| stretch.sample(true, t0 + s(at)))
+        .into();
+    assert_eq!(held, [Duration::ZERO, s(20), RESET_WINDOW]);
+}
+
 /// Waits for reset call `n` of `tag`, the row still `facts` when it enters. The row moving first
-/// fails at once, and so does a holder `ready` through [`RESET_WINDOW`] with no call.
+/// fails at once, and so does a holder `ready` without a break through [`RESET_WINDOW`] with no call.
 pub(super) async fn until_reset_entered(
     pool: &PgPool,
     dir: &Path,
@@ -1790,7 +1828,7 @@ pub(super) async fn until_reset_entered(
 ) {
     eprintln!("[s3] until reset call {n} of {tag}");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    let mut ready_since = None;
+    let mut stretch = ReadyStretch::default();
     loop {
         let entered = reset_entered(dir, tag, n);
         let row = home_facts(pool).await;
@@ -1801,14 +1839,12 @@ pub(super) async fn until_reset_entered(
         }
         let moved = format!("the row moved with reset call {n} of {tag} never entered");
         assert_eq!(row.as_ref(), Some(facts), "{moved}");
-        if ready() {
-            let since = *ready_since.get_or_insert_with(tokio::time::Instant::now);
-            assert!(
-                since.elapsed() < RESET_WINDOW,
-                "the holder was ready at epoch {} for {RESET_WINDOW:?} and tried no reset call {n} of {tag}",
-                facts.epoch
-            );
-        }
+        let held = stretch.sample(ready(), std::time::Instant::now());
+        assert!(
+            held < RESET_WINDOW,
+            "the holder stayed ready at epoch {} for {held:?} and tried no reset call {n} of {tag}",
+            facts.epoch
+        );
         let now = tokio::time::Instant::now();
         assert!(now < deadline, "never reached: reset call {n} of {tag}");
         tokio::time::sleep(Duration::from_millis(50)).await;
