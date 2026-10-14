@@ -755,4 +755,162 @@ mod pg {
             db.drop().await;
         });
     }
+
+    // Through the router and a real PG row, Inspect judges the execution the hook judgment folded,
+    // and reports that history and every unpinned session an old source may be, not a later one.
+    #[test]
+    fn transition_route_inspect_reports_the_folded_execution_it_judged_pg() {
+        use crate::services::claude_tui::hook_server::adoption_retry::retry_deferred_claude_adoptions;
+        use crate::services::tui_o::writer::tests::actor::host_start::{ProducerPane, session_row};
+        use crate::services::tui_prompt_dedupe::binding_events::claude_history;
+        let threaded = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        threaded.block_on(async {
+            let [a, u1, u2, u3, u4] = [(); 5].map(|_| uuid::Uuid::new_v4().to_string());
+            let hops = [&u1, &u2, &u3];
+            let hop = |n: usize| {
+                let session = hops[n - 1].clone();
+                let body = [session_row(&session), row(&format!("n{n}"), "one")].concat();
+                (session, body)
+            };
+            let chain = chain_named(3, true, hop);
+            let path = |session: &str| chain.paths[0].with_file_name(format!("{session}.jsonl"));
+            std::fs::write(path(&a), session_row(&a)).unwrap();
+            let pane = Rc::new(ProducerPane::launch(&a, &path(&a)));
+            let marker = crate::services::tmux_common::session_temp_path(pane.tmux, "spawn_nonce");
+            let nonce = std::fs::read_to_string(&marker).unwrap().trim().to_owned();
+            let root = crate::config::runtime_root().unwrap().display().to_string();
+            let launch = BindingContext {
+                schema: 1,
+                provider: "claude".into(),
+                created_at: Utc::now(),
+                execution_nonce: nonce.clone(),
+                tmux_session: pane.tmux.into(),
+                channel_id: Some(CHANNEL),
+                owner_runtime_root: root.clone(),
+                host: None,
+                expected_native_session_id: None,
+                launch_mode: "fresh".into(),
+                provider_root: None,
+                first_prompt_digest: None,
+                source_policy: None,
+            };
+            PreparedIncarnation::create(launch).unwrap();
+            // A cleared session's transcript appears with its first prompt: two clears are outlived
+            // unprompted, the third is prompted and pinned, and a fourth still awaits its prompt.
+            let aside = |session: &str| path(session).with_extension("aside");
+            for session in hops {
+                std::fs::rename(path(session), aside(session)).unwrap();
+            }
+            for (n, session) in hops.into_iter().enumerate() {
+                let at = 10 * (n as i64 + 1);
+                pane.http(
+                    "SessionStart",
+                    Some("clear"),
+                    &a,
+                    session,
+                    &path(session),
+                    at,
+                );
+            }
+            std::fs::rename(aside(&u3), path(&u3)).unwrap();
+            pane.http("UserPromptSubmit", None, &a, &u3, &path(&u3), 31);
+            for session in [&u1, &u2] {
+                std::fs::rename(aside(session), path(session)).unwrap();
+            }
+            // The outlived Pendings, written at last, resolve nothing once the rotation is delivered.
+            crate::services::tui_prompt_dedupe::clear_claude_session_rotation(pane.tmux);
+            retry_deferred_claude_adoptions();
+            pane.http("SessionStart", Some("clear"), &a, &u4, &path(&u4), 40);
+            let actor = run(&chain);
+            settle(&chain).await;
+            let rig = HerdrRig::start();
+            let _endpoints = rig.registry_on_this_thread();
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let (shared, registry) = runtime(&pool).await;
+            let owner = HostedOwner {
+                provider: "claude".into(),
+                discord_token_hash: shared.token_hash.clone(),
+                channel_id: CHANNEL.to_string(),
+                logical_key: pane.tmux.into(),
+                owner_node: NODE.into(),
+                runtime_root: root,
+            };
+            let mut bound = record(&owner, &nonce, HostedState::Bound);
+            bound.location = Some(HostedLocation {
+                host: "herdr".into(),
+                execution_node: NODE.into(),
+                endpoint_config_key: KEY.into(),
+                socket_addr: rig.socket().display().to_string(),
+                named_session: SESSION.into(),
+                pane_id: PANE.into(),
+            });
+            store(&pool, &owner, &serde_json::to_value(bound).unwrap()).await;
+            let (ready, watches) = (process_readiness(), Watches::new(true, false));
+            let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
+            let app = app(registry, pool.clone());
+            let request = chain.request(JOB);
+            let Some(Termination::Confirmed(end)) = &request.termination else {
+                unreachable!()
+            };
+            let body = json!({
+                "operation": "inspect", "channel": CHANNEL, "session_key": KEY_OF_ROW,
+                "execution_nonce": nonce, "cutoff": request.cutoff, "job_id": JOB,
+                "operator": "operator", "reason": "herdr transition",
+                "termination": {"Confirmed": end},
+            });
+            let (later, u4_path) = (Rc::clone(&pane), path(&u4));
+            let (launched, prompted) = (a.clone(), u4.clone());
+            route::on_reply(move || {
+                std::fs::write(&u4_path, session_row(&prompted)).unwrap();
+                later.http("UserPromptSubmit", None, &launched, &prompted, &u4_path, 41);
+            });
+            let (before, sent) = (files(&chain.dir()), sends());
+            let (status, answer) = post(&app, &body).await;
+            let (_, moved) = claude_history(CHANNEL, pane.tmux, Some(&nonce)).unwrap();
+            let moved = moved.current.map(|visit| visit.session);
+            assert_eq!(moved, Some(u4.clone()), "[F:moved_before_consumed]");
+            assert_eq!(
+                (status, answer["result"].clone()),
+                (StatusCode::OK, json!("inspected")),
+                "[F:own] {answer}"
+            );
+            assert_eq!(sends() - sent, 1, "[F:sent_once]");
+            let execution = answer["reply"]["execution"]["Err"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                execution.contains("has no pinned source"),
+                "[F:judged_unpinned] {answer}"
+            );
+            assert_eq!(verdicts(&answer), ["Unknown"; 3], "[F:no_eligible]");
+            assert_eq!(files(&chain.dir()), before, "[F:writes_nothing]");
+            let diagnostics = &answer["reply"]["diagnostics"];
+            assert_eq!(diagnostics["nonce"], json!(nonce), "[F:nonce]");
+            let pin = pinned(&chain.sources[3]);
+            let mut left = [&a, &u1, &u2].map(|session| json!(["left", session, null]));
+            left.sort_by_key(|left| left[1].to_string());
+            let mut sessions = vec![json!(["current", u3, pin]), json!(["awaiting", u4, null])];
+            sessions.extend(left);
+            let history = json!({"complete": true, "pinned": pin, "sessions": sessions});
+            assert_eq!(diagnostics["history"]["Ok"], history, "[F:same_history]");
+            let listed =
+                |n: usize| json!({"key": chain.key(n), "held_by": [], "unpinned": [hops[n - 1]]});
+            let mut expected = vec![listed(1), listed(2)];
+            expected.sort_by_key(|overlap| overlap["key"].to_string());
+            let mut overlaps = diagnostics["overlaps"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            overlaps.sort_by_key(|overlap| overlap["key"].to_string());
+            assert_eq!(overlaps, expected, "[F:every_unpinned]");
+            drop(hosted);
+            halt(actor.stop, actor.task).await;
+            pool.close().await;
+            db.drop().await;
+        });
+    }
 }

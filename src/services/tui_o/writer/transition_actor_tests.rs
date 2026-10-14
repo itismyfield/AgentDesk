@@ -54,12 +54,18 @@ fn chain(hops: usize) -> Chain {
 
 /// `herdr` configures the channel, so its POSTs are counted and its rotation count published.
 fn chain_on(hops: usize, herdr: bool) -> Chain {
+    let hop = |n: usize| (format!("h{n}"), row(&format!("n{n}"), &format!("h{n} one")));
+    chain_named(hops, herdr, hop)
+}
+
+/// As `chain_on`, with hop `n`'s session and transcript body from `hop(n)`.
+fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>)) -> Chain {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
     let pane = format!("hrot-{}", uuid::Uuid::new_v4().simple());
     let (mut sources, mut paths) = (vec![a], vec![a_path.clone()]);
     for n in 1..=hops {
-        let body = row(&format!("n{n}"), &format!("h{n} one"));
-        let (path, next) = transcript(&a_path, &format!("h{n}.jsonl"), &format!("h{n}"), &body);
+        let (session, body) = hop(n);
+        let (path, next) = transcript(&a_path, &format!("{session}.jsonl"), &session, &body);
         let cause = BindingCause::Startup;
         bindings.commit(hop_at(
             n as u64 + 1,

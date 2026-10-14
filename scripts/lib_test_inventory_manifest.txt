@@ -13082,6 +13082,7 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_scope_keeps_every_hop_past_the_candidate_limit_across_a_partial_apply
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_scope_keeps_its_digest_when_another_job_retires_its_hops
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_consumes_no_reply_of_a_run_replaced_meanwhile
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_lists_every_unpinned_session_a_source_may_be
