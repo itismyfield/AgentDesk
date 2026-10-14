@@ -1623,6 +1623,34 @@ class TargetHealthR2Contract(unittest.TestCase):
                 self.assertEqual((observed["global_active"], observed["global_finalizing"]), (1, 1))
 
 
+class E2RunIdMarkerContract(unittest.TestCase):
+    """The canary runbook drives E-2 and compares by run id, so every E-2 marker must carry it."""
+
+    def test_e2_prompts_are_sent_with_run_id_markers_the_source_comparator_finds(self):
+        from tui_relay import source_compare
+
+        path = ROOT / "tests/e2e/tui_relay/scenarios/E-2-three-turns.yaml"
+        scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
+        markers = [f"[E2E:E2:x:TURN-{n}]" for n in (1, 2, 3)]
+        bodies = [_relay_msg(10 + n, marker) for n, marker in enumerate(markers)]
+        completion = _raw_bot_msg(20, "✅ 응답 완료")
+        client = MagicMock(base_url="http://agentdesk.test")
+        client.send_prompt.side_effect = [{"id": str(n)} for n in (1, 3, 5)]
+        client.fetch_messages.return_value = [*bodies, completion]
+        args = Namespace(base_url=client.base_url, cell="claude-tui", channel_id="42", thread_channel_id=None,
+                         dry_run=False, reset_before_each=False, hard_reset_session_each=False,
+                         allow_destructive=False, queue_runtime_root="unused", final_refetches=1)
+        with patch.object(driver.herdr, "observe", return_value={"herdr": {}}), \
+             patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+             patch.object(driver, "wait_for_discord_text_with_tui_idle_draft_guard",
+                          side_effect=lambda **k: (_relay_msg(9, k["needle"]), [_relay_msg(9, k["needle"])])), \
+             patch.object(driver, "reset_channel_state"), patch.object(driver.time, "sleep"):
+            driver.run_scenario(scenario, args=args, run_id="x", client=client)
+        sent = [call.args[1] for call in client.send_prompt.call_args_list]
+        pattern = source_compare.marker_pattern(run_id="x")
+        self.assertEqual([pattern.findall(prompt) for prompt in sent], [[marker] for marker in markers])
+
+
 class E35CurrentRunContract(unittest.TestCase):
     def test_actual_yaml_through_real_runner_checks_final_body_and_completion(self):
         path = ROOT / "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml"

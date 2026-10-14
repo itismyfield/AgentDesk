@@ -223,12 +223,12 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 The N1 turn canary was dropped and its manifest, producer and 50-turn oracle tooling removed.
 Drive marked inputs with the E2E driver (`--cell codex-tui` for Codex), then compare that run's
-markers in the native transcript and Discord read-only. Always pass the prompt-only filter and
-`--no-reset-before-each`: the unfiltered run includes E-50 (`!clear`) and the default reset cancels
-the turn and clears the queue, which would wipe the canary session.
+markers in the native transcript and Discord read-only. Always pass `--filter E-2 --no-reset-before-each`: E-2 only sends three run-id marked prompts,
+while the unfiltered run includes E-50 (`!clear`) and the default reset cancels the turn and clears
+the queue, which would wipe the canary session.
 
 ```sh
-python3 scripts/e2e/run_tui_relay.py --cell claude-tui --filter E-1,E-2 --no-reset-before-each \
+python3 scripts/e2e/run_tui_relay.py --cell claude-tui --filter E-2 --no-reset-before-each \
   --channel-id <CHANNEL_ID> --run-id <RUN_ID>
 python3 -m scripts.e2e.tui_relay.source_compare --channel-id <CHANNEL_ID> --run-id <RUN_ID>
 ```
