@@ -118,6 +118,11 @@ impl CustodyStore {
         self.admission_open.store(false, Ordering::SeqCst);
     }
 
+    /// Shows the sync writers a row found in PG as undecided before anything is rebuilt from it.
+    pub(crate) fn attach(&self, channel_id: &str, revision: i64) {
+        self.index.attach(channel_id, revision);
+    }
+
     pub(crate) async fn inspect(&self, channel_id: &str) -> Result<Inspection, CustodyError> {
         let mut conn = self.pool.acquire().await.map_err(store_error)?;
         let stored = store::read(&mut conn, channel_id)
@@ -220,7 +225,7 @@ impl CustodyStore {
             return Err(refused(Refusal::Stale));
         };
         admission.commit().await.map_err(store_error)?;
-        self.index.block(&channel_id);
+        self.index.block(&channel_id, revision);
         Ok(Reservation::Reserved {
             channel_id,
             revision,
@@ -266,6 +271,8 @@ impl CustodyStore {
             return Err(refused(Refusal::AdmissionClosed));
         }
         tx.commit().await.map_err(store_error)?;
+        #[cfg(test)]
+        commit_fault::committed(channel_id).await;
         Ok((value, revision))
     }
 
@@ -282,13 +289,15 @@ impl CustodyStore {
     ) -> Result<Armed, CustodyError> {
         let open = || self.admission_open.load(Ordering::SeqCst);
         let arm_id = uuid::Uuid::new_v4().to_string();
-        self.rewrite(channel_id, Some(expected_revision), true, |record| {
-            let arm = (operation_id, stage, expected_after, grant);
-            Ok((armed_record(record, arm, &arm_id, open())?, ()))
-        })
-        .await?;
+        let ((), revision) = self
+            .rewrite(channel_id, Some(expected_revision), true, |record| {
+                let arm = (operation_id, stage, expected_after, grant);
+                Ok((armed_record(record, arm, &arm_id, open())?, ()))
+            })
+            .await?;
         self.index.publish(CommittedArm {
             channel_id,
+            revision,
             operation_id,
             stage,
             arm_id: &arm_id,
@@ -343,13 +352,19 @@ impl CustodyStore {
 
     /// A busy transition lock before any effect: a root that applied nothing ends with no
     /// responsibility; one that already applied a stage only records that this stage did not run.
+    /// It never lifts a hold: only a reconcile, with its evidence, does.
     pub(crate) async fn settle_busy(
         &self,
         channel_id: &str,
         expected_revision: i64,
         operation_id: &str,
     ) -> Result<i64, CustodyError> {
-        self.write_verdict(channel_id, expected_revision, operation_id, |op| {
+        self.write_verdict(channel_id, expected_revision, operation_id, |phase, op| {
+            if phase == Phase::Held {
+                return Verdict::Refused {
+                    reason: "a hold lifts only through a reconcile",
+                };
+            }
             reconcile::not_run_verdict(op).unwrap_or_else(|| match op.status {
                 StageStatus::KnownOutcome => Verdict::Confirmed,
                 _ => Verdict::Resume {
@@ -369,7 +384,7 @@ impl CustodyStore {
         operation_id: &str,
         result: &LegacyResult,
     ) -> Result<(Verdict, i64), CustodyError> {
-        self.write_verdict(channel_id, expected_revision, operation_id, |op| {
+        self.write_verdict(channel_id, expected_revision, operation_id, |_, op| {
             if op.root != Root::Legacy {
                 return Verdict::Refused {
                     reason: "not a legacy operation",
@@ -399,14 +414,22 @@ impl CustodyStore {
                 Ok((next, verdict))
             })
             .await;
-        self.block_unless_refused(channel_id, &result);
+        self.block_after(channel_id, expected_revision, &result);
         result
     }
 
-    /// A refusal wrote nothing, so a live exact operation keeps its index entry.
-    fn block_unless_refused<T>(&self, channel_id: &str, result: &Result<T, CustodyError>) {
-        if !matches!(result, Err(CustodyError::Refused(_))) {
-            self.index.block(channel_id);
+    /// Mirrors a transition at the revision it committed. A refusal wrote nothing; a store failure
+    /// only blocks what the index knew up to the revision the call targeted.
+    fn block_after<T>(
+        &self,
+        channel_id: &str,
+        targeted: i64,
+        result: &Result<(T, i64), CustodyError>,
+    ) {
+        match result {
+            Ok((_, revision)) => self.index.block(channel_id, *revision),
+            Err(CustodyError::Store(_)) => self.index.block(channel_id, targeted),
+            Err(CustodyError::Refused(_)) => {}
         }
     }
 
@@ -415,7 +438,7 @@ impl CustodyStore {
         channel_id: &str,
         expected_revision: i64,
         operation_id: &str,
-        verdict: impl FnOnce(&ActiveOperation) -> Verdict,
+        verdict: impl FnOnce(Phase, &ActiveOperation) -> Verdict,
     ) -> Result<(Verdict, i64), CustodyError> {
         let result = self
             .rewrite(channel_id, Some(expected_revision), false, |record| {
@@ -424,7 +447,7 @@ impl CustodyStore {
                     .as_ref()
                     .filter(|op| op.operation_id == operation_id)
                     .ok_or(refused(Refusal::Stale))?;
-                let verdict = verdict(op);
+                let verdict = verdict(record.phase, op);
                 let next = reconcile::next_record(record, &verdict, None).ok_or(match verdict {
                     Verdict::Refused { reason } => refused(Refusal::Unfit(reason)),
                     _ => refused(Refusal::Stale),
@@ -432,7 +455,7 @@ impl CustodyStore {
                 Ok((next, verdict))
             })
             .await;
-        self.block_unless_refused(channel_id, &result);
+        self.block_after(channel_id, expected_revision, &result);
         result
     }
 }
@@ -487,11 +510,41 @@ fn armed_record(
     })
 }
 
-/// Runs a test's change between a custody write and its commit; an error aborts the commit.
+/// Runs a test's change between a custody write and its commit (an error aborts the commit), or
+/// holds a committed write before it mirrors into the index.
 #[cfg(test)]
 pub(crate) mod commit_fault {
+    use tokio::sync::oneshot;
+
     type Fault = Box<dyn FnOnce() -> Result<(), String> + Send>;
     static NEXT: std::sync::Mutex<Vec<(String, Fault)>> = std::sync::Mutex::new(Vec::new());
+    type Hold = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HELD: std::sync::Mutex<Vec<(String, Hold)>> = std::sync::Mutex::new(Vec::new());
+
+    /// The next committed write on `channel_id` fires the first half and then waits, its index
+    /// mirror not yet made, until the second half is fired.
+    pub(crate) fn hold_after_next(
+        channel_id: &str,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let ((reached, committed), (release, held)) = (oneshot::channel(), oneshot::channel());
+        let mut waiting = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        waiting.push((channel_id.to_string(), (reached, held)));
+        (committed, release)
+    }
+
+    pub(super) async fn committed(channel_id: &str) {
+        let hold = {
+            let mut waiting = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let index = waiting
+                .iter()
+                .position(|(channel, _)| channel == channel_id);
+            index.map(|index| waiting.remove(index).1)
+        };
+        if let Some((reached, held)) = hold {
+            let _ = reached.send(());
+            let _ = held.await;
+        }
+    }
 
     pub(crate) fn before_next(
         channel_id: &str,
@@ -512,6 +565,6 @@ pub(crate) mod commit_fault {
 }
 
 #[cfg(test)]
-mod custody_pg_tests;
+pub(crate) mod custody_pg_tests;
 #[cfg(test)]
 mod reconcile_pg_tests;

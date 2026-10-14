@@ -1,5 +1,5 @@
 use super::custody_pg_tests::{
-    Fx, INCARNATION, NODE, channel, episode, evidence, legacy, live, scoped, seal,
+    Fx, INCARNATION, NODE, channel, episode, evidence, legacy, live, lost, scoped, seal,
 };
 use super::model::CanonicalSeal;
 use super::reconcile::{
@@ -25,7 +25,6 @@ async fn reconcile(
     evidence: &Evidence,
 ) -> (Verdict, CustodyRecord) {
     let (verdict, revision) = fx
-        .custody
         .reconcile(ch, revision, action, evidence)
         .await
         .expect("reconciled");
@@ -80,7 +79,7 @@ async fn s3act_b3b4a1_u03_reserved_only_and_marker_only_rows_pg() {
     let unknown = evidence(before.clone(), PriorExecution::Unknown);
     let (verdict, row) = reconcile(&fx, &ch, revision, Action::RecheckApply, &unknown).await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
-    let ended = evidence(before.clone(), PriorExecution::Ended);
+    let ended = evidence(before.clone(), lost());
     let (verdict, row) = reconcile(&fx, &ch, row.revision, Action::RecheckApply, &ended).await;
     assert_eq!(
         verdict,
@@ -103,11 +102,11 @@ async fn s3act_b3b4a1_u03_reserved_only_and_marker_only_rows_pg() {
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
     let granted = Evidence {
         followup_granted: true,
-        ..evidence(marker.clone(), PriorExecution::Ended)
+        ..evidence(marker.clone(), lost())
     };
     let (verdict, row) = reconcile(&fx, &ch, row.revision, Action::RecheckApply, &granted).await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
-    let ended = evidence(marker.clone(), PriorExecution::Ended);
+    let ended = evidence(marker.clone(), lost());
     let (verdict, row) = reconcile(&fx, &ch, row.revision, Action::RecheckApply, &ended).await;
     assert_eq!(
         verdict,
@@ -178,7 +177,7 @@ async fn s3act_b3b4a1_u03_queue_commit_row_reuses_its_debt_pg() {
         &ch,
         revision,
         Action::RevalidateInstall,
-        &with_debt(None, PriorExecution::Ended),
+        &with_debt(None, lost()),
     )
     .await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
@@ -187,7 +186,7 @@ async fn s3act_b3b4a1_u03_queue_commit_row_reuses_its_debt_pg() {
         &ch,
         row.revision,
         Action::RevalidateInstall,
-        &with_debt(Some("debt-1"), PriorExecution::Ended),
+        &with_debt(Some("debt-1"), lost()),
     )
     .await;
     assert_eq!(
@@ -214,7 +213,7 @@ async fn s3act_b3b4a1_u03_queue_commit_row_reuses_its_debt_pg() {
         &ch,
         revision,
         Action::CompleteReturn,
-        &with_debt(None, PriorExecution::Ended),
+        &with_debt(None, lost()),
     )
     .await;
     assert_eq!(
@@ -245,10 +244,10 @@ async fn s3act_b3b4a1_u03_queue_commit_row_reuses_its_debt_pg() {
     // Not committed (queue old) by an ended process: re-arm the same exit; neither state holds.
     let ch = channel(204);
     let revision = exit_lost(&fx, &ch, Root::Scoped).await;
-    let neither = evidence(seal("q9", None, None), PriorExecution::Ended);
+    let neither = evidence(seal("q9", None, None), lost());
     let (verdict, row) = reconcile(&fx, &ch, revision, Action::RecheckApply, &neither).await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
-    let old = evidence(seal("q1", None, None), PriorExecution::Ended);
+    let old = evidence(seal("q1", None, None), lost());
     let (verdict, row) = reconcile(&fx, &ch, row.revision, Action::RecheckApply, &old).await;
     assert_eq!(
         verdict,
@@ -323,7 +322,7 @@ async fn s3act_b3b4a1_u03_actor_install_row_pg() {
     let (revision, _) = install_armed(&fx, &ch, true).await;
     let wrong_debt = Evidence {
         debt: Some("debt-2".into()),
-        ..evidence(installed.clone(), PriorExecution::Ended)
+        ..evidence(installed.clone(), lost())
     };
     let (verdict, row) =
         reconcile(&fx, &ch, revision, Action::RevalidateInstall, &wrong_debt).await;
@@ -367,7 +366,7 @@ async fn s3act_b3b4a1_u03_actor_install_row_pg() {
         &ch,
         revision,
         Action::RevalidateInstall,
-        &evidence(installed, PriorExecution::Ended),
+        &evidence(installed, lost()),
     )
     .await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
@@ -417,7 +416,7 @@ async fn return_lost(fx: &Fx, ch: &str) -> (i64, String) {
 async fn s3act_b3b4a1_u03_source_return_row_pg() {
     let fx = Fx::create().await;
     type Prior = fn(&str) -> PriorExecution;
-    let ended: Prior = |_| PriorExecution::Ended;
+    let ended: Prior = |_| lost();
     let other_process: Prior = |id| {
         PriorExecution::SameOwnerLive(LiveOwner {
             process_incarnation: "incarnation-0".into(),
@@ -480,7 +479,7 @@ async fn s3act_b3b4a1_u03_source_return_row_pg() {
         &ch,
         revision,
         Action::CompleteReturn,
-        &evidence(seal("q1", None, None), PriorExecution::Ended),
+        &evidence(seal("q1", None, None), lost()),
     )
     .await;
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
@@ -534,11 +533,11 @@ async fn s3act_b3b4a1_u03_exact_release_row_pg() {
             released,
             owed_settled,
         }),
-        ..evidence(seal("q0", None, None), PriorExecution::Ended)
+        ..evidence(seal("q0", None, None), lost())
     };
     let refused_cases = [
         // No actor in the slot, no release result.
-        evidence(seal("q0", None, None), PriorExecution::Ended),
+        evidence(seal("q0", None, None), lost()),
         // Only the cancelled bit flipped.
         release(episode(None), false, true),
         // Another episode; `Some("")` is not `None`.
@@ -695,7 +694,7 @@ async fn s3act_b3b4a1_u03_legacy_results_end_only_with_their_evidence_pg() {
 async fn s3act_b3b4a1_f1_a_return_keeps_the_effect_reconcile_confirmed_pg() {
     let fx = Fx::create().await;
     // A committed legacy exit turned into a return still answers for the dequeued input.
-    let committed = evidence(seal("q0", None, None), PriorExecution::Ended);
+    let committed = evidence(seal("q0", None, None), lost());
     for (n, failed_return) in [false, true].into_iter().enumerate() {
         let ch = channel(701 + n as u32);
         let revision = exit_lost(&fx, &ch, Root::Legacy).await;
@@ -737,7 +736,7 @@ async fn s3act_b3b4a1_f1_a_return_keeps_the_effect_reconcile_confirmed_pg() {
     // A Marker-only return still owes the exact Marker cleanup.
     let ch = channel(703);
     let revision = marker_lost(&fx, &ch).await;
-    let marker = evidence(seal("q1", Some("m1"), None), PriorExecution::Ended);
+    let marker = evidence(seal("q1", Some("m1"), None), lost());
     let (_, row) = reconcile(&fx, &ch, revision, Action::CompleteReturn, &marker).await;
     assert_eq!(op(&row).applied, [Stage::MarkerPublish]);
     let id = op(&row).operation_id.clone();
@@ -772,7 +771,7 @@ async fn s3act_b3b4a1_f2_a_resumed_stage_starts_from_the_verified_seal_pg() {
     let ch = channel(711);
     let marker = seal("q1", Some("m1"), None);
     let revision = marker_lost(&fx, &ch).await;
-    let ended = evidence(marker.clone(), PriorExecution::Ended);
+    let ended = evidence(marker.clone(), lost());
     let (_, row) = reconcile(&fx, &ch, revision, Action::RecheckApply, &ended).await;
     assert_eq!(row.canonical_seal, marker);
     let id = op(&row).operation_id.clone();
@@ -818,7 +817,7 @@ async fn s3act_b3b4a1_f5_new_stages_and_ends_wait_for_the_earlier_execution_pg()
             ..live_owner(&id)
         }),
         PriorExecution::SameOwnerLive(LiveOwner {
-            applier_ended: false,
+            applier_ended: None,
             ..live_owner(&id)
         }),
     ];
@@ -855,7 +854,7 @@ async fn s3act_b3b4a1_f5_new_stages_and_ends_wait_for_the_earlier_execution_pg()
         &ch,
         revision,
         Action::RevalidateInstall,
-        &committed(PriorExecution::Ended),
+        &committed(lost()),
     )
     .await;
     assert_eq!(
@@ -878,7 +877,7 @@ async fn s3act_b3b4a1_f5_new_stages_and_ends_wait_for_the_earlier_execution_pg()
         }
     );
     assert!(!is_closed(&row));
-    let over = evidence(returned, PriorExecution::Ended);
+    let over = evidence(returned, lost());
     let (verdict, row) = reconcile(&fx, &ch, row.revision, Action::CompleteReturn, &over).await;
     assert_eq!(verdict, Verdict::Close);
     assert!(is_closed(&row));
@@ -943,12 +942,11 @@ async fn s3act_b3b4a1_f7_a_held_known_outcome_resolves_through_a_verified_return
     assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
     // Stores changed since the known outcome, or the earlier execution unknown: still held.
     let undecided = [
-        evidence(seal("q2", Some("m1"), None), PriorExecution::Ended),
+        evidence(seal("q2", Some("m1"), None), lost()),
         evidence(marker.clone(), PriorExecution::Unknown),
     ];
     for (n, case) in undecided.iter().enumerate() {
         let result = fx
-            .custody
             .reconcile(&ch, revision, Action::CompleteReturn, case)
             .await;
         assert!(
@@ -963,9 +961,8 @@ async fn s3act_b3b4a1_f7_a_held_known_outcome_resolves_through_a_verified_return
         );
         revision = row.revision;
     }
-    let verified = evidence(marker, PriorExecution::Ended);
+    let verified = evidence(marker, lost());
     let result = fx
-        .custody
         .reconcile(&ch, revision, Action::CompleteReturn, &verified)
         .await;
     assert!(
@@ -1032,17 +1029,17 @@ async fn s3act_b3b4a1_f7_a_settled_hold_returns_to_work_once_its_seal_is_seen_ag
     let revision = exit_lost(&fx, &named, Root::Scoped).await;
     let found = Evidence {
         debt: Some("debt-1".into()),
-        ..evidence(exit.clone(), PriorExecution::Ended)
+        ..evidence(exit.clone(), lost())
     };
     let (verdict, _) = reconcile(&fx, &named, revision, Action::RevalidateInstall, &found).await;
     assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
     let unread = Evidence {
         observed: None,
-        ..evidence(exit.clone(), PriorExecution::Ended)
+        ..evidence(exit.clone(), lost())
     };
-    let seen = evidence(exit.clone(), PriorExecution::Ended);
+    let seen = evidence(exit.clone(), lost());
     let undecided = [
-        evidence(seal("q2", None, None), PriorExecution::Ended),
+        evidence(seal("q2", None, None), lost()),
         evidence(exit.clone(), PriorExecution::Unknown),
     ];
     for ch in [&unapplied, &named] {
@@ -1051,6 +1048,16 @@ async fn s3act_b3b4a1_f7_a_settled_hold_returns_to_work_once_its_seal_is_seen_ag
         let (verdict, row) = reconcile(&fx, ch, settled.revision, action, &unread).await;
         assert!(matches!(verdict, Verdict::Held { .. }), "{ch}: {verdict:?}");
         assert_eq!(row.phase, Phase::Held, "{ch}");
+        // A busy settle carries no evidence: it leaves the hold, the row and the index as they are.
+        let (raw, index) = (fx.raw(ch).await, fx.index.state(ch));
+        let id = &op(&row).operation_id;
+        let busy = fx.custody.settle_busy(ch, row.revision, id).await;
+        let unfit = Refusal::Unfit("a hold lifts only through a reconcile");
+        assert!(
+            matches!(&busy, Err(CustodyError::Refused(refusal)) if *refusal == unfit),
+            "{ch}: {busy:?}"
+        );
+        assert_eq!((fx.raw(ch).await, fx.index.state(ch)), (raw, index), "{ch}");
         let (verdict, row) = reconcile(&fx, ch, row.revision, action, &seen).await;
         assert_eq!(verdict, Verdict::Restored, "{ch}");
         assert_eq!((row.phase, op(&row)), (settled.phase, op(&settled)), "{ch}");

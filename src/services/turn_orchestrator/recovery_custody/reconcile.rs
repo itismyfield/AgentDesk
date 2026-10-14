@@ -1,6 +1,7 @@
 //! Reconciles an operation from its durable progress, the canonical owner's observation and
 //! whether the earlier execution can still run; only a truly undecided case holds.
 
+use super::capability::EndProof;
 use super::model::{CanonicalSeal, CustodyRecord, IssuedEpisode, Observed, Phase};
 use super::operation::{ActiveOperation, OperationKind, Root, Stage, StageStatus};
 
@@ -15,8 +16,8 @@ pub(crate) enum Action {
 /// Whether the earlier execution of the operation can still apply anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PriorExecution {
-    /// Revoked, cooperatively ended, or its process is gone.
-    Ended,
+    /// The proof's arm is revoked and drained, or its process is gone.
+    Ended(EndProof),
     /// This process still serves the operation (a live lease, the actual actor); an incarnation
     /// match alone is not this.
     SameOwnerLive(LiveOwner),
@@ -28,8 +29,8 @@ pub(crate) enum PriorExecution {
 pub(crate) struct LiveOwner {
     pub(crate) process_incarnation: String,
     pub(crate) operation_id: String,
-    /// The armed stage's capability was revoked or its applier returned.
-    pub(crate) applier_ended: bool,
+    /// The end proof of the armed stage's own arm, once its applier is over.
+    pub(crate) applier_ended: Option<EndProof>,
 }
 
 /// How an owned return gets its sources back into the queue.
@@ -198,11 +199,12 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
             missing: "an observation by the canonical owner",
         };
     };
-    let ended = evidence.prior == PriorExecution::Ended;
+    // An end proof counts only for the row's current operation and arm.
+    let ended = matches!(&evidence.prior, PriorExecution::Ended(proof) if proof.names(op));
     let same_live = matches!(&evidence.prior, PriorExecution::SameOwnerLive(live)
         if live.process_incarnation == record.owner.process_incarnation
             && live.operation_id == op.operation_id
-            && live.applier_ended);
+            && live.applier_ended.as_ref().is_some_and(|proof| proof.names(op)));
     // A held stage whose result is known leaves only the root's disposition undecided; it is judged
     // against the seal its outcome stored.
     let held_known = record.phase == Phase::Held
