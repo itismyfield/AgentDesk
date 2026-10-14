@@ -561,6 +561,10 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
 fi
 
+if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
+"$PYTHON" -m unittest tests.test_lane_retry_verdict
+fi
+
 if run_check contracts "Test ROOT file-reference policy"; then
 # Require canonical shared-lock references in discovered ROOT-mutating files.
 "$PYTHON" scripts/check_test_env_lock_references.py

@@ -53,6 +53,15 @@ _FILTERS = re.compile(r"^[ \t]*filters\s*:\s*\|[-+]?\s*$")
 _FILTER_NAME = re.compile(r"^[ \t]*([A-Za-z0-9_-]+)\s*:\s*$")
 _FILTER_ITEM = re.compile(r"^[ \t]*-\s+(['\"]?)(.+?)\1\s*$")
 _ISSUE = re.compile(r"^#\d+$")
+_SHARD_MATRIX = re.compile(
+    r"^matrix:\s*\$\{\{\s*fromJSON\(needs\.([A-Za-z0-9_-]+)\.outputs\.matrix\)\s*\}\}$")
+_PLAN_OUTPUT = re.compile(r"^matrix:\s*\$\{\{\s*steps\.([A-Za-z0-9_-]+)\.outputs\.matrix\s*\}\}$")
+# The plan step's lines after `- id:`; only this emits the matrix the PG shard contract partitions.
+_PLAN_STEP = (
+    "shell: bash", "run: |",
+    "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)",
+    'echo "matrix=$matrix" >> "$GITHUB_OUTPUT"',
+)
 _EXPIRES = re.compile(r"^expires=(\d{4}-\d{2}-\d{2})$")
 
 
@@ -256,16 +265,61 @@ def _activation(condition: str, needs: set[str], filters: dict, outputs: dict):
     return tuple(patterns)
 
 
-def job_gates(parity, pgm, jobs) -> dict[str, Gate]:
+def _key_block(pgm, code: str, keys, key: str) -> list[str]:
+    """The stripped lines nested under a block-valued job key, [] when inline or absent."""
+    value, index = keys.get(key, ("", -1))
+    return [] if value or index < 0 else [
+        line.strip() for line in _block(pgm, code.splitlines(), index)]
+
+
+def shard_plan(parity, pgm, job, jobs, contract) -> str | None:
+    """The plan job a declared PG shard job fans out from, when its `fail-fast: false`
+    matrix is the plan step's `--pg-shard-matrix` output and the PG shard contract proves
+    the shards partition the unsharded PG selection; None leaves the matrix unmodeled."""
+    keys = parity.job_keys(pgm, job.code)
+    strategy = _key_block(pgm, job.code, keys, "strategy")
+    matrix = next(filter(None, map(_SHARD_MATRIX.match, strategy)), None)
+    if job.key not in pgm.PG_SHARD_JOBS or matrix is None \
+            or sorted(strategy) != sorted(["fail-fast: false", matrix.group()]) \
+            or matrix.group(1) not in parity._needs(pgm, job.code):
+        return None
+    plan = next((other for other in jobs if other.name == matrix.group(1)), None)
+    plan_keys = parity.job_keys(pgm, plan.code) if plan else {}
+    output = _key_block(pgm, plan.code, plan_keys, "outputs") if plan else []
+    step = _PLAN_OUTPUT.match(output[0]) if len(output) == 1 else None
+    lines = plan.code.splitlines() if plan else []
+    steps = [[line.strip() for line in lines[first:last + 1]]
+             for first, last in parity._steps(pgm, plan.code)] if plan else []
+    if step is None or [f"- id: {step.group(1)}", *_PLAN_STEP] not in steps or contract():
+        return None
+    return plan.name
+
+
+def job_gates(parity, pgm, jobs, repo_root: Path) -> dict[str, Gate]:
     changes = next((job for job in jobs if job.name == "changes"), None)
     filters, outputs = path_filters(parity, pgm, changes)
+
+    @functools.cache
+    def contract() -> list[str]:
+        workflows = sorted({key.rpartition(":")[0] for key in pgm.PG_SHARD_JOBS})
+        try:
+            shard_jobs = [found for rel in workflows if (repo_root / rel).is_file()
+                          for found in pgm.parse_jobs(repo_root / rel, repo_root)]
+            return pgm.pg_shard_contract_errors(repo_root, shard_jobs)
+        except (OSError, ValueError) as error:
+            return [str(error)]
+
     gates: dict[str, Gate] = {}
+    plans: dict[str, str] = {}
     for job in jobs:
         keys = parity.job_keys(pgm, job.code)
         runner = keys.get("runs-on", ("", 0))[0].strip(" '\"")
         platform = next((name for prefix, name in RUNNERS if runner.startswith(prefix)), None)
         problem = patterns = None
-        if "strategy" in keys:
+        plan = shard_plan(parity, pgm, job, jobs, contract) if "strategy" in keys else None
+        if plan:
+            plans[job.name] = plan
+        if "strategy" in keys and plan is None:
             problem = (RUNMODE, "a matrix job runs shards this gate does not model")
         elif keys.get("continue-on-error", ("false", 0))[0] != "false":
             problem = (RUNMODE, "continue-on-error lets the job pass with its tests failing")
@@ -275,10 +329,13 @@ def job_gates(parity, pgm, jobs) -> dict[str, Gate]:
         gates[job.name] = Gate(patterns, problem, platform)
     for _ in jobs:
         for job in jobs:
+            # A shard job's plan narrows nothing when it wakes on exactly the job's own paths.
             gated = sorted(
                 need for need in parity._needs(pgm, job.code)
                 if need in gates and need != job.name
                 and (gates[need].patterns is not None or gates[need].problem)
+                and not (need == plans.get(job.name) and not gates[need].problem
+                         and gates[need].patterns == gates[job.name].patterns)
             )
             if gated and not gates[job.name].problem:
                 gates[job.name] = Gate((), (PATH, f"it needs the gated job {gated[0]}"), None)
@@ -567,7 +624,7 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
             coverage, parity, repo_root, base, changed, head_ids, sites, aliases
         )
         findings.extend(touched)
-    gates = job_gates(parity, pgm, sources.pr_jobs)
+    gates = job_gates(parity, pgm, sources.pr_jobs, repo_root)
     lanes = [s.lane for s in sources.sources if s.origin.startswith("pr-") and s.lane]
     pg_only = coverage.pg_lanes(lanes, skip_args)
     by_id = {row.test_id: row for row in rows}
