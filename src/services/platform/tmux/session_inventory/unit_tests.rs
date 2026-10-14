@@ -53,8 +53,10 @@ pub(super) fn record_probe() {
 }
 
 fn context(path: &Path) -> Namespace {
-    tmux_command().unwrap();
-    Namespace::capture(&Command::new("/usr/bin/tmux"), Some(path.to_owned()))
+    context_for_command(path, &tmux_command().unwrap())
+}
+fn context_for_command(path: &Path, command: &Command) -> Namespace {
+    Namespace::capture(command, Some(path.to_owned()))
 }
 fn output(code: i32, stdout: &[u8], stderr: &str) -> Output {
     Output {
@@ -76,7 +78,7 @@ fn u_inventory_command_context() {
         snapshot.path.as_deref(),
         crate::services::platform::binary_resolver::prepared_runtime_path()
     );
-    let mut command = Command::new("/usr/bin/tmux");
+    let mut command = Command::new(runtime.get_program());
     command
         .arg("-u")
         .env("TMUX", "/tmp/test-socket,10,0")
@@ -105,6 +107,54 @@ fn u_inventory_command_context() {
 #[test]
 fn u_inventory_complete_stdout() {
     let ctx = context(Path::new("/tmp/s0u-none"));
+    let bin = tempfile::tempdir().unwrap();
+    let tool = bin.path().join("tmux");
+    std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = crate::services::platform::binary_resolver::command_with_path(
+        std::ffi::OsStr::new("tmux"),
+        Some(bin.path().as_os_str()),
+    )
+    .unwrap();
+    let path = bin.path().join("socket");
+    let portable = context_for_command(&path, &runtime);
+    assert_eq!(
+        portable.program,
+        runtime.get_program(),
+        "resolved executable is preserved"
+    );
+    for (out, expected) in [
+        (
+            output(0, "alpha\n한글-β\n".as_bytes(), ""),
+            Inventory::Sessions(vec!["alpha".into(), "한글-β".into()]),
+        ),
+        (output(0, b"", ""), Inventory::Sessions(vec![])),
+        (
+            output(
+                1,
+                b"",
+                &format!(
+                    "error connecting to {} (No such file or directory)\n",
+                    path.display()
+                ),
+            ),
+            Inventory::Empty(EmptyReason::MissingSocket(path.clone())),
+        ),
+        (
+            output(
+                1,
+                b"",
+                &format!("no server running on {}\n", path.display()),
+            ),
+            Inventory::Empty(EmptyReason::NoServer(path.clone())),
+        ),
+    ] {
+        assert_eq!(
+            classify_output(&out, &portable, |_| SocketState::Missing),
+            expected
+        );
+    }
     let parse = |bytes: &[u8]| {
         classify_output(&output(0, bytes, ""), &ctx, |_| {
             panic!("success must not invent a socket path")

@@ -294,6 +294,53 @@ fn activity_code(source: &str) -> String {
     String::from_utf8(code).unwrap()
 }
 
+fn test_activity_item_end(source: &str, start: usize) -> Option<usize> {
+    let head = &source[start..];
+    let prefix = r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?";
+    let body = regex::Regex::new(&format!(
+        r"{prefix}(?:(?:async|unsafe|const)\s+)*(?:fn|mod|impl|struct|enum|trait|union|extern|macro_rules|if|match|loop|while|for)\b|^\s*\{{"
+    ))
+    .unwrap()
+    .is_match(head);
+    let statement = regex::Regex::new(&format!(r"{prefix}(?:const|static|type|use|let)\b"))
+        .unwrap()
+        .is_match(head);
+    let field = regex::Regex::new(&format!(r"{prefix}[A-Za-z_][A-Za-z_0-9]*\s*[:,]"))
+        .unwrap()
+        .is_match(head);
+    if !body && !statement && !field {
+        return None;
+    }
+    let tokens = regex::Regex::new(r"[A-Za-z_][A-Za-z_0-9]*|[^\s]").unwrap();
+    let mut closers = Vec::new();
+    let mut body_opened = false;
+    // Only Rust delimiters nest; comparison and shift operators do not.
+    for token in tokens.find_iter(head) {
+        match token.as_str() {
+            "(" => closers.push(")"),
+            "[" => closers.push("]"),
+            "{" => {
+                body_opened |= body && closers.is_empty();
+                closers.push("}");
+            }
+            ")" | "]" | "}" => {
+                if closers.pop() != Some(token.as_str()) {
+                    return None;
+                }
+                if body_opened && closers.is_empty() {
+                    return Some(start + token.end());
+                }
+            }
+            ";" if closers.is_empty() => return Some(start + token.end()),
+            "," if field && !body && !statement && closers.is_empty() => {
+                return Some(start + token.end());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn dormant_activity_modules(source: &str) -> bool {
     let mut code = activity_code(source).into_bytes();
     let original = String::from_utf8(code.clone()).unwrap();
@@ -307,34 +354,10 @@ fn dormant_activity_modules(source: &str) -> bool {
             continue;
         }
         let start = gate.get(0).unwrap().start();
-        let mut i = gate.get(0).unwrap().end();
-        let mut depth = 0usize;
-        while i < code.len() {
-            match code[i] {
-                b'(' | b'[' | b'<' => depth += 1,
-                b')' | b']' | b'>' => depth = depth.saturating_sub(1),
-                b';' | b',' if depth == 0 => {
-                    i += 1;
-                    break;
-                }
-                b'{' if depth == 0 => {
-                    let mut braces = 1;
-                    i += 1;
-                    while i < code.len() && braces > 0 {
-                        match code[i] {
-                            b'{' => braces += 1,
-                            b'}' => braces -= 1,
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        code[start..i].fill(b' ');
+        let Some(end) = test_activity_item_end(&original, gate.get(0).unwrap().end()) else {
+            return false;
+        };
+        code[start..end].fill(b' ');
     }
     let production = String::from_utf8(code).unwrap();
     !regex::Regex::new(r"\bmod\s+(tail|unbound)\s*;|\b(tail|unbound)\s*::")
@@ -371,6 +394,33 @@ fn s0o_limits_and_dormant_activity_source_are_unchanged() {
     ] {
         assert!(!dormant_activity_modules(source), "{source}");
     }
+    for source in [
+        "#[cfg(test)] const _: bool = 1 < 2; fn live() {}",
+        "#[cfg(test)] const _: u32 = 1 << 2; fn live() {}",
+        "#[cfg(test)] const _: u32 = 1 >> 2; fn live() {}",
+        "#[cfg(test)] const _: bool = { 1 < 2 }; fn live() {}",
+        "#[cfg(test)] fn generic<T, U>(_: T) -> Option<U> { tail::x(); } fn live() {}",
+        "#[cfg(test)] type Generic<T, U> = Result<T, U>; fn live() {}",
+        "#[cfg(test)] mod t { #[cfg(test)] const _: bool = 1 < 2; fn nested<T, U>() { unbound::x(); } } fn live() {}",
+    ] {
+        assert!(dormant_activity_modules(source), "{source}");
+    }
+    let unsafe_suffixes = [
+        "#[cfg(test)] const _: bool = 1 < 2; mod tail;",
+        "#[cfg(test)] const _: bool = 1 < 2; fn live() { tail::x(); }",
+        "#[cfg(test)] const _: bool = 1 < 2; fn live() { unbound::x(); }",
+        "#[cfg(test)] const _: u32 = 1 << 2; mod unbound;",
+        "#[cfg(test)] const _: u32 = 1 << 2; fn live() { tail::x(); }",
+        "#[cfg(test)] const _: u32 = 1 >> 2; fn live() { unbound::x(); }",
+    ];
+    let accepted: Vec<_> = unsafe_suffixes
+        .into_iter()
+        .filter(|source| dormant_activity_modules(source))
+        .collect();
+    assert!(
+        accepted.is_empty(),
+        "unsafe non-test suffix accepted: {accepted:?}"
+    );
 }
 
 #[test]
