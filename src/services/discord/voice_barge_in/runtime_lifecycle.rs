@@ -596,6 +596,11 @@ impl VoiceBargeInRuntime {
                 return false;
             }
         }
+        // After the last input fence, before the cancel registration and the model call.
+        if let Err(retired) = super::utterance_pipeline::foreground_runtime(&foreground) {
+            super::utterance_pipeline::post_retired_notice(http, channel_id, retired).await;
+            return true;
+        }
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         // #3911 + #2335 (c): the guard OWNS the registration. It registers the
         // token BEFORE the generate `.await` below and unregisters on drop, so
@@ -870,7 +875,7 @@ impl VoiceBargeInRuntime {
     pub(in crate::services::discord) async fn handle_processing_transcript(
         &self,
         shared: &Arc<SharedData>,
-        _provider: &ProviderKind,
+        provider: &ProviderKind,
         channel_id: ChannelId,
         transcript: &str,
     ) -> VoiceBargeInTranscriptOutcome {
@@ -907,6 +912,22 @@ impl VoiceBargeInRuntime {
             return VoiceBargeInTranscriptOutcome::NoActiveTurn;
         }
 
+        // A follow-up for a retired background target is refused before it reaches the buffer.
+        let defer = crate::voice::barge_in::classify_processing_barge_in_transcript(transcript);
+        if let ProcessingBargeInDecision::DeferPrompt(_) = defer {
+            use crate::services::provider_hosting::{
+                RetiredRuntimeError, ensure_runtime_executable,
+            };
+            let target = Some(cancel_channel.unwrap_or(channel_id).get());
+            if let Err(retired) = ensure_runtime_executable(provider, target) {
+                if let Some(http) = shared.serenity_http_or_token_fallback() {
+                    super::utterance_pipeline::post_retired_notice(&http, channel_id, retired)
+                        .await;
+                }
+                let code = RetiredRuntimeError::CODE.to_string();
+                return VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(code);
+            }
+        }
         let buffer = self.buffer_for_channel(channel_id);
         let decision = buffer
             .lock()
