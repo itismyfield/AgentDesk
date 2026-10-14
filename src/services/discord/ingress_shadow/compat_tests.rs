@@ -680,12 +680,20 @@ fn child(test: &str, runner: Runner) -> bool {
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let _config = set("AGENTDESK_CONFIG", &config_path);
     assert_eq!(crate::config::resolved_config_path(), config_path);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
+    // Debug builds of the gateway handler future outgrow the default test thread stack.
+    let child_root = root.clone();
+    let outcome = std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(runner(case, run, child_root))
+        })
+        .unwrap()
+        .join()
         .unwrap();
-    let outcome = runtime.block_on(runner(case, run, root.clone()));
-    drop(runtime);
     std::fs::write(
         std::env::var(OUT_ENV).unwrap(),
         serde_json::to_vec(&outcome).unwrap(),
