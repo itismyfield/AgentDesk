@@ -199,7 +199,7 @@ fn a_restarted_o_writer_sends_owed_once_and_follows_a_hook_switch_without_legacy
         "[B:once] the owed body goes once after the restart"
     );
 
-    // The pane's /clear reaches the real hook ingress and moves the binding to B's transcript.
+    // The pane's /clear reaches the real hook ingress and moves the binding to a new session.
     let switched = ingress.claude_hook("SessionStart", &race.a, &race.payload, Some(&uuid()));
     assert_eq!(switched, 202, "the clear hook is durable");
     assert_eq!(bound(), Some(race.b.clone()), "the hook moved the binding");
