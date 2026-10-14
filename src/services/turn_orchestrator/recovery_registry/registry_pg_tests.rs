@@ -12,9 +12,9 @@ use super::super::recovery_custody::custody_pg_tests::{
     Fx, NODE, channel, evidence, legacy, namespace, scoped, seal,
 };
 use super::super::recovery_custody::denial_index::{Denial, DenialIndex, IndexState};
-use super::super::recovery_custody::model::CanonicalSeal;
+use super::super::recovery_custody::model::{CanonicalSeal, CustodyRecord};
 use super::super::recovery_custody::model::{Namespace, Owner, Phase};
-use super::super::recovery_custody::operation::{Stage, StepOutcome};
+use super::super::recovery_custody::operation::{Stage, StageStatus, StepOutcome};
 use super::super::recovery_custody::reconcile::{
     Action, Evidence, LegacyResult, PriorExecution, ReturnPath, Verdict,
 };
@@ -67,12 +67,7 @@ async fn started(fx: &Fx, registry: &RecoveryRegistry, ch: &str) -> (Arc<Slot>, 
 fn process(fx: &Fx) -> (RecoveryRegistry, CustodyStore, Arc<DenialIndex>) {
     let registry = RecoveryRegistry::isolated(8, 2);
     let index = Arc::new(DenialIndex::default());
-    let owner = Owner {
-        node: NODE.into(),
-        process_incarnation: registry.process_incarnation().into(),
-        attempt_id: "attempt-2".into(),
-    };
-    let custody = CustodyStore::new(fx.pool.clone(), owner, index.clone());
+    let custody = CustodyStore::new(fx.pool.clone(), owner_of(&registry), index.clone());
     (registry, custody, index)
 }
 
@@ -969,8 +964,30 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
         matches!(moved, Err(ArmRefusal::Registry(RegistryRefusal::Foreign))),
         "an arm in another namespace was kept: {moved:?}"
     );
+    // The refused arm committed in that namespace and was settled as not applied there.
+    let settled = recorded_at(&fx, &ch, revision + 2).await;
+    assert_eq!(settled.namespace.token_hash, "token-b");
+    let op = settled.active_operation.expect("the operation stays");
+    let stage = (op.stage, op.status, op.applied.contains(&op.stage));
+    assert_eq!(
+        stage,
+        (Stage::ActorInstall, StageStatus::KnownOutcome, false),
+        "the refused arm was not settled as not applied"
+    );
     drop(worker);
     fx.close().await;
+}
+
+/// The row once a result at `revision` or later was recorded, within a bounded wait.
+async fn recorded_at(fx: &Fx, ch: &str, revision: i64) -> CustodyRecord {
+    for _ in 0..300 {
+        let row = fx.record(ch).await;
+        if row.revision >= revision {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("nothing was recorded at revision {revision}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1270,7 +1287,7 @@ async fn s3act_b3b4a2b0_r1b_the_same_owner_reserves_a_closed_row_again_only_once
     let fx = Fx::create().await;
     let (registry, custody, index) = process(&fx);
     let ch = channel(898);
-    let (_slot, attempt) = started(&fx, &registry, &ch).await;
+    let (slot, attempt) = started(&fx, &registry, &ch).await;
     let worker = attempt.worker().expect("a worker place");
     let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
     let exited = seal("q0", None, None);
@@ -1310,10 +1327,175 @@ async fn s3act_b3b4a2b0_r1b_the_same_owner_reserves_a_closed_row_again_only_once
             "{refused:?}"
         );
     }
-    // Once the capability is given up the arm has ended, and the row is reserved again.
+    // Once the capability is given up and the attempt closed and drained, the registry's permit
+    // lets the same owner reserve the row again.
     drop(capability);
-    let (revision, next) = reserve(&fx, &custody, again()).await;
+    slot.close_admission();
+    let permit = slot.quiesce().expect("closed and drained");
+    let admission = fx.admit(&ch).await;
+    let taken = custody.reserve_successor(admission, again(), permit).await;
+    let Ok(Reservation::Reserved {
+        revision,
+        operation_id: next,
+        ..
+    }) = taken
+    else {
+        panic!("not reserved again: {taken:?}");
+    };
     assert_eq!(revision, closed.revision + 1);
     assert_ne!(next, op);
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b1_a_scoped_row_waits_for_the_registry_whichever_store_of_its_owner_asks_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, index) = process(&fx);
+    // The same owner through A's clone, and through a store with an index of its own.
+    let index_of_its_own = Arc::new(DenialIndex::default());
+    let other = CustodyStore::new(fx.pool.clone(), owner_of(&registry), index_of_its_own);
+    let clone = custody.clone();
+    let ch = channel(899);
+    let (slot, attempt) = started(&fx, &registry, &ch).await;
+    let worker = attempt.worker().expect("a worker place");
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    let step = arm_step(
+        &ch,
+        revision,
+        &op,
+        Stage::QueueCommit,
+        seal("q0", None, None),
+        None,
+    );
+    let Armed {
+        capability,
+        report,
+        collector,
+        ..
+    } = worker.arm(&custody, step).await.expect("armed and kept");
+    let entered = index.admit_write(&ch, Some(&capability));
+    let entered = entered.expect("entered while armed");
+    report.send(StepOutcome::NotApplied);
+    collector.await.unwrap().expect("recorded");
+    let (closed, raw) = (fx.record(&ch).await, fx.raw(&ch).await);
+    let again = || legacy(&ch, seal("q9", None, None));
+    let mut refused = Vec::new();
+    // A's guard and capability live; then only its worker; then only its open attempt.
+    for store in [&clone, &other] {
+        refused.push(store.reserve(fx.admit(&ch).await, again()).await);
+    }
+    drop((entered, capability));
+    refused.push(other.reserve(fx.admit(&ch).await, again()).await);
+    let busy = |open, workers| RegistryRefusal::NotQuiescent {
+        open,
+        workers,
+        arms: 0,
+    };
+    assert_eq!(slot.quiesce().map(drop), Err(busy(true, 1)));
+    drop(worker);
+    refused.push(other.reserve(fx.admit(&ch).await, again()).await);
+    assert_eq!(slot.quiesce().map(drop), Err(busy(true, 0)));
+    let row = fx.record(&ch).await;
+    assert_eq!(
+        (row.revision, row.active_operation),
+        (closed.revision, None),
+        "a new operation was reserved before the registry drained"
+    );
+    assert_eq!(
+        fx.raw(&ch).await,
+        raw,
+        "a refused reservation wrote the row"
+    );
+    for refused in refused {
+        assert!(
+            matches!(refused, Err(CustodyError::Refused(Refusal::NotQuiescent))),
+            "{refused:?}"
+        );
+    }
+    // Closed and drained, the registry's permit lets the other store of the owner reserve it.
+    slot.close_admission();
+    let permit = slot.quiesce().expect("closed and drained");
+    let admission = fx.admit(&ch).await;
+    let taken = other.reserve_successor(admission, again(), permit).await;
+    assert!(
+        matches!(taken, Ok(Reservation::Reserved { revision, .. }) if revision == closed.revision + 1),
+        "{taken:?}"
+    );
+    fx.close().await;
+}
+
+/// The owner [`process`] gives its custody store.
+fn owner_of(registry: &RecoveryRegistry) -> Owner {
+    Owner {
+        node: NODE.into(),
+        process_incarnation: registry.process_incarnation().into(),
+        attempt_id: "attempt-2".into(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b1_a_succession_lets_its_slot_go_only_once_its_commit_is_known_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, _index) = process(&fx);
+    let ch = channel(900);
+    let (slot, _attempt) = started(&fx, &registry, &ch).await;
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    let closed = custody.settle_busy(&ch, revision, &op).await;
+    closed.expect("closed");
+    slot.close_admission();
+    let raw = fx.raw(&ch).await;
+    let lane = |generation| scope(id(&ch), EPOCH + generation as i64);
+    // The caller leaves before its commit is sent: the write rolls back and the slot is let go.
+    let ((held, _release), task) = succession(&fx, &slot, &ch, "reserve-held").await;
+    held.await.expect("took the slot");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(fx.raw(&ch).await, raw, "a dropped admission committed");
+    let next = slot.retry(&fx.custody, lane(2), 2).await;
+    let next = next.expect("a reservation that never committed still held the slot");
+    drop(next);
+    slot.close_admission();
+    // The commit fails: a read finds the write rolled back, and only then is the slot let go.
+    let ((held, release), task) = succession(&fx, &slot, &ch, "reserve-held").await;
+    held.await.expect("took the slot");
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database()
+         AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()",
+    )
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    release.send(()).expect("released");
+    let failed = task.await.expect("ended");
+    assert!(matches!(failed, Err(CustodyError::Store(_))), "{failed:?}");
+    assert_eq!(fx.raw(&ch).await, raw, "a failed commit wrote the row");
+    let next = slot.retry(&fx.custody, lane(3), 3).await;
+    let next = next.expect("a commit known rolled back still held the slot");
+    drop(next);
+    slot.close_admission();
+    // The commit is sent and the caller leaves before it hears the result: the slot stays held
+    // until that result is known, then the reservation stands and is mirrored.
+    let ((committed, release), task) = succession(&fx, &slot, &ch, "reserve-committed").await;
+    committed.await.expect("committed");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_ne!(fx.raw(&ch).await, raw, "the sent commit did not land");
+    let during = slot.retry(&fx.custody, lane(4), 4).await.map(drop);
+    assert_eq!(
+        during,
+        Err(RegistryRefusal::Succeeding),
+        "the slot was let go before the commit's result was known"
+    );
+    release.send(()).expect("released");
+    for _ in 0..300 {
+        if fx.custody.mirrored(&ch).is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(fx.custody.mirrored(&ch), Some(IndexState::Blocked));
+    assert_eq!(fx.record(&ch).await.phase, Phase::ScopedReserved);
+    let after = slot.retry(&fx.custody, lane(4), 4).await.map(drop);
+    assert_eq!(after, Ok(()), "the decided commit kept the slot");
     fx.close().await;
 }

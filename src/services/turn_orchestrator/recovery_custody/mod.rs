@@ -244,10 +244,12 @@ impl CustodyStore {
                 return Err(refused(Refusal::Held));
             }
         };
-        // Every arm this store issued on the row has ended; another owner's needs the registry too.
+        // Every arm this store issued on the row has ended; a row the registry answered for, or
+        // another owner's, also needs the registry's permit that its attempt drained.
         let drained = |row: &CustodyRecord| {
             let vouched = permit.is_some_and(|permit| permit.vouches(row));
-            self.index.arms_ended(&channel_id) && (vouched || row.owner == *self.owner)
+            let own = row.owner == *self.owner && !row.ever_scoped;
+            self.index.arms_ended(&channel_id) && (vouched || own)
         };
         if closed.as_deref().is_some_and(|row| !drained(row)) {
             return Err(refused(Refusal::NotQuiescent));
@@ -298,7 +300,7 @@ impl CustodyStore {
         #[cfg(test)]
         commit_fault::pause(&channel_id, "reserve-checked").await;
         // The last check takes the slot for the succession until the commit is decided.
-        let _succession = match (closed.as_deref(), permit) {
+        let succession = match (closed.as_deref(), permit) {
             (Some(row), _) if !drained(row) => return Err(refused(Refusal::NotQuiescent)),
             (Some(row), Some(permit)) => match permit.begin(row) {
                 Some(succession) => Some(succession),
@@ -308,13 +310,45 @@ impl CustodyStore {
         };
         #[cfg(test)]
         commit_fault::pause(&channel_id, "reserve-held").await;
-        admission.commit().await.map_err(store_error)?;
-        self.index.block(&channel_id, revision);
-        Ok(Reservation::Reserved {
-            channel_id,
-            revision,
-            operation_id,
-        })
+        // The commit and the slot it holds outlive a caller that leaves; the slot is let go only
+        // once the commit's result is known.
+        let (custody, ours) = (self.clone(), operation_id.clone());
+        let decided = tokio::spawn(async move {
+            let committed = match admission.commit().await {
+                Ok(()) => Ok(true),
+                Err(error) => custody.landed(&channel_id, &ours).await.ok_or(error),
+            };
+            #[cfg(test)]
+            commit_fault::pause(&channel_id, "reserve-committed").await;
+            match committed {
+                Ok(true) => custody.index.block(&channel_id, revision),
+                Ok(false) => {}
+                // Unknown even after a read: the slot stays held, and nothing starts on it.
+                Err(_) => std::mem::forget(succession),
+            }
+            committed.map(|landed| landed.then_some(channel_id))
+        });
+        match decided.await.map_err(store_error)? {
+            Ok(Some(channel_id)) => Ok(Reservation::Reserved {
+                channel_id,
+                revision,
+                operation_id,
+            }),
+            Ok(None) => Err(store_error(
+                "the reservation commit failed and was rolled back",
+            )),
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    /// Whether the row now carries `operation_id`; `None` when it cannot be read.
+    async fn landed(&self, channel_id: &str, operation_id: &str) -> Option<bool> {
+        let row = self.inspect(channel_id).await.ok()?;
+        let op = match row {
+            Inspection::Row(row) => row.active_operation,
+            _ => None,
+        };
+        Some(op.is_some_and(|op| op.operation_id == operation_id))
     }
 
     /// Reads the row (at `expected_revision` when given), writes `step`'s next row by CAS and
@@ -360,9 +394,9 @@ impl CustodyStore {
         Ok((value, revision))
     }
 
-    /// Arms one stage durably; only after that commit is the exact operation published and the
-    /// capability issued. The owned collector records the applier's report even if the caller left.
-    pub(crate) async fn arm(
+    /// Arms one stage outside any registry attempt, for this tree's own fixtures only; every other
+    /// caller arms through [`Self::arm_for`], so the registry sees each arm it must drain.
+    async fn arm(
         &self,
         channel_id: &str,
         expected_revision: i64,
@@ -400,6 +434,8 @@ impl CustodyStore {
         Ok(armed)
     }
 
+    /// Arms one stage durably; only after that commit is the exact operation published and the
+    /// capability issued. The owned collector records the applier's report even if the caller left.
     async fn arm_step(
         &self,
         step: ArmStep<'_>,

@@ -679,19 +679,54 @@ async fn s3act_b3b4a1_cas_stale_writes_and_undecodable_rows_change_nothing_pg() 
     fx.close().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn s3act_b3b4a1_ever_scoped_survives_close_and_legacy_reuse_pg() {
+    use super::super::recovery_registry::RecoveryRegistry;
+    use crate::services::cluster::channel_home_port::scoped_restore::RestoreScope;
     let fx = Fx::create().await;
+    let registry = RecoveryRegistry::isolated(1, 1);
+    let owner = Owner {
+        node: NODE.into(),
+        process_incarnation: registry.process_incarnation().into(),
+        attempt_id: "attempt-1".into(),
+    };
+    let custody = CustodyStore::new(fx.pool.clone(), owner, fx.index.clone());
     let ch = channel(41);
     fx.home(&ch, NODE, 41).await;
+    let slot = registry.resolve(ch.parse().unwrap()).expect("a slot");
+    let scope = RestoreScope {
+        channel: ch.parse().unwrap(),
+        provider: "claude".into(),
+        epoch: 41,
+        state: crate::db::o_channel_homes::HomeState::Worker,
+        holder: Some(NODE.into()),
+        target: None,
+        local: NODE.into(),
+    };
+    let _attempt = slot.begin(scope, 1).ok().expect("an attempt");
     let before = seal("q1", None, None);
-    let (revision, op) = fx.reserve(scoped(&ch, before.clone(), 41)).await;
+    let admission = fx.admit(&ch).await;
+    let reserved = custody.reserve(admission, scoped(&ch, before.clone(), 41));
+    let Ok(Reservation::Reserved {
+        revision,
+        operation_id: op,
+        ..
+    }) = reserved.await
+    else {
+        panic!("not reserved");
+    };
     let row = fx.record(&ch).await;
     assert_eq!((row.phase, row.ever_scoped), (Phase::ScopedReserved, true));
-    fx.custody.settle_busy(&ch, revision, &op).await.unwrap();
+    custody.settle_busy(&ch, revision, &op).await.unwrap();
     let row = fx.record(&ch).await;
     assert_eq!((row.phase, row.ever_scoped), (Phase::Closed, true));
-    fx.reserve(legacy(&ch, before)).await;
+    // A row the registry answered for is reused once its attempt closed and drained.
+    slot.close_admission();
+    let permit = slot.quiesce().expect("closed and drained");
+    let admission = fx.admit(&ch).await;
+    let reused = custody.reserve_successor(admission, legacy(&ch, before), permit);
+    assert!(matches!(reused.await, Ok(Reservation::Reserved { .. })));
     let row = fx.record(&ch).await;
     assert_eq!((row.phase, row.ever_scoped), (Phase::LegacyReserved, true));
     fx.close().await;
