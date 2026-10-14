@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "12fa46050e838e744f6edd34962f9900aaa254a1",
+  "measured_at_sha": "de1237dff75d1b6cc87991cf894f1b343f5f3a85",
   "records": [
     {
       "root": "migrations/postgres",
@@ -41356,6 +41356,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:3d499eda5ff20e0a950d683da7ae9b5bc11df9f9a06867643808a257ef326f2f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:73841d119c851dcf9494125c3a6c2bb36cce34c58587e53a31aea49551baae22"
     },
     {
       "root": "src",

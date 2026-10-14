@@ -206,9 +206,8 @@ impl Slot {
         }
     }
 
-    /// Keeps a just-issued arm's lifetime with attempt `id`, under its own arm id. Only an arm
-    /// issued to that attempt on this channel and in the attempt's namespace is kept; an attempt
-    /// closed meanwhile still counts the arm and revokes it at once.
+    /// Keeps an arm issued to attempt `id` on this channel, in the attempt's namespace, under its
+    /// own arm id; an attempt closed meanwhile still counts the arm and revokes it at once.
     fn keep(&self, id: u64, armed: &Armed) -> Result<(), RegistryRefusal> {
         let arm = &armed.revoke;
         let mut state = self.state();
@@ -348,9 +347,8 @@ pub(crate) struct WorkerPermit {
 }
 
 impl WorkerPermit {
-    /// Arms one stage for this worker's open attempt and keeps it there before returning, so the
-    /// worker's place covers the arm from its commit to its keeping. A refused keep settles the
-    /// stage as not applied; nothing received its capability.
+    /// Arms a stage for this worker's open attempt and keeps it before returning, so the worker
+    /// covers the arm from commit to keeping; a refused keep settles it as not applied.
     pub(crate) async fn arm(
         &self,
         custody: &CustodyStore,
