@@ -851,7 +851,7 @@ mod pg {
             store(&pool, &owner, &serde_json::to_value(bound).unwrap()).await;
             let (ready, watches) = (process_readiness(), Watches::new(true, false));
             let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-            let app = app(registry, pool.clone());
+            let app = app(registry, pool.clone(), Config::default().server.port);
             let request = chain.request(JOB);
             let Some(Termination::Confirmed(end)) = &request.termination else {
                 unreachable!()
