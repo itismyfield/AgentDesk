@@ -325,6 +325,7 @@ jobs:
               - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs'
+              - 'src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
               - 'src/services/discord/admin_host_guard_tests.rs'
@@ -510,11 +511,15 @@ jobs:
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
               # Re-post production changes must run the shared-budget tests too.
               - 'src/services/tui_o/repost/**'
+              # Presence hooks run inside the PG entry-point tests that install a runtime.
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/tui_o/writer/**'
               - 'src/services/tui_o/store/ledger.rs'
               - 'src/services/discord/outbound/o_writer*.rs'
@@ -852,6 +857,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity.rs'
               - 'src/services/discord/turn_presence/entrypoints.rs'
               - 'src/services/discord/turn_presence/mod.rs'
+              - 'src/services/discord/turn_presence/supervisor.rs'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
