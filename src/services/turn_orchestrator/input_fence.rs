@@ -203,6 +203,9 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         // The claim names its own namespace; the actor's last one may be another.
         #[cfg(test)]
         M::ScopedClaim(scoped) => scoped.persistence(),
+        // A carried apply is fenced in the namespace its own request names.
+        #[cfg(test)]
+        M::Carried(carried) => carried.persistence(),
         _ => None,
     }
 }
@@ -328,6 +331,9 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         M::ScopedClaim(scoped) => {
             scoped.refuse(super::scoped_claim::ScopedClaimRefusal::InputFence(failure));
         }
+        // The carrier goes back unused, its payload with it.
+        #[cfg(test)]
+        M::Carried(carried) => carried.refuse_fenced(failure),
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(match failure {
                 Failure::Mode(mode) => RecoveryKickoffResult::InputModeFenced(mode),

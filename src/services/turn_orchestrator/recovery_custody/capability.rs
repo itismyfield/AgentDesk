@@ -10,6 +10,7 @@ use super::model::Namespace;
 use super::operation::{ActiveOperation, Stage, StageStatus};
 #[cfg(test)]
 use super::seam::{self, Point};
+use crate::services::discord::input_runtime::fence::Failure;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CapabilityRefusal {
@@ -150,6 +151,10 @@ impl RevokeHandle {
         &self.0.arm_id
     }
 
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.0.operation_id
+    }
+
     pub(crate) fn channel_id(&self) -> &str {
         &self.0.channel_id
     }
@@ -282,12 +287,18 @@ impl Drop for ApplyGuard {
 /// Why a carrier came back unused.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Unsent {
-    /// The receiving mailbox was gone at the send.
+    /// The receiving mailbox was gone before it took the carrier.
     SendFailed,
     /// The applier received it but is closed to new work.
     Closed,
+    /// The applier's input fence refused the request it came with.
+    Fenced(Failure),
     /// The index or the capability refused its entry.
     Denied(Denial),
+    /// No custody answers for the channel, so nothing applies under an arm there.
+    Unmanaged,
+    /// The channel's binding could not be read.
+    Unread,
 }
 
 /// A capability on its way to its applier with the payload it applies. It stays queued until it
@@ -389,6 +400,11 @@ impl LentApply<'_> {
 
     pub(crate) fn arm_id(&self) -> &str {
         &self.0.arm_id
+    }
+
+    /// The registry attempt its arm was issued to.
+    pub(crate) fn attempt(&self) -> Option<&AttemptKey> {
+        self.0.attempt.as_ref()
     }
 
     /// Runs one effect of the lent apply.

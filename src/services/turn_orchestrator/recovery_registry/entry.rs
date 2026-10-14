@@ -344,6 +344,14 @@ impl AttemptHandle {
         &self.witness
     }
 
+    /// Whether `key` is the mark of this attempt's arms, while it is the slot's current attempt.
+    pub(crate) fn marks(&self, key: Option<&AttemptKey>) -> bool {
+        let state = self.slot.state();
+        let attempt = state.attempt.as_ref();
+        let current = attempt.filter(|attempt| attempt.identity == self.identity);
+        current.is_some_and(|attempt| key == Some(&attempt.key))
+    }
+
     /// Takes one of the process's install worker places; the attempt has not ended while the
     /// permit lives.
     pub(crate) fn worker(&self) -> Result<WorkerPermit, RegistryRefusal> {

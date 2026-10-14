@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::PgPool;
 
-use self::capability::{ApplyCapability, AttemptKey, RevokeHandle};
+use self::capability::{ApplyCapability, ApplyGuard, AttemptKey, Carrier, RevokeHandle, Unapplied};
 use self::denial_index::{CommittedArm, DenialIndex};
 use self::model::{
     CanonicalSeal, CustodyRecord, HomeIdentity, Inspection, IssuedEpisode, Namespace, Owner, Phase,
@@ -157,6 +157,15 @@ impl CustodyStore {
     /// The index entry the sync writers see for the channel, without creating one.
     pub(crate) fn mirrored(&self, channel_id: &str) -> Option<denial_index::IndexState> {
         self.index.entry(channel_id)
+    }
+
+    /// An applier's entry with a carried capability through this store's index.
+    pub(crate) fn admit_carried<P>(
+        &self,
+        channel_id: &str,
+        carrier: Carrier<P>,
+    ) -> Result<(ApplyGuard, P), Unapplied<P>> {
+        self.index.admit_carried(channel_id, carrier)
     }
 
     /// Shows the sync writers a row found in PG as undecided before anything is rebuilt from it.

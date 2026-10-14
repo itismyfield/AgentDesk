@@ -127,6 +127,8 @@ pub(super) fn gate_closed_arm(
             "ScopedClaim"
         }
         #[cfg(test)]
+        M::Carried(carried) => carried.refuse_closed(),
+        #[cfg(test)]
         M::InstalledActorHandoff(request) => {
             request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected("handoff actor closed".into()));
             "InstalledActorHandoff"
@@ -482,6 +484,12 @@ impl ChannelMailboxRegistry {
 #[cfg(test)]
 mod closed_gate_tests;
 
+#[cfg(test)]
+#[path = "recovery_custody/mailbox_access.rs"]
+mod mailbox_access;
+#[cfg(test)]
+#[path = "recovery_custody/mailbox_transport.rs"]
+pub(super) mod mailbox_transport;
 #[cfg(test)]
 #[path = "recovery_custody/mod.rs"]
 pub(crate) mod recovery_custody;

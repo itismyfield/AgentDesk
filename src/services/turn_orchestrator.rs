@@ -1351,6 +1351,8 @@ enum ChannelMailboxMsg {
     InstalledActorHandoff(installed_actor_handoff::Request),
     #[cfg(test)]
     ScopedClaim(scoped_claim::ScopedMsg),
+    #[cfg(test)]
+    Carried(Box<registry_purge::mailbox_transport::Carried>),
     ClearRecoveryMarker {
         reply: closed_verdict::VerdictReply<()>,
     },
@@ -2085,6 +2087,8 @@ fn input_mailbox_step(
         }
         #[cfg(test)]
         ChannelMailboxMsg::ScopedClaim(msg) => scoped_claim::step(&mut state, channel_id, msg),
+        #[cfg(test)]
+        ChannelMailboxMsg::Carried(msg) => msg.apply(&mut state, channel_id, own_recovery_done),
         ChannelMailboxMsg::ClearRecoveryMarker { reply } => {
             state.recovery_started_at = None;
             let _ = reply.send(());
