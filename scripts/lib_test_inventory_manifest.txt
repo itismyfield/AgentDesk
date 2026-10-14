@@ -892,6 +892,7 @@ engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_returns_error
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_uses_remaining_budget_when_armed
 engine::ops::exec_ops::exec_allowlist_tests::public_and_raw_exec_enforce_allowlist_before_runner
 engine::ops::exec_ops::inflight_list_tests::inflight_list_exposes_synthetic_rebind_fields
+engine::ops::exec_ops::inflight_list_tests::inflight_remove_refuses_receipt_rows_and_never_reports_a_failed_unlink_as_removed
 engine::ops::exec_ops::session_liveness_tests::cold_snapshot_returns_unknown_without_discovery
 engine::ops::exec_ops::session_liveness_tests::js_liveness_honors_bridge_budget_and_blank_input
 engine::ops::exec_ops::session_liveness_tests::js_liveness_preserves_owner_live_dead_and_unknown
@@ -4521,8 +4522,10 @@ services::discord::inflight::receipt_boundary_tests::s3act_b3b_generic_store_can
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_rebind_gc_preserves_receipt_under_lock_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_commit_wins_concurrent_clear_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_free_reaper_results_and_logs_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_survives_all_legacy_deletes_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_scoped_invalidation_preserves_receipt_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unknown_receipt_json_shape_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unparseable_receipt_row_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_writer_matrix_carries_raw_receipt_pg
@@ -4593,6 +4596,7 @@ services::discord::inflight::removal::nondestructive_loader_tests::production_re
 services::discord::inflight::removal::nondestructive_loader_tests::restart_marking_leaves_hidden_rows_to_the_next_boot_reaper
 services::discord::inflight::restart_mark::tests::c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unseen_rows
 services::discord::inflight::restart_mark::tests::c2b_failed_protected_marker_write_records_gate_health_until_a_complete_pass
+services::discord::inflight::restart_mark::tests::receipt_rows_are_skipped_byte_identical_and_never_counted_as_failed
 services::discord::inflight::restart_mark_fence_tests::c2_loop_rechecks_protection_installed_after_loading
 services::discord::inflight::restart_mark_fence_tests::c2_restart_marking_skips_a_held_row_and_marks_the_rest
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
@@ -4631,6 +4635,8 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::before_st
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_adds_only_the_receipt_to_the_advanced_row
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_refuses_every_fresh_row_that_is_not_this_bridge_turn
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_stays_off_without_settlement_and_without_identity
+services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::off_scheduler_answers_a_transition_panic_with_none
+services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::off_scheduler_caller_cancel_lets_the_worker_finish_and_restore
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::old_rows_and_unknown_receipts_keep_their_shape
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::restart_clear_rechecks_the_delivered_receipt_under_its_lock
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::the_ack_needs_a_shown_notice_and_the_same_admission
@@ -9363,9 +9369,11 @@ services::discord::turn_bridge::before_start_stop::tests::coldstop_typed_untouch
 services::discord::turn_bridge::before_start_stop::tests::disk_gate::coldstop_receipt_refuses_a_planned_restart_row_of_the_same_episode
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_ack_post_commit_exact_witness
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_ack_pre_commit_unconfirmed
+services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_ack_refuses_a_message_moved_during_the_notice
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_actor_serialization
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_after_commit_feedback_panic
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_clear_refusal_is_nonreleasing
+services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_delivered_reentry_skips_the_notice_but_not_the_message_check
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_duplicate_exact_commit
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_duplicate_retained_row_repair
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_input_fence_typed_refusals
@@ -9379,6 +9387,16 @@ services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_panic_
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_send_failure_keeps_delivered_row
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_strict_boundaries
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_successor_or_actor_mismatch
+services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_unsupported_receipt_is_refused_before_the_notice
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_admission_and_ack_carry_the_permit_into_closing
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_names_one_row
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_spans_the_commit
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_late_protection_is_typed_busy
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_probes_and_counts_per_request
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_bridge_end_to_end
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_open_commit
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_sidecar_contention_refuses_without_waiting
+services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_worker_settlement_switch_restored
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_does_not_clear_successor
