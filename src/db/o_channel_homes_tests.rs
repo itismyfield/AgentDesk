@@ -388,3 +388,40 @@ async fn a_delegate_naming_an_unknown_provider_writes_nothing_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// The row and PG's clock come from one SELECT, so a reader ages the lease on the database's
+/// clock with no second round trip.
+#[tokio::test]
+async fn a_row_read_carries_pgs_clock_from_the_same_statement_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let clock = || async {
+        let now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        now
+    };
+    assert_eq!(read_home_at(&pool, C).await.unwrap(), None);
+    delegate(&pool, C, "claude", "gw", "mini").await.unwrap();
+    age_lease(&pool, 5).await;
+    let before = clock().await;
+    let (row, read_at) = read_home_at(&pool, C).await.unwrap().expect("row");
+    let after = clock().await;
+    assert_eq!(
+        Some(&row),
+        home(&pool).await.as_ref(),
+        "the same row as read_home"
+    );
+    assert!(
+        before <= read_at && read_at <= after,
+        "{before} <= {read_at} <= {after}"
+    );
+    let age = read_at - row.renewed_at.expect("renewed");
+    assert!(
+        age >= chrono::Duration::seconds(5) && age < chrono::Duration::seconds(6),
+        "{age:?}"
+    );
+    pool.close().await;
+    pg_db.drop().await;
+}

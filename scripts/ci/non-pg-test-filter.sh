@@ -121,6 +121,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::ingress_shadow::compat_tests
+  --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
@@ -501,6 +503,16 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_live_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
+  services::discord::ingress_shadow::shadow_tests::a_full_or_closed_queue_drops_and_counts_without_waiting
+  services::discord::ingress_shadow::shadow_tests::an_event_is_described_by_its_own_channel_and_ids
+  services::discord::ingress_shadow::shadow_tests::an_unreadable_gate_holds_and_counts_as_unknown
+  services::discord::ingress_shadow::shadow_tests::freshness_counts_the_whole_lookup_on_the_database_clock
+  services::discord::ingress_shadow::shadow_tests::only_the_switch_with_listed_channels_starts_an_observer
+  services::discord::ingress_shadow::shadow_tests::the_worker_judges_the_real_gate_and_records_every_id
   services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_adopt_requires_all_provider_mapping_views_ports
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
@@ -902,6 +914,7 @@ NON_PG_FILTER_REPLAY=(
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
+  services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r01_every_default_and_resolve_sees_one_core_slot_and_attempt
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password

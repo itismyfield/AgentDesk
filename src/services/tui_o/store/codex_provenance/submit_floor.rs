@@ -92,6 +92,7 @@ impl NativeFloor {
             captured_through: self.through,
             prefix_hash: self.prefix_hash.clone(),
             retired: false,
+            transition_cleanup: None,
         };
         let current = NativeSubmitFloor::capture_before_submit(&self.execution, &cursor)?;
         (self.valid(self.launch.episode.channel_id) && current.checkpoint() == self.checkpoint())

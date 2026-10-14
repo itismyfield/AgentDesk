@@ -71,6 +71,8 @@ pub(super) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = tmp_path(path);
     write_synced(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
+    #[cfg(test)]
+    fault::strike(path, fault::Step::ReplaceDirSync)?;
     fsync_parent_dir(path)
 }
 
@@ -152,6 +154,8 @@ pub(crate) mod fault {
         Append(Keep),
         /// A temp file written for a create or a replace.
         Write,
+        /// The directory sync of a replace, after its rename already published the new file.
+        ReplaceDirSync,
         /// Cutting a withdrawn ledger line, before the cut or before its sync.
         Cut,
         CutSync,
