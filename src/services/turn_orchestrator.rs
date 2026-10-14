@@ -75,6 +75,8 @@ use front_requeue::requeue_intervention_front;
 use inbound_order::INBOUND_ORDER_FAIL_OPEN_AFTER;
 pub(crate) use inbound_order::TurnAdmissionOrder;
 use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
+#[cfg(test)]
+use incarnation::spawn_channel_mailbox;
 pub(crate) use injected_inputs::{
     ExpectedClaim, HANDBACK_NOT_WRITTEN, InjectionSettlement, ReserveOutcome,
 };
@@ -476,20 +478,6 @@ pub(crate) struct ChannelMailboxHandle {
 impl ChannelMailboxHandle {
     pub(crate) fn is_closed(&self) -> bool {
         self.sender.is_closed()
-    }
-
-    async fn request<T>(
-        &self,
-        build: impl FnOnce(oneshot::Sender<T>) -> ChannelMailboxMsg,
-    ) -> Result<T, MailboxUnreachable> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.sender
-            .send((
-                build(reply_tx),
-                crate::services::discord::input_runtime::fence::effect::current(),
-            ))
-            .map_err(|_| MailboxUnreachable)?;
-        reply_rx.await.map_err(|_| MailboxUnreachable)
     }
 
     pub(crate) async fn snapshot(&self) -> ChannelMailboxSnapshot {
@@ -1765,50 +1753,6 @@ mod turn_finished_signal_tests {
         tokio::time::timeout(std::time::Duration::from_millis(250), signal.wait())
             .await
             .expect("fresh finish should wake reset waiter");
-    }
-}
-
-fn spawn_channel_mailbox(
-    channel_id: ChannelId,
-    fence: remint_fence::FenceCell,
-    recovery_done: Arc<RecoveryDoneSignal>,
-) -> ChannelMailboxHandle {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let own_recovery_done = recovery_done.clone();
-    tokio::spawn(async move {
-        let mut state = ChannelMailboxState {
-            claim_log: claim_observation::ClaimLog::spawned(channel_id),
-            remint_fence: fence,
-            ..Default::default()
-        };
-        while let Some((msg, input_permit)) = rx.recv().await {
-            if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
-                .is_some()
-            {
-                let signal = own_recovery_done.clone();
-                state = tokio::task::spawn_blocking(move || {
-                    crate::services::discord::input_runtime::fence::effect::synchronous(
-                        input_permit,
-                        || {
-                            crate::services::discord::input_runtime::fence::blocking(|| {
-                                input_mailbox_step(state, channel_id, msg, &signal)
-                            })
-                        },
-                    )
-                })
-                .await
-                .expect("input mailbox step panicked");
-            } else {
-                state = crate::services::discord::input_runtime::fence::effect::synchronous(
-                    input_permit,
-                    || input_mailbox_step(state, channel_id, msg, &own_recovery_done),
-                );
-            }
-        }
-    });
-    ChannelMailboxHandle {
-        sender: tx,
-        recovery_done,
     }
 }
 
