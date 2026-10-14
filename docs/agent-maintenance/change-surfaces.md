@@ -302,15 +302,15 @@ time for diagnostics; neither is a stored approval value.
   requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
   `continue-on-error`, and any edge that expands the closure is a
   review-triggering gate failure.
-
   <!-- required-publisher-wiring -->
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
+  | `lib_test_prepare` | none | none |
   | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
   | `relay_authority_mutations` | none | none |
-  | `relay_authority_targets` | none | none |
-  | `scripts` | `changes` | none |
+  | `relay_authority_targets` | `lib_test_prepare` | `${{ !cancelled() }}` |
+  | `scripts` | `changes`, `lib_test_prepare` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |
   | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
