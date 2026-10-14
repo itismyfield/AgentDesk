@@ -457,11 +457,11 @@ fn advance_cursor(
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<u64> {
+pub(crate) fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<(u64, bool)> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let scope = state.codex_restore_by_tmux.get(tmux)?;
     (scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
-        .then_some(scope.input_start)
+        .then_some((scope.input_start, scope.held.is_some()))
 }
 
 #[cfg(unix)]
@@ -544,7 +544,7 @@ pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
 pub(crate) fn prepare_codex_restore(
     tmux: &str,
     source: crate::services::codex_tui::session::checkpoint::Source,
-    linked: bool,
+    restore_custody: bool,
 ) -> std::io::Result<super::super::handoff::CodexRestore> {
     source.check(tmux)?;
     {
@@ -563,14 +563,14 @@ pub(crate) fn prepare_codex_restore(
             }
         }
     }
-    let mut input_start = if linked {
+    let mut input_start = if restore_custody {
         super::super::handoff::codex_rehydrated_scan_offset(tmux, &source.path)
             .min(source.complete_end)
     } else {
         source.complete_end
     };
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    let held = linked
+    let held = restore_custody
         .then(|| {
             state
                 .handoff_by_tmux

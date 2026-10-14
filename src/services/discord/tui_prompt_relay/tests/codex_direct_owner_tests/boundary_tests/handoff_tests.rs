@@ -882,3 +882,127 @@ async fn rebind_complete_boundary(root: PathBuf) {
 fn codex_6903_rebind_writer_stores_the_complete_record_end() {
     run(|root| Box::pin(rebind_complete_boundary(root)));
 }
+
+async fn markerless_saved_custody(root: PathBuf, custody: bool) {
+    let _tmux = live_pane_tmux(&root);
+    let _home =
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", &root);
+    let tmux = "AgentDesk-codex-6903-markerless-custody-cdx";
+    let mut fx = Fixture::start(&root, 6_903_951, tmux).await;
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let native = sessions.join("rollout-markerless-custody.jsonl");
+    std::fs::write(
+        &native,
+        rollout_line(serde_json::json!({
+            "type":"session_meta", "payload":{"id":"s-5704", "cwd":root, "source":"cli"}
+        })),
+    )
+    .unwrap();
+    fx.codex.rollout = native;
+    let mut binding = dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
+    binding.output_path = fx.codex.rollout.to_string_lossy().into_owned();
+    binding.last_offset = std::fs::metadata(&fx.codex.rollout).unwrap().len();
+    dedupe::register_tmux_runtime_binding(tmux, binding);
+    let executable = root.join("fake-tmux/tmux");
+    let script = std::fs::read_to_string(&executable).unwrap();
+    let cwd = root.display().to_string().replace('\'', "'\\''");
+    std::fs::write(
+        &executable,
+        script.replace(
+            "list-sessions)",
+            &format!("display-message) printf '%s\\n' '{cwd}';; list-sessions)"),
+        ),
+    )
+    .unwrap();
+    discord_row(&fx, 6_903_952);
+    if custody {
+        std::mem::forget(reserve(&fx));
+        send_captured_hook(&fx, STEER, &turn(2));
+        held(&fx, 1).await;
+    }
+    let b = fx.append(&(opening_record(&turn(1), ORIGIN) + &user_record(STEER, &turn(2))));
+    let marked = inflight::mark_restart_mode_blocking(
+        ProviderKind::Codex,
+        crate::services::discord::InflightRestartMode::DrainRestart,
+    )
+    .await;
+    assert_eq!(marked.marked, 1);
+    dedupe::reset_state_for_tests();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux,
+        RuntimeHandoffKind::CodexTui,
+    )
+    .unwrap();
+    crate::services::tmux_common::write_tmux_channel_binding(tmux, fx.codex.channel.get()).unwrap();
+    assert!(crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux).is_none());
+    dedupe::register_tmux_channel(tmux, fx.codex.channel.get());
+    super::super::super::super::rehydration::run_codex_rehydrate_pass_for_tests(&fx.shared, tmux);
+    let binding = dedupe::runtime_binding_for_tmux_session(tmux)
+        .expect("actual markerless discovery binding");
+    assert_eq!(binding.output_path, fx.codex.rollout.to_string_lossy());
+    if custody {
+        assert_eq!(
+            dedupe::held_handoff_inputs_for_tests("codex", tmux),
+            Some(1),
+            "markerless discovery skipped saved reservation"
+        );
+        assert!(
+            binding.last_offset < b,
+            "saved custody lost its independent input floor"
+        );
+    } else {
+        assert_eq!(
+            binding.last_offset, b,
+            "no custody starts at the complete observation boundary"
+        );
+    }
+    assert!(inflight::clear_inflight_state(
+        &ProviderKind::Codex,
+        fx.codex.channel.get()
+    ));
+    if custody {
+        let mut events = events_for(&mut fx, STEER, Duration::from_secs(3)).await;
+        assert_eq!(
+            events.len(),
+            1,
+            "independent replay decides the parked input once"
+        );
+        let event = events.remove(0);
+        assert!(!event.steer_echo);
+        super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
+        let anchor = fx.codex.row().unwrap().user_msg_id;
+        fx.append(&answer_for(&turn(2), STEER_ANSWER));
+        assert!(
+            fx.delivered(STEER_ANSWER).await,
+            "restored markerless parked answer was lost"
+        );
+        fx.assert_answer(STEER_ANSWER, anchor);
+        fx.polls(3).await;
+        assert!(
+            events_for(&mut fx, STEER, Duration::from_secs(1))
+                .await
+                .is_empty()
+        );
+        assert_eq!(fx.completed_turns(), 1);
+    } else {
+        fx.polls(3).await;
+        assert!(
+            events_for(&mut fx, STEER, Duration::from_secs(1))
+                .await
+                .is_empty()
+        );
+        assert!(fx.sent(STEER_ANSWER).is_empty());
+    }
+    fx.finish();
+}
+
+#[test]
+fn codex_6903_markerless_discovery_restores_saved_parked_input() {
+    run(|root| Box::pin(markerless_saved_custody(root, true)));
+}
+
+#[test]
+fn codex_6903_markerless_discovery_without_custody_keeps_complete_boundary() {
+    run(|root| Box::pin(markerless_saved_custody(root, false)));
+}

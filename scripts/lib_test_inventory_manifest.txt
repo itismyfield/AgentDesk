@@ -9166,6 +9166,8 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::codex_direct_same_prompt_twice_keeps_each_answer_on_its_own_input
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_actual_marker_watcher_starts_before_the_partial_user
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_actual_markerless_watcher_starts_before_the_partial_user
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_markerless_discovery_restores_saved_parked_input
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_markerless_discovery_without_custody_keeps_complete_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_rebind_writer_stores_the_complete_record_end
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_bound_handoff_keeps_a_turnless_input_across_restart_in_its_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_bound_handoff_keeps_a_turnless_input_across_restart_in_the_next_turn

@@ -74,18 +74,10 @@ pub(super) fn existing_source_is_live(
     Some(crate::services::tui_prompt_dedupe::codex_restore_source_current(tmux, path))
 }
 
-pub(super) fn bootstrap(
-    tmux: &str,
-    path: &Path,
-    session: Option<String>,
-    linked: bool,
-) -> Option<u64> {
+pub(super) fn bootstrap(tmux: &str, path: &Path, session: Option<String>) -> Option<u64> {
     use crate::services::codex_tui::session::checkpoint::{ScanStats, Source};
     use crate::services::tui_prompt_dedupe as dedupe;
     let start = (|| {
-        if let Some(start) = dedupe::codex_restore_scan_floor(tmux, path) {
-            return Some(start);
-        }
         let (source, mut file) = Source::open(tmux, path, session).ok()?;
         let observed_session = codex_rollout_session_id(path);
         if source
@@ -96,15 +88,16 @@ pub(super) fn bootstrap(
         {
             return None;
         }
-        if dedupe::codex_restore_has_custody(tmux).ok()?
-            && !custody_source_matches(tmux, path, source.session_id.as_deref())?
-        {
+        let custody = dedupe::codex_restore_has_custody(tmux).ok()?;
+        if custody && !custody_source_matches(tmux, path, source.session_id.as_deref())? {
             return None;
         }
-        let linked = linked && observed_session.is_some() && observed_session == source.session_id;
+        if let Some((start, restored)) = dedupe::codex_restore_scan_floor(tmux, path) {
+            return (!custody || restored).then_some(start);
+        }
         #[cfg(test)]
         super::idempotency_tests::bootstrap_pause(tmux);
-        let plan = dedupe::prepare_codex_restore(tmux, source.clone(), linked).ok()?;
+        let plan = dedupe::prepare_codex_restore(tmux, source.clone(), custody).ok()?;
         let mut offset = 0;
         let mut total = ScanStats::default();
         while offset < source.complete_end {
@@ -159,10 +152,21 @@ pub(super) fn relay_checkpoint(tmux: &str, native: &Path) -> (Option<String>, Op
 
 fn custody_source_matches(tmux: &str, path: &Path, session: Option<&str>) -> Option<bool> {
     use crate::services::discord::inflight;
+    let mut linked = crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux)
+        .is_some_and(|marker| {
+            crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+                &marker.rollout_path,
+                path,
+            ) && marker
+                .session_id
+                .as_deref()
+                .zip(session)
+                .is_some_and(|(a, b)| a == b)
+        });
     let root = inflight::inflight_runtime_root()?;
     let entries = match std::fs::read_dir(root.join("codex")) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(linked),
         Err(_) => return None,
     };
     for entry in entries {
@@ -193,8 +197,20 @@ fn custody_source_matches(tmux: &str, path: &Path, session: Option<&str>) -> Opt
         {
             return Some(false);
         }
+        linked |= row.tmux_session_name.as_deref() == Some(tmux)
+            && row.output_path.as_deref().is_some_and(|saved| {
+                crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+                    Path::new(saved),
+                    path,
+                )
+            })
+            && row
+                .session_id
+                .as_deref()
+                .zip(session)
+                .is_some_and(|(a, b)| a == b);
     }
-    Some(true)
+    Some(linked)
 }
 
 #[cfg(all(unix, test))]
