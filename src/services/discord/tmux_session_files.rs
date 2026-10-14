@@ -215,12 +215,15 @@ fn bump_generation_mtime_past_previous(
 pub(in crate::services::discord) fn stamp_session_generation_marker(
     tmux_session_name: &str,
 ) -> Option<i64> {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
-        stamp_session_generation_marker_under_source_authority(tmux_session_name)
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        stamp_session_generation_marker_under_source_authority(authority, tmux_session_name)
     })
 }
 
-fn stamp_session_generation_marker_under_source_authority(tmux_session_name: &str) -> Option<i64> {
+fn stamp_session_generation_marker_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+) -> Option<i64> {
     let generation = crate::services::discord::runtime_store::process_generation();
     let path = crate::services::tmux_common::session_temp_path(tmux_session_name, "generation");
     let tmp_path = format!(
@@ -256,6 +259,7 @@ fn stamp_session_generation_marker_under_source_authority(tmux_session_name: &st
             );
         }
         drop(file);
+        authority.invalidate();
         std::fs::rename(&tmp_path, &path)?;
         Ok(modified_ns)
     };
@@ -294,34 +298,49 @@ pub(crate) fn stamp_spawn_markers(
     tmux_session_name: &str,
     prepared: Option<&crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation>,
 ) -> std::io::Result<String> {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         if let Some(prepared) = prepared {
             prepared.validate(tmux_session_name)?;
         }
-        let _ = stamp_session_generation_marker_under_source_authority(tmux_session_name);
+        let _ =
+            stamp_session_generation_marker_under_source_authority(authority, tmux_session_name);
         #[cfg(test)]
         run_spawn_markers_after_generation_hook_for_tests();
         let nonce = prepared
             .map(|p| p.context.execution_nonce.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        write_spawn_nonce_value(tmux_session_name, nonce)
+        write_spawn_nonce_value(authority, tmux_session_name, nonce)
     })
 }
 
 /// Create a fresh nonce for legacy callers; production spawns use the combined gate.
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
-    write_spawn_nonce_value(tmux_session_name, uuid::Uuid::new_v4().simple().to_string())
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        write_spawn_nonce_value(
+            authority,
+            tmux_session_name,
+            uuid::Uuid::new_v4().simple().to_string(),
+        )
+    })
 }
 
-fn write_spawn_nonce_value(tmux_session_name: &str, nonce: String) -> std::io::Result<String> {
+fn write_spawn_nonce_value(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+    nonce: String,
+) -> std::io::Result<String> {
     let path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, SPAWN_NONCE_SUFFIX);
     // Distinct per-process temp sibling to avoid clobbering across concurrent
     // spawns; replaced atomically into `path` on success.
     let tmp_path = format!("{path}.tmp.{}", std::process::id());
 
+    let changed = std::fs::read(&path).ok().as_deref() != Some(nonce.as_bytes());
     let write_then_rename = || -> std::io::Result<()> {
         std::fs::write(&tmp_path, nonce.as_bytes())?;
+        if changed {
+            authority.invalidate();
+        }
         std::fs::rename(&tmp_path, &path)
     };
 
@@ -330,6 +349,9 @@ fn write_spawn_nonce_value(tmux_session_name: &str, nonce: String) -> std::io::R
         // pre-existing destination so the key resolves to `None`, never to a
         // prior spawn's nonce.
         let _ = std::fs::remove_file(&tmp_path);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            authority.invalidate();
+        }
         let _ = std::fs::remove_file(&path);
         return Err(e);
     }
@@ -468,12 +490,24 @@ pub(super) fn preserve_session_generation_mtime_after_write(
     content: &[u8],
     context: &str,
 ) {
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |_| {
-        preserve_mtime_after_write(path, content, context)
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        preserve_mtime_after_write_with_invalidation(path, content, context, || {
+            authority.invalidate()
+        })
     });
 }
 
+#[cfg(test)]
 fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
+    preserve_mtime_after_write_with_invalidation(path, content, context, || ())
+}
+
+fn preserve_mtime_after_write_with_invalidation(
+    path: &str,
+    content: &[u8],
+    context: &str,
+    invalidate: impl Fn(),
+) {
     let mut file = loop {
         match std::fs::OpenOptions::new()
             .read(true)
@@ -482,6 +516,7 @@ fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
         {
             Ok(file) => break file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                invalidate();
                 match std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -531,6 +566,7 @@ fn preserve_mtime_after_write(path: &str, content: &[u8], context: &str) {
     #[cfg(test)]
     run_preserve_mtime_before_rewrite_hook_for_tests();
 
+    invalidate();
     if let Err(error) = file.set_len(0) {
         warn_preserve_mtime_failure(path, context, "truncate", &error);
         return;
@@ -668,10 +704,11 @@ pub(in crate::services::discord) fn reset_relay_watermark_on_generation_change(
     if watermark == 0 {
         return false;
     }
-    if relay_coord.reset_confirmed_frontier(watermark, 0) {
-        relay_coord
-            .confirmed_end_generation_mtime_ns
-            .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
+    if relay_coord.reset_confirmed_frontier_with_generation(
+        watermark,
+        0,
+        Some(current_gen_mtime_ns),
+    ) {
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
             "  [{ts}] 👁 Reset relay watermark on wrapper generation change for {} (channel {}, context={}, stale_watermark={}, stored_gen_mtime={}, current_gen_mtime={})",
@@ -710,13 +747,14 @@ pub(in crate::services::discord) fn reset_stale_relay_watermark_if_output_regres
             observed_output_end,
         );
 
-        if relay_coord.reset_confirmed_frontier(confirmed, new_watermark) {
+        if relay_coord.reset_confirmed_frontier_with_generation(
+            confirmed,
+            new_watermark,
+            Some(current_gen_mtime_ns),
+        ) {
             relay_coord
                 .last_relay_ts_ms
                 .store(0, std::sync::atomic::Ordering::Release);
-            relay_coord
-                .confirmed_end_generation_mtime_ns
-                .store(current_gen_mtime_ns, std::sync::atomic::Ordering::Release);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] 👁 Reset stale tmux relay watermark for {} (channel {}, context={}, observed_output_end={}, stale_confirmed_end={}, new_watermark={}, generation_mtime_changed={})",
@@ -928,6 +966,7 @@ fn sweep_orphan_session_files_in(dir: &std::path::Path, live: &std::collections:
                 for entry in iter.flatten() {
                     if let Ok(fname) = entry.file_name().into_string() {
                         if fname.starts_with(&format!("{}.", stem)) {
+                            crate::services::tmux_common::invalidate_session_temp_source(&stem);
                             let _ = std::fs::remove_file(entry.path());
                         }
                     }
@@ -1554,5 +1593,142 @@ mod tests {
             1,
             "generation failure must emit exactly one WARN: {logs}"
         );
+    }
+    #[test]
+    fn s2a1_managed_generation_spawn_nonce_rewrite_binding_cleanup_entry_matrix() {
+        use crate::services::tmux_common as tc;
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("s2a1-managed");
+        let pin =
+            || tc::with_tmux_source_authority(&session, |authority| authority.pin()).expect("pin");
+        let first = pin();
+        stamp_session_generation_marker(&session).expect("stamp");
+        assert!(!first.is_current());
+        let standalone = pin();
+        let nonce = write_spawn_nonce(&session).expect("nonce");
+        assert_eq!(read_spawn_nonce(&session), Some(nonce));
+        assert!(!standalone.is_current());
+        let combined = pin();
+        assert!(stamp_spawn_markers(&session, None).is_ok());
+        assert!(!combined.is_current());
+        let path = generation_path(&session);
+        let content = std::fs::read(&path).expect("content");
+        let before = pin();
+        preserve_session_generation_mtime_after_write(&session, &path, &content, "s2a1_same");
+        assert!(before.is_current());
+        let mtime = read_generation_file_mtime_ns(&session);
+        preserve_session_generation_mtime_after_write(&session, &path, b"changed", "s2a1_changed");
+        assert!(!before.is_current());
+        assert_eq!(read_generation_file_mtime_ns(&session), mtime);
+        assert_eq!(std::fs::read(&path).unwrap(), b"changed");
+        let bound = pin();
+        tc::write_tmux_channel_binding(&session, 59_960_401).expect("binding");
+        assert!(!bound.is_current());
+        let same = pin();
+        tc::write_tmux_channel_binding(&session, 59_960_401).expect("same binding");
+        assert!(same.is_current());
+        let old = pin();
+        let blocked = format!("{}.tmp.{}", nonce_path(&session), std::process::id());
+        std::fs::create_dir(&blocked).expect("block temp");
+        assert!(write_spawn_nonce(&session).is_err());
+        assert!(read_spawn_nonce(&session).is_none());
+        assert!(
+            !old.is_current(),
+            "failed writer fences its destination deletion"
+        );
+        std::fs::remove_dir(&blocked).expect("remove fixture dir");
+        let before_cleanup = pin();
+        tc::cleanup_session_temp_files(&session);
+        assert!(!before_cleanup.is_current());
+        let empty = pin();
+        tc::cleanup_session_temp_files(&session);
+        assert!(empty.is_current());
+    }
+
+    #[test]
+    fn s2a1_two_real_reset_entries_pair_generation_and_keep_admission_policy() {
+        use crate::services::cluster::stream_relay::source_read_proof::tests::seal_with_frontier;
+        use crate::services::tmux_common as tc;
+        let (_root, _env) = isolated_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        for (index, changed_generation) in [false, true].into_iter().enumerate() {
+            let channel = ChannelId::new(59_960_410 + index as u64);
+            let session = unique_session("s2a1-reset");
+            let generation = stamp_session_generation_marker(&session).expect("gen");
+            let coord = shared.tmux_relay_coord(channel);
+            let (_dir, seal) = seal_with_frontier(&session, 200, (generation, 0));
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    coord.publish_confirmed_for_tests(200, generation, 0, Some(&seal))
+                ),
+                "Published"
+            );
+            let old_pin =
+                tc::with_tmux_source_authority(&session, |authority| authority.pin()).expect("pin");
+            if changed_generation {
+                stamp_session_generation_marker(&session).expect("new gen");
+                assert!(!old_pin.is_current());
+            }
+            let token = shared.relay_frontier_token(channel);
+            let guard = shared
+                .acquire_relay_frontier_mutation(channel, token)
+                .expect("admission");
+            let reset = || {
+                if changed_generation {
+                    reset_relay_watermark_on_generation_change(
+                        &shared,
+                        channel,
+                        &session,
+                        "s2a1_reset",
+                    )
+                } else {
+                    reset_stale_relay_watermark_if_output_regressed(
+                        &shared,
+                        channel,
+                        &session,
+                        40,
+                        "s2a1_reset",
+                    )
+                }
+            };
+            assert!(!reset());
+            assert_eq!(coord.frontier_tuple_for_tests().0, 200);
+            drop(guard);
+            let hook_coord = coord.clone();
+            let reached = std::rc::Rc::new(std::cell::Cell::new(false));
+            let observed = reached.clone();
+            coord.before_generation_for_tests(move || {
+                observed.set(true);
+                assert!(matches!(
+                    hook_coord.reset_state.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+            });
+            assert!(reset());
+            assert!(reached.get());
+            let tuple = coord.frontier_tuple_for_tests();
+            assert_eq!(
+                tuple,
+                (
+                    if changed_generation { 0 } else { 40 },
+                    read_generation_file_mtime_ns(&session),
+                    1,
+                    false
+                )
+            );
+            if changed_generation {
+                assert!(!old_pin.is_current());
+            }
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    coord.publish_confirmed_for_tests(200, generation, 1, Some(&seal))
+                ),
+                "Unmeasured",
+                "old proof cannot be relabeled into reset 1"
+            );
+            tc::cleanup_session_temp_files(&session);
+        }
     }
 }

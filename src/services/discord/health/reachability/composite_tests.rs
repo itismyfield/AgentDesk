@@ -734,6 +734,7 @@ fn coverage_under_an_unproven_generation_is_not_promoted_to_green() {
 fn section_6_2_enrichment(capture_lagged: bool) -> SessionEnrichment {
     let row_output_path = "/nonexistent/agentdesk/b6-row-transcript.jsonl";
     SessionEnrichment {
+        tail_observation: Default::default(),
         inflight: None,
         attached: true,
         watcher_attached: true,
@@ -782,7 +783,6 @@ fn section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_health
         row_path_missing_while_registry_live,
         RowCoordinateDivergence::RowPathUnresolvableWhileRegistryLive
     );
-
     let case = Case {
         divergence: row_path_missing_while_registry_live,
         ..Case::default()

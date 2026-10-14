@@ -57,6 +57,7 @@ use super::session_matcher::MatchedChannel;
 mod frame_admission;
 mod identity;
 mod shutdown;
+pub(crate) mod source_read_proof;
 pub use shutdown::ShutdownOutcome;
 mod terminal_resolution;
 pub use frame_admission::RelayFrameRequest;

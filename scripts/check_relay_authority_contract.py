@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import importlib.util
 import os
 import re
 import shlex
@@ -76,7 +77,8 @@ def load_relay_authority_job(
 
 
 def expected_workflow_command(lane: Lane) -> str:
-    return f"env -u AGENTDESK_ROOT_DIR {shlex.join(lane.command)} -- --test-threads=1"
+    return ("env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- "
+            f"{shlex.join(lane.command)} -- --test-threads=1")
 
 
 def validate_workflow_contract(
@@ -95,8 +97,12 @@ def validate_workflow_contract(
         )
     for job_id in (RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB):
         execution = load_relay_authority_job(repo_root, job_id)
-        if any(key in execution for key in ("if", "needs", "continue-on-error")):
-            raise ManifestError(f"workflow jobs.{job_id} must execute unconditionally without needs")
+        shared = job_id == RELAY_AUTHORITY_TARGETS_JOB
+        if ("continue-on-error" in execution or
+            (shared and (execution.get("needs") not in ("lib_test_prepare", ["lib_test_prepare"])
+                         or execution.get("if") != "${{ !cancelled() }}")) or
+            (not shared and any(key in execution for key in ("if", "needs")))):
+            raise ManifestError(f"workflow jobs.{job_id} must execute unconditionally with exact preparation dependencies")
 
     job = load_relay_authority_job(repo_root)
     steps = job.get("steps")
@@ -373,6 +379,17 @@ def list_command(lane: Lane) -> tuple[str, ...]:
     return lane.command + ("--", "--list")
 
 
+def artifact_contract():
+    path = Path(__file__).parent / "ci/lib-test-artifact.py"
+    spec = importlib.util.spec_from_file_location("lib_test_artifact", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot import shared lib-test contract: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def run_lane(
     lane: Lane,
     repo_root: Path,
@@ -381,13 +398,15 @@ def run_lane(
     command = list_command(lane)
     env = os.environ.copy()
     env.pop("AGENTDESK_ROOT_DIR", None)
-    proc = runner(
-        command,
-        cwd=repo_root,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    shared = None
+    if env.get("ADK_LIB_TEST_ARTIFACT") and lane.command[:3] == ("cargo", "test", "--lib") and len(lane.command) == 4:
+        shared = artifact_contract().validated_inventory(repo_root)
+    if shared is not None:
+        output = "\n".join(line for line in shared.splitlines()
+                           if line.endswith(TEST_ID_SUFFIX) and lane.command[3] in line[:-len(TEST_ID_SUFFIX)]) + "\n"
+        proc = subprocess.CompletedProcess(command, 0, output, "")
+    else:
+        proc = runner(command, cwd=repo_root, env=env, capture_output=True, text=True)
     output = f"{proc.stdout}{proc.stderr}"
     return LaneResult(lane, count_test_ids(proc.stdout), proc.returncode, command, output)
 

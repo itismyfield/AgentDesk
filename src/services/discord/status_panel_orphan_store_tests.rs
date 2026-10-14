@@ -408,3 +408,169 @@ fn drain_committed_delete_emits_relay_delete() {
     assert_eq!(event.payload["outcome"], "committed");
     assert_eq!(event.payload["status"], "committed");
 }
+
+/// Fixture for one owned pending bind: (orphan root, inflight root, live owner identity).
+fn owned_pending_bind_fixture(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    panel_id: u64,
+) -> (PathBuf, PathBuf, InflightTurnIdentity) {
+    let orphan_root = root.join("orphans");
+    let inflight_root = root.join("inflight");
+    let live = test_inflight(provider, channel_id, 7001, Some(panel_id), 6001, Some(10));
+    let inflight_path = crate::services::discord::inflight::inflight_state_path(
+        &inflight_root,
+        provider,
+        channel_id,
+    );
+    fs::create_dir_all(inflight_path.parent().expect("inflight parent")).expect("mkdir inflight");
+    fs::write(&inflight_path, serde_json::to_string_pretty(&live).unwrap()).expect("owner row");
+    let identity = InflightTurnIdentity::from_state(&live);
+    enqueue_pending_bind_in_root(
+        &orphan_root,
+        provider,
+        "tok",
+        channel_id,
+        panel_id,
+        Some(identity.clone()),
+    );
+    (orphan_root, inflight_root, identity)
+}
+
+/// Makes `dir` read-only and returns its permissions to restore; a fault that does not
+/// take effect (running as root) fails the test instead of passing it vacuously.
+fn make_read_only(dir: &Path) -> fs::Permissions {
+    let original = fs::metadata(dir).expect("store dir").permissions();
+    let mut read_only = original.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(dir, read_only).expect("read-only store dir");
+    assert!(
+        fs::File::create(dir.join(".fault-probe")).is_err(),
+        "the read-only fault did not take effect (running as root?)"
+    );
+    original
+}
+
+#[test]
+fn checked_pending_bind_removal_reports_only_proven_store_states() {
+    let provider = ProviderKind::Claude;
+    let (channel_id, panel_id) = (5_708_201, 5_708_202);
+    type Fault = fn(&Path, &Path) -> Option<fs::Permissions>;
+    let invalid_utf8: Fault = |file, _| {
+        let mut bytes = fs::read(file).expect("pending bind file");
+        bytes.push(0xFF);
+        fs::write(file, bytes).expect("unreadable store file");
+        None
+    };
+    let corrupt: Fault = |file, _| {
+        fs::write(file, "[{\"id\": 5708202, \"kind\": \"pending_").expect("corrupt file");
+        None
+    };
+    let read_only_dir: Fault = |_, dir| Some(make_read_only(dir));
+    let cases: [(&str, Fault, bool, PendingBindCheckError); 4] = [
+        ("read", invalid_utf8, false, PendingBindCheckError::Read),
+        ("parse", corrupt, false, PendingBindCheckError::Parse),
+        (
+            "last-record delete",
+            read_only_dir,
+            false,
+            PendingBindCheckError::Write,
+        ),
+        (
+            "atomic write",
+            read_only_dir,
+            true,
+            PendingBindCheckError::Write,
+        ),
+    ];
+    for (label, fault, other_record, expected) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (orphan_root, inflight_root, identity) =
+            owned_pending_bind_fixture(temp.path(), &provider, channel_id, panel_id);
+        if other_record {
+            enqueue_in_root(&orphan_root, &provider, "tok", channel_id, panel_id + 1);
+        }
+        let file = channel_file_path_in_root(&orphan_root, &provider, "tok", channel_id);
+        let dir = file.parent().expect("store dir").to_path_buf();
+        let restore = fault(&file, &dir);
+        let outcome = remove_pending_bind_if_owned_checked_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            "tok",
+            channel_id,
+            panel_id,
+            &identity,
+        );
+        if let Some(original) = restore {
+            fs::set_permissions(&dir, original).expect("restore store dir");
+        }
+        let still_on_disk = String::from_utf8_lossy(&fs::read(&file).unwrap_or_default())
+            .contains(&panel_id.to_string());
+        assert!(
+            still_on_disk,
+            "{label}: the fault left the pending bind on disk"
+        );
+        assert!(
+            !matches!(
+                outcome,
+                Ok(PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
+                    | PendingBindOwnedRemovalOutcome::OwnedRecordMissing)
+            ),
+            "{label}: reported {outcome:?} while the pending bind is still on disk"
+        );
+        assert_eq!(outcome, Err(expected), "{label}");
+    }
+}
+
+#[test]
+fn checked_pending_bind_removal_proves_removal_and_never_queues_a_delete() {
+    let provider = ProviderKind::Claude;
+    let (channel_id, panel_id) = (5_708_211, 5_708_212);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (orphan_root, inflight_root, identity) =
+        owned_pending_bind_fixture(temp.path(), &provider, channel_id, panel_id);
+    let remove = |identity: &InflightTurnIdentity| {
+        remove_pending_bind_if_owned_checked_in_root(
+            &orphan_root,
+            &inflight_root,
+            &provider,
+            "tok",
+            channel_id,
+            panel_id,
+            identity,
+        )
+    };
+    assert_eq!(
+        remove(&identity),
+        Ok(PendingBindOwnedRemovalOutcome::OwnedRecordRemoved)
+    );
+    assert!(load_pending_in_root(&orphan_root, &provider, "tok").is_empty());
+    assert_eq!(
+        remove(&identity),
+        Ok(PendingBindOwnedRemovalOutcome::OwnedRecordMissing)
+    );
+
+    // A queued stranded delete for the same panel blocks the release, in either file format.
+    enqueue_in_root(&orphan_root, &provider, "tok", channel_id, panel_id);
+    assert_eq!(remove(&identity), Err(PendingBindCheckError::DeleteQueued));
+    let file = channel_file_path_in_root(&orphan_root, &provider, "tok", channel_id);
+    fs::write(&file, format!("[{panel_id}]")).expect("legacy id array");
+    assert_eq!(remove(&identity), Err(PendingBindCheckError::DeleteQueued));
+    fs::write(&file, format!("[{}]", panel_id + 7)).expect("legacy id array");
+    assert_eq!(
+        remove(&identity),
+        Ok(PendingBindOwnedRemovalOutcome::OwnedRecordMissing)
+    );
+    fs::remove_file(&file).expect("reset store");
+
+    // Unlike the legacy helper, a mismatch never writes delete protection.
+    let mut stranger = identity.clone();
+    stranger.user_msg_id += 1;
+    assert_eq!(
+        remove(&stranger),
+        Ok(PendingBindOwnedRemovalOutcome::OwnershipMismatch)
+    );
+    assert!(load_pending_in_root(&orphan_root, &provider, "tok").is_empty());
+}

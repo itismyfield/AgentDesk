@@ -1018,6 +1018,7 @@ mod tests {
         capture_offset: Option<u64>,
     ) -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: true,
             tmux_session: Some(tmux_session.to_string()),
@@ -1184,7 +1185,6 @@ mod tests {
         snap.unread_bytes = Some(0);
         snap.relay_health.unread_bytes = Some(0);
         let now = chrono::Utc::now().timestamp();
-
         let decision = evaluate_stall_watchdog_liveness(
             &provider,
             channel,

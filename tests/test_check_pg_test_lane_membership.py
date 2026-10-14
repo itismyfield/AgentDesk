@@ -640,7 +640,10 @@ class DetectionMutation(FixtureCase):
         voice = voice.replace('    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', '    #[cfg(test)]\n    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', 1)
         self.fx.write_source("src/services/discord/voice_barge_in.rs", voice)
         target = "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs"
-        self.fx.write_source(target, (REPO_ROOT / target).read_text("utf-8"))
+        # Every external voice test module the real file mounts must exist in the fixture.
+        for external in sorted((REPO_ROOT / "src/services/discord/voice_barge_in/tests").glob("*.rs")):
+            relative = external.relative_to(REPO_ROOT).as_posix()
+            self.fx.write_source(relative, external.read_text("utf-8"))
         findings: list[membership.Finding] = []
         self.assertIn((self.root / target).resolve(), membership._external_test_files(self.root.resolve(), membership._load_coverage_module(self.root), findings=findings))
         self.assertFalse([finding for finding in findings if finding.source.startswith("src/services/discord/voice_barge_in.rs:")])
@@ -2335,7 +2338,7 @@ class PgDbCiWiring(unittest.TestCase):
         # Unconditional on purpose: were the job path-filtered, a PR adding a
         # PG test to an unselected file could skip the very check for it.
         job = self.workflow["jobs"]["scripts"]
-        self.assertNotIn("if", job)
+        self.assertEqual((job.get("if"), job["needs"]), ("${{ !cancelled() }}", ["changes", "lib_test_prepare"]))
         self.assertTrue(
             any("ci-script-checks.sh" in str(step.get("run", "")) for step in job["steps"]),
             "the scripts job must run scripts/ci-script-checks.sh",

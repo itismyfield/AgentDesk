@@ -5,11 +5,15 @@ use crate::services::discord::relay_health::{
     CoordFrontierObservation, DurableFrontierObservation, FrontierProvenance,
 };
 use crate::services::discord::{self as discord, SharedData};
-use crate::services::platform::tmux::SessionPresence;
+use crate::services::platform::tmux::health_probe::{HealthTmuxAnswer, HealthTmuxQuery};
 use crate::services::provider::ProviderKind;
 use crate::services::provider::session_probe::SessionLiveness;
 
 use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
+
+#[path = "probe_runtime.rs"]
+mod probe_runtime;
+use probe_runtime::{HealthProbeRuntime, ProbeOutcome};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
@@ -28,16 +32,8 @@ impl HealthSnapshotOptions {
             include_mailbox_details,
             tmux: TmuxObservationBudget {
                 remaining: TMUX_OBSERVATION_BUDGET,
-                // #5942 r2: `session_presence`, not `has_session`. The two
-                // agree exactly on "is it Present" — `has_session` IS
-                // `session_presence(..) == Present` — so `tmux_present` below
-                // is bit-for-bit what it always was. What the bool threw away
-                // is WHY it said no, and `tmux.rs` warns about that in
-                // `has_session`'s own doc: a tmux spawn failure, a timed-out
-                // `has-session`, a blank name or an unrecognised stderr all
-                // read as `false` there. Those are probe faults, not absent
-                // sessions, and #5942 must not expire a ledger on one.
-                probe: crate::services::platform::tmux::session_presence,
+                // One process-wide runtime, so the slot limit spans requests and endpoints.
+                runtime: HealthProbeRuntime::shared(),
             },
         }
     }
@@ -45,42 +41,7 @@ impl HealthSnapshotOptions {
 
 pub(super) struct TmuxObservationBudget {
     remaining: std::time::Duration,
-    probe: fn(&str) -> SessionPresence,
-}
-
-/// Test-only fixtures (#5942 r4, P2-5).
-///
-/// r2 and r3 widened `remaining` and `probe` to `pub(super)` so the sibling
-/// `health::snapshot` tests could pose an exhausted budget and a probe with a
-/// chosen answer. That handed every module under `health` a writable fn pointer
-/// and a writable clock in ALL builds, which is far more surface than those two
-/// shapes need. The fields are private again and the two shapes are named here
-/// instead, `#[cfg(test)]` so they do not exist in a release build at all.
-#[cfg(test)]
-impl TmuxObservationBudget {
-    /// A full budget whose probe always answers `presence`.
-    ///
-    /// Matched rather than closed over: `probe` is a plain fn pointer (it is
-    /// handed to `spawn_blocking`), so it cannot capture a runtime value.
-    pub(super) fn answering(presence: SessionPresence) -> Self {
-        Self {
-            remaining: TMUX_OBSERVATION_BUDGET,
-            probe: match presence {
-                SessionPresence::Present => |_: &str| SessionPresence::Present,
-                SessionPresence::Missing => |_: &str| SessionPresence::Missing,
-                SessionPresence::ProbeFailed => |_: &str| SessionPresence::ProbeFailed,
-            },
-        }
-    }
-
-    /// A spent budget whose probe fails the test if the budget check is ever
-    /// skipped.
-    pub(super) fn exhausted() -> Self {
-        Self {
-            remaining: std::time::Duration::ZERO,
-            probe: |_| panic!("an exhausted budget must not spawn a probe"),
-        }
-    }
+    runtime: HealthProbeRuntime,
 }
 
 /// What a caller could establish about the execution owner behind a channel.
@@ -95,8 +56,8 @@ impl TmuxObservationBudget {
 ///
 /// [`ExecutorWitness::Absent`] is the only value that may expire a reachability
 /// ledger, so every one of the other five has to reach
-/// [`ExecutorWitness::Unwitnessed`] instead. That is why the budget's probe is
-/// `tmux::session_presence` and not `tmux::has_session`: the latter is
+/// [`ExecutorWitness::Unwitnessed`] instead. That is why the budget's probe keeps
+/// `session_presence`'s three-way classifier, not `tmux::has_session`: the latter is
 /// documented in `platform/tmux.rs` as folding probe faults into "unavailable",
 /// with an explicit warning that callers who act on absence must not use it.
 ///
@@ -150,32 +111,24 @@ pub(super) async fn witness_tmux_session_within(
     //
     // A BLANK name is not this case — it goes to the probe, which classifies it
     // `ProbeFailed`.
-    let Some(session_name) = session_name.map(str::to_string) else {
+    let Some(session_name) = session_name else {
         return ExecutorWitness::Absent;
     };
     // Another host's session is never witnessed absent, and no tmux probe is spent on it.
-    if !host_liveness::local_tmux(&session_name, None) {
+    if !host_liveness::local_tmux(session_name, None) {
         return ExecutorWitness::Unwitnessed;
     }
-    if budget.remaining.is_zero() {
-        return ExecutorWitness::Unwitnessed;
-    }
-    let started = tokio::time::Instant::now();
-    let probe_fn = budget.probe;
-    let probe = tokio::task::spawn_blocking(move || probe_fn(&session_name));
-    let result = tokio::time::timeout(budget.remaining, probe).await;
-    budget.remaining = budget.remaining.saturating_sub(started.elapsed());
-    match result {
-        Ok(Ok(SessionPresence::Present)) => ExecutorWitness::Present,
+    match budget
+        .observe(HealthTmuxQuery::HasSession, session_name)
+        .await
+    {
+        ProbeOutcome::Answered(HealthTmuxAnswer::Present) => ExecutorWitness::Present,
         // The ONLY path to `Absent`: tmux answered, and its answer was "can't
         // find session" / "no such session" / "no server running".
-        Ok(Ok(SessionPresence::Missing)) => ExecutorWitness::Absent,
-        // A tmux that could not be spawned, timed out inside the probe, or
-        // answered with an stderr nobody recognised. A join failure or the
-        // outer timeout is the same kind of non-answer: the probe may still be
-        // running. Claiming absence from any of these is the over-expiry
-        // #5942's guards exist to refuse.
-        Ok(Ok(SessionPresence::ProbeFailed)) | Ok(Err(_)) | Err(_) => ExecutorWitness::Unwitnessed,
+        ProbeOutcome::Answered(HealthTmuxAnswer::Missing) => ExecutorWitness::Absent,
+        // A spent budget, a full runtime, a deadline, or a spawn, output or answer fault: none
+        // is evidence of absence, so none may expire a ledger.
+        _ => ExecutorWitness::Unwitnessed,
     }
 }
 
@@ -325,11 +278,10 @@ pub(super) struct SessionEnrichment {
     pub last_capture_offset: Option<u64>,
     pub capture_coordinate: CaptureCoordinateObservation,
     pub unread_bytes: Option<u64>,
+    pub tail_observation: super::TailObservation,
     pub relay_stale: bool,
     pub capture_lagged: bool,
-    /// #5071 relay-tail S1 (I-4): which witnesses produced the frontier fields
-    /// above. Descriptive — no field on this struct changed source or polarity
-    /// because of it, and nothing but the health detail reads it.
+    /// Descriptive witnesses for health detail; frontier sources and polarity stay unchanged.
     pub frontier_provenance: FrontierProvenance,
 }
 
@@ -464,6 +416,7 @@ impl SessionEnrichment {
             last_capture_offset,
             capture_coordinate,
             unread_bytes,
+            tail_observation: Default::default(),
             relay_stale,
             capture_lagged,
             frontier_provenance: FrontierProvenance::observe(
@@ -542,12 +495,6 @@ impl SessionEnrichment {
         budget: &mut TmuxObservationBudget,
     ) -> ExecutorWitness {
         witness_tmux_session_within(self.tmux_session.as_deref(), budget).await
-    }
-
-    pub fn process_present(&self) -> bool {
-        self.tmux_session
-            .as_deref()
-            .is_some_and(|name| crate::services::platform::tmux::pane_pid(name).is_some())
     }
 
     pub fn desynced(&self, live_tmux_present: bool, attached: bool) -> bool {
@@ -673,6 +620,7 @@ fn liveness_as_alive(liveness: SessionLiveness) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::platform::tmux::SessionPresence;
 
     #[test]
     fn inflight_a_alive_watcher_b_dead_mismatch_probes_a() {
@@ -696,17 +644,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_exhausted_tmux_budget_withholds_a_live_session() {
         let mut budget = HealthSnapshotOptions::new(false).tmux;
-        let default_probe =
-            crate::services::platform::tmux::session_presence as fn(&str) -> SessionPresence;
-        assert!(std::ptr::fn_addr_eq(budget.probe, default_probe));
-        budget.probe = |_| SessionPresence::Present;
+        assert!(budget.runtime.is(&HealthProbeRuntime::shared()));
+        budget.runtime = HealthProbeRuntime::answering(SessionPresence::Present);
         // Model detail-only work between probes, outside probe accounting.
         tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
         tokio::time::resume();
         assert!(probe_tmux_session_within(Some("fake-live"), &mut budget).await);
         budget.remaining = std::time::Duration::ZERO;
-        budget.probe = |_| panic!("exhausted budget spawned a probe");
-        assert!(!probe_tmux_session_within(Some("fake-live"), &mut budget).await);
+        let spent = !probe_tmux_session_within(Some("fake-live"), &mut budget).await;
+        assert!(spent, "exhausted budget spawned a probe");
     }
 
     /// #5942 r2 (P1-3): a probe FAULT must not read as an absent session.
@@ -731,24 +677,14 @@ mod tests {
             ),
         ];
         for (presence, expected_witness, expected_bool) in cases {
-            let mut budget = HealthSnapshotOptions::new(false).tmux;
-            budget.probe = match presence {
-                SessionPresence::Present => |_: &str| SessionPresence::Present,
-                SessionPresence::Missing => |_: &str| SessionPresence::Missing,
-                SessionPresence::ProbeFailed => |_: &str| SessionPresence::ProbeFailed,
-            };
+            let mut budget = TmuxObservationBudget::answering(presence);
             assert_eq!(
                 witness_tmux_session_within(Some("session"), &mut budget).await,
                 expected_witness,
                 "{presence:?} mapped to the wrong executor witness"
             );
 
-            let mut budget = HealthSnapshotOptions::new(false).tmux;
-            budget.probe = match presence {
-                SessionPresence::Present => |_: &str| SessionPresence::Present,
-                SessionPresence::Missing => |_: &str| SessionPresence::Missing,
-                SessionPresence::ProbeFailed => |_: &str| SessionPresence::ProbeFailed,
-            };
+            let mut budget = TmuxObservationBudget::answering(presence);
             assert_eq!(
                 probe_tmux_session_within(Some("session"), &mut budget).await,
                 expected_bool,
@@ -758,11 +694,11 @@ mod tests {
 
         // A registry that resolved no tmux binding at all is a fact about the
         // registry, not a probe that failed, and stays a positive absence.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.probe = |_| panic!("a channel with no session name must not spawn a probe");
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::Present);
         assert_eq!(
             witness_tmux_session_within(None, &mut budget).await,
-            ExecutorWitness::Absent
+            ExecutorWitness::Absent,
+            "a channel with no session name must not spawn a probe"
         );
     }
 
@@ -779,9 +715,7 @@ mod tests {
     /// this is pinned separately from the fresh-budget case above.
     #[tokio::test]
     async fn a_registry_with_no_session_is_absent_even_on_an_exhausted_budget() {
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.remaining = std::time::Duration::ZERO;
-        budget.probe = |_| panic!("an exhausted budget must not spawn a probe");
+        let mut budget = TmuxObservationBudget::exhausted();
         assert_eq!(
             witness_tmux_session_within(None, &mut budget).await,
             ExecutorWitness::Absent,
@@ -791,9 +725,7 @@ mod tests {
         // The control, and the reason the budget check still exists: a channel
         // that DOES have a session to probe is unwitnessed once the budget is
         // gone, because there the budget really is what stopped the answer.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.remaining = std::time::Duration::ZERO;
-        budget.probe = |_| panic!("an exhausted budget must not spawn a probe");
+        let mut budget = TmuxObservationBudget::exhausted();
         assert_eq!(
             witness_tmux_session_within(Some("named"), &mut budget).await,
             ExecutorWitness::Unwitnessed
@@ -849,9 +781,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tracing::instrument::WithSubscriber;
         use tracing_subscriber::prelude::*;
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
         static DETAILS: AtomicUsize = AtomicUsize::new(0);
-        struct DetailDelay;
+        struct DetailDelay(bool);
         impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DetailDelay {
             fn on_event(
                 &self,
@@ -860,7 +791,7 @@ mod tests {
             ) {
                 if event.metadata().target() == "agentdesk::discord::relay_health" {
                     let detail = DETAILS.fetch_add(1, Ordering::SeqCst);
-                    if CALLS.load(Ordering::SeqCst) == 1 && detail == 0 {
+                    if self.0 && detail == 0 {
                         // This event is emitted inside the builder's detail-only payload branch.
                         std::thread::sleep(TMUX_OBSERVATION_BUDGET * 2);
                     }
@@ -880,18 +811,16 @@ mod tests {
         for available in [true, false] {
             let mut options = HealthSnapshotOptions::new(true);
             options.tmux.remaining *= u32::from(available);
-            options.tmux.probe = |_| {
-                CALLS.fetch_add(1, Ordering::SeqCst);
-                SessionPresence::Present
-            };
-            CALLS.store(0, Ordering::SeqCst);
+            let runtime = HealthProbeRuntime::answering(SessionPresence::Present);
+            options.tmux.runtime = runtime.clone();
             DETAILS.store(0, Ordering::SeqCst);
             crate::logging::test_capture::pin_callsite_interest();
             let snapshot =
                 super::super::snapshot::build_health_snapshot_with_options(&registry, options)
-                    .with_subscriber(tracing_subscriber::registry().with(DetailDelay))
+                    .with_subscriber(tracing_subscriber::registry().with(DetailDelay(available)))
                     .await;
-            assert_eq!(CALLS.load(Ordering::SeqCst), 2 * usize::from(available));
+            let presence_probes = runtime.calls(HealthTmuxQuery::HasSession);
+            assert_eq!(presence_probes, 2 * usize::from(available));
             assert_eq!(DETAILS.load(Ordering::SeqCst), 2);
             let json = serde_json::to_value(snapshot).unwrap();
             assert_eq!(json["mailboxes"].as_array().unwrap().len(), 2);
