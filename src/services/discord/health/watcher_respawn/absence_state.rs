@@ -17,8 +17,6 @@ pub(super) struct WatcherAbsenceState {
     pub(super) failed_attempts: u32,
     pub(super) next_attempt_unix_secs: i64,
     pub(super) retirement_logged: bool,
-    #[cfg(unix)]
-    pub(super) o_install_reason: Option<discord::tmux::OOnlyInstallReason>,
 }
 
 impl WatcherAbsenceState {
@@ -32,8 +30,6 @@ impl WatcherAbsenceState {
             failed_attempts: 0,
             next_attempt_unix_secs: now_unix_secs,
             retirement_logged: false,
-            #[cfg(unix)]
-            o_install_reason: None,
         }
     }
 }

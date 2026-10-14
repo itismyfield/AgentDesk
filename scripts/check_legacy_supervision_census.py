@@ -111,7 +111,7 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root, promoted_paths=()):
+def sync_skips(root, promoted_paths=(), deleted_paths=()):
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
@@ -121,6 +121,12 @@ def sync_skips(root, promoted_paths=()):
     actual = {p.relative_to(root).as_posix() for p in basename | resolved}
     existing = {p.relative_to(root).as_posix() for p in files}
     promoted = set(promoted_paths)
+    deleted = set(deleted_paths)
+    for rel in sorted(deleted):
+        if (root / rel).exists():
+            raise RuntimeError("deletion path still exists: " + rel)
+        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+            raise RuntimeError("deletion is not pinned: " + rel)
     for rel in sorted(promoted):
         if rel not in existing:
             raise RuntimeError("promotion path missing: " + rel)
@@ -128,9 +134,9 @@ def sync_skips(root, promoted_paths=()):
             raise RuntimeError("promotion remains test-only: " + rel)
         if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
             raise RuntimeError("promotion is not pinned: " + rel)
-    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted:
+    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted - deleted:
         raise RuntimeError("refusing pin removal")
-    for rel in sorted(promoted):
+    for rel in sorted(promoted | deleted):
         pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
         source, count = re.subn(pattern, '', source)
         if count != 1:
@@ -152,8 +158,10 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
         parser.add_argument('--promote', action='append', default=[], metavar='PATH',
                             help='explicitly remove this existing production module from the skip pin')
+        parser.add_argument('--delete-pin', action='append', default=[], metavar='PATH',
+                            help='explicitly dispose the pin for a deleted test module')
         args = parser.parse_args(sys.argv[2:])
-        sync_skips(Path.cwd(), args.promote)
+        sync_skips(Path.cwd(), args.promote, args.delete_pin)
         sys.exit(0)
     ok, report = check(Path.cwd())
     print(report)

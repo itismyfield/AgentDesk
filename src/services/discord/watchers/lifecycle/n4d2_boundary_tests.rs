@@ -59,136 +59,6 @@ async fn joined(ticket: watcher_completion::Ticket) {
 }
 
 #[tokio::test]
-async fn n4d2_restore_actual_first_chunk_is_rowless_for_both_providers() {
-    if !isolated(
-        module_path!(),
-        "n4d2_restore_actual_first_chunk_is_rowless_for_both_providers",
-    ) {
-        return;
-    }
-    for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
-        .into_iter()
-        .enumerate()
-    {
-        let (fixture, discord) = fixture(provider.clone(), 632_520_700 + index as u64).await;
-        seed_legacy(&fixture);
-        let _retired = RetiredForTest::new(provider.as_str(), fixture.channel.get());
-        let rows = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-        let before = test_support::tree_fingerprint(&rows);
-        let observed = observe(&fixture);
-        let submitted = Scope::new(&fixture.shared);
-        restore_tmux_watchers(&fixture.http, &fixture.shared).await;
-        assert_eq!(
-            submitted.submissions(),
-            1,
-            "public restore submitted a watcher"
-        );
-        until(&observed, "actual initial EOF", |s| {
-            s.event_count("outer_eof") > 0
-        })
-        .await;
-        let fresh = transcript(&provider, false);
-        append(&fixture, fresh.as_bytes());
-        until(&observed, "actual first decoded source chunk", |s| {
-            s.decoded_chunks.concat() == fresh
-        })
-        .await;
-        fixture.cancel_and_join().await;
-        let returned = submitted.join_all().await;
-        assert_eq!(returned.len(), 1);
-        assert!(
-            returned
-                .iter()
-                .all(|(_, outcome)| *outcome == Outcome::Returned)
-        );
-        assert_zero_loaders(&observed);
-        let snapshot = observed.snapshot();
-        assert!(
-            snapshot.watcher_initialization_observed
-                && snapshot.stream_decoder_initialization_observed
-        );
-        assert!(snapshot.decoded_source_chunks > 0);
-        assert!(
-            snapshot.parser_responses.iter().any(|body| body == BODY),
-            "{snapshot:?}"
-        );
-        assert_eq!(test_support::tree_fingerprint(&rows), before);
-        assert!(fixture.shared.core.lock().await.sessions.is_empty());
-        assert!(
-            discord
-                .requests_for(fixture.channel.get())
-                .iter()
-                .all(|request| !request.contains(BODY))
-        );
-    }
-}
-
-#[tokio::test]
-async fn n4d2_generation_missing_is_fail_closed_and_retry_charges_failure() {
-    if !isolated(
-        module_path!(),
-        "n4d2_generation_missing_is_fail_closed_and_retry_charges_failure",
-    ) {
-        return;
-    }
-    use crate::services::discord::health::{
-        n4d2_absence, n4d2_arm_absence, retry_pending_watcher_respawn,
-    };
-    let (fixture, _discord) = fixture(ProviderKind::Claude, 632_520_710).await;
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let marker = tc::session_temp_path(&fixture.session, "generation");
-    std::fs::rename(&marker, format!("{marker}.missing")).unwrap();
-    let submitted = Scope::new(&fixture.shared);
-    assert_eq!(
-        fixture.install().await,
-        OOnlyInstallOutcome::Deferred(OOnlyInstallReason::SourceUnavailable)
-    );
-    assert_eq!(submitted.submissions(), 0);
-    n4d2_arm_absence(&fixture.provider, fixture.channel, 100);
-    assert!(
-        retry_pending_watcher_respawn(
-            &fixture.registry,
-            &fixture.provider,
-            std::slice::from_ref(&fixture.shared),
-            fixture.channel,
-            100
-        )
-        .await
-    );
-    let absent = n4d2_absence(&fixture.provider, fixture.channel)
-        .expect("missing generation keeps recovery obligation");
-    assert_eq!(
-        (absent.0, absent.1, absent.3),
-        (100, 1, Some(OOnlyInstallReason::SourceUnavailable))
-    );
-    assert!(absent.2 > 100);
-    assert_eq!(submitted.submissions(), 0);
-    assert!(
-        !retry_pending_watcher_respawn(
-            &fixture.registry,
-            &fixture.provider,
-            std::slice::from_ref(&fixture.shared),
-            fixture.channel,
-            101
-        )
-        .await
-    );
-    assert_eq!(
-        n4d2_absence(&fixture.provider, fixture.channel),
-        Some(absent)
-    );
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Invalidation {
-    Source,
-    NonRegular,
-    Generation,
-    Owner,
-    Reset,
-}
-
-#[tokio::test]
 async fn n4d2_terminal_invalidated_authority_self_exits_and_retains_custody() {
     if !isolated(
         module_path!(),
@@ -513,34 +383,19 @@ skips = basename | resolved
 sources = {p.relative_to(root).as_posix(): c._production_text(p) for p in all_files}
 errors = b.audit(sources, skips={p.relative_to(root).as_posix() for p in skips})
 assert not errors, errors
-definitions = callers = 0
+removed = re.compile(r'\b(?:restore_retired_o_watchers|RetiredOWatcherRestore|install_mapped_retired_o_watcher|o_only_restore|o_only_retry|record_retired_o_install_outcome|retired_o_install_due|o_install_reason)\b')
 for path, code in sources.items():
-    if root / path in skips:
-        continue
-    for item in re.findall(r'\b(?:pub(?:\([^)]*\))?\s+)?use\s+[^;]+;', code):
-        if 'restore_retired_o_watchers' in item:
-            assert not re.search(r'\bas\b', item), f'{path}: unclassified boot API alias'
-    code = re.sub(r'\b(?:pub(?:\([^)]*\))?\s+)?use\s+[^;]+;', '', code)
-    definitions += len(re.findall(r'\bfn\s+restore_retired_o_watchers\b', code))
-    code = re.sub(r'\bfn\s+restore_retired_o_watchers\b', 'fn DEFINITION', code)
-    uses = list(re.finditer(r'\brestore_retired_o_watchers\b', code))
-    callers += len(uses)
-    assert not uses, f'{path}: owner-runtime boot API call or alias exists'
-assert definitions == 1, definitions
-assert callers == 0, callers
+    if root / path not in skips:
+        assert not removed.search(code), f'{path}: removed restore/retry symbol reintroduced'
 guards = [
-    ('health/watcher_respawn/live_bridge_guard.rs', 'retry_pending_watcher_respawn', 'super::super::legacy_supervision::is_retired(provider.as_str(),channel_id.get())'),
-    ('health/watcher_respawn/live_bridge_guard.rs', 'complete_force_clean_watcher_recovery', 'super::super::legacy_supervision::is_retired(provider.as_str(),channel_id.get())'),
     ('watchers/lifecycle/o_only_install.rs', 'install_retired_o_watcher', '!crate::services::discord::health::legacy_supervision::is_retired(request.provider.as_str(),request.channel_id.get())'),
-    ('watchers/lifecycle/restore.rs', 'restore_tmux_watchers', 'crate::services::discord::health::legacy_supervision::is_retired(provider.as_str(),channel_id.get())'),
-    ('watchers/lifecycle/o_only_restore.rs', 'restore_retired_o_watchers', '!crate::services::discord::health::legacy_supervision::is_retired(provider.as_str(),channel)'),
 ]
 for suffix, function, expected in guards:
-    body = b.function_text(sources['src/services/discord/' + suffix], function)
+    body = b.function_text(c._production_text(root / ('src/services/discord/' + suffix)), function)
     conditions = [re.sub(r',\)', ')', re.sub(r'\s+', '', cond)) for cond in re.findall(r'\bif\s+([^{}]+)\{', body) if 'is_retired' in cond]
     assert conditions == [expected], (function, conditions)
 print('canonical_retired_production_writers=0')
-print('restore_retired_o_watchers_owner_runtime_boot_callers=0')
+print('removed_retired_restore_retry_symbols=0')
 print('canonical_retired_condition_unchanged=true')
 print('activation_ready=false')
 "#;
@@ -556,7 +411,7 @@ print('activation_ready=false')
     );
     let report = String::from_utf8(output.stdout).unwrap();
     assert!(report.contains("canonical_retired_production_writers=0"));
-    assert!(report.contains("restore_retired_o_watchers_owner_runtime_boot_callers=0"));
+    assert!(report.contains("removed_retired_restore_retry_symbols=0"));
     assert!(report.contains("canonical_retired_condition_unchanged=true"));
     assert!(report.contains("activation_ready=false"));
 }

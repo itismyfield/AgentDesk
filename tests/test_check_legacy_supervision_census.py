@@ -71,6 +71,26 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
         self.assertIn('"src/still_test.rs"', source)
 
+    def test_explicit_deleted_pin_removes_only_missing_path(self):
+        missing = 'src/fixture_tests.rs'
+        (self.root / missing).unlink()
+        guard.sync_skips(self.root, ('src/promoted.rs',), (missing,))
+        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertIn('"src/still_test.rs"', self.path.read_text())
+
+    def test_deleted_pin_refuses_existing_unpinned_or_implicit_removal(self):
+        for path, expected in (
+            ('src/fixture_tests.rs', 'deletion path still exists: src/fixture_tests.rs'),
+            ('src/missing.rs', 'deletion is not pinned: src/missing.rs'),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    guard.sync_skips(self.root, ('src/promoted.rs',), (path,))
+                self.assertEqual(self.path.read_text(), self.original)
+        (self.root / 'src/fixture_tests.rs').unlink()
+        self.assertEqual(self.outcome(('src/promoted.rs',)), 'refusing pin removal')
+        self.assertEqual(self.path.read_text(), self.original)
+
 
 class N4DInstallerDormancyTests(unittest.TestCase):
     INSTALLER = 'src/services/discord/watchers/lifecycle/o_only_install.rs'
@@ -95,11 +115,10 @@ class N4DInstallerDormancyTests(unittest.TestCase):
             path.write_text(source)
             return self.errors(source, guard.classifier._production_text(path), 'source.rs')
 
-    def test_actual_installer_has_its_own_dormant_production_census(self):
+    def test_remaining_test_installer_has_no_production_restore_retry_adapter(self):
         root = Path.cwd()
         files, skips = guard.classifier._scan_inputs(root, guard.classifier.PINNED_TEST_ONLY_MODULE_FILES)
-        self.assertIn(root / self.INSTALLER, files)
-        self.assertNotIn(root / self.INSTALLER, skips, 'installer must be scanned as production')
+        self.assertIn(root / self.INSTALLER, skips, 'remaining installer fixture must be test-only')
         source = (root / 'src/services/discord/watchers/lifecycle/n4d2_boundary_tests.rs').read_text()
         census = re.findall(
             r'fn n4d2_dormant_census_counts_actual_production_callers\(\)\s*\{\s*let script = r#"(.*?)"#;',
@@ -110,7 +129,7 @@ class N4DInstallerDormancyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             'canonical_retired_production_writers=0',
-            'restore_retired_o_watchers_owner_runtime_boot_callers=0',
+            'removed_retired_restore_retry_symbols=0',
             'canonical_retired_condition_unchanged=true',
             'activation_ready=false',
         ])

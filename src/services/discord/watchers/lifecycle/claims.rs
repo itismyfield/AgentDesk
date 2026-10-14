@@ -352,6 +352,7 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher_for_host(
     claim_watcher_for_host(watchers, channel_id, handle, provider, claim, None)
 }
 
+#[cfg(test)]
 pub(super) fn claim_retired_o_watcher_for_host(
     watchers: &TmuxWatcherRegistry,
     channel_id: ChannelId,

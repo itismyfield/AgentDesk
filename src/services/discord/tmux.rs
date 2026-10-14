@@ -75,10 +75,10 @@ pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::n4d2_pause_install_after_host;
+#[cfg(test)]
 pub use watcher_lifecycle::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
-pub use watcher_lifecycle::{RetiredOWatcherRestore, restore_retired_o_watchers};
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;

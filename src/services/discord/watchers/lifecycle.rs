@@ -95,19 +95,21 @@ pub(in crate::services::discord) use self::claims::{
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
 };
 
+#[cfg(test)]
 #[path = "lifecycle/o_only_install.rs"]
 mod o_only_install;
 #[cfg(test)]
 pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
 #[cfg(test)]
 pub(in crate::services::discord) use o_only_install::tests::pause_host as n4d2_pause_install_after_host;
+#[cfg(test)]
 pub use o_only_install::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
 
-#[path = "lifecycle/o_only_restore.rs"]
-mod o_only_restore;
-pub use o_only_restore::{RetiredOWatcherRestore, restore_retired_o_watchers};
+#[cfg(all(test, unix))]
+#[path = "lifecycle/restore_legacy_tests.rs"]
+mod restore_legacy_tests;
 
 #[cfg(test)]
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
