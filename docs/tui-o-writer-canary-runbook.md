@@ -100,13 +100,10 @@ channel lost its TUI binding. Restore the binding; do not delete the store to ge
 
 ## 3. Confirm activation
 
-These checks establish writer activation. Before measuring N1, also require effective turn
-selection, successful retirement of the channel's synthetic population, and a same-boot,
-same-channel `n1_mode_confirmed` event with `actual_confirmed_at_us` inside its confirmation
-window (§5). A failed or partial retirement leaves Legacy turn-mode active. An `init` alone
-does not authorize N1 measurement (P33: `src/services/tui_o/turn_mode.rs:8–80`,
-`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`,
-`src/services/tui_o/n1_observation.rs:93–100`).
+These checks establish writer activation. A failed or partial retirement of the channel's
+synthetic population leaves Legacy turn-mode active (`src/services/tui_o/turn_mode.rs:8–80`,
+`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`). Check the relayed
+output with the source-to-Discord comparison in §5.
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
 - `<runtime_root>/o_store/o_era` exists (first canary only) and
@@ -224,185 +221,20 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 ## 5. Observe
 
-### 5.1 Establish capture paths before starting (R1, R2, R4)
-
-Keep a capture plan with the real raw input path/API, producer/normalizer command, completeness
-check and retained hash for every row below. Run R1, R2 and R4 before the first measured turn and
-retain a baseline from the confirmed boot. If a production provenance, Legacy, residue, binding
-normalizer or historical-debt producer cannot be identified and demonstrated, stop before
-measurement. The raw binding and N1 logs alone do not supply these captures. Fixtures and manual
-empty lists or zero counters cannot substitute for operational evidence (P44:
-`scripts/n1_canary/manifest.py:11–53`, `scripts/n1_canary/evidence.py:107–130`,
-`scripts/n1_canary/audit.py:14–60`; capture fields are in
-[`scripts/n1_canary/README.md`](../scripts/n1_canary/README.md)).
-
-All commands in this preflight read operational state. Save output only in a separate evidence
-directory; do not write configuration, DB rows, stores, cursors or transcripts. Variables name
-already established runtime root `R`, release root `REL`, boot configuration `CFG`, PID `PID`,
-channel string `C`, API base `BASE` and agent `AGENT`. Use existing read-only authentication where
-required; 401/403 and read failures do not mean absence.
-
-R1 checks the node, deployed source provenance and actual running executable:
+The N1 turn canary was dropped and its manifest, producer and 50-turn oracle tooling removed.
+Post marked prompts in the canary channel from your own Discord account, for example
+`Reply with exactly [E2E:CANARY:<RUN_ID>:1]`, one or more turns each with its own marker. The
+comparison counts your Discord message as the input; prompts sent through `/turn/start` (as the
+E2E driver's `send_prompt` does) leave no Discord input and read as `lost`. Do not use the E2E
+driver here: its default run includes E-50 (`!clear`) and its reset cancels the turn and clears the
+queue. Then compare that run's markers in the native transcript and Discord read-only:
 
 ```sh
-uname -s
-ps -p "$PID" -o pid=,lstart=,comm=
-jq '{repo_head, repo_dirty, build_profile, o_tui_writer,
-     o_tui_writer_type: (.o_tui_writer | type)}' "$REL/runtime/release-source.json"
-readlink "/proc/$PID/exe"
-sha256sum "/proc/$PID/exe"
-rg -n '^[[:space:]]*(tui_o|writer|turn|channels|all_tui|all_owned|cluster|instance_id|gateway_preferred_instance_id|default_execution_node_id):' "$CFG"
+python3 -m scripts.e2e.tui_relay.source_compare --channel-id <CHANNEL_ID> --run-id <RUN_ID>
 ```
 
-Check PID start identity before and after capture to detect restart/PID reuse. Current config text
-is not proof of what that PID applied: connect it to effective boot policy and retirement logs.
-The current oracle accepts Linux `/proc/<pid>/exe` proof only; another OS cannot use an installed
-file path as its substitute. `init.build_digest` is not the build Git SHA
-(`scripts/n1_canary/manifest.py:100–117`, `scripts/n1_canary/evidence.py:107–115`).
-
-R2 reads health, the watcher and the N1 snapshot. Verify that the agent's default turn target is C:
-
-```sh
-curl -fsS "$BASE/api/health" | jq '{status, fully_recovered, degraded_reasons}'
-curl -fsS "$BASE/api/channels/$C/watcher-state"
-curl -fsS "$BASE/api/agents/$AGENT/turn" |
-  python3 -c '
-import json, sys
-body = json.load(sys.stdin)
-snap = (body.get("turn_presence") or {}).get("n1_observation") or {}
-if snap.get("status") != "available" or str(snap.get("channel_id")) != sys.argv[1]:
-    raise SystemExit("REFUSE: unavailable or wrong-channel snapshot")
-print(json.dumps(snap, ensure_ascii=False))
-' "$C"
-rg -n '\[tui_o\].*(first activation|adoption|turn mode|Legacy delivered nothing through the stall|writer alarm)|delivery_record_authority: enabled' "$R"/logs/dcserver.stdout.log*
-find "$R/logs" -maxdepth 1 -type f -name 'n1-observation.jsonl*' -print
-```
-
-Retain the actual snapshot object as `baseline`, including schema, boot, sequence high-water,
-all nine counters, loss/error, open-attempt state and confirmation window. Require status
-`available`, dropped events and sink errors 0, a healthy observer, `open_attempts_complete: true`
-and no open attempt. Join `n1_mode_confirmed` and `actual_confirmed_at_us` to that same boot/channel.
-Do not replace unavailable/null/incomplete state with 0. Preserve all needed rotations, not only
-stdout grep or the latest JSONL file (queue 1024, 16 MiB rotation, three archives:
-`src/services/tui_o/n1_observation/sink.rs:1–115`,
-`src/services/tui_o/n1_observation.rs:110–175,240–500`). Health 200 or `fully_recovered: true` does
-not replace inspecting the channel's degraded reasons (`src/services/tui_o/alarm.rs:197–400`).
-
-R4 runs on every related node to establish panes, complete binding history, stores and source
-identity. Listing panes grants no permission to send keys or stop sessions:
-
-```sh
-tmux list-panes -a -F '#{session_name} #{pane_id} #{pane_pid} #{pane_current_command}'
-cat "$R/binding_events/$C.log"
-find "$R/o_store/$C" -maxdepth 1 -type f -print
-python3 -m json.tool "$R/o_store/$C/init"
-```
-
-Read `init` only if an existing store is present; distinguish missing from unreadable or damaged.
-Use the binding's resolved native path as `TRANSCRIPT`. Read-only `os.fstat` on its open descriptor
-must capture path, dev, ino, length and mtime; validate full JSONL boundaries and native turn
-completion. A tail or first-record check is only an identity probe. Reconcile Legacy delivery
-receipts/frontier and every historical/abandoned range with the pinned source set. No DB session
-count alone establishes that another node has no pane.
-
-The 16 manifest inputs and their required operational sources are:
-
-| Input | Raw source and production/completeness check |
-|---|---|
-| `process_proof` | R1 PID/start identity, release build attestation and proc executable hash; normalize exactly to runtime fields plus `executable_path`. |
-| `executable` | Bytes captured from the same stable `/proc/<pid>/exe`; hash agrees with proof and approved producer pair. |
-| `transcript` | R4 resolved native file, full SourceId and exact prefix/window through closure; no generated or truncated native file. |
-| `bindings` | Full R4 binding history, with a demonstrated normalizer to seq/boot/channel/provider/source/identity/status; all intervening transitions included. |
-| `baseline` | R2 available snapshot after actual confirmation, before the first measured native turn; preserve its full counters and boundary. |
-| `end_snapshot` | Same R2 API after the 50th turn and closure; same boot/channel, matching log high-water. Produced after measurement. |
-| `log` | Dedicated R2 N1 JSONL plus rotations covering confirmation through closure, without sequence gaps or mixed boots. |
-| `o_init` | R4 real `o_store/<C>/init`, including pinned sources and starts; preserve native store format. |
-| `o_ledger` | R4 complete `ledger.jsonl` through closure, including historical and unresolved attempts; preserve native ledger format. |
-| `legacy` | Actual input provenance ledger and authoritative delivery records, observed owner and allowed panel evidence; capture schema 1, full scoped inventory. |
-| `inflight` | Real Legacy inflight population with all relevant records, independently inventoried through closure; scoped schema 1. |
-| `pending` | Real pending TUI-direct population and its completeness evidence through closure; scoped schema 1. |
-| `abort` | Actual abort/residue population and boundary evidence through closure; scoped schema 1. |
-| `debt` | Historical sources, undelivered/abandoned ranges, individually checked baseline messages and full ledger hash; scoped schema 1. |
-| `pg` | SELECT-only capture of TEXT-channel intake and lifecycle rows for the exact interval; collector normalizes channel to an integer. External captures must use that same form. |
-| `discord` | Read-only history with proven page closure and visibility, plus individual Posted/baseline message lookups; one page or an empty response does not prove absence. |
-
-Demonstrate the capture producers on real preflight data and record the baseline before starting.
-The final `end_snapshot`, closure scopes and file hashes are completed afterward. Do not label a
-partial preflight capture `complete: true`; every capture's final scope must bind boot, channel,
-provider, SourceId, closing seq and closing offset. Positive per-physical-observation origin proof
-must bind execution identity, native record digest and input kind. Missing PG rows do not prove
-TTY/autonomous origin (`scripts/n1_canary/audit.py:14–60`).
-
-### 5.2 Register the deployed producer before using PASS
-
-The shipped `producer_capabilities` list is intentionally empty until a verified deployed pair
-is registered. The coordinator registers the actual `945aac266` deployment only after deployment;
-this lane does not invent an executable hash or enable unconditional support. Keep rejection of
-every unregistered build/hash, old schema or false capability (P43:
-`scripts/n1_canary/manifest.py:74–87`).
-
-1. Retain the build's clean source attestation (`release-source.json` `repo_head` and
-   `repo_dirty: "false"`) and the build/deployment record linking that SHA to the exact artifact.
-   A current checkout SHA or edited JSON alone does not attest a binary's build.
-2. In a separate producer verification run of those exact executable bytes, capture real schema 2
-   `n1_outcome_unknown` and successful `n1_mode_confirmed` events with actual confirmation time
-   and its window. Preserve that run's process proof and complete raw verification log/hash.
-   The original log may interleave channels. Sequence increases per boot/channel, including
-   across provider changes; preserve those rows without manual filtering. The observer owns
-   sequence per channel (`src/services/tui_o/n1_observation.rs:128–142,205–268`).
-   Both events must name the same boot/channel/provider; the unknown witness belongs to this
-   verification run, not the clean 50-turn canary. Do not induce an unknown event in the canary
-   to demonstrate the capability. Review the build's producer paths at
-   `src/services/tui_o/n1_observation.rs:57–100,240–365` and
-   `src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`.
-3. Run the read-only candidate tool against the captured proc executable. It checks SHA256,
-   build/proc proof, schema and positive evidence for both capabilities and prints one JSON
-   object; it neither executes the binary nor modifies the support table:
-
-   ```sh
-   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/scripts" \
-     python3 -m n1_canary.producer \
-       --process-proof "$PRODUCER_PROOF" --executable "$CAPTURED_EXE" \
-       --release-source "$RELEASE_SOURCE" --verification-log "$PRODUCER_LOG"
-   ```
-
-4. The coordinator reviews the retained attestation and verification captures, then inserts the
-   printed object into `scripts/n1_canary/compatibility.json` `producer_capabilities` for the
-   deployed oracle. Keep every other guard. Archive the approved table and recompute the oracle
-   bundle hash in the manifest, because the table and tool are part of that hash. A rebuild with
-   different bytes needs a new entry even at the same Git SHA. The registration/removal regression
-   proves PASS with a verified entry and rejection after removal in isolated test copies.
-
-The tool checks consistency of supplied captures; trusted build attestation and operational log
-provenance remain required review evidence. Missing positive capability evidence keeps the run
-blocked; toggling booleans by hand is not verification.
-
-### 5.3 Sample and close the run
-
-“50 turns” means 50 distinct completed native logical turns whose non-Discord input provenance
-(`tty`, `monitor` or `autonomous`) is positively proved for every physical observation. Discord
-round trips, aborted turns, rereads and the raw `closed_events` counter cannot fill the sample.
-Pin `fiftieth_offset` to the 50th eligible turn's exact end and retain evidence through
-`closure_offset`; do not replace that boundary with a later EOF (P40:
-`scripts/n1_canary/audit.py:14–60`). Preserve the same boot/channel/source and continuous binding
-and observation sequences from confirmation through closure.
-
-Run the independent oracle on the finalized 16-input manifest:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/scripts/n1_turn_canary_oracle.py" --manifest "$MANIFEST"
-```
-
-Expand only on exit 0 / `PASS`: native/origin, delivery, effects, reverse Discord comparison and
-historical-debt audit stages must all be complete, with no reasons or failures. Missing/duplicate
-pieces, Legacy body effects, synthetic/placeholder attempts, unresolved historical debt or
-unknown outcomes cannot be excused by an alarm or time spent waiting. Exit 1 / `FAIL` or 2 / `[U]`
-stops expansion (`scripts/n1_canary/audit.py:220–313`,
-`scripts/n1_turn_canary_oracle.py:79–127`). An approved producer entry alone is insufficient.
-
-Other channels remain control samples: separately confirm their Legacy delivery. The target's
-PASS does not prove their behavior. Broad `all_tui`/`all_owned` selection expands the operational
-scope beyond this single-channel procedure (`src/services/tui_o/turn_mode.rs:8–80`).
+Require exit 0. Evidence without markers exits 2; a `missing_relay`, `lost` or `duplicated`
+verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 
 ## 6. Forbidden during the canary
 
