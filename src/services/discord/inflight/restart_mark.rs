@@ -9,13 +9,23 @@ use crate::services::provider::ProviderKind;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-/// One marking pass: rows marked, rows whose marker could not be written, and whether the scan
-/// could not see every row.
+/// One marking pass: rows marked, rows whose marker could not be written, rows left alone for
+/// their policy receipt, and whether the scan could not see every row.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub(in crate::services::discord) struct RestartMarkReport {
     pub(in crate::services::discord) marked: usize,
     pub(in crate::services::discord) failed: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(in crate::services::discord) skipped_receipt: Vec<u64>,
     pub(in crate::services::discord) incomplete: bool,
+}
+
+/// One row's marking result; a receipt row is skipped, which is neither a mark nor a failure.
+#[derive(Debug)]
+pub(super) enum MarkOutcome {
+    Marked,
+    SkippedPolicyReceipt,
+    Failed,
 }
 
 /// Marks every readable row and reports the rest; one bad row never leaves later rows unmarked.
@@ -43,10 +53,10 @@ pub(super) fn mark_restart_mode_report(
             continue;
         }
         let path = inflight_state_path(&root, provider, state.channel_id);
-        if set_inflight_restart_mode_under_lock(&path, restart_mode) {
-            report.marked += 1;
-        } else {
-            report.failed.push(state.channel_id);
+        match set_inflight_restart_mode_under_lock(&path, restart_mode) {
+            MarkOutcome::Marked => report.marked += 1,
+            MarkOutcome::SkippedPolicyReceipt => report.skipped_receipt.push(state.channel_id),
+            MarkOutcome::Failed => report.failed.push(state.channel_id),
         }
     }
     report
@@ -64,6 +74,13 @@ pub(in crate::services::discord) async fn mark_restart_mode_blocking(
     .await;
     for channel in &report.failed {
         fence::record_failure(&provider, *channel, &[], fence::Failure::Persistence);
+    }
+    if !report.skipped_receipt.is_empty() {
+        tracing::info!(
+            provider = provider.as_str(),
+            skipped = ?report.skipped_receipt,
+            "restart marking left policy receipt rows unmarked"
+        );
     }
     let short = report.incomplete || !report.failed.is_empty();
     publish_short_pass(&provider, short.then(|| report.clone()));

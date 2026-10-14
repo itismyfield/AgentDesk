@@ -10,11 +10,11 @@ use super::fence::Failure;
 use super::ordering::{
     FetchTicket, PendingOverflow, PendingSource, ScanCapability, ValidatedOrderCapability,
 };
-use super::receipt::{Deferred, Receipt};
+use super::receipt::{Deferred, Receipt, ResponsibilityLookup};
 use super::source::Source;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::ledger::LedgerSlot;
-use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+use crate::services::tui_input::rows::receipt_identity::ReceiptIdentity;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ClosedAndFlushed(());
@@ -64,7 +64,7 @@ pub(crate) enum SupervisorCmd {
     },
     LookupResponsibility {
         identity: ReceiptIdentity,
-        reply: oneshot::Sender<Responsibility>,
+        reply: oneshot::Sender<ResponsibilityLookup>,
     },
     BeginScan {
         ticket: FetchTicket,

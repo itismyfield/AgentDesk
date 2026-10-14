@@ -11,7 +11,7 @@ mod current_message_anchor;
 #[cfg(unix)]
 mod early_tui_completion;
 mod finalize_epilogue;
-mod followup_requeue;
+pub(in crate::services::discord) mod followup_requeue;
 mod guards;
 mod headless_delivery;
 pub(in crate::services::discord) mod intake_settlement;
@@ -688,6 +688,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             },
         )
         .await;
+        let busy_attempt_cost = turn_start.elapsed();
         match stream_loop_output.outcome {
             stream_loop::StreamLoopOutcome::Completed => {}
             stream_loop::StreamLoopOutcome::AuthorityLost => {
@@ -708,7 +709,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         }
         #[rustfmt::skip]
         let (pending_long_running_open_after_state_save, pending_long_running_retarget_after_state_save) = (stream_loop_output.pending_long_running_open_after_state_save, stream_loop_output.pending_long_running_retarget_after_state_save);
-
         let post_loop_finalize_output = post_loop_finalize::run_post_loop_finalize(
             post_loop_finalize::PostLoopFinalizeContext {
                 shared_owned: shared_owned.clone(),
@@ -769,8 +769,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             post_loop_finalize_output.long_running_placeholder_active;
         let inflight_state = post_loop_finalize_output.inflight_state;
         let api_friction_reports = post_loop_finalize_output.api_friction_reports;
-        let claude_tui_followup_pre_submit_requeue_candidate =
-            post_loop_finalize_output.claude_tui_followup_pre_submit_requeue_candidate;
         let review_dispatch_warning = post_loop_finalize_output.review_dispatch_warning;
         let is_prompt_too_long = post_loop_finalize_output.is_prompt_too_long;
         let bridge_relay_delegated_to_watcher =
@@ -811,11 +809,13 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                     should_fail_dispatch_after_delivery,
                     single_message_panel_footer_mode,
                     is_prompt_too_long,
-                    claude_tui_followup_pre_submit_requeue_candidate,
+                    claude_tui_followup_pre_submit_requeue_candidate: post_loop_finalize_output
+                        .claude_tui_followup_pre_submit_requeue_candidate,
                     tui_error_classification: post_loop_finalize_output.tui_error_classification,
                     had_prior_session_id_at_turn_start,
                     session_handshake_seen,
                     turn_start,
+                    busy_attempt_cost,
                     #[cfg(unix)]
                     bridge_tui_gate_outcome_early,
                 },

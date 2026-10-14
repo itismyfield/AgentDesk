@@ -1532,13 +1532,13 @@ class PgIncludeRestoration(unittest.TestCase):
         pg, run_only = self.PG, {"recipe": None}
         workflow, recipe = "ci-fixture.yml", "justfile"
         missing = ("_pg", "pg_", "postgres", "no_such_module")
-        zero = [(workflow, "pg-include-zero-match")] + [(recipe, "pg-include-zero-match")] * 3
+        zero = [(workflow, "pg-include-zero-match"), (recipe, "pg-include-zero-match")] + [(recipe, "pg-include-empty")] * 2
         normalized = pg.replace('"', "")
         for name, kwargs, kinds in (
                 ("every shard selects", {}, []),
                 # A workflow sources with the shard unset; a recipe may inherit 0 or 1.
                 ("shard 0 selects nothing", {"pg_case": None},
-                 [(recipe, "pg-include-zero-match")]),
+                 [(recipe, "pg-include-empty")]),
                 ("shard 1 has no positive filter", {"skips": ("pg_", "postgres")},
                  [(recipe, "pg-include-empty")]),
                 ("nothing selected", {"skips": missing, "pg_case": None}, zero),
@@ -1578,14 +1578,15 @@ class PgIncludeRestoration(unittest.TestCase):
                 ("index = 1;", "index = 0;"),
                 ("index += 2", "index += 1"),
                 ("  PG_INCLUDE_ARGS+=(", "  PG_EXTRA_ARGS+=("),
-                ('0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_0[@]}")',
-                 '0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_1[@]}")'),
-                ("    return 1\n", "    :\n"),
+                ('--partition-pg-list "$PG_INCLUDE_SHARD"', '--partition-pg-list "0"'),
+                ('--validate-pg-shard "$PG_INCLUDE_SHARD" || return 1',
+                 '--validate-pg-shard "$PG_INCLUDE_SHARD" || true'),
                 ("\nreadonly -a PG_INCLUDE_ARGS\n", "\n"),
-                ("\nrun_non_pg_filter_replay() {", "\nPG_INCLUDE_ARGS_SHARD_0+=(extra)\n"
+                ("\nrun_non_pg_filter_replay() {", "\nPG_INCLUDE_ARGS+=(extra)\n"
                  "run_non_pg_filter_replay() {"),
-                ("  --skip pg_\n  --skip postgres\n)\n# END", ")\n# END"),
-                ("PG_INCLUDE_ARGS_SHARD_0=(\n  pg_\n", "PG_INCLUDE_ARGS_SHARD_0=(\n  $EXTRA\n"),
+                ('PG_INCLUDE_ARGS=(--exact', 'PG_INCLUDE_ARGS=(--skip'),
+                ('set -o pipefail;', ':'),
+                ('NON_PG_SKIP_ARGS=(\n  --skip _pg', 'NON_PG_SKIP_ARGS=(\n  --skip $EXTRA'),
                 ("# BEGIN generated", "return 0\n# BEGIN generated"),
                 ("  --skip server::multinode_regression\n)", "  --skip server::multinode_regression\n")):
             def edit(text: str, old: str = old, new: str = new) -> str:
