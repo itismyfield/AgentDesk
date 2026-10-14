@@ -9,6 +9,7 @@ use crate::services::agent_protocol::StatusEvent;
 use crate::services::provider::ProviderKind;
 
 mod background_task_events;
+mod channel_visibility;
 mod common;
 mod completion_footer;
 mod context_panel;
@@ -105,6 +106,7 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // (no needless re-edit) while Discord shows the localized live age client-side.
     last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
     panel_cache_invalidations: panel_cache_invalidation::PanelCacheInvalidations,
+    panel_channel_kinds: channel_visibility::PanelChannelKinds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -589,7 +589,8 @@ pub(in crate::services::discord) fn completion_footer_forget_registered_target_i
     true
 }
 
-fn completion_footer_forget_registered_target_if_identity(
+/// Forgets the footer target only while both its message and its owner still match.
+pub(in crate::services::discord) fn completion_footer_forget_registered_target_if_identity(
     channel_id: ChannelId,
     message_id: MessageId,
     owner: CompletionFooterOwner,
@@ -605,4 +606,58 @@ fn completion_footer_forget_registered_target_if_identity(
     }
     guard.remove(&channel_id.get());
     true
+}
+
+#[cfg(test)]
+mod owner_cas_tests {
+    use super::*;
+
+    fn register(channel_id: ChannelId, message_id: u64, owner: CompletionFooterOwner) {
+        let _ = register_completion_footer_target_for_owner(
+            channel_id,
+            MessageId::new(message_id),
+            owner,
+            &ProviderKind::Claude,
+            1_700_000_000,
+            "answer body",
+            None,
+            true,
+        );
+    }
+
+    fn registered(channel_id: ChannelId) -> Option<(MessageId, CompletionFooterOwner)> {
+        completion_footer_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&channel_id.get())
+            .map(|target| (target.message_id, target.owner))
+    }
+
+    #[test]
+    fn a_late_owner_cannot_forget_a_footer_reregistered_on_the_same_message() {
+        let late = CompletionFooterOwner::new(10, 1_700_000_000);
+        let current = CompletionFooterOwner::new(11, 1_700_000_100);
+        let message = MessageId::new(900);
+        let forget = completion_footer_forget_registered_target_if_identity;
+
+        // The message changed owners before the late release: it is refused.
+        let channel_id = ChannelId::new(5_708_401);
+        register(channel_id, 900, late);
+        completion_footer_forget_registered_target(channel_id);
+        register(channel_id, 900, current);
+        assert_eq!(registered(channel_id), Some((message, current)));
+        assert!(!forget(channel_id, message, late));
+        assert!(!forget(channel_id, MessageId::new(901), current));
+        assert_eq!(registered(channel_id), Some((message, current)));
+        assert!(forget(channel_id, message, current));
+        assert_eq!(registered(channel_id), None);
+
+        // The release lands first: the following re-registration is kept.
+        let channel_id = ChannelId::new(5_708_402);
+        register(channel_id, 900, late);
+        assert!(forget(channel_id, message, late));
+        register(channel_id, 900, current);
+        assert!(!forget(channel_id, message, late));
+        assert_eq!(registered(channel_id), Some((message, current)));
+    }
 }

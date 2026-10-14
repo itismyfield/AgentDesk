@@ -41244,6 +41244,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:22e01718e38cce08d843d78d1bb02c9f5680da56d26c2a5e453d559cd6397f65"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
@@ -41346,7 +41355,25 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:ad6cc85e3b5752fa4d4bbe6afe2078b0fbe69b4a3db60342637e3f6a25716e9a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:b8e7a2fce09f7b1d2edcbdfe6731d06bece7d88b9d415f81dd8c661bd49a691b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b9b8899017baa406c7667b2334ff51ad5f3c9b7dc3e1b930b689712460f49457"
     },
     {
       "root": "src",
@@ -41401,6 +41428,24 @@
       "symbol": "raw_sql",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:a2b6b1fe6d6fb965c06b5bdc809c8cdca5e9ce9bea5a07436d63addbdbd15b2c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3d499eda5ff20e0a950d683da7ae9b5bc11df9f9a06867643808a257ef326f2f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a2139364b105960996e51bd75db818995bd0ad81bd951c92e4d2c03f16953ad4"
     },
     {
       "root": "src",
