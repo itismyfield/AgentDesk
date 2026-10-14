@@ -1,7 +1,5 @@
 use super::*;
-use crate::services::discord::input_runtime::intake::{
-    Access, Applied, Client, apply_from_scan, lookup,
-};
+use crate::services::discord::input_runtime::intake::{Access, Applied, apply_from_scan, lookup};
 use crate::services::discord::input_runtime::intake::{
     Classification, Origin, SourceDraft, prepare_source,
 };
