@@ -62,7 +62,7 @@ async fn wrapper_source_case(binding: BindingSource) {
     let handle = fixture.handle();
     assert_eq!(
         handle.output_path, fixture.output,
-        "the installer prefers its existing wrapper"
+        "the watcher starts with the specified wrapper source"
     );
     let ticket = watcher_completion::observe(&handle.cancel).unwrap();
     until(
@@ -120,10 +120,9 @@ async fn wrapper_source_case(binding: BindingSource) {
 }
 
 #[tokio::test]
-async fn t6_b_native_binding_with_wrapper_relay_preserves_installer_selection() {
-    if child(
-        "source_contract::t6_b_native_binding_with_wrapper_relay_preserves_installer_selection",
-    ) {
+async fn t6_b_native_binding_with_wrapper_relay_keeps_watcher_wrapper_source() {
+    if child("source_contract::t6_b_native_binding_with_wrapper_relay_keeps_watcher_wrapper_source")
+    {
         wrapper_source_case(BindingSource::NativeWithWrapperRelay).await;
     }
 }
