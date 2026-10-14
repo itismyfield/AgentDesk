@@ -25,16 +25,15 @@ const MINI: &str = "mini-4386";
 
 /// Enforce routing over a fresh root, holding the crate-wide env lock.
 struct EnforceEnv {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _live: crate::config_live_reload::TestLiveGuard,
     _root: tempfile::TempDir,
     previous: [(&'static str, Option<OsString>); 2],
 }
 
 impl EnforceEnv {
     fn new() -> Self {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let live = crate::config_live_reload::test_live_guard(lock);
         let root = tempfile::tempdir().unwrap();
         let keys = ["ADK_INTAKE_ROUTING_MODE", "AGENTDESK_ROOT_DIR"];
         let previous = keys.map(|key| (key, std::env::var_os(key)));
@@ -43,8 +42,12 @@ impl EnforceEnv {
             std::env::set_var(keys[0], "enforce");
             std::env::set_var(keys[1], root.path());
         }
+        // Routing needs a known-empty owner allowlist independent of other tests.
+        let mut config = crate::config::Config::default();
+        config.data.dir = root.path().join("data");
+        crate::config_live_reload::install(config);
         Self {
-            _lock: lock,
+            _live: live,
             _root: root,
             previous,
         }

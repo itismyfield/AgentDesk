@@ -9,6 +9,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+mod capacity;
+#[cfg(test)]
+mod model;
 const RESTART_REPORT_VERSION: u32 = 2;
 const AWAITING_REPORT_MAX_AGE: chrono::Duration = chrono::Duration::minutes(5);
 pub(crate) const RESTART_REPORT_CHANNEL_ENV: &str = "AGENTDESK_REPORT_CHANNEL_ID";
@@ -300,6 +304,7 @@ pub(crate) fn settle_restart_handoff(
         state,
     )
 }
+#[cfg(test)]
 pub(super) fn settle_restart_in_root(
     root: &Path,
     context: &RestartReportContext,

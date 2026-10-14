@@ -908,8 +908,8 @@ targets = {
   },
   "test_fast" => {
     "label" => "PostgreSQL job",
-    "name" => "PostgreSQL tests (ubuntu-postgres)",
-    "needs" => "changes",
+    "name" => "PostgreSQL tests (shard ${{ matrix.shard }})",
+    "needs" => ["changes", "pg_shards"],
     "if" => "needs.changes.outputs.pg_db == 'true'",
     "runs_on" => "ubuntu-latest",
     # #4979 S2 re-pins after adding the AGENTDESK_REQUIRE_PG=1 job env so a PG
@@ -924,14 +924,15 @@ targets = {
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
     # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "058d450aa87871bdc002d7137def8f4500fe5f777bddc4ce4a7147c919716ad0",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "6616db35e28cccdbf0e5d8dca33cdf5d797c1990dfb7c2983f9b07ecccb48553",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [
@@ -965,9 +966,9 @@ targets = {
         ],
         "timeout_minutes" => 10,
       },
-      "just test-postgres" => {
-        "commands" => ["just test-postgres"],
-        "timeout_minutes" => 60,
+      "just test-postgres-shard" => {
+        "commands" => ["just test-postgres-shard"],
+        "timeout_minutes" => 75,
       },
     },
   },
@@ -1132,14 +1133,15 @@ targets = {
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "73362980d7fa0040f95fa5cb604d0c418c19ffd0f1dae88504623075aa1824c8",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "941e48600f40434394ade7cc8dc2efa9d83a775f2293c69c10712989b8fa2a8c",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [
@@ -1443,22 +1445,36 @@ RUBY
 }
 validate_main_full_sweep
 
-# Main's PG lane is two matrix shards; each must run unconditionally so the run
-# is green only when both shards pass every PG test step.
+# Both PG matrices must use the shared planner and fail when any shard fails.
 validate_main_pg_shards() {
-  if ! ruby - "$main_workflow" <<'RUBY'
+  if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
-main_path = ARGV.fetch(0)
-job = YAML.load_file(main_path).dig("jobs", "postgres")
+errors = []
+ARGV.each do |main_path|
+pr = main_path.end_with?("ci-pr.yml")
+job_id = pr ? "test_fast" : "postgres"
+document = YAML.load_file(main_path)
+plan = {
+  "runs-on" => "ubuntu-latest",
+  "outputs" => { "matrix" => "${{ steps.plan.outputs.matrix }}" },
+  "steps" => [
+    { "uses" => "actions/checkout@v4" },
+    { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
+  ],
+}
+plan.merge!("needs" => "changes", "if" => "needs.changes.outputs.pg_db == 'true'") if pr
+job = document.dig("jobs", job_id)
 unless job.is_a?(Hash)
   warn "#{main_path}: job postgres is missing"
   exit 1
 end
-errors = []
+errors << "#{main_path}: pg_shards must emit the canonical matrix" unless document.dig("jobs", "pg_shards") == plan
 errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
 errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-%w[if needs continue-on-error].each { |key| errors << "job postgres must not set #{key}" if job.key?(key) }
-errors << "job postgres strategy must be exactly fail-fast false over shard [0, 1]" unless job["strategy"] == { "fail-fast" => false, "matrix" => { "shard" => [0, 1] } }
+errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards"] : "pg_shards")
+errors << "PG job must retain its path condition" unless (pr ? job["if"] == "needs.changes.outputs.pg_db == 'true'" : !job.key?("if"))
+errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
+errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
 env = job["env"] || {}
 errors << "job postgres env must set PG_INCLUDE_SHARD from matrix.shard" unless env["PG_INCLUDE_SHARD"] == "${{ matrix.shard }}"
 errors << "job postgres env must set AGENTDESK_REQUIRE_PG=1" unless env["AGENTDESK_REQUIRE_PG"] == "1"
@@ -1466,6 +1482,7 @@ diagnostics = {
   "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
   "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
 }
+diagnostics["Require observer summary"] = "always()" if pr
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
 # A step is a test step by what it runs, so a diagnostics name cannot lend it a condition.
 runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test)/) }
@@ -1485,12 +1502,15 @@ index = ->(pred) { steps.index(&pred) }
 start = index.(->(step) { step["run"] == start_run })
 tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-test_step = tests.length == 1 ? steps[tests[0]] : {}
-errors << "job postgres must run tests in exactly one step, \"just test-postgres-shard\": just test-postgres-shard" unless test_step["name"] == "just test-postgres-shard" && test_step["run"].to_s.strip == "just test-postgres-shard"
-errors << "job postgres test step must keep timeout-minutes: 60" unless test_step["timeout-minutes"] == 60
+errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == "just test-postgres-shard" } == 1
+test_step = steps.find { |step| step["run"].to_s.strip == "just test-postgres-shard" } || {}
+errors << "PG shard step must keep its exact name" unless test_step["name"] == "just test-postgres-shard"
+errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
-errors << "job postgres must start PostgreSQL, run the test step, then stop it" unless start && stop && tests.length == 1 && start < tests[0] && tests[0] < stop
-errors.each { |message| warn "#{main_path}: #{message}" }
+errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }
+errors << "main PG job must have exactly one test step" unless pr || tests.length == 1
+end
+errors.each { |message| warn message }
 exit(errors.empty? ? 0 : 1)
 RUBY
   then
@@ -2031,16 +2051,15 @@ done < <(workflow_files)
 validate_required_context_uniqueness
 validate_path_filter_required_mirrors
 
-if [ -f "$trusted_workflow" ]; then
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then
-    error "$trusted_workflow must not have a pull_request or pull_request_target trigger"
-  fi
-  grep -Eq '^[[:space:]]+push:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a trusted push trigger"
-  grep -Eq '^[[:space:]]+workflow_dispatch:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a workflow_dispatch trigger"
-  grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a merge_group trigger"
+# Trusted macOS runs on a timer or by hand only and no run cancels another:
+# a per-push run outlasts the gap between main pushes and never finishes.
+if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
+  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
+  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
+    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
+    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
+  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

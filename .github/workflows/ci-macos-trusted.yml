@@ -1,21 +1,26 @@
 name: CI macOS Trusted
 
 on:
-  # Main pushes only: branch pushes used to queue a hosted macOS run each; run a branch manually when needed.
-  push:
-    branches:
-      - main
+  # Current main every 6 hours: a per-push run outlasts the gap between main pushes.
+  # :17 avoids the top-of-hour cron rush; the hours stay clear of the 18:00 UTC nightly.
+  schedule:
+    - cron: "17 3,9,15,21 * * *"
+  # Manual run on any branch, tag or commit, e.g. a deploy candidate SHA.
   workflow_dispatch:
-  merge_group:
-    types:
-      - checks_requested
+    inputs:
+      ref:
+        description: Full commit SHA, branch or tag to check; empty checks the branch picked in the run form
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-macos-trusted-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # One group per event and ref, never cancelling: a manual run and a scheduled run cannot stop each other.
+  group: ci-macos-trusted-${{ github.event_name }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,9 +31,11 @@ jobs:
     # Pin the arm64 image for H2 measurements; the host-triple check rejects image drift.
     runs-on: macos-15
     steps:
-      # Skip heavy steps on docs-only pushes only when the filter succeeds with run=false.
+      # Heavy steps skip only on a successful run=false, which scheduled and manual runs never get.
       - uses: actions/checkout@v4
         with:
+          # Empty unless a manual run names a ref; empty checks out the event's own commit.
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
           filter: blob:none
 

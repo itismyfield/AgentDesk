@@ -2501,10 +2501,10 @@ class ControlFlowPrimitives(unittest.TestCase):
         self.assertEqual(
             sent,
             [
-                ("AgentDesk-claude-adk-claude-tui-e2e", ("STALE_DRAFT",)),
-                ("AgentDesk-claude-adk-claude-tui-e2e", ("C-u",)),
-                ("AgentDesk-claude-adk-claude-tui-e2e", ("final prompt",)),
-                ("AgentDesk-claude-adk-claude-tui-e2e", ("C-m",)),
+                ("AgentDesk-claude-adk-claude-tui-2-e2e", ("STALE_DRAFT",)),
+                ("AgentDesk-claude-adk-claude-tui-2-e2e", ("C-u",)),
+                ("AgentDesk-claude-adk-claude-tui-2-e2e", ("final prompt",)),
+                ("AgentDesk-claude-adk-claude-tui-2-e2e", ("C-m",)),
             ],
         )
         self.assertEqual([sleep for sleep in sleeps if sleep == 0.35], [0.35, 0.35, 0.35])
@@ -2512,7 +2512,7 @@ class ControlFlowPrimitives(unittest.TestCase):
             record["tmux_key_sequences"],
             [
                 {
-                    "session": "AgentDesk-claude-adk-claude-tui-e2e",
+                    "session": "AgentDesk-claude-adk-claude-tui-2-e2e",
                     "count": 4,
                     "mode": "per_key",
                     "key_interval_s": 0.35,

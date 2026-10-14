@@ -272,6 +272,36 @@ else
     fail "the peer lost its smoke exemption: $(cat "$TMP_ROOT/peer.log")"
 fi
 
+echo "§7 a peer keeps the Herdr worker channel claude-tui moved off exempt"
+# 444 is the Herdr worker channel, 111 claude-tui's tmux channel, 222 Codex; exemptions come from the real resolver.
+printf 'agents:\n  - {id: adk-claude-tui-e2e, channels: {claude: {id: "444"}}}\n  - {id: adk-claude-tui-2-e2e, channels: {claude: {id: "111"}}}\n  - {id: adk-codex-tui-e2e, channels: {codex: {id: "222"}}}\n' > "$TMP_ROOT/both.yaml"
+printf 'agents:\n  - {id: adk-claude-tui-e2e, channels: {claude: {id: "444"}}}\n  - {id: adk-codex-tui-e2e, channels: {codex: {id: "222"}}}\n' > "$TMP_ROOT/old-only.yaml"
+peer_verdict() {
+    export DEPLOY_E2E_SMOKE_CHANNEL_IDS
+    DEPLOY_E2E_SMOKE_CHANNEL_IDS=$(_deploy_e2e_smoke_channel_ids "$REPO_ROOT" "$TMP_ROOT/$1" "$2" codex-tui)
+    PEER_HEALTH_BODY="$(body "[\"$3\"]")"
+    _wait_for_peer_deploy_verdict fixture-peer fixture-log fixture-manifest 1 target-head > "$TMP_ROOT/peer.log" 2>&1
+}
+for config in both.yaml old-only.yaml; do
+    if peer_verdict "$config" claude-tui tui_o:too_many_readers:444; then
+        pass "$config: the peer verdict accepts the Herdr worker channel's reader alarm"
+    else
+        fail "$config: the peer verdict refused 444: $(cat "$TMP_ROOT/peer.log")"
+    fi
+    for reason in tui_o:too_many_readers:333 tui_o:halted:444 tui_o:binding_pending:444; do
+        if peer_verdict "$config" claude-tui "$reason"; then
+            fail "$config: the peer verdict accepted $reason"
+        else
+            pass "$config: the peer verdict still refuses $reason"
+        fi
+    done
+done
+if peer_verdict both.yaml codex-tui tui_o:too_many_readers:444; then
+    fail "a Codex-only smoke exempted the Herdr worker channel on the peer"
+else
+    pass "a Codex-only smoke leaves the Herdr worker channel blocking on the peer"
+fi
+
 if [ "$FAILURES" -gt 0 ]; then
     echo "$FAILURES failure(s)" >&2
     exit 1

@@ -15,6 +15,14 @@ struct Witness {
 static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// Actor proof of a claim delegated to a non-bridge owner. Kept apart from `CLAIMS`
+/// so capture and dormant resume still refuse the row; only `reown` reads it.
+static DELEGATED: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::tui_prompt_relay) mod reown;
+
 /// What the claim is, decided from the row read before it takes the slot (I21).
 #[derive(Clone, Debug)]
 pub(super) enum AdmissionClass {
@@ -371,6 +379,16 @@ pub(super) fn record(
 ) -> bool {
     let Some(actor) = actor else { return false };
     if row.effective_relay_owner_kind() != RelayOwnerKind::None {
+        let mut delegated = DELEGATED.lock().unwrap_or_else(|error| error.into_inner());
+        delegated.retain(|_, witness| witness.actor.strong_count() > 0);
+        delegated.insert(
+            (row.provider.clone(), row.channel_id),
+            Witness {
+                episode: InflightEpisodePin::from_state(row),
+                actor: Arc::downgrade(actor),
+                pg_pin,
+            },
+        );
         return true;
     }
     if row.external_turn_id.as_deref().is_none_or(str::is_empty)

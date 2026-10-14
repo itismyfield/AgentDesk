@@ -63,6 +63,11 @@ class CellHelpers(unittest.TestCase):
             # legacy adk-dash workspaces must never match a new cell substring.
             self.assertNotIn("dash", sub)
 
+    def test_herdr_cells_keep_their_cell_named_workspace_tag(self):
+        # claude-tui's agent move must not retarget the Herdr harness's path tag.
+        self.assertEqual(driver.cell_workspace_substring("claude-herdr"), "adk-claude-herdr-e2e")
+        self.assertEqual(driver.cell_workspace_substring("codex-herdr"), "adk-codex-herdr-e2e")
+
 
 class ScenarioFilter(unittest.TestCase):
     def setUp(self):
@@ -440,7 +445,7 @@ class ScenarioFilter(unittest.TestCase):
     def test_no_legacy_adk_dash_residue_in_scenarios(self):
         """Scenarios must not embed the legacy `adk-dash` reverify substring.
 
-        New session names are AgentDesk-{provider}-adk-{cell}-e2e, so any
+        New session names are AgentDesk-{provider}-{worker agent}, so any
         kill_pane / destructive guard that reverifies against `adk-dash`
         would fail closed under the cell driver.
         """

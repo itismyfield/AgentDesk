@@ -129,9 +129,19 @@ async fn consume(
     {
         return false;
     }
-    let sent = notice.await;
-    let Some(acked) = admitted.ack_before_start_notice(&sent).await else {
-        return false;
+    // A re-entry whose notice is already durably delivered submits without showing it again.
+    let acked = if admitted
+        .herdr_before_start_stop
+        .as_ref()
+        .is_some_and(|receipt| receipt.notice_delivered())
+    {
+        admitted.clone()
+    } else {
+        let sent = notice.await;
+        let Some(acked) = admitted.ack_before_start_notice(&sent).await else {
+            return false;
+        };
+        acked
     };
     #[cfg(test)]
     test_hooks::boundary("after_notice_ack", &admitted);
@@ -190,7 +200,11 @@ fn policy_intent(
             &shared.provider,
             channel,
         ),
+        trace: Default::default(),
     };
+    // Tests bind the request's own probe and settlement switch to it here.
+    #[cfg(test)]
+    let request = crate::services::turn_orchestrator::policy_close::test_hooks::bind(request);
     Some(PolicyCloseIntent {
         key,
         provider: shared.provider.clone(),
