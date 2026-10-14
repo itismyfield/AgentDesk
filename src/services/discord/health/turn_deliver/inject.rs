@@ -198,9 +198,19 @@ pub(super) fn holder(
     })
 }
 
-/// Queued input, or a head dequeued but not yet claimed, must run before this one.
-pub(super) fn backlog(snapshot: &ChannelMailboxSnapshot) -> Result<(), &'static str> {
-    if snapshot.intervention_queue.is_empty() && snapshot.pending_user_dispatch.is_none() {
+/// Queued input that is not parked, or a head dequeued but not yet claimed, must run before
+/// this one; the owner's reservation decides again on its own state.
+pub(super) fn backlog(
+    snapshot: &ChannelMailboxSnapshot,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<(), &'static str> {
+    use crate::services::discord::busy_followup_retry_store::{input_class, parked_only};
+    let queue = snapshot.intervention_queue.iter();
+    let classes: Vec<_> = queue
+        .map(|item| input_class(provider, channel, item))
+        .collect();
+    if snapshot.pending_user_dispatch.is_none() && parked_only(&classes) {
         Ok(())
     } else {
         Err(QUEUE_NONEMPTY)
@@ -343,7 +353,7 @@ async fn resolve(
     let (snapshot, row) = observe(shared, request).await;
     let first = holder(&snapshot, row.as_ref(), channel)?;
     if !queued {
-        backlog(&snapshot)?;
+        backlog(&snapshot, &request.provider, request.channel_id)?;
     }
     let deferred = crate::services::discord::host_defer_gate::channel_session_deferred;
     if deferred(shared, &request.provider, channel, &pane.0).await {

@@ -36,6 +36,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
+        "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
+        "src/services/discord/runtime_bootstrap/queued_recovery_draft_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queued_recovery_tests.rs",
@@ -73,6 +75,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/db/replay_disposition/write_tests.rs",
         "src/services/discord/replay_policy/permit_tests.rs",
         "src/services/discord/replay_policy/policy_tests.rs",
+        "src/services/discord/busy_followup_retry_store/policy_tests.rs",
         "src/services/discord/replay_policy/live_tests.rs",
         "src/services/discord/replay_policy/injected/test_support_tests.rs",
         "src/services/discord/tmux_watcher/injected_watcher_tests.rs",
@@ -692,6 +695,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
+        "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
+        "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
         "src/services/tui_prompt_dedupe/handoff_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
@@ -786,6 +792,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/services/discord/inflight/save_store/coordinate_replay.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
     }
 )
 

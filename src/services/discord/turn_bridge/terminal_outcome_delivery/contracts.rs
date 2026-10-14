@@ -34,6 +34,8 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     pub(in crate::services::discord::turn_bridge) had_prior_session_id_at_turn_start: bool,
     pub(in crate::services::discord::turn_bridge) session_handshake_seen: bool,
     pub(in crate::services::discord::turn_bridge) turn_start: std::time::Instant,
+    /// Bridge-active time of this attempt, frozen when its stream loop ended.
+    pub(in crate::services::discord::turn_bridge) busy_attempt_cost: std::time::Duration,
     #[cfg(unix)]
     pub(in crate::services::discord::turn_bridge) bridge_tui_gate_outcome_early:
         Option<super::super::super::tmux::TuiCompletionGateOutcome>,
@@ -286,6 +288,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) resume_failure_detected: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
     pub(super) claude_tui_busy_requeue_pending: bool,
+    pub(super) busy_attempt_cost: std::time::Duration,
     pub(super) tui_error_classification: TuiErrorClassification,
     #[cfg(unix)]
     pub(super) bridge_tui_gate_outcome_early:

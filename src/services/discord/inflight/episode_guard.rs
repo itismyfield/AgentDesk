@@ -144,9 +144,16 @@ impl LockedInflightEpisode {
         updated: &InflightTurnState,
         caller: &'static str,
     ) -> GuardedSaveOutcome {
-        let saved = match super::store::persist_under_lock_with_snapshot(
-            &self.root, &self.path, updated, caller,
-        ) {
+        let written =
+            super::store::persist_under_lock_with_snapshot(&self.root, &self.path, updated, caller);
+        self.adopt_reread_write(written)
+    }
+
+    fn adopt_reread_write(
+        &mut self,
+        written: Result<Option<InflightTurnState>, String>,
+    ) -> GuardedSaveOutcome {
+        let saved = match written {
             Ok(Some(saved)) => saved,
             Ok(None) => return GuardedSaveOutcome::AuthorityPinned,
             Err(_) => return GuardedSaveOutcome::IoError,
@@ -158,6 +165,25 @@ impl LockedInflightEpisode {
             }
             _ => GuardedSaveOutcome::IoError,
         }
+    }
+
+    /// Writes a coordinate-group change under the held lock and adopts the re-read durable row,
+    /// so the caller rebuilds its pin from what is actually persisted. No second flock is taken.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn persist_coordinate_change_under_guard(
+        &mut self,
+        updated: &InflightTurnState,
+        source_rebase: bool,
+        caller: &'static str,
+    ) -> GuardedSaveOutcome {
+        let written = super::store::persist_coordinate_change_under_lock(
+            &self.root,
+            &self.path,
+            updated,
+            caller,
+            source_rebase,
+        );
+        self.adopt_reread_write(written)
     }
 
     pub(in crate::services::discord) fn mark_readopted_under_guard(
@@ -228,7 +254,7 @@ pub(in crate::services::discord) fn lock_inflight_birth_episode(
     Ok(LockedInflightEpisode::new(lock, root, path, state))
 }
 
-fn lock_inflight_episode_in_root(
+pub(in crate::services::discord::inflight) fn lock_inflight_episode_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
     channel_id: u64,
