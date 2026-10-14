@@ -232,7 +232,7 @@ fn stash(status: &str, width: usize) -> Stash {
 
 /// The person's draft rows when the composer holds plain text, Claude shows no stash and the
 /// frame will render flat; anything else leaves the draft untouched.
-pub(super) fn stashable(
+pub(in crate::services::claude_tui) fn stashable(
     capture: &str,
     frame: &str,
     size: Option<(usize, usize)>,
@@ -403,7 +403,7 @@ pub(super) fn typed(capture: &str) -> Option<bool> {
 }
 
 /// The composer shows exactly the frame, row for row, with the draft still stashed.
-pub(super) fn owns(capture: &str, frame: &str) -> bool {
+pub(in crate::services::claude_tui) fn owns(capture: &str, frame: &str) -> bool {
     let screen = read(capture);
     screen.stash == Stash::Present
         && matches!(&screen.composer, Composer::Text(rows) if rows.iter().map(String::as_str).eq(frame.split('\n')))

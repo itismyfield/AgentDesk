@@ -1,10 +1,10 @@
 //! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
-mod screen;
+pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;
-mod stash;
+pub(in crate::services::claude_tui) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]

@@ -2154,6 +2154,14 @@ services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_real
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_runtime_env_change_does_not_change_the_selected_attempt
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_selected_input_boundaries_and_other_legacy_use_actual_tmux
 services::claude_tui::host_input::guarded_submission::executor_tests::cg_d1_selected_unknown_mismatch_and_host_conflict_never_downgrade
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::cancel_and_gate_revocation_at_effect_boundaries_never_enter_or_fallback
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::each_lost_acknowledgement_stops_without_retry_or_cleanup
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::exact_receipt_rejects_first_foreign_mixed_partial_and_replaced_records
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::fence_and_revoked_authority_precede_any_stash_effect
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::missing_capability_and_off_do_no_preparation_or_io
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::pinned_idle_stash_preserves_delivery_and_protects_unrestored_draft
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::pinned_stash_is_single_attempt_even_when_acknowledgement_is_lost
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::restore_observation_holds_same_pane_writer_while_other_pane_proceeds
 services::claude_tui::host_input::tests::a_mounted_dialog_is_never_ready_even_after_clear
 services::claude_tui::host_input::tests::a_send_that_may_have_landed_is_indeterminate_and_nothing_follows
 services::claude_tui::host_input::tests::blind_truncated_or_failed_reads_are_never_ready
