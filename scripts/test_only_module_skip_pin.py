@@ -612,6 +612,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/ledger_io_tests.rs",
         "src/services/discord/router/intake_gate/ledger_tests.rs",
+        "src/services/discord/router/intake_dispatch/ledger_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
@@ -715,6 +716,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
+        "src/services/discord/router/intake_dispatch/ledger.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
