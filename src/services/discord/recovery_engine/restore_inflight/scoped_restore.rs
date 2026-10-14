@@ -783,6 +783,10 @@ async fn checked_handoff(
                         inflight::TryLockRefusal::Contended => {
                             "retryable: canonical row locked".into()
                         }
+                        // The typed lock reports an input fence as `Failed`; kept non-retryable.
+                        inflight::TryLockRefusal::Fenced => {
+                            "canonical row lock: input fence: Busy".into()
+                        }
                         inflight::TryLockRefusal::Failed(error) => {
                             format!("canonical row lock: {error}")
                         }

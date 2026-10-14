@@ -6,7 +6,7 @@ use super::*;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 
-fn bind(path: &std::path::Path, provider: ShadowProvider) -> SourceBinding {
+pub(super) fn bind(path: &std::path::Path, provider: ShadowProvider) -> SourceBinding {
     let (dev, ino) = file_identity(&std::fs::metadata(path).unwrap());
     let session_id = "parent".into();
     let source = SourceId {
@@ -22,7 +22,7 @@ fn bind(path: &std::path::Path, provider: ShadowProvider) -> SourceBinding {
     }
 }
 
-fn lines(path: &std::path::Path, lines: &[String]) {
+pub(super) fn lines(path: &std::path::Path, lines: &[String]) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -33,16 +33,16 @@ fn lines(path: &std::path::Path, lines: &[String]) {
     }
 }
 
-fn header(root: &std::path::Path) -> String {
+pub(super) fn header(root: &std::path::Path) -> String {
     json!({"type":"session_meta","payload":{"id":"parent","cwd":root,"source":"cli","originator":"codex-tui"}}).to_string()
 }
 
-fn event(kind: &str, id: &str) -> String {
+pub(super) fn event(kind: &str, id: &str) -> String {
     json!({"type":"event_msg","payload":{"type":kind,"turn_id":id}}).to_string()
 }
 
 /// A JSON record whose output block O cannot type; the reader may resume after it.
-fn blocked() -> String {
+pub(super) fn blocked() -> String {
     json!({"type":"response_item","payload":{"type":"unknown_item","id":"x"}}).to_string()
 }
 

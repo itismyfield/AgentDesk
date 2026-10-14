@@ -116,7 +116,6 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::Deploy
         | Commands::Migrate { .. }
         | Commands::ReleaseMigratePostgres
-        | Commands::OShadow(..)
         | Commands::O(..)
         | Commands::Herdr(..)
         | Commands::ChannelHome(..)
@@ -706,7 +705,6 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         )),
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
-        Commands::OShadow(command) => exit_for_cli(super::o_shadow::run(command)),
         Commands::O(command) => exit_for_cli(super::o::run(command)),
         Commands::Herdr(command) => exit_for_cli(super::herdr::run(command)),
         Commands::ChannelHome(command) => exit_for_cli(super::channel_home::run(command)),

@@ -168,26 +168,6 @@ PG_INCLUDE_TOKEN = "${PG_INCLUDE_ARGS[@]}"
 PG_INCLUDE_USE = re.compile(r"\$\{?PG_INCLUDE_ARGS\b")
 # The file's code after its generated region, blanks collapsed: the one derivation
 # whose PG_INCLUDE_ARGS value per PG_INCLUDE_SHARD is read without running Bash.
-PG_INCLUDE_DERIVATION = tuple("""\
-readonly -a NON_PG_SKIP_ARGS
-readonly -a NON_PG_FILTER_REPLAY
-readonly -a PG_INCLUDE_ARGS_SHARD_0
-readonly -a PG_INCLUDE_ARGS_SHARD_1
-PG_INCLUDE_ARGS=()
-for ((index = 1; index < ${#NON_PG_SKIP_ARGS[@]}; index += 2)); do
-PG_INCLUDE_ARGS+=("${NON_PG_SKIP_ARGS[$index]}")
-done
-unset index
-case "${PG_INCLUDE_SHARD-}" in
-"") ;;
-0) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_0[@]}") ;;
-1) PG_INCLUDE_ARGS=("${PG_INCLUDE_ARGS_SHARD_1[@]}") ;;
-*)
-echo "PG_INCLUDE_SHARD must be 0 or 1, got: ${PG_INCLUDE_SHARD}" >&2
-return 1
-;;
-esac
-readonly -a PG_INCLUDE_ARGS""".splitlines())
 # A control operator left visible in lexed syntax; the lexer masks quoted, escaped,
 # substituted and redirection text, so `2>&1` or a quoted `;` never matches.
 SHELL_CONTROL = re.compile(r"[;&|()]")
@@ -1444,20 +1424,20 @@ class PackageTestIds:
             replay_at = region.index("NON_PG_FILTER_REPLAY=(") + 1
             replay = tuple(line.strip() for line in region[replay_at:region.index(")", replay_at)])
             # The shards are PGM's own split of the pairs, so the region must render from them.
-            shards = contract.pg_include_shards(skips)
+            shards = contract.pg_include_shards(skips, contract.load_lib_test_inventory(self.repo_root))
             expected = contract.render_non_pg_selection(skips, replay)
         except (OSError, UnicodeError, ValueError) as error:
             return str(error) or type(error).__name__
         code = [" ".join(line.split()) for line in lines[stop + 1:]
                 if line.strip() and not line.lstrip().startswith("#")]
-        size = len(PG_INCLUDE_DERIVATION)
+        size = len(contract.PG_INCLUDE_DERIVATION)
         # Only comments precede the region, so nothing can guard or skip the derivation.
         if any(line.strip() and not line.lstrip().startswith("#") for line in lines[:start]) \
                 or lines.count(contract.NON_PG_SELECTION_BEGIN) != 1 or region != expected \
-                or tuple(code[:size]) != PG_INCLUDE_DERIVATION \
-                or any("PG_INCLUDE" in line for line in code[size:]):
+                or tuple(code[:size]) != contract.PG_INCLUDE_DERIVATION \
+                or any("PG_INCLUDE" in line or "PG_SELECTED" in line for line in code[size:]):
             return "it departs from the generated region or the PG_INCLUDE_ARGS derivation"
-        return {"": skips, "0": shards[0], "1": shards[1]}
+        return {"": skips, **{str(index): args for index, args in enumerate(shards)}}
 
     def target_flag(self, target: str, flag: str) -> bool:
         """A target's `test`/`bench`/`doctest` flag: manifest, else Cargo's default."""
@@ -2180,7 +2160,7 @@ def check_workflows(repo_root: Path, workflows: list[Path], allowlist: set[str] 
         texts = {lineno: text.strip() for shell in shells.get(source, []) for lineno, text in shell}
         if source == justfile:
             # A recipe may inherit any shard, and sourcing fails on every other value.
-            shards: tuple[str, ...] | None = ("", "0", "1")
+            shards: tuple[str, ...] | None = ("", *(str(index) for index in range(_membership().PG_SHARD_COUNT)))
         else:
             # A workflow that never names the shard leaves it unset where a job sources the file.
             named = "PG_INCLUDE_SHARD" in _membership().strip_shell_comments(

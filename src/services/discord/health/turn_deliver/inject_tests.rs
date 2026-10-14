@@ -649,7 +649,8 @@ fn any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row() {
         pending_user_dispatch: Some(MessageId::new(11)),
         ..ChannelMailboxSnapshot::default()
     };
-    let backlog = [&idle, &queued_item, &reserved].map(inject::backlog);
+    let backlog = [&idle, &queued_item, &reserved]
+        .map(|snapshot| inject::backlog(snapshot, &ProviderKind::Claude, ChannelId::new(9)));
     let nonempty = Err(inject::QUEUE_NONEMPTY);
     assert_eq!(backlog, [Ok(()), nonempty, nonempty]);
 }
