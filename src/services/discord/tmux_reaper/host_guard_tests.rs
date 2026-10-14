@@ -1005,6 +1005,10 @@ async fn n3bc_last_protection_release_allows_existing_orphan_cleanup_pg() {
 
 #[tokio::test]
 async fn n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLookup, HostedLookupKey, load_hosted_execution_pg,
+    };
+
     if !n3bc_isolated("n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg") {
         return;
     }
@@ -1019,13 +1023,14 @@ async fn n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg() {
         own(name);
     }
     crate::services::tmux_common::write_tmux_channel_binding(&orphan, channel.get() + 1).unwrap();
-    let row_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE session_key = $1)")
-            .bind(channel_key(&shared, &orphan))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(!row_exists, "the orphan has no sessions row");
+    let orphan_key = channel_key(&shared, &orphan);
+    assert!(
+        matches!(
+            load_hosted_execution_pg(&pool, HostedLookupKey::SessionKey(&orphan_key)).await,
+            HostedLookup::Missing
+        ),
+        "the orphan has no sessions row"
+    );
     std::fs::write(
         n3bc_root().join("tmux-sessions"),
         format!("{owned}\n{orphan}\n"),
