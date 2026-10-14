@@ -4,6 +4,10 @@ This runbook covers the first O writer canary: one new channel moved to the O wr
 [`tui_o.writer.channels`](tui-o-writer-channels.md). It applies to a build whose `O_TUI_WRITER`
 switch is `true`, as this build is. With an empty list every channel stays on Legacy.
 
+The first N1 run uses Claude's completed warm-up and historical adoption path. Writer activation
+and N1 turn-mode confirmation are separate gates. Code coordinates below refer to
+`945aac2668ce010b92053fdb39f541ae51629e20`; recheck them for the deployed build.
+
 Managed drain and handback to Legacy are not implemented. The canary is one way: a canary channel
 is never removed from the list and never added again. The next canary uses a different new channel.
 
@@ -12,7 +16,7 @@ is never removed from the list and never added again. The next canary uses a dif
 Use a Discord channel created for the canary. On the gateway node all of these must hold, or the
 channel is not adopted:
 
-- The channel is registered in `agents[].channels` with a Claude or Codex TUI runtime.
+- The first N1 channel is registered in `agents[].channels` with a Claude TUI runtime.
 - The gateway node is the O home: without clustering every node is; with clustering both
   `cluster.instance_id` and `cluster.gateway_preferred_instance_id` are set and equal on it. A
   clustered node with a non-empty list and either id unset refuses to boot.
@@ -26,9 +30,15 @@ channel is not adopted:
   record naming it (`<runtime_root>/discord_terminal_delivery_custody`). A custody record that does
   not parse also blocks adoption.
 - The channel's binding log (`<runtime_root>/binding_events/<channel>.log`) binds at least one
-  transcript and no bind is pending. A Codex channel's transcripts must all still be empty (0 bytes,
-  same file). A Claude channel's may hold output under the checks of §3.1.
+  transcript and no bind is pending. The Claude transcript may hold output under the checks of §3.1.
 - `<runtime_root>/o_store/<channel>` does not exist.
+
+Codex writer activation requires an already bound, unchanged 0-byte source, but its N1 native
+reader requires real session metadata. A normal native path providing both has not been verified.
+Do not create or truncate a transcript to manufacture that state; Codex is excluded from the first
+N1 run (P12: `src/services/tui_o/writer/activation.rs:244–276`,
+`src/services/tui_o/writer/input_facts.rs:87–100`,
+`src/services/codex_tui/rollout_index.rs:240–280`).
 
 The TUI writes its transcript and the binding log binds it only at the first prompt, so a Claude
 canary starts with a warm-up turn:
@@ -40,8 +50,11 @@ canary starts with a warm-up turn:
 3. Apply (§2) and confirm (§3). The `init` must list the transcript with `delivery_start` at its
    length at the restart.
 
-Legacy's cursor lives only in memory (`tui_prompt_dedupe` state). At boot the rehydrate pass sets
-it from the launch script to the transcript's length, and O starts there.
+Legacy's cursor lives only in memory (`tui_prompt_dedupe` state). At boot the rehydrate pass uses
+the launch script's transcript length. Confirm the actual cursor, EOF, closed native turn and
+authoritative delivery frontier; a restart alone does not establish these facts
+(`src/services/discord/tui_prompt_relay/launch_script.rs:104–120`,
+`src/services/tui_o/writer/adoption.rs:1–270`).
 
 Only the canary must stay quiet from step 2 to the confirmation; other channels may keep working
 through the restart. A message to the canary in that window lets its placement or first Legacy
@@ -51,6 +64,10 @@ body take the channel for that process: it stays on Legacy until the next restar
 
 1. Add the channel ID to `tui_o.writer.channels` in `agentdesk.yaml` on every node. All nodes must
    carry the same list. Saving the file only marks the change as restart-required.
+   Separately select this channel in `tui_o.turn.channels`, keeping `tui_o.turn.all_owned: false`
+   for the single-channel run. Its default is an empty list with `all_owned: false`, so writer
+   selection alone does not enable N1. Verify the effective boot selection on every producer
+   (`src/services/tui_o/turn_mode.rs:8–80`).
 2. Restart the gateway node through the managed restart path. The new list applies at boot only.
 3. Restart any standby or runner node the same way, so no node keeps the old list.
 
@@ -82,6 +99,14 @@ A startup refused with `o_store: channel <id> is not registered` or `is not TUI`
 channel lost its TUI binding. Restore the binding; do not delete the store to get past it.
 
 ## 3. Confirm activation
+
+These checks establish writer activation. Before measuring N1, also require effective turn
+selection, successful retirement of the channel's synthetic population, and a same-boot,
+same-channel `n1_mode_confirmed` event with `actual_confirmed_at_us` inside its confirmation
+window (§5). A failed or partial retirement leaves Legacy turn-mode active. An `init` alone
+does not authorize N1 measurement (P33: `src/services/tui_o/turn_mode.rs:8–80`,
+`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`,
+`src/services/tui_o/n1_observation.rs:93–100`).
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
 - `<runtime_root>/o_store/o_era` exists (first canary only) and
@@ -132,13 +157,15 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
   `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
   starts the abandoned range; it no longer holds the channel.
-- Earlier transcripts the log bound total at most 64 files and 128 MiB (`past sources exceed
-  budget`).
+- Earlier transcripts are pinned newest first within a 64-source scan and cumulative 128 MiB
+  budget. Missing past sources are skipped and the byte budget stops further pinning; exceeding
+  it does not reject the whole adoption. Inspect the actual pinned set rather than assuming it
+  covers all history (P27/P28: `src/services/tui_o/writer/adoption.rs:592–620`).
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
   response tail runs for the session.
 
-An open last turn does not end the adoption, unless the channel also has sessions on another node
-or a node override (those release it first). The channel stays on Legacy, logged as
+An open last turn, delivery debt, lagging cursor, custody or other transient Legacy state can defer
+adoption; sessions on another node or a node override release it first. The channel stays on Legacy, logged as
 `adoption waits for Legacy`, and its writer host looks again every 5 seconds without a restart. It
 reads the transcript again only once the reason it waited on may have cleared: the transcript
 changed, Legacy's cursor reached its end, the frontier moved or the binding log moved. It adopts
@@ -147,29 +174,38 @@ once all of these hold, logged as `deferred adoption committed`:
 - The transcript has not changed for 10 seconds.
 - Legacy holds no inflight row, custody, pending start, response tail, mailbox turn, queued
   intervention or pending dispatch for the channel, and is not emitting a terminal delivery.
-- Every check above passes, and in addition nothing past Legacy's frontier is left undelivered:
-  a deferred adoption abandons nothing. While a record is past the frontier it keeps waiting.
+- Every check above passes, and in the normal clean branch nothing past Legacy's frontier is left
+  undelivered. This branch abandons nothing; the stall-EOF branch below is a separate outcome.
 
 A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
-(sessions on another node, a node override, a non-authoritative delivery record, the budget) or if
+(sessions on another node, a node override or a non-authoritative delivery record) or if
 the binding log bound another transcript while it waited (`was bound while the adoption
-waited`), since Legacy may still owe output it read from that one. A channel whose debt never clears stays on Legacy
-until the next restart, which adopts it as above.
+waited`), since Legacy may still owe output it read from that one.
+
+Deferred adoption does not promise an unlimited wait. After 40 minutes without delivery progress
+(soft stall), or the 80-minute frontier-progress cap (hard stall), the guarded non-late path may
+handoff at EOF. The log is `Legacy delivered nothing through the stall; O starts at the source's
+end`. Preserve the stall kind, source, frontier and abandoned ranges. Do not approve that sample
+as a clean N1 baseline until the historical debt/abandon evidence is established; elapsed time or
+`deferred adoption committed` alone is insufficient (P31:
+`src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.
 
 1. Panes (F4): on every node, list the tmux sessions and the Legacy binding for each channel being
    added. A pane for it on any node other than the O home stops the expansion.
-2. Selection (F5): diff `tui_o.writer.channels`, `tui_o.writer.all_tui`, the TUI bindings in
-   `agents[].channels`, `cluster.gateway_preferred_instance_id` and `cluster.instance_id` across
-   the nodes. Refuse the deploy if any node's list drops a channel
+2. Selection (F5): compare writer and turn selections, the TUI bindings in `agents[].channels`
+   and `cluster.gateway_preferred_instance_id` across the nodes. Check each node's distinct local
+   `cluster.instance_id` and the home relationship; local IDs need not be identical. Refuse the deploy if any node's list drops a channel
    another node selects. After the restart, every channel with `<runtime_root>/o_store/<channel>/init`
    on the O home must still be in its selection: the home has no `tui_o:selection_missing` reason.
 
 Confirm as in §3. The channel's `init` lists its current transcript with `delivery_start` at
-Legacy's cursor, which is that transcript's length when it was adopted, and each earlier transcript
-at its length. Replace these manual checks with the automated check once it lands.
+Legacy's cursor, which is that transcript's length when it was adopted, and each pinned earlier
+transcript at its length. Unpinned history is not covered by these entries: a later bind to an
+unpinned source holds it Pending (`src/services/tui_o/writer/past_bind.rs:9–40`). Replace these
+manual checks with the automated check once it lands.
 
 ## 4. Emergency stop
 
@@ -188,16 +224,185 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 ## 5. Observe
 
-Watch the canary for 50 turns with an oracle independent of the writer:
+### 5.1 Establish capture paths before starting (R1, R2, R4)
 
-- Silent missing: every assistant text unit in the transcript appears in the channel, or its
-  withheld state is visible as an alarm.
-- Unapproved duplicates: no unit is posted twice without an ambiguity alarm.
-- Legacy body effect: Legacy posts no body text in the canary channel (count 0).
+Keep a capture plan with the real raw input path/API, producer/normalizer command, completeness
+check and retained hash for every row below. Run R1, R2 and R4 before the first measured turn and
+retain a baseline from the confirmed boot. If a production provenance, Legacy, residue, binding
+normalizer or historical-debt producer cannot be identified and demonstrated, stop before
+measurement. The raw binding and N1 logs alone do not supply these captures. Fixtures and manual
+empty lists or zero counters cannot substitute for operational evidence (P44:
+`scripts/n1_canary/manifest.py:11–53`, `scripts/n1_canary/evidence.py:107–130`,
+`scripts/n1_canary/audit.py:14–60`; capture fields are in
+[`scripts/n1_canary/README.md`](../scripts/n1_canary/README.md)).
 
-When all three hold across the 50 turns, move to the expansion step without further waiting.
+All commands in this preflight read operational state. Save output only in a separate evidence
+directory; do not write configuration, DB rows, stores, cursors or transcripts. Variables name
+already established runtime root `R`, release root `REL`, boot configuration `CFG`, PID `PID`,
+channel string `C`, API base `BASE` and agent `AGENT`. Use existing read-only authentication where
+required; 401/403 and read failures do not mean absence.
 
-Other channels stay on Legacy throughout. Check that their delivery is unchanged.
+R1 checks the node, deployed source provenance and actual running executable:
+
+```sh
+uname -s
+ps -p "$PID" -o pid=,lstart=,comm=
+jq '{repo_head, repo_dirty, build_profile, o_tui_writer,
+     o_tui_writer_type: (.o_tui_writer | type)}' "$REL/runtime/release-source.json"
+readlink "/proc/$PID/exe"
+sha256sum "/proc/$PID/exe"
+rg -n '^[[:space:]]*(tui_o|writer|turn|channels|all_tui|all_owned|cluster|instance_id|gateway_preferred_instance_id|default_execution_node_id):' "$CFG"
+```
+
+Check PID start identity before and after capture to detect restart/PID reuse. Current config text
+is not proof of what that PID applied: connect it to effective boot policy and retirement logs.
+The current oracle accepts Linux `/proc/<pid>/exe` proof only; another OS cannot use an installed
+file path as its substitute. `init.build_digest` is not the build Git SHA
+(`scripts/n1_canary/manifest.py:100–117`, `scripts/n1_canary/evidence.py:107–115`).
+
+R2 reads health, the watcher and the N1 snapshot. Verify that the agent's default turn target is C:
+
+```sh
+curl -fsS "$BASE/api/health" | jq '{status, fully_recovered, degraded_reasons}'
+curl -fsS "$BASE/api/channels/$C/watcher-state"
+curl -fsS "$BASE/api/agents/$AGENT/turn" |
+  python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+snap = (body.get("turn_presence") or {}).get("n1_observation") or {}
+if snap.get("status") != "available" or str(snap.get("channel_id")) != sys.argv[1]:
+    raise SystemExit("REFUSE: unavailable or wrong-channel snapshot")
+print(json.dumps(snap, ensure_ascii=False))
+' "$C"
+rg -n '\[tui_o\].*(first activation|adoption|turn mode|Legacy delivered nothing through the stall|writer alarm)|delivery_record_authority: enabled' "$R"/logs/dcserver.stdout.log*
+find "$R/logs" -maxdepth 1 -type f -name 'n1-observation.jsonl*' -print
+```
+
+Retain the actual snapshot object as `baseline`, including schema, boot, sequence high-water,
+all nine counters, loss/error, open-attempt state and confirmation window. Require status
+`available`, dropped events and sink errors 0, a healthy observer, `open_attempts_complete: true`
+and no open attempt. Join `n1_mode_confirmed` and `actual_confirmed_at_us` to that same boot/channel.
+Do not replace unavailable/null/incomplete state with 0. Preserve all needed rotations, not only
+stdout grep or the latest JSONL file (queue 1024, 16 MiB rotation, three archives:
+`src/services/tui_o/n1_observation/sink.rs:1–115`,
+`src/services/tui_o/n1_observation.rs:110–175,240–500`). Health 200 or `fully_recovered: true` does
+not replace inspecting the channel's degraded reasons (`src/services/tui_o/alarm.rs:197–400`).
+
+R4 runs on every related node to establish panes, complete binding history, stores and source
+identity. Listing panes grants no permission to send keys or stop sessions:
+
+```sh
+tmux list-panes -a -F '#{session_name} #{pane_id} #{pane_pid} #{pane_current_command}'
+cat "$R/binding_events/$C.log"
+find "$R/o_store/$C" -maxdepth 1 -type f -print
+python3 -m json.tool "$R/o_store/$C/init"
+```
+
+Read `init` only if an existing store is present; distinguish missing from unreadable or damaged.
+Use the binding's resolved native path as `TRANSCRIPT`. Read-only `os.fstat` on its open descriptor
+must capture path, dev, ino, length and mtime; validate full JSONL boundaries and native turn
+completion. A tail or first-record check is only an identity probe. Reconcile Legacy delivery
+receipts/frontier and every historical/abandoned range with the pinned source set. No DB session
+count alone establishes that another node has no pane.
+
+The 16 manifest inputs and their required operational sources are:
+
+| Input | Raw source and production/completeness check |
+|---|---|
+| `process_proof` | R1 PID/start identity, release build attestation and proc executable hash; normalize exactly to runtime fields plus `executable_path`. |
+| `executable` | Bytes captured from the same stable `/proc/<pid>/exe`; hash agrees with proof and approved producer pair. |
+| `transcript` | R4 resolved native file, full SourceId and exact prefix/window through closure; no generated or truncated native file. |
+| `bindings` | Full R4 binding history, with a demonstrated normalizer to seq/boot/channel/provider/source/identity/status; all intervening transitions included. |
+| `baseline` | R2 available snapshot after actual confirmation, before the first measured native turn; preserve its full counters and boundary. |
+| `end_snapshot` | Same R2 API after the 50th turn and closure; same boot/channel, matching log high-water. Produced after measurement. |
+| `log` | Dedicated R2 N1 JSONL plus rotations covering confirmation through closure, without sequence gaps or mixed boots. |
+| `o_init` | R4 real `o_store/<C>/init`, including pinned sources and starts; preserve native store format. |
+| `o_ledger` | R4 complete `ledger.jsonl` through closure, including historical and unresolved attempts; preserve native ledger format. |
+| `legacy` | Actual input provenance ledger and authoritative delivery records, observed owner and allowed panel evidence; capture schema 1, full scoped inventory. |
+| `inflight` | Real Legacy inflight population with all relevant records, independently inventoried through closure; scoped schema 1. |
+| `pending` | Real pending TUI-direct population and its completeness evidence through closure; scoped schema 1. |
+| `abort` | Actual abort/residue population and boundary evidence through closure; scoped schema 1. |
+| `debt` | Historical sources, undelivered/abandoned ranges, individually checked baseline messages and full ledger hash; scoped schema 1. |
+| `pg` | SELECT-only capture of TEXT-channel intake and lifecycle rows for the exact interval; collector normalizes channel to an integer. External captures must use that same form. |
+| `discord` | Read-only history with proven page closure and visibility, plus individual Posted/baseline message lookups; one page or an empty response does not prove absence. |
+
+Demonstrate the capture producers on real preflight data and record the baseline before starting.
+The final `end_snapshot`, closure scopes and file hashes are completed afterward. Do not label a
+partial preflight capture `complete: true`; every capture's final scope must bind boot, channel,
+provider, SourceId, closing seq and closing offset. Positive per-physical-observation origin proof
+must bind execution identity, native record digest and input kind. Missing PG rows do not prove
+TTY/autonomous origin (`scripts/n1_canary/audit.py:14–60`).
+
+### 5.2 Register the deployed producer before using PASS
+
+The shipped `producer_capabilities` list is intentionally empty until a verified deployed pair
+is registered. The coordinator registers the actual `945aac266` deployment only after deployment;
+this lane does not invent an executable hash or enable unconditional support. Keep rejection of
+every unregistered build/hash, old schema or false capability (P43:
+`scripts/n1_canary/manifest.py:74–87`).
+
+1. Retain the build's clean source attestation (`release-source.json` `repo_head` and
+   `repo_dirty: "false"`) and the build/deployment record linking that SHA to the exact artifact.
+   A current checkout SHA or edited JSON alone does not attest a binary's build.
+2. In a separate producer verification run of those exact executable bytes, capture real schema 2
+   `n1_outcome_unknown` and successful `n1_mode_confirmed` events with actual confirmation time
+   and its window. Preserve that run's process proof and complete raw verification log/hash.
+   The original log may interleave channels. Sequence increases per boot/channel, including
+   across provider changes; preserve those rows without manual filtering. The observer owns
+   sequence per channel (`src/services/tui_o/n1_observation.rs:128–142,205–268`).
+   Both events must name the same boot/channel/provider; the unknown witness belongs to this
+   verification run, not the clean 50-turn canary. Do not induce an unknown event in the canary
+   to demonstrate the capability. Review the build's producer paths at
+   `src/services/tui_o/n1_observation.rs:57–100,240–365` and
+   `src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`.
+3. Run the read-only candidate tool against the captured proc executable. It checks SHA256,
+   build/proc proof, schema and positive evidence for both capabilities and prints one JSON
+   object; it neither executes the binary nor modifies the support table:
+
+   ```sh
+   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO/scripts" \
+     python3 -m n1_canary.producer \
+       --process-proof "$PRODUCER_PROOF" --executable "$CAPTURED_EXE" \
+       --release-source "$RELEASE_SOURCE" --verification-log "$PRODUCER_LOG"
+   ```
+
+4. The coordinator reviews the retained attestation and verification captures, then inserts the
+   printed object into `scripts/n1_canary/compatibility.json` `producer_capabilities` for the
+   deployed oracle. Keep every other guard. Archive the approved table and recompute the oracle
+   bundle hash in the manifest, because the table and tool are part of that hash. A rebuild with
+   different bytes needs a new entry even at the same Git SHA. The registration/removal regression
+   proves PASS with a verified entry and rejection after removal in isolated test copies.
+
+The tool checks consistency of supplied captures; trusted build attestation and operational log
+provenance remain required review evidence. Missing positive capability evidence keeps the run
+blocked; toggling booleans by hand is not verification.
+
+### 5.3 Sample and close the run
+
+“50 turns” means 50 distinct completed native logical turns whose non-Discord input provenance
+(`tty`, `monitor` or `autonomous`) is positively proved for every physical observation. Discord
+round trips, aborted turns, rereads and the raw `closed_events` counter cannot fill the sample.
+Pin `fiftieth_offset` to the 50th eligible turn's exact end and retain evidence through
+`closure_offset`; do not replace that boundary with a later EOF (P40:
+`scripts/n1_canary/audit.py:14–60`). Preserve the same boot/channel/source and continuous binding
+and observation sequences from confirmation through closure.
+
+Run the independent oracle on the finalized 16-input manifest:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/scripts/n1_turn_canary_oracle.py" --manifest "$MANIFEST"
+```
+
+Expand only on exit 0 / `PASS`: native/origin, delivery, effects, reverse Discord comparison and
+historical-debt audit stages must all be complete, with no reasons or failures. Missing/duplicate
+pieces, Legacy body effects, synthetic/placeholder attempts, unresolved historical debt or
+unknown outcomes cannot be excused by an alarm or time spent waiting. Exit 1 / `FAIL` or 2 / `[U]`
+stops expansion (`scripts/n1_canary/audit.py:220–313`,
+`scripts/n1_turn_canary_oracle.py:79–127`). An approved producer entry alone is insufficient.
+
+Other channels remain control samples: separately confirm their Legacy delivery. The target's
+PASS does not prove their behavior. Broad `all_tui`/`all_owned` selection expands the operational
+scope beyond this single-channel procedure (`src/services/tui_o/turn_mode.rs:8–80`).
 
 ## 6. Forbidden during the canary
 

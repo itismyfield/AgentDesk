@@ -303,7 +303,10 @@ pub(super) async fn handle_delivery_epilogue(
                     &inflight_state,
                     dispatch_id.as_deref(),
                     adk_session_key.as_deref(),
-                    turn_id.as_str(),
+                    followup_requeue::BusyAttempt {
+                        turn_id: turn_id.as_str(),
+                        cost: ctx.busy_attempt_cost,
+                    },
                 )
                 .await;
                 super::super::super::tmux::TuiCompletionGateOutcome::NotGated

@@ -27,7 +27,7 @@ ENTRIES = {
 # "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '957638b9ccd2e0a26234ddbed02e24dbfe15a6b5436b5d4cac9064d3ff279af7'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'de34ae33a679f5db0c88dc5a2446f992e0dd323dd2e296bc29876f0702458060'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
@@ -37,7 +37,7 @@ PROTECTED = {
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
     'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'dc4f69221f468ab3a3943975e9812ae8b3ce7db43ccccb1cf9a387c1ca86c6d0'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'cf38b1f1b18f3e6464c04bc3ecf82eccb6bb558c0f415eb76daae732c933eeaf'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 

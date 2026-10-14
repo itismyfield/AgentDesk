@@ -669,26 +669,32 @@ async fn p10_fin_off_bridge_exit_never_submits_a_policy_close() {
         .enumerate()
     {
         let bridge_steps = std::rc::Rc::new(std::cell::Cell::new(0));
-        let step_stages = std::rc::Rc::new(std::cell::Cell::new(0));
+        let step_stages = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (bridge_seen, step_seen) = (bridge_steps.clone(), step_stages.clone());
         test_hooks::observe(Some(Box::new(move |_, _| {
             bridge_seen.set(bridge_seen.get() + 1)
         })));
-        step::observe(Some(Box::new(move |_| step_seen.set(step_seen.get() + 1))));
+        step::arm(Box::new(move |_| {
+            step_seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
         let submitted = test_hooks::submitted();
         HERDR_SETTLEMENT_OVERRIDE.set(false);
         let (signal, holds, _row, active) =
             herdr_cold_case(5_340_341_000 + index as u64, cold).await;
         HERDR_SETTLEMENT_OVERRIDE.set(true);
         test_hooks::observe(None);
-        step::observe(None);
+        assert!(step::disarm(), "{cold:?}: no policy request was built");
         assert_eq!(
             test_hooks::submitted(),
             submitted,
             "{cold:?}: no policy submission"
         );
         assert_eq!(bridge_steps.get(), 0, "{cold:?}: no receipt step");
-        assert_eq!(step_stages.get(), 0, "{cold:?}: no policy mailbox step");
+        assert_eq!(
+            step_stages.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "{cold:?}: no policy mailbox step"
+        );
         let _ = signal;
         assert_eq!(
             (holds, active),

@@ -843,4 +843,6 @@ mod tests {
             assert_eq!(marker_after.text, "queued a");
         });
     }
+
+    mod hydrate_corrupt_queue_tests;
 }

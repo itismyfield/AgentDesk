@@ -14,22 +14,23 @@ use crate::services::tui_o::turn_mode::TestConfirmation;
 
 static CHANNEL: AtomicU64 = AtomicU64::new(6_325_100);
 
-struct Fixture {
+/// A busy, confirmed turn-mode channel on a live host, homed here, with one transcript record.
+pub(in crate::services::discord::turn_presence) struct Fixture {
     _runtime: crate::config::TestRuntimeRootGuard,
-    root: tempfile::TempDir,
+    pub(in crate::services::discord::turn_presence) root: tempfile::TempDir,
     _binding: BindingRoot,
-    shared: Arc<SharedData>,
+    pub(in crate::services::discord::turn_presence) shared: Arc<SharedData>,
     confirmed: Option<TestConfirmation>,
     _host: InjectedLivenessGuard,
-    identity: Identity,
-    home: Arc<HomeGate>,
+    pub(in crate::services::discord::turn_presence) identity: Identity,
+    pub(in crate::services::discord::turn_presence) home: Arc<HomeGate>,
     runtime: Arc<crate::services::discord::PresenceRuntime>,
     _lifetime: super::super::lifecycle::Lifetime,
     incarnation: Arc<Incarnation>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(in crate::services::discord::turn_presence) fn new() -> Self {
         let runtime_root = crate::config::TestRuntimeRootGuard::new();
         let root = tempfile::tempdir().unwrap();
         let binding = BindingRoot::enter(root.path());
@@ -87,7 +88,8 @@ impl Fixture {
         self.runtime.register(self.identity.channel).unwrap()
     }
 
-    async fn read(&self) -> Reading {
+    /// A strict reading past `catching_up`, which also leaves the channel's watch settled.
+    pub(in crate::services::discord::turn_presence) async fn read(&self) -> Reading {
         let ticket = self.ticket();
         for _ in 0..500 {
             let reading = activity::presence_reading_now(
@@ -832,7 +834,7 @@ async fn b2b1_watcher_unpair_waits_for_a_first_poll_and_then_withdraws_its_appro
     let fixture = Fixture::new();
     let fence =
         Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
-    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let _installed = super::super::entrypoints::install(&fixture.shared, fence);
     let channel = poise::serenity_prelude::ChannelId::new(fixture.identity.channel);
     let first = fixture.approval().await;
     let next = fixture.approval().await;
@@ -999,7 +1001,7 @@ async fn b2b2_home_mount_replace_and_unmount_withdraw_the_displaced_owner() {
     let fixture = Fixture::new();
     let fence =
         Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
-    let _installed = super::super::entrypoints::tests::install(&fixture.shared, fence);
+    let _installed = super::super::entrypoints::install(&fixture.shared, fence);
     let channel = fixture.identity.channel.to_string();
     let home = |epoch| {
         let home = Arc::new(HomeGate::new(&channel, "b1-worker"));
@@ -1050,4 +1052,73 @@ fn b2b2_an_unhomed_admission_before_any_home_holds_off_the_first_mount() {
     })
     .join()
     .unwrap();
+}
+
+/// Owner `epoch`'s Home for `channel`, held and confirmed here.
+pub(in crate::services::discord::turn_presence) fn held_home(
+    channel: u64,
+    epoch: i64,
+) -> Arc<HomeGate> {
+    let id = channel.to_string();
+    let home = Arc::new(HomeGate::new(&id, "b1-worker"));
+    let held = HeldHome::for_test(&id, "b1-worker", epoch, HomeState::Worker);
+    home.confirm(&held, tokio::time::Instant::now()).unwrap();
+    home
+}
+
+// A Home notice delivered after a later mount was adopted leaves that mount's approval, child and
+// schedule alone; only the registry's current mount decides what a notice withdraws.
+#[tokio::test(flavor = "current_thread")]
+async fn b2b3_a_late_home_notice_never_withdraws_the_approval_on_the_current_mount() {
+    let fixture = Fixture::new();
+    let fence =
+        Arc::downgrade(&fixture.runtime) as std::sync::Weak<dyn super::super::entrypoints::Fence>;
+    let _installed = super::super::entrypoints::install(&fixture.shared, fence);
+    let channel = fixture.identity.channel;
+    let on_first = fixture.ticket();
+    let current = held_home(channel, 8);
+    channel_home::register(current.clone());
+    assert!(
+        on_first.incarnation().is_none(),
+        "the displaced mount's approval"
+    );
+    let ticket = fixture.ticket();
+    let incarnation = ticket.incarnation().unwrap();
+    assert!(incarnation.replace(&ticket, fixture.identity.clone()));
+    let seated = fixture.ticket();
+    let (child, cancelled) = tokio::sync::oneshot::channel::<()>();
+    assert!(seated.spawn_child(async move {
+        let _child = child;
+        std::future::pending::<()>().await;
+    }));
+    let at = std::time::Instant::now();
+    seated.with_current(|r| r.deadline = Some(at)).unwrap();
+    let late = crate::services::discord::presence_withdraw_unmounted;
+    let id = channel.to_string();
+    late(&id, Some(&fixture.home), "home_mounted");
+    late(&id, None, "home_unmounted");
+    tokio::task::yield_now().await;
+    assert!(
+        seated.incarnation().is_some(),
+        "a late notice withdrew the current mount's approval"
+    );
+    assert_eq!(seated.with_current(|r| r.deadline), Some(Some(at)));
+    let mut cancelled = cancelled;
+    assert_eq!(
+        cancelled.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+        "the current mount's child runs on"
+    );
+    let polls = AtomicUsize::new(0);
+    let started = incarnation
+        .approve(fixture.read().await)
+        .expect("the current mount still approves")
+        .start(42, channel, || {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        })
+        .await;
+    assert!(started.is_some());
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    channel_home::unregister_if_same(&current);
 }

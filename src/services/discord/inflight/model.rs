@@ -3,59 +3,30 @@
 //! Inflight state, turn identity, relay ownership, zero-id helpers, and
 //! version-tolerant serde adapters extracted from `inflight.rs`.
 
-use std::num::NonZeroU64;
-
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
 mod identity;
+mod legacy_replay_coordinate;
 mod serde_adapters;
 mod turn_kinds;
 
-pub(in crate::services::discord) use identity::InflightTurnIdentity;
+pub(in crate::services::discord) use identity::{
+    InflightTurnIdentity, opt_channel_id, opt_message_id, transfer_end,
+};
+pub(in crate::services::discord) use legacy_replay_coordinate::{
+    COORDINATE_HOLD_PREFIX, LegacyReplayCoordinate,
+};
+#[cfg(test)]
+pub(in crate::services::discord) use legacy_replay_coordinate::{
+    CoordinateInstallPhase, InstalledSourceWitness, PriorNormalizedCoordinate, RawTurnWitness,
+    is_coordinate_hold_reason,
+};
 use serde_adapters::{
     deserialize_relay_owner_kind_tolerant, deserialize_runtime_kind_tolerant,
     deserialize_task_notification_kind, serialize_task_notification_kind,
 };
 pub(in crate::services::discord) use turn_kinds::{RelayOwnerKind, TurnSource};
-
-/// Transfer a numeric end only when both UTF-8 prefixes are identical.
-pub(in crate::services::discord) fn transfer_end(
-    source_body: &str,
-    end: usize,
-    target_body: &str,
-) -> Option<usize> {
-    let source = source_body.get(..end)?;
-    let target = target_body.get(..end)?;
-    (source == target).then_some(end)
-}
-
-/// Build an optional `serenity::MessageId` from a possibly-zero raw persisted id.
-///
-/// A zero message id is a legitimate sentinel for an unanchored TUI-direct or
-/// recovery turn. Callers must treat `None` as "skip the message-specific step"
-/// instead of constructing `MessageId::new(0)`, which panics. Because zero is an
-/// expected sentinel here (not an anomaly), the zero case is silent — unlike
-/// [`opt_channel_id`], where a zero channel id is never legitimate.
-pub(in crate::services::discord) fn opt_message_id(
-    raw: u64,
-) -> Option<poise::serenity_prelude::MessageId> {
-    NonZeroU64::new(raw).map(|raw| poise::serenity_prelude::MessageId::new(raw.get()))
-}
-
-/// Build an optional `serenity::ChannelId` from a persisted Discord channel id.
-///
-/// Stored recovery state must never construct `ChannelId::new(0)`: the invalid
-/// state is skipped and left available for a later diagnostic or repair.
-pub(in crate::services::discord) fn opt_channel_id(
-    raw: u64,
-) -> Option<poise::serenity_prelude::ChannelId> {
-    let Some(raw) = NonZeroU64::new(raw) else {
-        tracing::warn!("skipping Discord channel operation because persisted id is zero");
-        return None;
-    };
-    Some(poise::serenity_prelude::ChannelId::new(raw.get()))
-}
 
 pub(in crate::services::discord) use opt_message_id as optional_message_id;
 
@@ -600,6 +571,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Why this episode's replay is held; any reason forbids an automatic rerun of the turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replay_hold_reasons: Vec<String>,
+    /// Coordinate origin and install state of a legacy restart replay; absent on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_replay_coordinate: Option<LegacyReplayCoordinate>,
 }
 
 #[cfg(test)]
@@ -1168,6 +1142,7 @@ impl InflightTurnState {
             streaming_rollover_frozen_msg_ids: Vec::new(),
             replay_receipt_id: None,
             replay_hold_reasons: Vec::new(),
+            legacy_replay_coordinate: None,
         }
     }
 

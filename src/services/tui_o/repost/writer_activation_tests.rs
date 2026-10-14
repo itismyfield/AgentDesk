@@ -218,6 +218,14 @@ impl RepostHook<Writer> for ActorDispatch {
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(std::future::ready(OriginalGate::Admitted))
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
+    }
 }
 
 fn home() -> Arc<HomeGate> {

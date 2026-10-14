@@ -1022,7 +1022,7 @@ pub(super) async fn build_health_snapshot_with_options(
                     watcher_attached: session.watcher_attached,
                     inflight_state_present: session.inflight_state_present,
                     tmux_present,
-                    process_present: session.process_present(),
+                    process_present: false, // set after every presence probe
                     active_dispatch_present: session.active_dispatch_present(),
                     stall_shadow_verdict,
                     #[cfg(unix)]
@@ -1102,7 +1102,7 @@ pub(super) async fn build_health_snapshot_with_options(
         expired_relay_ledgers,
         restart_marking_short_passes: discord::inflight::short_passes(),
         providers: provider_entries,
-        mailboxes: mailbox_entries,
+        mailboxes: tmux.with_process_presence(mailbox_entries).await,
         queue_park_observation_failures: failures,
         transcript_turns,
     }
