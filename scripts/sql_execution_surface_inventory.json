@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "62b52104576518e17c01ef78ec0078a0bb902ca6",
+  "measured_at_sha": "1ec7c2ab0da29de174d82c3e2e11beaddbe2c464",
   "records": [
     {
       "root": "migrations/postgres",
@@ -32050,6 +32050,132 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:b1352ea05b095a3d0c229a00a37e035f282f44342ec6f364900726c7bd0a8932"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1d51fe8ce9169301ba04d001af17c4d43eb21fae7c3994e33982d01a7ab3d0b7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3aecf3235dbfb0090fef84e3f36d13c25b4baa404b6f73171214305ef00a65a6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:536afeefc99432ff52818ddef27ad7518995096086ba24174090ea016decbb89"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5b4240779b1af8003bf1d6fd8cb140f00e3668a6ab2ddeebb67fb7ae0aac841b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5b5d5b72b8f19c942b2ce60ca768c666e89f4cbc327b799473b13d242d9152e5"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:62caf6f7e310cc0c8d16a56e93afa438d21be07654199379ca3e3d428110ca1a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7e512b206e39dc9e1ffb8d6538e93f4c4e9337deab182451e1144c3ca48c57c8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9573e3d605857999305a075b475f0f6804240e60d5527a90b2aa75bccccc4601"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b944d8403073ab25c5fa0ddd76e405bbfb548b392df8dc148357c0e91420bb00"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e6cbba62785dc7bb7c57173c99f653fe443d33656d3d49aa6c57bbbd3c47ad2c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f6f2fb68b4ccdce155636bb2a8140b18e53449031ef123e890bcfcd43abbb4d7"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f77a62e69d35627438f20b878f0d234952b652a7d44f6a382f0869d898c7749b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f8fa654cfcb51aabdac4161069f6dbf51aa13f78d85dd250d388b9cd3d6def6b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:fd80f0ab6e1392d5df8fa4db3150bd1424f751f42adbedc07bff5d4e9fed0d80"
     },
     {
       "root": "src",

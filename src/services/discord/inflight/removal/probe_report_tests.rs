@@ -6,6 +6,18 @@ thread_local! {
     static ROOT_UNAVAILABLE: Cell<bool> = const { Cell::new(false) };
     static ENTRY_ERROR: Cell<bool> = const { Cell::new(false) };
     static BEFORE_SYNC: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static FRESH_RECEIPT: Cell<bool> = const { Cell::new(false) };
+    static FRESH_RECEIPT_BYTES: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+pub(in crate::services::discord::inflight::removal) fn before_scoped_backfill(path: &Path) {
+    if FRESH_RECEIPT.replace(false) {
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        raw["finalizer_turn_id"] = raw["user_msg_id"].clone();
+        raw["herdr_before_start_stop"] = serde_json::json!({"protocol":1,"kind":"unsubmitted_before_start_stop","turn_nonce":"r0l","admitted_generation":1,"basis":"no_attempt","notice":"pending"});
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        fs::write(path, &bytes).unwrap();
+        FRESH_RECEIPT_BYTES.with(|saved| *saved.borrow_mut() = Some(bytes));
+    }
 }
 pub(super) fn root(root: Option<PathBuf>) -> Option<PathBuf> {
     if ROOT_UNAVAILABLE.get() { None } else { root }
@@ -218,6 +230,35 @@ fn r0l_scoped_backfill_distinguishes_contention_fence_and_sync_failure() {
         BackfillOutcome::Lock(store::LockCause::InputFence(_))
     ));
     drop(closing);
+    let mut receipt = row(632541, None);
+    receipt.finalizer_turn_id = 0;
+    let path = env.seed(&receipt, 0);
+    FRESH_RECEIPT.set(true);
+    let checked = load_inflight_probe_scoped_checked(&CLAUDE, 632541);
+    assert!(checked.complete && checked.states.len() == 1);
+    assert!(checked.states[0].herdr_before_start_stop.is_some());
+    assert!(
+        checked
+            .observations
+            .iter()
+            .any(|event| event.cause == ProbeCause::Backfill(BackfillOutcome::Unneeded))
+    );
+    assert!(
+        checked
+            .observations
+            .iter()
+            .any(|event| event.cause == ProbeCause::ReceiptHeld),
+        "the locked reread must retain fresh receipt custody independently of legacy completeness"
+    );
+    let bytes = FRESH_RECEIPT_BYTES.with(|saved| saved.borrow_mut().take().unwrap());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let legacy = load_inflight_probe_scoped(&CLAUDE, 632541);
+    assert!(legacy.complete);
+    assert_eq!(
+        serde_json::to_value(&checked.states).unwrap(),
+        serde_json::to_value(&legacy.states).unwrap()
+    );
+    assert_eq!(fs::read(path).unwrap(), bytes);
     let mut sibling = row(632540, None);
     sibling.finalizer_turn_id = 0;
     let path = env.seed(&sibling, 0);

@@ -309,6 +309,8 @@ pub(super) fn load_inflight_probe_with_scope(
             RowVerdict::Keep(state, true) => {
                 let backfilled = if scope.is_some() {
                     if observe_scoped {
+                        #[cfg(test)]
+                        report_tests::before_scoped_backfill(&path);
                         let (result, outcome) =
                             scoped_restore::backfill_scoped_restore_observed(root, &path, provider);
                         note(&mut observations, &path, ProbeCause::Backfill(outcome));
@@ -330,6 +332,14 @@ pub(super) fn load_inflight_probe_with_scope(
                         RestoreFailure::Rejected("legacy backfill incomplete".into())
                     })
                 };
+                let receipt_held = backfilled
+                    .as_ref()
+                    .is_ok_and(|fresh| fresh.herdr_before_start_stop.is_some());
+                #[cfg(test)]
+                let receipt_held = receipt_held && !report_tests::mutant("inflight-late-receipt");
+                if receipt_held {
+                    note(&mut observations, &path, ProbeCause::ReceiptHeld);
+                }
                 complete &= backfilled.is_ok();
                 #[cfg(test)]
                 if scope.is_some() {
