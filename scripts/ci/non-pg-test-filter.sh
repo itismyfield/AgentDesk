@@ -228,6 +228,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::writer::tests::actor::host_start::deferred::pg
   --skip services::tui_o::writer::tests::actor::host_start::late_delegated
   --skip services::tui_o::writer::tests::actor::repost_turn
+  --skip services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -1114,6 +1115,7 @@ PG_INCLUDE_ARGS_SHARD_1=(
   services::tui_o::writer::tests::actor::host_start::deferred::pg
   services::tui_o::writer::tests::actor::host_start::late_delegated
   services::tui_o::writer::tests::actor::repost_turn
+  services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
   services::turn_host::tests
   services::turn_lifecycle::host_guard_tests
   voice::announce_meta::tests

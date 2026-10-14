@@ -186,6 +186,11 @@ cli::o::tests::o_resume_refusals_exit_with_their_own_code_and_write_nothing
 cli::o::tests::o_resume_two_racing_identical_commands_leave_one_approval_and_one_exit_zero
 cli::o::tests::o_status_failures_exit_non_zero_without_a_header_or_a_write
 cli::o::tests::o_status_reports_the_refused_piece_and_writes_nothing
+cli::o::transition::tests::transition_cli_has_no_token_argument
+cli::o::transition::tests::transition_cli_ignores_an_environment_proxy
+cli::o::transition::tests::transition_cli_never_follows_a_redirect
+cli::o::transition::tests::transition_cli_never_shows_an_unproven_answer_as_unsent
+cli::o::transition::tests::transition_cli_posts_its_bases_origin_and_no_token
 cli::o_shadow::tests::an_allowlisted_thread_bound_to_a_default_tui_provider_covers_its_profile
 cli::o_shadow::tests::population_joins_resolver_defaults_with_numeric_channels_and_warns_on_name_only
 cli::o_shadow::tests::the_report_reads_a_secret_bearing_config_without_changing_its_mode
@@ -1380,6 +1385,8 @@ server::routes::message_outbox::tests::monitor_alert_action_id_is_durable_and_id
 server::routes::message_outbox::tests::monitor_alert_routing_separates_actionable_and_informational_kinds
 server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
 server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
+server::routes::o_transition::tests::transition_route_refuses_all_but_a_loopback_peer_with_this_ports_origin
+server::routes::o_transition::tests::transition_route_refuses_apply_before_any_read
 server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
 server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::pr_summary::tests::ensure_valid_query_accepts_good_input
@@ -12901,6 +12908,13 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_recent_missing_halts_without_retirement
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_resume_publishes_after_init_only_eof_pending_flush
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_configless_actor_keeps_the_legacy_off_path
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_consumes_no_reply_of_a_run_replaced_meanwhile
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_lists_every_unpinned_session_a_source_may_be
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_reports_the_history_of_the_judgment_not_a_later_one
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_writes_nothing_and_reports_the_execution_it_judged
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_job_keeps_the_home_permit_after_the_requester_left
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_sends_nothing_to_an_actor_that_takes_no_work
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_holds_a_source_whose_inputs_changed_after_its_probes
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_keeps_what_it_retired_before_a_failed_write_and_resumes_the_rest
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_held

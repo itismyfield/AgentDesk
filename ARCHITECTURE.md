@@ -52,6 +52,8 @@ src/
 │   │   ├── apply_config_tests.rs
 │   │   ├── plan.rs
 │   │   └── source.rs
+│   ├── o_transition/
+│   │   └── http.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -80,6 +82,8 @@ src/
 │   ├── o.rs
 │   ├── o_shadow.rs
 │   ├── o_tests.rs
+│   ├── o_transition.rs
+│   ├── o_transition_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
@@ -452,6 +456,8 @@ src/
 │   │   ├── messages.rs
 │   │   ├── mod.rs
 │   │   ├── monitoring.rs
+│   │   ├── o_transition.rs
+│   │   ├── o_transition_tests.rs
 │   │   ├── onboarding.rs
 │   │   ├── pipeline.rs
 │   │   ├── pipeline_stage_save_tests.rs
@@ -1003,6 +1009,7 @@ src/
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── o_transition.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
@@ -2811,6 +2818,7 @@ src/
 │   │   │   ├── transition_observe.rs
 │   │   │   ├── transition_observe_tests.rs
 │   │   │   ├── transition_port.rs
+│   │   │   ├── transition_route_tests.rs
 │   │   │   ├── unpinned_past_tests.rs
 │   │   │   ├── verified_delivery_tests.rs
 │   │   │   └── writer_tests.rs
