@@ -199,6 +199,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_recovery_custody.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -709,6 +710,7 @@ src/
 │   │   │   │   ├── drain_pg_tests.rs
 │   │   │   │   ├── force_pg_tests.rs
 │   │   │   │   ├── harness_tests.rs
+│   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
@@ -1008,6 +1010,7 @@ src/
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── probe_runtime.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
@@ -1426,6 +1429,12 @@ src/
 │   │   │       ├── mod.rs
 │   │   │       ├── phase.rs
 │   │   │       └── values.rs
+│   │   ├── restart_report/
+│   │   │   ├── model/
+│   │   │   │   ├── entry_tests.rs
+│   │   │   │   └── tests.rs
+│   │   │   ├── capacity.rs
+│   │   │   └── model.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
@@ -1437,6 +1446,8 @@ src/
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -1848,9 +1859,16 @@ src/
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
+│   │   │   │   ├── bridge_handoff/
+│   │   │   │   │   ├── reown/
+│   │   │   │   │   │   └── reown_tests.rs
+│   │   │   │   │   └── reown.rs
+│   │   │   │   ├── non_bridge_claim/
+│   │   │   │   │   └── strict_yield_tests.rs
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
+│   │   │   │   ├── non_bridge_claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
@@ -2099,6 +2117,8 @@ src/
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── strict_runtime.rs
+│   │   │   ├── strict_supervisor_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
@@ -2112,7 +2132,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   └── pcm_harness_tests.rs
+│   │   │   │   ├── pcm_harness_tests.rs
+│   │   │   │   └── retired_text_reply_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
@@ -2450,6 +2471,7 @@ src/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── availability.rs
+│   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
@@ -2506,6 +2528,9 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
 │   │   └── session_lifecycle.rs
+│   ├── recovery_defer/
+│   │   ├── cursor.rs
+│   │   └── tests.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -2719,6 +2744,8 @@ src/
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
+│   │   │   │   ├── p5a2_projection_tests.rs
+│   │   │   │   ├── projection.rs
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
@@ -2735,6 +2762,8 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── actor/
+│   │   │   │   └── codex_submission.rs
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
 │   │   │   │   ├── fold.rs
@@ -2801,6 +2830,7 @@ src/
 │   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── owed.rs
 │   │   │   ├── owed_tests.rs
+│   │   │   ├── p5a2_actor_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── readers_host_tests.rs
@@ -2859,9 +2889,12 @@ src/
 │   │   │   │   ├── provenance/
 │   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── admission_tests.rs
+│   │   │   │   │   ├── decisions.rs
 │   │   │   │   │   ├── dormant.rs
 │   │   │   │   │   ├── dormant_construction.rs
 │   │   │   │   │   ├── dormant_tests.rs
+│   │   │   │   │   ├── live_grant.rs
+│   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
@@ -2898,11 +2931,23 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── dispatch_reservation/
+│   │   │   └── tests/
+│   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queue_exit_debt.rs
 │   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
+│   │   ├── recovery_custody/
+│   │   │   ├── capability.rs
+│   │   │   ├── custody_pg_tests.rs
+│   │   │   ├── denial_index.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── model.rs
+│   │   │   ├── operation.rs
+│   │   │   ├── reconcile.rs
+│   │   │   └── reconcile_pg_tests.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
@@ -3021,6 +3066,7 @@ src/
 │   ├── queue.rs
 │   ├── qwen.rs
 │   ├── qwen_tmux_wrapper.rs
+│   ├── recovery_defer.rs
 │   ├── release_source.rs
 │   ├── remote_stub.rs
 │   ├── retrospectives.rs

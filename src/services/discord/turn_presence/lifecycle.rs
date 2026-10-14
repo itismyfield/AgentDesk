@@ -4,10 +4,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use super::activity::Activity;
 use super::admission::Incarnation;
+
+/// The supervisor state a registration shows; it changes under the registration's fence.
+pub(super) trait Shown: Send + Sync {
+    /// The registration's approvals and children are gone; a retire also takes down its display.
+    fn withdrawn(&self, channel: u64, retire: bool);
+    /// A fresh reading seated a new approval, so the channel starts over from it.
+    fn seated(&self, channel: u64);
+}
 
 pub(crate) struct Runtime(Mutex<State>);
 
@@ -16,12 +24,13 @@ struct State {
     owner_present: bool,
     owner_token: Arc<()>,
     channels: HashMap<u64, Registration>,
+    shown: Option<Arc<dyn Shown>>,
 }
 
 impl State {
     fn fresh(&mut self) {
         for registration in self.channels.values_mut().filter(|r| !r.retired) {
-            registration.reset();
+            registration.reset(false);
         }
     }
 
@@ -56,6 +65,8 @@ pub(super) struct Registration {
     pub(super) deadline: Option<Instant>,
     children: Vec<JoinHandle<()>>,
     retired: bool,
+    /// Kept across resets, so every later reset still reaches the same display.
+    shown: Option<(Arc<dyn Shown>, u64)>,
 }
 
 impl Default for Registration {
@@ -68,6 +79,7 @@ impl Default for Registration {
             deadline: None,
             children: Vec::new(),
             retired: false,
+            shown: None,
         }
     }
 }
@@ -80,11 +92,27 @@ impl Registration {
         for child in self.children.drain(..) {
             child.abort();
         }
+        self.withdrawn(false);
     }
 
-    fn reset(&mut self) {
+    pub(super) fn seated(&self) {
+        if let Some((shown, channel)) = &self.shown {
+            shown.seated(*channel);
+        }
+    }
+
+    fn withdrawn(&self, retire: bool) {
+        if let Some((shown, channel)) = &self.shown {
+            shown.withdrawn(*channel, retire);
+        }
+    }
+
+    fn reset(&mut self, retire: bool) {
         self.incarnation.invalidate();
+        let shown = self.shown.take();
         *self = Self::default();
+        (self.retired, self.shown) = (retire, shown);
+        self.withdrawn(retire);
     }
 }
 
@@ -107,16 +135,22 @@ pub(crate) struct Ticket {
 
 impl Default for Runtime {
     fn default() -> Self {
+        Self::showing(None)
+    }
+}
+
+impl Runtime {
+    /// A runtime whose resets clear `shown` under the same lock that revokes the approval.
+    pub(super) fn showing(shown: Option<Arc<dyn Shown>>) -> Self {
         Self(Mutex::new(State {
             open: true,
             owner_present: false,
             owner_token: Arc::new(()),
             channels: HashMap::new(),
+            shown,
         }))
     }
-}
 
-impl Runtime {
     pub(crate) fn own(self: &Arc<Self>) -> Lifetime {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.owner_token = Arc::new(());
@@ -133,10 +167,12 @@ impl Runtime {
         if !state.open || !state.owner_present || channel == 0 {
             return None;
         }
+        let shown = state.shown.clone().map(|shown| (shown, channel));
         let registration = state.channels.entry(channel).or_default();
         if registration.retired {
             *registration = Registration::default();
         }
+        registration.shown = registration.shown.take().or(shown);
         Some(Ticket {
             runtime: Arc::downgrade(self),
             channel,
@@ -146,7 +182,7 @@ impl Runtime {
 
     pub(crate) fn invalidate_if_current(&self, ticket: &Ticket, cause: &'static str) -> bool {
         ticket.transition(self, |registration| {
-            registration.reset();
+            registration.reset(false);
             tracing::debug!(
                 channel_id = ticket.channel,
                 cause,
@@ -156,10 +192,7 @@ impl Runtime {
     }
 
     pub(crate) fn retire_if_current(&self, ticket: &Ticket) -> bool {
-        ticket.transition(self, |registration| {
-            registration.reset();
-            registration.retired = true;
-        })
+        ticket.transition(self, |registration| registration.reset(true))
     }
 
     pub(crate) fn prune(&self) {
@@ -239,9 +272,20 @@ impl Ticket {
         &self,
         work: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> bool {
+        self.own_child(work, drop)
+    }
+
+    /// [`Self::spawn_child`], handing its abort handle to `arm` while the fence still holds it.
+    pub(super) fn own_child(
+        &self,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+        arm: impl FnOnce(AbortHandle),
+    ) -> bool {
         self.with_current(|registration| {
             registration.children.retain(|child| !child.is_finished());
-            registration.children.push(tokio::spawn(work));
+            let child = tokio::spawn(work);
+            arm(child.abort_handle());
+            registration.children.push(child);
         })
         .is_some()
     }
@@ -253,8 +297,7 @@ impl super::entrypoints::Fence for Runtime {
         let Some(registration) = state.channels.get_mut(&channel).filter(|r| !r.retired) else {
             return;
         };
-        registration.reset();
-        registration.retired = retire;
+        registration.reset(retire);
         tracing::debug!(
             channel_id = channel,
             cause,
@@ -271,7 +314,7 @@ impl super::entrypoints::Fence for Runtime {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         for (channel, registration) in state.channels.iter_mut() {
             if !registration.retired && registration.incarnation.rests_on(gate) {
-                registration.reset();
+                registration.reset(false);
                 tracing::debug!(
                     channel_id = channel,
                     cause,
@@ -288,11 +331,16 @@ impl super::entrypoints::Fence for Runtime {
         cause: &'static str,
     ) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        // A late notice names a mount the registry has since moved past; only the current one counts.
+        let current = super::entrypoints::current_mount(channel);
+        if mount.map(Arc::as_ptr) != current.as_ref().map(Arc::as_ptr) {
+            return;
+        }
         let Some(registration) = state.channels.get_mut(&channel) else {
             return;
         };
         if !registration.retired && registration.incarnation.rests_off(mount) {
-            registration.reset();
+            registration.reset(false);
             tracing::debug!(
                 channel_id = channel,
                 cause,
@@ -313,7 +361,7 @@ impl super::entrypoints::Fence for Runtime {
             return;
         };
         if !registration.retired && Arc::ptr_eq(&registration.generation, generation) {
-            registration.reset();
+            registration.reset(false);
             tracing::debug!(channel_id = channel, cause, "presence lease withdrawn");
         }
     }
@@ -327,5 +375,6 @@ impl super::entrypoints::Fence for Runtime {
     }
 }
 
+#[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;

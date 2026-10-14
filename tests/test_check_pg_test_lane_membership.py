@@ -142,9 +142,9 @@ class NonPgModuleSelectors(FixtureCase):
         skips, replay = membership.non_pg_selection(self.root)
         self.assertEqual(skips, globals + ("pure",))
         self.assertEqual(replay, ("suite::plain_pg_name",))
-        shard_0, shard_1 = membership.pg_include_shards(skips)
-        self.assertEqual(shard_0, membership.PG_SHARD_0_SELECTORS)
-        self.assertEqual(shard_1[-4:], ("--skip", "pg_", "--skip", "postgres"))
+        shard_0, shard_1 = membership.pg_include_shards(skips, membership.load_lib_test_inventory(self.root))
+        self.assertEqual(set(shard_0[1:]) | set(shard_1[1:]), {"pure::database", "suite::plain_pg_name"})
+        self.assertFalse(set(shard_0[1:]) & set(shard_1[1:]))
 
     def test_existing_and_new_names_keep_selection_replay_and_both_shards(self) -> None:
         modules = (
@@ -186,7 +186,7 @@ class NonPgModuleSelectors(FixtureCase):
             replay,
             tuple(sorted(name for name in names - pg_names if any(value in name for value in original))),
         )
-        for old, new in zip(membership.pg_include_shards(original), membership.pg_include_shards(reduced)):
+        for old, new in zip(membership.pg_include_shards(original, names), membership.pg_include_shards(reduced, names)):
             with self.subTest(shard=old):
                 def selection(args):
                     command = shlex.join(["cargo", "test", "--lib", "--", *args])
@@ -343,11 +343,14 @@ class NonPgFilterContract(unittest.TestCase):
         cases = {
             "dropped include": (
                 membership.NON_PG_FILTER_REL,
-                "PG_INCLUDE_ARGS_SHARD_1=(\n  _pg\n", "PG_INCLUDE_ARGS_SHARD_1=(\n",
-                "PG shards [] select",
+                'mapfile -t PG_INCLUDE_ARGS <<< "$PG_SELECTED_TESTS"',
+                'PG_INCLUDE_ARGS=()',
+                "PG shard derivation is not canonical",
             ),
             "duplicated selector": (
-                membership.NON_PG_FILTER_REL, "  --skip postgres\n)", ")", "PG shards [0, 1] select",
+                membership.NON_PG_FILTER_REL,
+                '--partition-pg-list "$PG_INCLUDE_SHARD"', '--partition-pg-list "0"',
+                "PG shard derivation is not canonical",
             ),
             "literal shard": (
                 Path(".github/workflows/ci-main.yml"), "${{ matrix.shard }}", "1",
@@ -374,6 +377,18 @@ class NonPgFilterContract(unittest.TestCase):
                 finally:
                     path.write_text(original, "utf-8")
                 self.assertTrue(any(expected in error for error in errors), errors)
+
+
+    def test_actual_missing_and_overlapping_exact_ids_are_rejected(self) -> None:
+        from unittest.mock import patch
+        shards = membership.load_pg_include_shards(self.root)
+        self.assertTrue(all(len(args) > 1 for args in shards))
+        missing = (shards[0][:-1], shards[1])
+        overlap = (shards[0], (*shards[1], shards[0][-1]))
+        for bad, message in ((missing, "PG shards [] select"), (overlap, "PG shards [0, 1] select")):
+            with self.subTest(message=message), patch.object(membership, "load_pg_include_shards", return_value=bad):
+                errors = membership.pg_shard_contract_errors(self.root, self.jobs())
+                self.assertTrue(any(message in error for error in errors), errors)
 
 
 class DetectionMutation(FixtureCase):
@@ -625,7 +640,10 @@ class DetectionMutation(FixtureCase):
         voice = voice.replace('    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', '    #[cfg(test)]\n    #[path = "pcm_harness_tests.rs"]\n    mod pcm_harness_tests;', 1)
         self.fx.write_source("src/services/discord/voice_barge_in.rs", voice)
         target = "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs"
-        self.fx.write_source(target, (REPO_ROOT / target).read_text("utf-8"))
+        # Every external voice test module the real file mounts must exist in the fixture.
+        for external in sorted((REPO_ROOT / "src/services/discord/voice_barge_in/tests").glob("*.rs")):
+            relative = external.relative_to(REPO_ROOT).as_posix()
+            self.fx.write_source(relative, external.read_text("utf-8"))
         findings: list[membership.Finding] = []
         self.assertIn((self.root / target).resolve(), membership._external_test_files(self.root.resolve(), membership._load_coverage_module(self.root), findings=findings))
         self.assertFalse([finding for finding in findings if finding.source.startswith("src/services/discord/voice_barge_in.rs:")])

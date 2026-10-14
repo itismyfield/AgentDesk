@@ -109,6 +109,9 @@ pub(crate) mod provider_teardown;
 pub mod queue;
 pub mod qwen;
 pub mod qwen_tmux_wrapper;
+// Scheduling contracts remain unavailable to runtime callers until activation.
+#[cfg(test)]
+pub(crate) mod recovery_defer;
 pub(crate) mod release_source;
 pub mod remote_stub;
 pub mod retrospectives;

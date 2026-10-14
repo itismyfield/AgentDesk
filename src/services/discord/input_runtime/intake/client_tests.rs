@@ -1,5 +1,7 @@
 use super::*;
-use crate::services::discord::input_runtime::intake::{Access, Applied, apply_from_scan, lookup};
+use crate::services::discord::input_runtime::intake::{
+    Access, Applied, Client, apply_from_scan, lookup,
+};
 use crate::services::discord::input_runtime::intake::{
     Classification, Origin, SourceDraft, prepare_source,
 };
@@ -154,9 +156,7 @@ async fn roundtrip<T>(
     receiver: &mut mpsc::Receiver<SupervisorCmd>,
 ) -> T {
     let (result, ()) = tokio::join!(request, async {
-        supervisor
-            .input_command(receiver.recv().await.unwrap(), true)
-            .await;
+        Box::pin(supervisor.input_command(receiver.recv().await.unwrap(), true)).await;
     });
     result
 }
@@ -178,6 +178,58 @@ fn prepared(channel: u64) -> crate::services::discord::input_runtime::intake::Pr
         voice_announcement: None,
     })
     .unwrap()
+}
+
+#[tokio::test]
+async fn c2c1_lookup_returns_persisted_canonical_receipt() {
+    let rig = Rig::new(963_259_830_001);
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+    assert_eq!(supervisor.boot().await, Landing::Admitted);
+    let (sender, mut receiver) = mpsc::channel(4);
+    let client = supervisor.bind_intake(sender).unwrap();
+    supervisor.adopt_task(rig.channel).unwrap();
+    supervisor.publish_intake();
+    roundtrip(client.pending(vec![10, 11]), &mut supervisor, &mut receiver)
+        .await
+        .unwrap();
+    let ticket = roundtrip(client.fetch_ticket(), &mut supervisor, &mut receiver)
+        .await
+        .unwrap();
+    let capability = roundtrip(
+        client.begin_scan(ticket, vec![10, 11], 11, true),
+        &mut supervisor,
+        &mut receiver,
+    )
+    .await
+    .unwrap();
+    let original = prepared(rig.channel);
+    let canonical = original.identity().clone();
+    let committed = roundtrip(
+        apply_from_scan(&client, Classification::Target, original, capability),
+        &mut supervisor,
+        &mut receiver,
+    )
+    .await
+    .unwrap();
+    let Applied::Receipt(committed) = committed else {
+        panic!("the valid scan must produce a durable receipt")
+    };
+    assert!(matches!(committed.receipt, Receipt::Accepted(_)));
+    assert_eq!(committed.settlement, Ok(()));
+    let alias = ReceiptIdentity::new(11, vec![11], 7, rig.channel, rig.channel).unwrap();
+    let response = roundtrip(
+        client.lookup_responsibility(alias),
+        &mut supervisor,
+        &mut receiver,
+    )
+    .await
+    .unwrap();
+    assert!(supervisor.release());
+    println!("C2C1_CANONICAL_LOOKUP_RESPONSE={response:?}");
+    assert!(
+        format!("{response:?}").contains(&format!("{canonical:?}")),
+        "alias lookup must return persisted canonical provenance: {response:?}"
+    );
 }
 
 #[tokio::test]
@@ -299,7 +351,10 @@ async fn c2_apply_from_real_scan_keeps_receipt_distinct_from_failed_settlement_a
     )
     .await
     .unwrap();
-    assert!(matches!(result, Responsibility::Known { key: 10, .. }));
+    assert!(matches!(
+        result.responsibility,
+        Responsibility::Known { key: 10, .. }
+    ));
     assert!(supervisor.release());
 }
 
@@ -382,4 +437,270 @@ async fn c2_external_reply_loss_retains_original_and_does_not_cancel_the_receive
         before_receipt + 1
     );
     assert!(supervisor.release());
+}
+
+#[derive(Debug)]
+pub(in crate::services::discord) struct ScanFixtureEvidence {
+    pub(crate) original_input: serde_json::Value,
+    pub(crate) original_identity: ReceiptIdentity,
+    pub(crate) persisted_row: Option<crate::services::tui_input::rows::Row>,
+    pub(crate) persisted_identity: Option<ReceiptIdentity>,
+    pub(crate) open_rows: usize,
+    pub(crate) pending: ordering::PendingSource,
+}
+
+pub(in crate::services::discord) fn run_scan_fixture<F, Fut, T>(
+    channel: u64,
+    fail_settlement: bool,
+    callback: F,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = (T, ScanFixtureEvidence)>>>
+where
+    F: FnOnce(
+        &'static Registry,
+        Arc<Client>,
+        crate::services::discord::input_runtime::intake::PreparedSource,
+        ordering::ScanCapability,
+    ) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    Box::pin(async move {
+        let rig = Rig::new(channel);
+        let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+        assert_eq!(Box::pin(supervisor.boot()).await, Landing::Admitted);
+        let (sender, mut receiver) = mpsc::channel(8);
+        let client = supervisor.bind_intake(sender).unwrap();
+        supervisor.adopt_task(rig.channel).unwrap();
+        supervisor.publish_intake();
+        roundtrip(client.pending(vec![10, 11]), &mut supervisor, &mut receiver)
+            .await
+            .unwrap();
+        let ticket = roundtrip(client.fetch_ticket(), &mut supervisor, &mut receiver)
+            .await
+            .unwrap();
+        let capability = roundtrip(
+            client.begin_scan(ticket, vec![10, 11, 12], 12, true),
+            &mut supervisor,
+            &mut receiver,
+        )
+        .await
+        .unwrap();
+        if fail_settlement {
+            supervisor.after_receipt_io = Some(supervisor.pending_overflow());
+        }
+        let original = prepared(rig.channel);
+        let original_input = original.input().clone();
+        let original_identity = original.identity().clone();
+        let request = callback(rig.registry, client, original, capability);
+        tokio::pin!(request);
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut request => break result,
+                command = receiver.recv() => {
+                    Box::pin(supervisor.input_command(command.expect("fixture mailbox remains live"), true)).await;
+                }
+            }
+        };
+        let rows = supervisor.slot().get().unwrap().rows().unwrap();
+        let evidence = ScanFixtureEvidence {
+            original_input,
+            original_identity,
+            persisted_row: rows.row(10).cloned(),
+            persisted_identity: rows.receipt_identity(10),
+            open_rows: rows.open_rows().count(),
+            pending: supervisor.pending_snapshot(),
+        };
+        assert!(supervisor.release());
+        (result, evidence)
+    })
+}
+
+async fn lookup_rows(
+    channel: u64,
+    inputs: Vec<(u64, serde_json::Value)>,
+    handback: Option<u64>,
+    queries: Vec<ReceiptIdentity>,
+) -> (
+    Vec<receipt::ResponsibilityLookup>,
+    Vec<receipt::DurableReceipt>,
+) {
+    let rig = Rig::new(channel);
+    let mut supervisor = rig.supervisor(Request::Ledger, vec![]);
+    assert_eq!(Box::pin(supervisor.boot()).await, Landing::Admitted);
+    let ledger = supervisor.slot().get().unwrap();
+    for (key, input) in inputs {
+        ledger
+            .append_entry(&Entry::Received { key, input }, &[])
+            .unwrap();
+    }
+    let rows = ledger.rows().unwrap();
+    let expected = rows
+        .open_rows()
+        .filter_map(|(key, row)| {
+            Some(receipt::DurableReceipt {
+                key,
+                received_seq: row.received_seq?,
+                identity: rows.receipt_identity(key)?,
+            })
+        })
+        .collect();
+    if let Some(key) = handback {
+        ledger
+            .append_entry(
+                &Entry::Transition {
+                    key,
+                    state: RowState::Abandoned(AbandonReason::Handback),
+                    attempt: None,
+                },
+                &[],
+            )
+            .unwrap();
+    }
+    let (sender, mut receiver) = mpsc::channel(8);
+    let client = supervisor.bind_intake(sender).unwrap();
+    supervisor.adopt_task(rig.channel).unwrap();
+    supervisor.publish_intake();
+    let mut responses = Vec::new();
+    for query in queries {
+        responses.push(
+            roundtrip(
+                client.lookup_responsibility(query),
+                &mut supervisor,
+                &mut receiver,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    assert!(supervisor.release());
+    (responses, expected)
+}
+
+#[tokio::test]
+async fn c2c1_lookup_preserves_full_coverage_and_each_provenance_field() {
+    let channel = 963_259_830_002;
+    let original = prepared(channel);
+    let query = |ids: Vec<u64>, author, source_channel, execution| {
+        ReceiptIdentity::new(ids[0], ids, author, source_channel, execution).unwrap()
+    };
+    let queries = vec![
+        query(vec![10, 11], 7, channel, channel),
+        query(vec![11], 7, channel, channel),
+        query(vec![10, 12], 7, channel, channel),
+        query(vec![10, 11], 8, channel, channel),
+        query(vec![10, 11], 7, channel + 1, channel),
+        query(vec![10, 11], 7, channel, channel + 1),
+        query(vec![12], 7, channel, channel),
+    ];
+    let (responses, expected) =
+        lookup_rows(channel, vec![(10, original.input().clone())], None, queries).await;
+    let receipt = expected[0].clone();
+    let known = receipt::ResponsibilityLookup {
+        responsibility: Responsibility::Known {
+            key: receipt.key,
+            received_seq: receipt.received_seq,
+        },
+        receipt: Some(receipt),
+    };
+    assert_eq!(responses[0], known);
+    assert_eq!(
+        responses[1], known,
+        "a covered alias returns the entire canonical receipt"
+    );
+    for response in &responses[2..6] {
+        assert_eq!(
+            *response,
+            receipt::ResponsibilityLookup {
+                responsibility: Responsibility::Conflict,
+                receipt: None
+            }
+        );
+    }
+    assert_eq!(
+        responses[6],
+        receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Absent,
+            receipt: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn c2c1_lookup_rejects_foreign_execution_and_multiple_canonical_rows() {
+    let channel = 963_259_830_003;
+    let query = ReceiptIdentity::new(11, vec![11], 7, channel, channel).unwrap();
+    let foreign = ReceiptIdentity::new(10, vec![10, 11], 7, channel, channel + 1).unwrap();
+    let (responses, _) = lookup_rows(
+        channel,
+        vec![(10, serde_json::json!({ "receipt_identity": foreign }))],
+        None,
+        vec![query],
+    )
+    .await;
+    assert_eq!(
+        responses[0],
+        receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Conflict,
+            receipt: None
+        }
+    );
+
+    let channel = 963_259_830_004;
+    let original = prepared(channel);
+    let other = ReceiptIdentity::new(12, vec![11, 12], 7, channel, channel).unwrap();
+    let query = ReceiptIdentity::new(11, vec![11], 7, channel, channel).unwrap();
+    let (responses, _) = lookup_rows(
+        channel,
+        vec![
+            (10, original.input().clone()),
+            (12, serde_json::json!({ "receipt_identity": other })),
+        ],
+        None,
+        vec![query],
+    )
+    .await;
+    assert_eq!(
+        responses[0],
+        receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Conflict,
+            receipt: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn c2c1_lookup_keeps_unknown_and_legacy_responsibility_distinct() {
+    let channel = 963_259_830_005;
+    let invalid = serde_json::json!({ "receipt_identity": { "source_ids": [10, 11], "author_id": 0, "original_channel_id": channel, "execution_channel_id": channel } });
+    let query = ReceiptIdentity::new(11, vec![11], 7, channel, channel).unwrap();
+    let (responses, _) = lookup_rows(channel, vec![(10, invalid)], None, vec![query]).await;
+    assert_eq!(
+        responses[0],
+        receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Unknown,
+            receipt: None
+        }
+    );
+
+    let channel = 963_259_830_006;
+    let original = prepared(channel);
+    let query = ReceiptIdentity::new(11, vec![11], 7, channel, channel).unwrap();
+    let (responses, expected) = lookup_rows(
+        channel,
+        vec![(10, original.input().clone())],
+        Some(10),
+        vec![query],
+    )
+    .await;
+    let receipt = expected[0].clone();
+    assert_eq!(
+        responses[0],
+        receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Legacy {
+                key: receipt.key,
+                received_seq: receipt.received_seq
+            },
+            receipt: Some(receipt),
+        }
+    );
 }
