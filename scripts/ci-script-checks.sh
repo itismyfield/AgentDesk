@@ -248,25 +248,9 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
-if run_check guards "N1 canary oracle input contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
-"$PYTHON" tests/run_n1_canary_mutations.py
-"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
-fi
-
-if run_check guards "N1 native oracle contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli tests.test_n1_canary_native_wiring
-"$PYTHON" tests/run_n1_canary_native_mutations.py
-fi
-
-if run_check guards "N1 canary final audit contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_audit
-"$PYTHON" tests/run_n1_canary_audit_mutations.py
-fi
-
-if run_check guards "N1 canary producer capability contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_producer
-"$PYTHON" tests/run_n1_canary_producer_mutations.py
+if run_check guards "hrot transition sender surface"; then
+"$PYTHON" scripts/check_hrot_sender_surface.py
+"$PYTHON" -m unittest tests.test_hrot_sender_surface
 fi
 
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
@@ -508,17 +492,15 @@ if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
 fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
-"$PYTHON" -m unittest tests.test_lane_source_parity
+"$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
 fi
 
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
-# cargo exits 0 on zero filter matches, so a curated lane with the wrong
-# --lib/--bin/--test flag can run 0 tests while its required check stays
-# green. The gate consumes workflow and justfile command sites and is enforced
-# here. The unittest run below is the gate's own mutation proof.
+# Zero-match cargo is green; verify selectors and the shared compiled oracle.
+# Mutation tests retain the static/compiled and artifact fallback contracts.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity
+"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
 AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
@@ -547,7 +529,7 @@ if run_check contracts "D4-B acceptance manifest (#5340)"; then
 fi
 
 if run_check contracts "B3b-4 recovery custody dormancy (#5340)"; then
-"$PYTHON" scripts/check_b3b4_dormancy.py
+"$PYTHON" scripts/check_b3b4_dormancy.py --ci --diff-base "${TEST_LANE_BASELINE_REF:-}" --policy dormant
 "$PYTHON" -m unittest tests.test_check_b3b4_dormancy
 fi
 

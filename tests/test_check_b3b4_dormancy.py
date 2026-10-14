@@ -1,4 +1,5 @@
 """CLI-boundary tests for the B3b-4 dormancy gate: a clean tree passes, each planted leak fails."""
+import os
 import subprocess
 import sys
 import tempfile
@@ -37,14 +38,38 @@ TREE = {
 }
 
 
-def run(tree, *args):
+# Each run decides CI mode from its own arguments, not from the environment running the tests.
+ENV = {key: value for key, value in os.environ.items() if key != "CI"}
+
+
+def write(root, tree):
+    for name, text in tree.items():
+        path = Path(root) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def run(tree, *args, env=ENV):
     with tempfile.TemporaryDirectory() as tmp:
-        for name, text in tree.items():
-            path = Path(tmp) / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+        write(tmp, tree)
         done = subprocess.run([sys.executable, str(SCRIPT), "--root", tmp, *args],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
+        return done.returncode, done.stdout
+
+
+def changed(change, *args):
+    """Runs the check on a fixture repository whose HEAD applies `change` to the clean tree."""
+    with tempfile.TemporaryDirectory() as tmp:
+        git = ("git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
+        subprocess.run(["git", "init", "-q", tmp], check=True)
+        write(tmp, TREE)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "base"], check=True)
+        write(tmp, change)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run([*git, "commit", "-qm", "head"], check=True)
+        done = subprocess.run([sys.executable, str(SCRIPT), "--root", tmp, *args],
+                              capture_output=True, text=True, env=ENV)
         return done.returncode, done.stdout
 
 
@@ -61,8 +86,64 @@ class DormancyGate(unittest.TestCase):
 
     def test_clean_tree_and_the_real_repository_pass(self):
         self.assertEqual(run(TREE), (0, "B3b-4 dormancy: PASS\n"))
-        done = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True)
+        done = subprocess.run([sys.executable, str(SCRIPT), "--diff-base", "HEAD", "--policy", "b3b4"],
+                              capture_output=True, text=True, env=ENV)
         self.assertEqual((done.returncode, done.stdout), (0, "B3b-4 dormancy: PASS\n"))
+
+    def test_a_changed_forbidden_file_fails_and_only_the_gated_declarations_pass(self):
+        base = ("--diff-base", "HEAD~1")
+        policy_base = (*base, "--policy")
+        code, out = changed({"src/services/turn_orchestrator/incarnation.rs": "fn spawn() {}\n"},
+                            *policy_base, "4a2b-0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("incarnation.rs: changed against HEAD~1 but must stay as it is", out)
+        code, out = changed({"src/services/turn_orchestrator/injected_inputs.rs": "fn f() {}\n"}, *base)
+        self.assertEqual(code, 1, out)
+        self.assertIn("injected_inputs.rs: changed against", out)
+        # The base tree without the registry declaration; HEAD adds exactly its three gated lines.
+        declared = TREE[PURGE].replace('#[cfg(test)]\n#[path = "recovery_registry/mod.rs"]\n'
+                                       'pub(crate) mod recovery_registry;\n', "")
+        with tempfile.TemporaryDirectory() as tmp:
+            git = ("git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false")
+            subprocess.run(["git", "init", "-q", tmp], check=True)
+            write(tmp, {**TREE, PURGE: declared})
+            subprocess.run([*git, "add", "-A"], check=True)
+            subprocess.run([*git, "commit", "-qm", "base"], check=True)
+            for head, expected in ((TREE[PURGE], 0), (TREE[PURGE] + "fn reap() {}\n", 1)):
+                write(tmp, {PURGE: head})
+                subprocess.run([*git, "commit", "-qam", "head"], check=True)
+                done = subprocess.run([sys.executable, str(SCRIPT), "--root", tmp, "--ci", *policy_base,
+                                       "b3b4"], capture_output=True, text=True, env=ENV)
+                self.assertEqual(done.returncode, expected, done.stdout)
+                subprocess.run([*git, "reset", "-q", "--hard", "HEAD~1"], check=True)
+        self.assertIn("`fn reap() {}` changed; only its gated declarations may", done.stdout)
+
+    def test_ci_freezes_no_file_but_a_slice_policy_does_and_both_refuse_a_link(self):
+        ci = ("--ci", "--diff-base", "HEAD~1", "--policy")
+        unrelated = {"src/db/agents.rs": "fn renamed() {}\n",
+                     "migrations/postgres/0200_agents_note.sql": "ALTER TABLE agents ADD COLUMN note TEXT;\n"}
+        self.assertEqual(changed(unrelated, *ci, "dormant"), (0, "B3b-4 dormancy: PASS\n"))
+        code, out = changed(unrelated, *ci, "4a2b-0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("src/db/agents.rs: changed against HEAD~1 but must stay as it is", out)
+        self.assertIn("0200_agents_note.sql: changed against HEAD~1", out)
+        mailbox = "src/services/turn_orchestrator.rs"
+        link = {mailbox: "fn boot() { registry_purge::recovery_custody::CustodyStore::new(); }\n"
+                + TREE[mailbox]}
+        for policy in ("dormant", "4a2b-0"):
+            code, out = changed(link, *ci, policy)
+            self.assertEqual(code, 1, (policy, out))
+            self.assertIn("reference to a dormant module outside it", out)
+
+    def test_ci_without_a_base_or_a_policy_is_unverified_not_pass(self):
+        for args, env in (((), {**ENV, "CI": "true"}), (("--ci",), ENV),
+                          (("--ci", "--diff-base", ""), ENV), (("--ci", "--diff-base", "HEAD"), ENV)):
+            code, out = run(TREE, *args, env=env)
+            self.assertEqual(code, 1, (args, out))
+            self.assertIn("unverified: CI needs --diff-base and --policy", out)
+        code, out = run(TREE, "--ci", "--diff-base", "no-such-ref", "--policy", "b3b4")
+        self.assertEqual(code, 1, out)
+        self.assertIn("unverified: no diff against no-such-ref", out)
 
     def test_an_ungated_or_loosely_gated_declaration_fails(self):
         gate = '#[cfg(test)]\n#[path = "recovery_registry/mod.rs"]'

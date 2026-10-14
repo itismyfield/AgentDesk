@@ -1694,6 +1694,7 @@ mod home_command_tests {
             provider: crate::services::provider::ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let mut msg = serenity::Message::default();
         msg.id = serenity::MessageId::new(channel.get() + 2);

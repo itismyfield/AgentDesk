@@ -964,6 +964,7 @@ mod tests {
         mailbox_active: Option<u64>,
     ) -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: false,
             tmux_session: tmux_session.map(str::to_string),
@@ -1148,7 +1149,6 @@ mod tests {
         let _env = EnvRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_140_002);
         let tmux_session = "AgentDesk-codex-stale-generation-floor";

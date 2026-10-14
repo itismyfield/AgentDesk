@@ -20,6 +20,9 @@ CI_PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 TUI_RELAY_TESTS = REPO_ROOT / "scripts/e2e/tui_relay"
 UNCONDITIONAL_JOB = "relay_authority_targets"
 CENSUS_TARGET = "services::discord::tui_prompt_relay::tests::scenario_census_e2e"
+# The census may wait on the shared lib producer only behind this exact cancellation guard.
+PRODUCER_NEEDS_LINE = "    needs: lib_test_prepare"
+CANCELLATION_GUARD_LINE = "    if: ${{ !cancelled() }}"
 
 
 def executable_lines(text: str) -> list[str]:
@@ -57,6 +60,25 @@ def job_block(text: str, job: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def activation_lines(block: str) -> list[str]:
+    return [line for line in block.splitlines() if line.startswith(("    if:", "    needs:"))]
+
+
+def census_job_stays_unconditional(block: str) -> bool:
+    # Absent, or the exact guarded producer edge (as test_pr_cap_ci_wiring permits);
+    # needs without the guard would skip the census whenever the producer fails.
+    return sorted(activation_lines(block)) in (
+        [],
+        [CANCELLATION_GUARD_LINE],
+        [CANCELLATION_GUARD_LINE, PRODUCER_NEEDS_LINE],
+    )
+
+
+def with_activation(block: str, *lines: str) -> str:
+    body = [line for line in block.splitlines() if line not in activation_lines(block)]
+    return "\n".join(body[:1] + list(lines) + body[1:])
+
+
 class E2eScenarioLaneWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.script = CI_SCRIPT_CHECKS.read_text(encoding="utf-8")
@@ -81,11 +103,35 @@ class E2eScenarioLaneWiring(unittest.TestCase):
 
     def test_the_census_job_carries_no_path_filter(self) -> None:
         block = job_block(self.workflow, UNCONDITIONAL_JOB)
-        for line in block.splitlines():
-            self.assertFalse(
-                line.startswith("    if:") or line.startswith("    needs:"),
-                f"{UNCONDITIONAL_JOB} must stay unconditional; found {line.strip()!r}",
-            )
+        self.assertTrue(
+            census_job_stays_unconditional(block),
+            f"{UNCONDITIONAL_JOB} must stay unconditional; found {activation_lines(block)!r}",
+        )
+
+    def test_the_original_unconditional_census_job_is_accepted(self) -> None:
+        block = job_block(self.workflow, UNCONDITIONAL_JOB)
+        self.assertTrue(census_job_stays_unconditional(with_activation(block)))
+
+    def test_other_census_job_activation_fails(self) -> None:
+        block = job_block(self.workflow, UNCONDITIONAL_JOB)
+        for lines in (
+            ("    if: false",),
+            ("    if: ${{ false }}",),
+            ("    if: needs.changes.outputs.relay == 'true'",),
+            (PRODUCER_NEEDS_LINE, "    if: ${{ needs.changes.outputs.relay == 'true' }}"),
+            (PRODUCER_NEEDS_LINE,
+             "    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' }}"),
+            (PRODUCER_NEEDS_LINE, "    if: ${{ always() }}"),
+            (PRODUCER_NEEDS_LINE, "    if: ${{!cancelled()}}"),
+            (PRODUCER_NEEDS_LINE,),
+            ("    needs: changes", CANCELLATION_GUARD_LINE),
+            ("    needs: [lib_test_prepare, changes]", CANCELLATION_GUARD_LINE),
+            ("    needs: [lib_test_prepare]", CANCELLATION_GUARD_LINE),
+            ("    needs:", CANCELLATION_GUARD_LINE),
+            (PRODUCER_NEEDS_LINE, CANCELLATION_GUARD_LINE, "    if: false"),
+        ):
+            with self.subTest(lines=lines):
+                self.assertFalse(census_job_stays_unconditional(with_activation(block, *lines)))
 
     def test_census_target_remains_required_by_the_always_publisher(self) -> None:
         jobs = yaml.safe_load(self.workflow)["jobs"]
