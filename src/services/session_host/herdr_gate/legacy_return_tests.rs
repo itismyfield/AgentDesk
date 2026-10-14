@@ -6,6 +6,10 @@ use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdenti
 
 struct MissingPane;
 impl HerdrTransport for MissingPane {
+    fn call_with_witness(&self, _: &HerdrCall, _: &ServerWitness) -> HerdrOutcome {
+        panic!("legacy return must never mutate Herdr")
+    }
+
     fn server_witness(&self) -> Witnessed {
         Ok(ServerWitness::for_test(99))
     }
