@@ -275,6 +275,150 @@ pub fn codex_remote_ssh_enabled() -> bool {
         .unwrap_or_else(|error| error.into_inner())
 }
 
+/// A known runtime that no longer executes; consumers refuse the input, never re-select a driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetiredRuntimeError(());
+
+impl RetiredRuntimeError {
+    /// Stable reason for API responses and logs.
+    pub const CODE: &'static str = "runtime_retired:claude-e";
+    /// What a user sees when a new input is refused.
+    pub const NEW_INPUT_NOTICE: &'static str = "claude-e runtime은 퇴역하여 요청을 실행하거나 대기열에 추가하지 않았습니다. 지원 runtime 설정을 확인한 뒤 다시 요청해 주세요.";
+}
+
+impl std::fmt::Display for RetiredRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", Self::NEW_INPUT_NOTICE, Self::CODE)
+    }
+}
+
+impl std::error::Error for RetiredRuntimeError {}
+
+/// Drivers that already report `String` errors surface the user notice.
+impl From<RetiredRuntimeError> for String {
+    fn from(error: RetiredRuntimeError) -> Self {
+        error.to_string()
+    }
+}
+
+/// Fallible resolver. Every production selection is still `Ok`, exactly as the plain resolver.
+pub fn try_resolve_provider_session_selection_with_capability(
+    provider: &ProviderKind,
+    entrypoint_supports_tui_hosting: bool,
+) -> Result<ProviderSessionSelection, RetiredRuntimeError> {
+    try_resolve_provider_session_selection_with_channel(
+        provider,
+        entrypoint_supports_tui_hosting,
+        None,
+    )
+}
+
+pub fn try_resolve_provider_session_selection_with_channel(
+    provider: &ProviderKind,
+    entrypoint_supports_tui_hosting: bool,
+    channel_id: Option<u64>,
+) -> Result<ProviderSessionSelection, RetiredRuntimeError> {
+    #[cfg(test)]
+    if retired_runtime_for_tests::is_retired(provider, channel_id) {
+        return Err(RetiredRuntimeError(()));
+    }
+    Ok(resolve_provider_session_selection_with_channel(
+        provider,
+        entrypoint_supports_tui_hosting,
+        channel_id,
+    ))
+}
+
+/// The resolver's refusal for an input consumer that executes later or elsewhere.
+pub fn ensure_runtime_executable(
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+) -> Result<(), RetiredRuntimeError> {
+    try_resolve_provider_session_selection_with_channel(provider, true, channel_id).map(|_| ())
+}
+
+/// Test-only typed refusal for one provider/channel scope, visible to the installing thread only.
+#[cfg(test)]
+pub(crate) mod retired_runtime_for_tests {
+    use super::ProviderKind;
+    use std::cell::RefCell;
+
+    type Scope = (String, Option<u64>);
+
+    thread_local! {
+        static RETIRED: RefCell<Vec<Scope>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Lifts its scope's refusal on drop.
+    pub(crate) struct Retired(Scope);
+
+    pub(crate) fn retire(provider: &ProviderKind, channel_id: Option<u64>) -> Retired {
+        let scope = (provider.as_str().to_ascii_lowercase(), channel_id);
+        RETIRED.with(|cell| cell.borrow_mut().push(scope.clone()));
+        Retired(scope)
+    }
+
+    pub(super) fn is_retired(provider: &ProviderKind, channel_id: Option<u64>) -> bool {
+        let scope = (provider.as_str().to_ascii_lowercase(), channel_id);
+        RETIRED.with(|cell| cell.borrow().contains(&scope))
+    }
+
+    impl Drop for Retired {
+        fn drop(&mut self) {
+            RETIRED.with(|cell| {
+                let mut scopes = cell.borrow_mut();
+                if let Some(at) = scopes.iter().position(|scope| *scope == self.0) {
+                    scopes.remove(at);
+                }
+            });
+        }
+    }
+
+    /// One Claude channel's `runtime` installed through the production mirror under the hosting
+    /// config lock; the defaults come back on drop.
+    pub(crate) struct ChannelRuntime {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    pub(crate) fn install_channel_runtime(channel_id: u64, runtime: &str) -> ChannelRuntime {
+        use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef};
+        let lock = super::TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let channel = AgentChannel::Detailed(AgentChannelConfig {
+            id: Some(channel_id.to_string()),
+            provider: Some("claude".to_string()),
+            runtime: Some(runtime.to_string()),
+            ..AgentChannelConfig::default()
+        });
+        let mut config = crate::config::Config::default();
+        config.agents.push(AgentDef {
+            id: "retired-runtime-fixture".to_string(),
+            name: "Retired Runtime Fixture".to_string(),
+            name_ko: None,
+            aliases: Vec::new(),
+            wake_word: None,
+            voice_enabled: false,
+            sensitivity_mode: None,
+            voice: crate::config::AgentVoiceConfig::default(),
+            provider: "claude".to_string(),
+            channels: AgentChannels::new().with("claude", channel),
+            keywords: Vec::new(),
+            department: None,
+            avatar_emoji: None,
+            preferred_intake_node_labels: None,
+        });
+        super::install_provider_hosting_config(&config);
+        ChannelRuntime { _lock: lock }
+    }
+
+    impl Drop for ChannelRuntime {
+        fn drop(&mut self) {
+            super::install_provider_hosting_config(&crate::config::Config::default());
+        }
+    }
+}
+
 pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSessionSelection {
     resolve_provider_session_selection_with_capability(provider, true)
 }
@@ -1089,6 +1233,63 @@ mod tests {
             avatar_emoji: None,
             preferred_intake_node_labels: None,
         }
+    }
+
+    /// Dormant: under every production runtime, claude-e and its alias included, the fallible
+    /// resolver returns the plain resolver's selection and the input check passes.
+    #[test]
+    fn fallible_resolver_keeps_every_production_selection() {
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let channel = 6_570_631_u64;
+        let runtimes = [
+            None,
+            Some("pipe"),
+            Some("tui"),
+            Some("claude-e"),
+            Some("claude_e"),
+        ];
+        for runtime in runtimes {
+            let mut config = Config::default();
+            for provider in ["claude", "codex"] {
+                let runtime = runtime.map(str::to_string);
+                let provider_config = ProviderConfig {
+                    runtime,
+                    ..ProviderConfig::default()
+                };
+                config
+                    .providers
+                    .insert(provider.to_string(), provider_config);
+            }
+            let agent = test_agent_with_claude_channel_runtime(&channel.to_string(), runtime);
+            config.agents.push(agent);
+            install_provider_hosting_config(&config);
+            for provider in [
+                ProviderKind::Claude,
+                ProviderKind::Codex,
+                ProviderKind::Qwen,
+            ] {
+                for channel_id in [None, Some(channel), Some(42)] {
+                    for capable in [true, false] {
+                        let plain = resolve_provider_session_selection_with_channel(
+                            &provider, capable, channel_id,
+                        );
+                        let fallible = try_resolve_provider_session_selection_with_channel(
+                            &provider, capable, channel_id,
+                        );
+                        let case = format!("{runtime:?} {provider:?} {channel_id:?} {capable}");
+                        assert_eq!(fallible, Ok(plain), "{case}");
+                    }
+                    assert_eq!(ensure_runtime_executable(&provider, channel_id), Ok(()));
+                }
+                let plain = resolve_provider_session_selection_with_capability(&provider, false);
+                let fallible =
+                    try_resolve_provider_session_selection_with_capability(&provider, false);
+                assert_eq!(fallible, Ok(plain), "{runtime:?} {provider:?}");
+            }
+        }
+        install_provider_hosting_config(&Config::default());
     }
 
     fn test_agent_with_claude_channel(channel_id: &str, tui_hosting: Option<bool>) -> AgentDef {
