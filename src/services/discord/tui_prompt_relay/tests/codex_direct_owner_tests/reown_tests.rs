@@ -193,6 +193,15 @@ fn codex_idle_loop_reowns_a_turn_whose_watcher_died_and_delivers_it_once() {
             turn.codex.row().is_none(),
             "the delivered turn's row is cleared"
         );
+        let lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            "codex",
+            &turn.codex.tmux,
+            turn.codex.channel.get(),
+        );
+        assert_eq!(
+            lease, None,
+            "the tail released the lease it was started under"
+        );
     });
 }
 

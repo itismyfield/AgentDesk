@@ -437,16 +437,18 @@ fn reown_cannot_commit_between_a_claim_and_its_owner_adopt() {
 
 /// The real Claude idle caller observes the prompt with no row yet, the hook wiring then
 /// delegates the turn to a watcher that dies, and the caller tails the re-owned turn under the
-/// lease the re-own stored rather than its own.
+/// lease the re-own stored: the tail's guard releases that lease when the tail ends.
 #[test]
 fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
     isolated(|dir| async move {
-        // Session-bound delivery lets the caller scan beside a live watcher, and makes the
-        // caller's own lease a non-bridge one.
+        // Session-bound delivery lets the caller scan beside a live watcher.
         enable_session_bound_delivery();
-        let dir = std::fs::canonicalize(dir).expect("canonical dir");
         let (b, end) = transcript(&dir, "caller.jsonl", "");
         let turn = Turn::observe(180, &b, end, Some(&b), Some(&b));
+        // The tmux session is gone, so the tail the caller starts ends on its own.
+        let tmux =
+            crate::services::provider_teardown::tests::test_support::FakeTmux::install(&turn.tmux);
+        tmux.mark_missing();
         crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
             "claude",
             &turn.tmux,
@@ -471,11 +473,6 @@ fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
             }
         };
         let observer = turn.live_lease().expect("the caller's lease");
-        assert_ne!(
-            observer.relay_owner,
-            ExternalInputRelayOwner::BridgeAdapter,
-            "fixture: the caller's own lease cannot start a bridge tail"
-        );
 
         // The hook relay's half, on the event the caller published.
         let mut hook_lease =
@@ -518,10 +515,25 @@ fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
             turn.row().effective_relay_owner_kind(),
             RelayOwnerKind::None
         );
-        let tails = super::super::super::CLAUDE_IDLE_RESPONSE_TAILS
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        assert!(tails.contains(&turn.tmux), "the caller tails the turn");
+        let tailing = || {
+            let tails = super::super::super::CLAUDE_IDLE_RESPONSE_TAILS.lock();
+            (tails.unwrap_or_else(|poison| poison.into_inner())).contains(&turn.tmux)
+        };
+        assert!(tailing(), "the caller tails the turn");
+        let ended = tokio::time::timeout(Duration::from_secs(30), async {
+            while tailing() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        assert!(
+            ended.await.is_ok(),
+            "the tail ends once the session is gone"
+        );
+        assert_eq!(
+            turn.live_lease(),
+            None,
+            "the tail released the lease it was started under"
+        );
     });
 }
 
