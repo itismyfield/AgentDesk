@@ -261,3 +261,37 @@ fn run_legacy_ingress(race_channel_registration: bool) {
     binding_events::set_test_root(None);
     super::super::reset_state_for_tests();
 }
+
+#[test]
+fn marker_io_guard_rejects_only_this_threads_binding_publication() {
+    use crate::services::cluster::stream_relay::source_read_proof::tests::hold_revisions_for_tests;
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _state = crate::services::tui_prompt_dedupe::hold_binding_peek_lock_for_tests();
+        let _revisions = hold_revisions_for_tests();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().unwrap();
+    // A concurrent test thread holding either mutex is not this thread's marker IO.
+    assert_marker_publication_unlocked_for_tests();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    let panic = std::panic::catch_unwind(|| {
+        with_runtime_binding_authority("marker-guard-same-thread", |_| {
+            assert_marker_publication_unlocked_for_tests();
+        })
+    })
+    .expect_err("marker IO inside this thread's binding publication must be rejected");
+    STATE.clear_poison();
+    let message = panic
+        .downcast_ref::<&str>()
+        .map(|message| message.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned());
+    assert_eq!(
+        message.as_deref(),
+        Some("binding cache mutex must not cover marker IO")
+    );
+}

@@ -103,6 +103,8 @@ fn with_runtime_binding_state_under_source_authority<R>(
     operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
 ) -> R {
     let tmux_session_name = authority.session();
+    #[cfg(test)]
+    let _publication = super::state::BindingPublicationHeld::enter();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state.purge_expired_runtime_binding_under_authority(authority);
@@ -135,15 +137,6 @@ fn with_runtime_binding_authority<R>(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         with_runtime_binding_state_under_source_authority(authority, operation)
     })
-}
-
-#[cfg(test)]
-pub(crate) fn assert_marker_publication_unlocked_for_tests() {
-    assert!(
-        STATE.try_lock().is_ok(),
-        "binding cache mutex must not cover marker IO"
-    );
-    crate::services::cluster::stream_relay::source_read_proof::assert_revision_unlocked_for_tests();
 }
 
 pub fn subscribe_observed_prompts() -> broadcast::Receiver<ObservedTuiPrompt> {
