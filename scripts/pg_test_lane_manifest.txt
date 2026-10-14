@@ -231,6 +231,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
+src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs
@@ -559,6 +560,7 @@ services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests
@@ -1494,6 +1496,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backsto
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
 services::discord::health::turn_deliver::inject_codex_tests::claude_injection_keeps_reading_a_separate_relay_pg
 services::discord::health::turn_deliver::inject_codex_tests::codex_injection_reads_native_with_a_separate_relay_pg
+services::discord::health::turn_deliver::inject_codex_tests::codex_listed_channel_uses_production_enablement_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
@@ -1984,6 +1987,7 @@ services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor

@@ -19,9 +19,18 @@ fn user_line_of_kind(text: &str, turn: &str, kind: &str) -> String {
 
 /// A direct input's turn with its prompt, the tail reading at the rollout end, its anchor.
 async fn claimed_turn(fx: &mut Fixture, t1: &str) -> u64 {
-    let first = fx.hook(PROMPT, t1).await;
-    fx.append(&(model_opening(t1, PROMPT) + &item_completed_line_for(t1)));
-    super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+    if fx.automatic {
+        fx.append(&(model_opening(t1, PROMPT) + &item_completed_line_for(t1)));
+        fx.send_hook(PROMPT, t1);
+        assert!(
+            wait_for(Duration::from_secs(5), || fx.codex.row().is_some()).await,
+            "automatic A claim"
+        );
+    } else {
+        let first = fx.hook(PROMPT, t1).await;
+        fx.append(&(model_opening(t1, PROMPT) + &item_completed_line_for(t1)));
+        super::super::super::super::relay_observed_prompt(&fx.shared, first).await;
+    }
     let anchor = fx.codex.row().expect("claim").user_msg_id;
     fx.append(&rollout_line(
         serde_json::json!({"type": "response_item", "payload": {
@@ -253,11 +262,19 @@ load-buffer) for last do :; done; cp "$last" "$d/buffer";;
 if-shell)
   echo "$7" >> "$d/keys"
   case "$7" in
-  paste-buffer*) touch "$d/pasted";;
+  paste-buffer*)
+    touch "$d/pasted"
+    if [ -f "$d/dynamic" ]; then
+      { printf '\n› %s\n' "$(head -n 1 "$d/buffer")"
+        awk 'NR > 1 { print "  " $0 }' "$d/buffer"
+        printf '\n  tab to queue message    95%% context left\n'; } > "$d/after"
+    fi;;
   send-keys*)
     touch "$d/enter"
     i=0; while [ -f "$d/gate" ] && [ ! -f "$d/release" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done
-    cat "$d/records" >> '@T@';;
+    if [ -f "$d/dynamic" ]; then
+      sed "s/@HEADER@/$(head -n 1 "$d/buffer")/" "$d/records" >> '@T@'
+    else cat "$d/records" >> '@T@'; fi;;
   esac;;
 esac
 "#;
@@ -446,4 +463,187 @@ fn codex_injected_new_turn_hook_first_delivers_its_answer() {
 #[test]
 fn codex_injected_new_turn_rollout_first_delivers_its_answer() {
     run(|root| Box::pin(injected_new_turn_delivers(root, 5_845_243, false)));
+}
+
+/// Production's Discord owner and ledger hand B to the automatic observer callback and HTTP tail.
+#[test]
+fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
+    run(|root| {
+        Box::pin(async move {
+            use crate::services::discord::health::{
+                HumanInputRequest, InjectAttempt, InjectOrigin, inject_hook, inject_human_input,
+            };
+            use crate::services::turn_orchestrator::{
+                Intervention, InterventionMode, SourceMessageQueuedGeneration,
+            };
+            use poise::serenity_prelude::UserId;
+            use std::os::unix::fs::PermissionsExt;
+            let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = pg_db.connect_and_migrate().await;
+            let _pane = live_pane_tmux(&root);
+            let channel = 5_845_255;
+            let tmux = "AgentDesk-codex-5845-discord-entry";
+            let shared =
+                crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+            let mut fx = Fixture::start_inner(&root, channel, tmux, false, shared, true).await;
+            let (a, b) = (turn(1), turn(2));
+            let anchor_a = claimed_turn(&mut fx, &a).await;
+            let dir = root.join("inject-pane");
+            std::fs::create_dir(&dir).unwrap();
+            let program = dir.join("tmux");
+            std::fs::write(
+                &program,
+                NEW_TURN_TMUX
+                    .replace("@D@", dir.to_str().unwrap())
+                    .replace("@T@", fx.codex.rollout.to_str().unwrap()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let screen = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex_busy_inject/busy_empty.ansi");
+            std::fs::write(dir.join("before"), std::fs::read(screen).unwrap()).unwrap();
+            std::fs::write(dir.join("dynamic"), "").unwrap();
+            std::fs::write(dir.join("gate"), "").unwrap();
+            let completed = chrono::Utc::now();
+            std::fs::write(
+                dir.join("records"),
+                timestamped(
+                    &event_line(serde_json::json!({
+            "type": "task_complete", "turn_id": a, "last_agent_message": RESPONSE})),
+                    completed,
+                ) + &timestamped(
+                    &(model_opening(&b, &format!("@HEADER@\n{PROMPT2}"))
+                        + &item_completed_line_for(&b)),
+                    completed + chrono::Duration::milliseconds(8),
+                ),
+            )
+            .unwrap();
+            inject_hook::set_pane_program(channel, program);
+            inject_hook::enable_codex(channel);
+            let message = MessageId::new(5_845_256);
+            let generation = crate::services::discord::runtime_store::process_generation();
+            let request = HumanInputRequest {
+                channel_id: fx.codex.channel,
+                provider: ProviderKind::Codex,
+                text: PROMPT2.into(),
+                author_id: 200,
+                source: "discord".into(),
+                metadata: None,
+                channel_name_hint: None,
+            };
+            let entry = Intervention {
+                author_id: UserId::new(200),
+                author_is_bot: false,
+                message_id: message,
+                queued_generation: generation,
+                source_message_ids: vec![message],
+                source_message_queued_generations: vec![
+                    SourceMessageQueuedGeneration::user_instruction(message, generation),
+                ],
+                source_text_segments: Vec::new(),
+                text: PROMPT2.into(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            };
+            let guard = crate::services::discord::inject_disposition::claim_source(
+                &ProviderKind::Codex,
+                message,
+                std::time::Instant::now(),
+            )
+            .unwrap();
+            let shared = fx.shared.clone();
+            let injected = tokio::spawn(async move {
+                inject_human_input(
+                    &shared,
+                    &request,
+                    InjectOrigin::Discord {
+                        message,
+                        handback: Box::new((entry, format!("discord:{channel}:{message}"))),
+                        guard,
+                    },
+                )
+                .await
+            });
+            assert!(
+                wait_for(Duration::from_secs(10), || dir.join("enter").exists()
+                    || injected.is_finished())
+                .await,
+                "entry reaches Enter"
+            );
+            if !dir.join("enter").exists() {
+                panic!("entry never reached Enter: {:?}", injected.await.unwrap());
+            }
+            let prompt = std::fs::read_to_string(dir.join("buffer")).unwrap();
+            let processed = fx.hook_probe.processed.load(Ordering::SeqCst);
+            fx.send_hook(&prompt, &b);
+            assert!(
+                wait_for(Duration::from_secs(5), || fx
+                    .hook_probe
+                    .processed
+                    .load(Ordering::SeqCst)
+                    > processed)
+                .await,
+                "B hook processed"
+            );
+            let _ = wait_for(Duration::from_secs(3), || !fx.pending_starts().is_empty()).await;
+            let pending_anchor_b = fx.pending_starts().first().map(|record| record.1);
+            assert_eq!(
+                fx.codex.row().unwrap().user_msg_id,
+                anchor_a,
+                "B observed before A cleanup"
+            );
+            std::fs::write(dir.join("release"), "").unwrap();
+            let attempt_result = injected.await.unwrap();
+            fx.append(&answer_for(&b, RESPONSE2));
+            fx.assert_answers_in_order(&[RESPONSE, RESPONSE2], Some(2))
+                .await;
+            assert_eq!(attempt_result, InjectAttempt::Injected { turn_id: None });
+            assert_eq!(fx.anchor_of(RESPONSE), anchor_a);
+            let anchor_b = fx.anchor_of(RESPONSE2);
+            assert_ne!(anchor_a, anchor_b);
+            assert_eq!(
+                pending_anchor_b,
+                Some(anchor_b),
+                "automatic callback reserved B before native opening"
+            );
+            let mut b_observations = 0;
+            while let Ok(event) = fx.observed.try_recv() {
+                if event.tmux_session_name == tmux && event.prompt == prompt.trim() {
+                    assert!(!event.steer_echo, "B is owning input, not an echo");
+                    assert_eq!(event.native_turn_id.as_deref(), Some(b.as_str()));
+                    b_observations += 1;
+                }
+            }
+            assert_eq!(b_observations, 1, "one automatic B observation");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("keys"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2,
+                "one paste and Enter"
+            );
+            assert!(
+                crate::services::discord::health::queue_texts(&fx.shared, channel)
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                crate::services::discord::inject_disposition::claim_source(
+                    &ProviderKind::Codex,
+                    message,
+                    std::time::Instant::now()
+                )
+                .is_none(),
+                "Discord source stays owned"
+            );
+            inject_hook::clear(channel);
+            fx.finish();
+        })
+    });
 }
