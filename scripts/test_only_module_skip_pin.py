@@ -355,6 +355,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/readiness/tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",
         "src/services/discord/abandon_request_store/probe_contract_tests.rs",
+        "src/services/discord/catch_up/g2d_tests.rs",
         "src/services/discord/catch_up/absorbed_active_tests.rs",
         "src/services/discord/catch_up/claim_cas_tests.rs",
         "src/services/discord/catch_up/classification_order_tests.rs",
@@ -808,6 +809,9 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/restart_report/capacity.rs",
         "src/services/recovery_defer.rs",
         "src/services/recovery_defer/cursor.rs",
+        "src/services/discord/catch_up/ledger.rs",
+        "src/services/discord/catch_up/ledger/fetch.rs",
+        "src/services/discord/catch_up/ledger/classify.rs",
     }
 )
 
