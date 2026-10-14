@@ -79,11 +79,19 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
     if expected.user_msg_id == 0 {
         return GuardedSaveOutcome::Unnameable;
     }
-    if !expected.matches_state(&on_disk) || on_disk.turn_nonce != state.turn_nonce {
+    let same_source = on_disk.same_coordinate_source(&state);
+    let transition = !same_source
+        && super::stamp_merge::coordinate_projection_matches(&on_disk, &state, expected);
+    if (same_source && !expected.matches_state(&on_disk))
+        || (!same_source && !transition)
+        || on_disk.turn_nonce != state.turn_nonce
+    {
         return GuardedSaveOutcome::SuccessorOwned;
     }
     if let Some(expected_offset) = expected_turn_start_offset {
-        if on_disk.turn_start_offset != Some(expected_offset) {
+        if on_disk.turn_start_offset != Some(expected_offset)
+            && (!transition || state.turn_start_offset != Some(expected_offset))
+        {
             return GuardedSaveOutcome::SuccessorOwned;
         }
     }
@@ -94,7 +102,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
     if !updated.merge_replay_projection(&state) {
         return GuardedSaveOutcome::AuthorityPinned;
     }
-    if generation_matches && !updated.replay_rerun_blocked() {
+    if same_source && generation_matches && !updated.replay_rerun_blocked() {
         updated.full_response.clone_from(&state.full_response);
         updated.response_sent_offset =
             normalize_response_sent_offset(&updated.full_response, state.response_sent_offset);

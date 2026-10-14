@@ -13,6 +13,9 @@ use crate::services::discord::inflight::model::{
 
 pub(super) const CHANNEL: u64 = 5_925_100;
 
+#[path = "../p5925b_s1_watcher_tests.rs"]
+mod p5925b_s1_watcher_tests;
+
 /// A Watcher-owned missing-normalized Codex row with a nonzero prior normalized cursor.
 pub(super) fn legacy_row(channel_id: u64) -> InflightTurnState {
     let mut state = InflightTurnState::new(
@@ -125,6 +128,220 @@ fn coordinate_holds(state: &InflightTurnState) -> Vec<&str> {
         .map(String::as_str)
         .filter(|reason| reason.starts_with(COORDINATE_HOLD_PREFIX))
         .collect()
+}
+
+#[test]
+fn s1_guard_coordinate_api_retains_exact_readback_without_public_store_module() {
+    let root = tempfile::tempdir().unwrap();
+    let original = seed(root.path(), &legacy_row(CHANNEL + 42));
+    let mut locked = lock_inflight_episode_in_root(
+        root.path(),
+        &ProviderKind::Codex,
+        original.channel_id,
+        &InflightEpisodePin::from_state(&original),
+    )
+    .unwrap();
+    assert_eq!(
+        locked.begin_coordinate_preparation(&original, "guard-api".into()),
+        GuardedSaveOutcome::Saved
+    );
+    let preparing = locked.state().clone();
+    assert_eq!(
+        locked.install_coordinate_source(
+            &preparing,
+            "guard-api".into(),
+            "/managed/5925/normalized.jsonl".into(),
+            (3, 4),
+            77
+        ),
+        GuardedSaveOutcome::AuthorityPinned
+    );
+    assert_eq!(
+        locked.attach_coordinate_proof(&original, "guard-api".into(), raw_witness()),
+        GuardedSaveOutcome::AuthorityPinned
+    );
+    assert_eq!(
+        locked.attach_coordinate_proof(&preparing, "guard-api".into(), raw_witness()),
+        GuardedSaveOutcome::Saved
+    );
+    let proved = locked.state().clone();
+    assert_eq!(
+        locked.install_coordinate_source(
+            &proved,
+            "guard-api".into(),
+            "/managed/5925/normalized.jsonl".into(),
+            (3, 4),
+            77
+        ),
+        GuardedSaveOutcome::Saved
+    );
+    let installed = locked.state().clone();
+    assert_eq!(
+        locked.release_coordinate_hold(&installed),
+        GuardedSaveOutcome::Saved
+    );
+    assert_eq!(locked.state().current_msg_id, original.current_msg_id);
+    assert_eq!(locked.state().turn_nonce, original.turn_nonce);
+    assert_eq!(locked.state().last_offset, 0);
+    assert_eq!(locked.state().turn_start_offset, Some(0));
+    assert!(coordinate_holds(locked.state()).is_empty());
+    assert_eq!(
+        serde_json::to_value(locked.state()).unwrap(),
+        serde_json::to_value(load(root.path(), original.channel_id)).unwrap()
+    );
+}
+
+#[test]
+fn s1_preparing_is_durable_before_proof_and_install_requires_attached_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let original = seed(root.path(), &legacy_row(CHANNEL + 40));
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::BeginPrepare {
+                install_id: "pending-proof".into()
+            }
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+    let preparing = load(root.path(), original.channel_id);
+    let marker = preparing.legacy_replay_coordinate.as_ref().unwrap();
+    assert_eq!(marker.phase, CoordinateInstallPhase::Preparing);
+    assert_eq!(marker.raw, None);
+    assert_eq!(preparing.last_offset, original.last_offset);
+    assert_eq!(preparing.current_msg_id, original.current_msg_id);
+    assert_eq!(preparing.turn_nonce, original.turn_nonce);
+    assert_eq!(
+        preparing.effective_relay_owner_kind(),
+        original.effective_relay_owner_kind()
+    );
+    assert_eq!(coordinate_holds(&preparing), ["p5925_coordinate:pending"]);
+    crate::services::discord::inflight::store::second_handle_try_lock(&row_path(
+        root.path(),
+        original.channel_id,
+    ))
+    .unwrap();
+    let before = fs::read(row_path(root.path(), original.channel_id)).unwrap();
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::Install {
+                install_id: "pending-proof".into(),
+                installed: installed_witness()
+            }
+        ),
+        CoordinateRmwOutcome::Refused(CoordinateRefusal::PhaseOrder)
+    );
+    assert_eq!(
+        fs::read(row_path(root.path(), original.channel_id)).unwrap(),
+        before
+    );
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::AttachProof {
+                install_id: "another-install".into(),
+                raw: raw_witness()
+            }
+        ),
+        CoordinateRmwOutcome::Refused(CoordinateRefusal::PhaseOrder)
+    );
+    let mut foreign = raw_witness();
+    foreign.native_turn_id = "another-native-turn".into();
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::AttachProof {
+                install_id: "pending-proof".into(),
+                raw: foreign
+            }
+        ),
+        CoordinateRmwOutcome::Refused(CoordinateRefusal::SeedChanged)
+    );
+    assert_eq!(
+        fs::read(row_path(root.path(), original.channel_id)).unwrap(),
+        before
+    );
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::AttachProof {
+                install_id: "pending-proof".into(),
+                raw: raw_witness()
+            }
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::Install {
+                install_id: "pending-proof".into(),
+                installed: installed_witness()
+            }
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+    let installed = load(root.path(), original.channel_id);
+    assert_eq!(installed.turn_start_offset, Some(0));
+    assert_eq!(installed.current_msg_id, original.current_msg_id);
+    assert_eq!(installed.turn_nonce, original.turn_nonce);
+}
+
+#[test]
+fn s1_proof_attach_refuses_the_snapshot_changed_during_unlocked_scan() {
+    let root = tempfile::tempdir().unwrap();
+    let original = seed(root.path(), &legacy_row(CHANNEL + 41));
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::BeginPrepare {
+                install_id: "pending-proof".into()
+            }
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+    let preparing = load(root.path(), original.channel_id);
+    let expected = CoordinateExpectation::of(&preparing).unwrap();
+    assert_eq!(
+        change(
+            root.path(),
+            original.channel_id,
+            CoordinateChange::Hold("intervening-write")
+        ),
+        CoordinateRmwOutcome::Saved
+    );
+    let current = load(root.path(), original.channel_id);
+    let before = fs::read(row_path(root.path(), original.channel_id)).unwrap();
+    let mut locked = lock_inflight_episode_in_root(
+        root.path(),
+        &ProviderKind::Codex,
+        original.channel_id,
+        &InflightEpisodePin::from_state(&current),
+    )
+    .unwrap();
+    assert_eq!(
+        apply_coordinate_change(
+            &mut locked,
+            &expected,
+            CoordinateChange::AttachProof {
+                install_id: "pending-proof".into(),
+                raw: raw_witness()
+            }
+        ),
+        CoordinateRmwOutcome::Refused(CoordinateRefusal::StaleSnapshot)
+    );
+    assert_eq!(
+        fs::read(row_path(root.path(), original.channel_id)).unwrap(),
+        before
+    );
 }
 
 #[test]

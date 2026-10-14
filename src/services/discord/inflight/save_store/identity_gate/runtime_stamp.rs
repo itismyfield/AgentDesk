@@ -572,20 +572,18 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         );
         return GuardedSaveOutcome::Unnameable;
     }
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
-    {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = requested.channel_id,
-            caller,
-            snapshot_identity = ?expected,
-            durable_identity = ?durable,
-            durable_restart_mode = ?on_disk.restart_mode,
-            durable_rebind_origin = on_disk.rebind_origin,
-            "runtime-handoff stamp skipped because durable row authority changed"
-        );
-        return GuardedSaveOutcome::from_durable_authority(&on_disk);
-    }
+    let state = match super::stamp_merge::guard_coordinate_stamp(
+        root,
+        &path,
+        &mut on_disk,
+        &requested,
+        expected,
+        state,
+        caller,
+    ) {
+        Ok(state) => state,
+        Err(outcome) => return outcome,
+    };
     if expected.tmux_session_name.is_some()
         && requested.tmux_session_name != expected.tmux_session_name
     {

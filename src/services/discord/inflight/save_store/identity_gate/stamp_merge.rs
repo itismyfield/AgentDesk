@@ -115,3 +115,136 @@ pub(super) fn merge_runtime_stamp_progress(
     }
     true
 }
+
+pub(super) fn coordinate_projection_matches(
+    durable: &InflightTurnState,
+    local: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+) -> bool {
+    let Some(marker) = durable.legacy_replay_coordinate.as_ref() else {
+        return false;
+    };
+    let (Some(raw), Some(installed)) = (&marker.raw, &marker.installed) else {
+        return false;
+    };
+    marker.version == 1
+        && marker.phase
+            == crate::services::discord::inflight::model::CoordinateInstallPhase::Installed
+        && durable.output_path.as_deref() == Some(installed.output_path.as_str())
+        && durable.turn_start_offset == Some(0)
+        && local.coordinate_source().is_none()
+        && local.turn_start_offset == marker.prior.turn_start_offset
+        && expected.matches_state(local)
+        && durable.user_msg_id == local.user_msg_id
+        && durable.started_at == local.started_at
+        && durable.provider == local.provider
+        && durable.channel_id == local.channel_id
+        && durable.request_owner_user_id == local.request_owner_user_id
+        && durable.born_generation == local.born_generation
+        && durable.tmux_session_name == local.tmux_session_name
+        && durable
+            .turn_nonce
+            .as_deref()
+            .is_some_and(|nonce| !nonce.trim().is_empty())
+        && durable.turn_nonce == local.turn_nonce
+        && durable.session_id == local.session_id
+        && durable.native_turn_id == local.native_turn_id
+        && durable.external_turn_id == local.external_turn_id
+        && durable.finalizer_turn_id == local.finalizer_turn_id
+        && durable.injected_prompt_message_id == local.injected_prompt_message_id
+        && durable.session_id.as_deref() == Some(raw.session_id.as_str())
+        && durable.native_turn_id.as_deref() == Some(raw.native_turn_id.as_str())
+        && raw.prefix_record_end > raw.turn_start
+        && raw.prefix_len <= durable.full_response.len()
+        && durable
+            .full_response
+            .get(..raw.prefix_len)
+            .is_some_and(|prefix| local.full_response.get(..raw.prefix_len) == Some(prefix))
+}
+
+fn merge_coordinate_projection(
+    durable: &mut InflightTurnState,
+    local: &InflightTurnState,
+) -> Option<bool> {
+    let before = (
+        durable.full_response.len(),
+        durable.response_sent_offset,
+        durable.replay_hold_reasons.len(),
+        durable.streaming_rollover_frozen_msg_ids.len(),
+        durable.replay_receipt_id,
+    );
+    let (body, offset) = merge_forward_response_progress(
+        (&durable.full_response, durable.response_sent_offset),
+        (&local.full_response, local.response_sent_offset),
+    )?;
+    if !durable.merge_replay_projection(local) {
+        return None;
+    }
+    durable.full_response = body;
+    durable.response_sent_offset = offset;
+    for id in &local.streaming_rollover_frozen_msg_ids {
+        if !durable.streaming_rollover_frozen_msg_ids.contains(id) {
+            durable.streaming_rollover_frozen_msg_ids.push(*id);
+        }
+    }
+    let after = (
+        durable.full_response.len(),
+        durable.response_sent_offset,
+        durable.replay_hold_reasons.len(),
+        durable.streaming_rollover_frozen_msg_ids.len(),
+        durable.replay_receipt_id,
+    );
+    Some(before != after)
+}
+
+/// Source-refused stamps preserve only proven same-turn projection. The outcome denies
+/// runtime adoption; a mutable target still receives the actual durable projection.
+pub(super) fn guard_coordinate_stamp<T: GuardedStampTarget>(
+    root: &Path,
+    path: &Path,
+    durable: &mut InflightTurnState,
+    local: &InflightTurnState,
+    expected: &InflightTurnIdentity,
+    target: T,
+    caller: &'static str,
+) -> Result<T, GuardedSaveOutcome> {
+    if durable.restart_mode.is_some() || durable.rebind_origin {
+        return Err(GuardedSaveOutcome::AuthorityPinned);
+    }
+    if durable.same_coordinate_source(local) {
+        return if expected.matches_state(durable) {
+            Ok(target)
+        } else {
+            Err(GuardedSaveOutcome::SuccessorOwned)
+        };
+    }
+    if durable.terminal_delivery_committed
+        || !coordinate_projection_matches(durable, local, expected)
+    {
+        return Err(GuardedSaveOutcome::AuthorityPinned);
+    }
+    let mut projection = durable.clone();
+    match merge_coordinate_projection(&mut projection, local) {
+        Some(false) => target.adopt_persisted(durable.clone()),
+        Some(true) => {
+            let saved = crate::services::discord::inflight::store::persist_under_lock_with_snapshot(
+                root,
+                path,
+                &projection,
+                caller,
+            );
+            match saved {
+                Ok(Some(saved)) => match load_inflight_state_unlocked(path) {
+                    Some(reread) if reread.save_generation == saved.save_generation => {
+                        target.adopt_persisted(reread)
+                    }
+                    _ => return Err(GuardedSaveOutcome::IoError),
+                },
+                Ok(None) => return Err(GuardedSaveOutcome::AuthorityPinned),
+                Err(_) => return Err(GuardedSaveOutcome::IoError),
+            }
+        }
+        None => return Err(GuardedSaveOutcome::AuthorityPinned),
+    }
+    Err(GuardedSaveOutcome::AuthorityPinned)
+}

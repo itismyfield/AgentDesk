@@ -9,21 +9,7 @@ use crate::services::discord::inflight::model::{
 
 const COORDINATE_MARKER_VERSION: u32 = 1;
 
-/// The coordinate source a snapshot, proof or watcher patch was produced against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::services::discord) struct CoordinateSourceWitness(
-    Option<(String, InstalledSourceWitness)>,
-);
-
-impl CoordinateSourceWitness {
-    pub(in crate::services::discord) fn of(state: &InflightTurnState) -> Self {
-        Self(
-            state
-                .coordinate_source()
-                .map(|(install_id, installed)| (install_id.to_owned(), installed.clone())),
-        )
-    }
-}
+pub(in crate::services::discord) use crate::services::discord::inflight::CoordinateSourceWitness;
 
 /// The durable row a proof or plan was built from. A long scan runs without the lock, so every
 /// field is checked again under it before any coordinate write.
@@ -61,7 +47,14 @@ pub(in crate::services::discord) enum CoordinateChange {
     Hold(&'static str),
     /// Drop the coordinate holds. The install marker stays until the turn retires.
     Release,
-    /// Record a verified proof and hold the row pending while the new source is prepared.
+    /// Persist pending before the proof scan begins outside the flock.
+    BeginPrepare { install_id: String },
+    /// Attach the proof to the exact Preparing snapshot the scan started from.
+    AttachProof {
+        install_id: String,
+        raw: RawTurnWitness,
+    },
+    /// Record an already verified proof while preparing its replacement source.
     Prepare {
         install_id: String,
         raw: RawTurnWitness,
@@ -122,7 +115,7 @@ pub(in crate::services::discord) fn admit_source_patch(
     durable: &InflightTurnState,
     patch_source: &CoordinateSourceWitness,
 ) -> Result<(), CoordinateRefusal> {
-    if CoordinateSourceWitness::of(durable) == *patch_source {
+    if patch_source.matches_state(durable) {
         Ok(())
     } else {
         Err(CoordinateRefusal::SourceChanged)
@@ -161,28 +154,27 @@ pub(in crate::services::discord) fn apply_coordinate_change(
             set_coordinate_hold(&mut next, None);
             false
         }
+        CoordinateChange::BeginPrepare { install_id } => {
+            prepare_marker(&mut next, durable, install_id, None);
+            false
+        }
         CoordinateChange::Prepare { install_id, raw } => {
-            // A reconstruction after an install keeps naming the coordinates the row began with.
-            let prior = durable.legacy_replay_coordinate.as_ref().map_or_else(
-                || PriorNormalizedCoordinate {
-                    output_path: durable.output_path.clone(),
-                    last_offset: durable.last_offset,
-                    turn_start_offset: durable.turn_start_offset,
-                },
-                |marker| marker.prior.clone(),
-            );
-            next.legacy_replay_coordinate = Some(LegacyReplayCoordinate {
-                version: COORDINATE_MARKER_VERSION,
-                install_id,
-                phase: CoordinateInstallPhase::Preparing,
-                prior,
-                raw: Some(raw),
-                installed: durable
-                    .legacy_replay_coordinate
-                    .as_ref()
-                    .and_then(|marker| marker.installed.clone()),
-            });
-            set_coordinate_hold(&mut next, Some("pending"));
+            if !proof_matches(durable, &raw) {
+                return CoordinateRmwOutcome::Refused(CoordinateRefusal::SeedChanged);
+            }
+            prepare_marker(&mut next, durable, install_id, Some(raw));
+            false
+        }
+        CoordinateChange::AttachProof { install_id, raw } => {
+            if !proof_matches(durable, &raw) {
+                return CoordinateRmwOutcome::Refused(CoordinateRefusal::SeedChanged);
+            }
+            let Some(marker) = next.legacy_replay_coordinate.as_mut().filter(|marker| {
+                marker.phase == CoordinateInstallPhase::Preparing && marker.install_id == install_id
+            }) else {
+                return CoordinateRmwOutcome::Refused(CoordinateRefusal::PhaseOrder);
+            };
+            marker.raw = Some(raw);
             false
         }
         CoordinateChange::Install {
@@ -190,7 +182,9 @@ pub(in crate::services::discord) fn apply_coordinate_change(
             installed,
         } => {
             let Some(marker) = next.legacy_replay_coordinate.as_mut().filter(|marker| {
-                marker.phase == CoordinateInstallPhase::Preparing && marker.install_id == install_id
+                marker.phase == CoordinateInstallPhase::Preparing
+                    && marker.install_id == install_id
+                    && marker.raw.is_some()
             }) else {
                 return CoordinateRmwOutcome::Refused(CoordinateRefusal::PhaseOrder);
             };
@@ -211,5 +205,103 @@ pub(in crate::services::discord) fn apply_coordinate_change(
     ) {
         GuardedSaveOutcome::Saved => CoordinateRmwOutcome::Saved,
         other => CoordinateRmwOutcome::Write(other),
+    }
+}
+
+fn proof_matches(state: &InflightTurnState, raw: &RawTurnWitness) -> bool {
+    state.session_id.as_deref() == Some(raw.session_id.as_str())
+        && state.native_turn_id.as_deref() == Some(raw.native_turn_id.as_str())
+        && raw.prefix_len == state.full_response.len()
+        && raw.prefix_record_end > raw.turn_start
+}
+
+fn prepare_marker(
+    next: &mut InflightTurnState,
+    durable: &InflightTurnState,
+    install_id: String,
+    raw: Option<RawTurnWitness>,
+) {
+    let prior = durable.legacy_replay_coordinate.as_ref().map_or_else(
+        || PriorNormalizedCoordinate {
+            output_path: durable.output_path.clone(),
+            last_offset: durable.last_offset,
+            turn_start_offset: durable.turn_start_offset,
+        },
+        |marker| marker.prior.clone(),
+    );
+    next.legacy_replay_coordinate = Some(LegacyReplayCoordinate {
+        version: COORDINATE_MARKER_VERSION,
+        install_id,
+        phase: CoordinateInstallPhase::Preparing,
+        prior,
+        raw,
+        installed: durable
+            .legacy_replay_coordinate
+            .as_ref()
+            .and_then(|m| m.installed.clone()),
+    });
+    set_coordinate_hold(next, Some("pending"));
+}
+
+impl LockedInflightEpisode {
+    pub(in crate::services::discord) fn begin_coordinate_preparation(
+        &mut self,
+        snapshot: &InflightTurnState,
+        install_id: String,
+    ) -> GuardedSaveOutcome {
+        self.change_coordinate_snapshot(snapshot, CoordinateChange::BeginPrepare { install_id })
+    }
+
+    pub(in crate::services::discord) fn attach_coordinate_proof(
+        &mut self,
+        snapshot: &InflightTurnState,
+        install_id: String,
+        raw: RawTurnWitness,
+    ) -> GuardedSaveOutcome {
+        self.change_coordinate_snapshot(snapshot, CoordinateChange::AttachProof { install_id, raw })
+    }
+
+    pub(in crate::services::discord) fn install_coordinate_source(
+        &mut self,
+        snapshot: &InflightTurnState,
+        install_id: String,
+        output_path: String,
+        file_identity: (u64, u64),
+        generation_mtime_ns: i64,
+    ) -> GuardedSaveOutcome {
+        let installed = InstalledSourceWitness {
+            output_path,
+            file_identity,
+            generation_mtime_ns,
+        };
+        self.change_coordinate_snapshot(
+            snapshot,
+            CoordinateChange::Install {
+                install_id,
+                installed,
+            },
+        )
+    }
+
+    pub(in crate::services::discord) fn release_coordinate_hold(
+        &mut self,
+        snapshot: &InflightTurnState,
+    ) -> GuardedSaveOutcome {
+        self.change_coordinate_snapshot(snapshot, CoordinateChange::Release)
+    }
+
+    fn change_coordinate_snapshot(
+        &mut self,
+        snapshot: &InflightTurnState,
+        change: CoordinateChange,
+    ) -> GuardedSaveOutcome {
+        let Some(expected) = CoordinateExpectation::of(snapshot) else {
+            return GuardedSaveOutcome::Unnameable;
+        };
+        match apply_coordinate_change(self, &expected, change) {
+            CoordinateRmwOutcome::Saved => GuardedSaveOutcome::Saved,
+            CoordinateRmwOutcome::Refused(_) => GuardedSaveOutcome::AuthorityPinned,
+            CoordinateRmwOutcome::Write(outcome) => outcome,
+        }
     }
 }

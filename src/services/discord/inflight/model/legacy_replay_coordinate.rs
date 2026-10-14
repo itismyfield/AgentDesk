@@ -59,6 +59,27 @@ pub(in crate::services::discord) struct LegacyReplayCoordinate {
     pub installed: Option<InstalledSourceWitness>,
 }
 
+/// Coordinate namespace captured when a watcher observes output, before its RMW lock.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) struct CoordinateSourceWitness(
+    Option<(String, InstalledSourceWitness)>,
+);
+
+impl CoordinateSourceWitness {
+    #[cfg(test)]
+    pub(in crate::services::discord) fn of(state: &InflightTurnState) -> Self {
+        Self(
+            state
+                .coordinate_source()
+                .map(|(id, source)| (id.to_owned(), source.clone())),
+        )
+    }
+
+    pub(in crate::services::discord) fn matches_state(&self, state: &InflightTurnState) -> bool {
+        self.0.as_ref().map(|(id, source)| (id.as_str(), source)) == state.coordinate_source()
+    }
+}
+
 #[cfg(test)]
 impl LegacyReplayCoordinate {
     pub(in crate::services::discord) fn is_installed(&self) -> bool {

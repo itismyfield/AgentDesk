@@ -9,6 +9,39 @@ use super::{
     lock_inflight_state_path, normalize_response_sent_offset, persist_under_lock,
 };
 
+/// Observed episode/source pair. Existing callers address the unmarked legacy namespace.
+pub(in crate::services::discord) struct WatcherSource<'a> {
+    identity: Option<&'a InflightTurnIdentity>,
+    source: super::CoordinateSourceWitness,
+}
+
+impl<'a> From<Option<&'a InflightTurnIdentity>> for WatcherSource<'a> {
+    fn from(identity: Option<&'a InflightTurnIdentity>) -> Self {
+        Self {
+            identity,
+            source: super::CoordinateSourceWitness::default(),
+        }
+    }
+}
+
+impl<'a> From<&'a InflightTurnIdentity> for WatcherSource<'a> {
+    fn from(identity: &'a InflightTurnIdentity) -> Self {
+        Self::from(Some(identity))
+    }
+}
+
+#[cfg(test)]
+impl<'a> From<(&'a InflightTurnIdentity, &super::CoordinateSourceWitness)> for WatcherSource<'a> {
+    fn from(
+        (identity, source): (&'a InflightTurnIdentity, &super::CoordinateSourceWitness),
+    ) -> Self {
+        Self {
+            identity: Some(identity),
+            source: source.clone(),
+        }
+    }
+}
+
 /// #3558: the watcher-owned streaming fields a single-lock RMW patches onto the
 /// persisted row. Plain value struct (moved into the helper). `last_offset` is
 /// deliberately ABSENT — the streaming caller does not own the relay watermark
@@ -136,14 +169,18 @@ pub(in crate::services::discord) fn persist_watcher_stream_progress_locked(
 
 /// Root-explicit variant of [`persist_watcher_stream_progress_locked`] for unit
 /// tests (avoids `AGENTDESK_ROOT_DIR` env-var races).
-pub(super) fn persist_watcher_stream_progress_locked_in_root(
+pub(super) fn persist_watcher_stream_progress_locked_in_root<'a>(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
-    require_identity: Option<&InflightTurnIdentity>,
+    require_identity: impl Into<WatcherSource<'a>>,
     require_tmux_session_name: &str,
     patch: WatcherStreamProgressPatch,
 ) -> WatcherProgressOutcome {
+    let WatcherSource {
+        identity: require_identity,
+        source,
+    } = require_identity.into();
     let path = inflight_state_path(root, provider, channel_id);
     if crate::services::discord::input_runtime::fence::lookup(provider, channel_id).is_none()
         && let Some(parent) = path.parent()
@@ -157,6 +194,9 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     let Some(mut state) = load_inflight_state_unlocked(&path) else {
         return WatcherProgressOutcome::RowAbsent;
     };
+    if !source.matches_state(&state) {
+        return WatcherProgressOutcome::CoordinateMismatch;
+    }
     // A pinned restart/rebind marker means a different lifecycle owns the row;
     // the streaming caller must not touch it (mirrors the refresh-path guard).
     if state.restart_mode.is_some() || state.rebind_origin {
@@ -269,14 +309,18 @@ pub(in crate::services::discord) fn commit_watcher_terminal_delivery_locked(
 
 /// Root-explicit variant of [`commit_watcher_terminal_delivery_locked`] for unit
 /// tests.
-pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
+pub(super) fn commit_watcher_terminal_delivery_locked_in_root<'a>(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
-    require_identity: &InflightTurnIdentity,
+    require_identity: impl Into<WatcherSource<'a>>,
     require_tmux_session_name: &str,
     patch: WatcherTerminalCommitPatch,
 ) -> WatcherTerminalCommitOutcome {
+    let WatcherSource {
+        identity: require_identity,
+        source,
+    } = require_identity.into();
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return WatcherTerminalCommitOutcome::IoError;
@@ -284,13 +328,16 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
     let Some(mut state) = load_inflight_state_unlocked(&path) else {
         return WatcherTerminalCommitOutcome::Skipped;
     };
+    if !source.matches_state(&state) {
+        return WatcherTerminalCommitOutcome::Skipped;
+    }
     if state.restart_mode.is_some() || state.rebind_origin {
         return WatcherTerminalCommitOutcome::Skipped;
     }
     // Preserve the existing strong identity guard (user_msg_id + started_at +
     // tmux_session + turn_start_offset) exactly — `matches_state` already
     // compares all four, and we additionally pin the caller-supplied session.
-    if !require_identity.matches_state(&state)
+    if require_identity.is_none_or(|identity| !identity.matches_state(&state))
         || state.tmux_session_name.as_deref() != Some(require_tmux_session_name)
     {
         return WatcherTerminalCommitOutcome::Skipped;
@@ -383,14 +430,18 @@ pub(in crate::services::discord) fn persist_watcher_relay_watermark_locked(
 
 /// Root-explicit variant of [`persist_watcher_relay_watermark_locked`] for unit
 /// tests.
-pub(super) fn persist_watcher_relay_watermark_locked_in_root(
+pub(super) fn persist_watcher_relay_watermark_locked_in_root<'a>(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
-    require_identity: &InflightTurnIdentity,
+    require_identity: impl Into<WatcherSource<'a>>,
     require_tmux_session_name: &str,
     patch: WatcherRelayWatermarkPatch,
 ) -> WatcherRelayWatermarkOutcome {
+    let WatcherSource {
+        identity: require_identity,
+        source,
+    } = require_identity.into();
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return WatcherRelayWatermarkOutcome::IoError;
@@ -398,6 +449,9 @@ pub(super) fn persist_watcher_relay_watermark_locked_in_root(
     let Some(mut state) = load_inflight_state_unlocked(&path) else {
         return WatcherRelayWatermarkOutcome::Skipped;
     };
+    if !source.matches_state(&state) {
+        return WatcherRelayWatermarkOutcome::Skipped;
+    }
     if state.restart_mode.is_some() || state.rebind_origin {
         return WatcherRelayWatermarkOutcome::Skipped;
     }
@@ -406,7 +460,7 @@ pub(super) fn persist_watcher_relay_watermark_locked_in_root(
     // session). Rejects a write onto a fresh row B that replaced the row this
     // relay was for — the late-frame race the old tmux-session-only load→save
     // let through.
-    if !require_identity.matches_state(&state)
+    if require_identity.is_none_or(|identity| !identity.matches_state(&state))
         || state.tmux_session_name.as_deref() != Some(require_tmux_session_name)
     {
         return WatcherRelayWatermarkOutcome::Skipped;

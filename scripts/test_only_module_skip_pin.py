@@ -701,6 +701,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
+        "src/services/discord/inflight/p5925b_s1_watcher_tests.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
         "src/services/tui_prompt_dedupe/handoff_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",

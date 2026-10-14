@@ -15,12 +15,11 @@ pub(in crate::services::discord) use identity::{
     InflightTurnIdentity, opt_channel_id, opt_message_id, transfer_end,
 };
 pub(in crate::services::discord) use legacy_replay_coordinate::{
-    COORDINATE_HOLD_PREFIX, LegacyReplayCoordinate,
+    COORDINATE_HOLD_PREFIX, CoordinateInstallPhase, CoordinateSourceWitness, LegacyReplayCoordinate,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use legacy_replay_coordinate::{
-    CoordinateInstallPhase, InstalledSourceWitness, PriorNormalizedCoordinate, RawTurnWitness,
-    is_coordinate_hold_reason,
+    InstalledSourceWitness, PriorNormalizedCoordinate, RawTurnWitness, is_coordinate_hold_reason,
 };
 use serde_adapters::{
     deserialize_relay_owner_kind_tolerant, deserialize_runtime_kind_tolerant,
