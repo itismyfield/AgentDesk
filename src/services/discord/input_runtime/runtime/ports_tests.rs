@@ -352,8 +352,9 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
         );
         assert_eq!(source.input(), &original);
         assert_eq!(prepared.input(), &original);
-        assert!(!root.path().join("input_ledger").exists());
-        assert!(!root.path().join("discord_pending_queue").exists());
+        let population = fence::population_root().expect("test population root");
+        assert!(!population.join("input_ledger").try_exists().unwrap());
+        assert!(!population.join("discord_pending_queue").try_exists().unwrap());
         discord.assert_reads_only();
         drop(gate);
     });
@@ -436,8 +437,9 @@ fn c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors()
             ) == Classification::Target);
         assert_eq!(source.input(), &original);
         assert_eq!(prepared.input(), &original);
-        assert!(!root.path().join("input_ledger").exists());
-        assert!(!root.path().join("discord_pending_queue").exists());
+        let population = fence::population_root().expect("test population root");
+        assert!(!population.join("input_ledger").try_exists().unwrap());
+        assert!(!population.join("discord_pending_queue").try_exists().unwrap());
         discord.assert_reads_only();
         drop((own_gate, foreign_gate));
     });
@@ -506,8 +508,9 @@ fn c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind() {
                 &prepared,
             ) != Classification::Target);
         }
-        assert!(!root.path().join("input_ledger").exists());
-        assert!(!root.path().join("discord_pending_queue").exists());
+        let population = fence::population_root().expect("test population root");
+        assert!(!population.join("input_ledger").try_exists().unwrap());
+        assert!(!population.join("discord_pending_queue").try_exists().unwrap());
         discord.assert_reads_only();
         drop(gate);
     });
