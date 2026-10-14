@@ -282,9 +282,8 @@ fn grown(harness: &Harness) -> Vec<WriterAlarm> {
     harness.alarms.taken().into_iter().filter(grew).collect()
 }
 
-// T1, T8, T4: once both probes held, one cursor write per hop retires it with its audit, the
-// init-only source included; the transition lock is free while probing and held at each write,
-// the count is closed meanwhile, and nothing but the two cursors changes in the store.
+// Once both probes held, one cursor write per hop retires it with its audit, the init-only source
+// included; the lock is held and the count closed only around the writes, which touch nothing else.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_held() {
     let chain = chain(2);
@@ -401,9 +400,8 @@ fn strip_hop_fields(chain: &Chain, legacy: &[usize]) {
     std::fs::write(&file, serde_json::to_vec(&written).unwrap()).unwrap();
 }
 
-// The 59 hops of the operation's channel, synthetic and with three successors stored before hop
-// fields were kept: a request without a checked end writes nothing; a checked one retires all 59
-// through the actor and leaves nothing unsettled.
+// The channel's 59 hops, also with three seq-less successors: an unchecked end writes nothing, a
+// checked one retires all 59 through the actor and leaves nothing unsettled.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_settles_all_fifty_nine_hops_of_both_fixtures() {
     for legacy in [&[][..], &[30, 31, 32][..]] {
@@ -459,7 +457,7 @@ async fn transition_apply_settles_all_fifty_nine_hops_of_both_fixtures() {
     }
 }
 
-// B4: a job probes at most 64 candidates; the rest are held for a later job.
+// A job probes at most 64 candidates; the rest are held for a later job.
 #[tokio::test(start_paused = true)]
 async fn transition_job_probes_at_most_sixty_four_candidates() {
     let chain = chain(65);
@@ -505,9 +503,8 @@ impl Drop for Release {
     }
 }
 
-// B4: a slow probe keeps one worker and no other starts, past the job's deadline too; requests
-// meanwhile are answered and the actor keeps posting; probes that come back after the deadline
-// hold every source unapplied.
+// A slow probe keeps one worker, past the deadline too, while requests are answered and posts go
+// on; probes back after the deadline hold every source unapplied.
 #[tokio::test(start_paused = true)]
 async fn transition_probes_run_on_one_worker_however_slow_it_is() {
     let chain = chain(5);
@@ -555,9 +552,8 @@ async fn transition_probes_run_on_one_worker_however_slow_it_is() {
     halt(actor.stop, actor.task).await;
 }
 
-// T2: the first source retired, the next one's write failing and the third untried: the first
-// stays retired, the failed one is unknown and stops the actor, and the same job asked again
-// writes only the two it did not finish.
+// A failed second write keeps the first retirement, stops the actor and leaves the third untried;
+// the same job asked again writes only the two it did not finish.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_keeps_what_it_retired_before_a_failed_write_and_resumes_the_rest() {
     let chain = chain(3);
@@ -622,9 +618,8 @@ async fn transition_apply_keeps_what_it_retired_before_a_failed_write_and_resume
     halt(actor.stop, actor.task).await;
 }
 
-// T5: the cursor renamed into place but its directory sync failing is no retirement: the actor
-// stops on the I/O error, nothing projects 0 and the reply is unknown, though the file already
-// shows the audit; only a reopened store answers the same job as done.
+// A failed directory sync after the rename is no retirement though the file shows it: the actor
+// stops, nothing projects 0, and only a reopened store answers the job as done.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_reopens() {
     let chain = chain(1);
@@ -687,8 +682,8 @@ async fn transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_
     halt(actor.stop, actor.task).await;
 }
 
-// T6: a change after a source's probes to its cursor, reader or successor, to the checkpoint or
-// the execution, or to the file at its path holds the source unwritten while the actor goes on.
+// A change after the probes to the cursor, reader, successor, checkpoint, execution or file holds
+// the source unwritten while the actor goes on.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_holds_a_source_whose_inputs_changed_after_its_probes() {
     let cases = [
@@ -754,8 +749,8 @@ fn admitting_home() -> Arc<HomeGate> {
     home
 }
 
-// T4: a request dropped before the mailbox took it changes nothing; one whose requester left
-// after keeps its job and command permit to the end; an actor that ends drops both.
+// A request dropped before the mailbox took it changes nothing; a taken one keeps its job and
+// permit to the end whoever left, until the actor itself ends.
 #[tokio::test(start_paused = true)]
 async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_left() {
     let chain = chain(1);
@@ -816,7 +811,7 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
     );
 }
 
-// T7 through the actor's own state: output it still queues refuses every hop until delivered.
+// Output the actor still queues refuses every hop until it is delivered.
 #[tokio::test(start_paused = true)]
 async fn transition_judges_what_the_actor_still_owes_from_its_own_state() {
     let chain = chain(1);
@@ -847,7 +842,7 @@ async fn transition_judges_what_the_actor_still_owes_from_its_own_state() {
     halt(actor.stop, actor.task).await;
 }
 
-// T7: a channel whose POSTs this process does not count is unknown, never nothing owed.
+// A channel whose POSTs this process does not count is unknown, never nothing owed.
 #[tokio::test(start_paused = true)]
 async fn transition_judges_uncounted_posts_unknown() {
     let chain = chain_on(1, false);
@@ -866,8 +861,8 @@ async fn transition_judges_uncounted_posts_unknown() {
     halt(actor.stop, actor.task).await;
 }
 
-// B3, A1, A3: a job's audit is compared whole after a reopen; growth of a cleaned source then
-// reads it again with an alarm naming the job, and the same job asked again writes nothing.
+// A job's audit is compared whole after a reopen; a cleaned source that grows reads again with an
+// alarm naming the job, and the same job asked again writes nothing for it.
 #[tokio::test(start_paused = true)]
 async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_read_again() {
     let chain = chain(1);
@@ -970,10 +965,8 @@ async fn transition_apply_that_finds_its_file_grown_after_the_write_reports_it_r
     halt(actor.stop, actor.task).await;
 }
 
-// The lite regrowth matrix: a cleaned source that grows, live, past its watch, after a restart
-// or bound back, reads again from its old end with its audit kept, an alarm naming the job
-// unless it was bound back. Only a legacy FD past its watch sees nothing, as for a provider
-// retirement.
+// A cleaned source that grows, live, past its watch, after a restart or bound back, reads again
+// from its old end with its audit; only a legacy FD past its watch sees nothing, as it would.
 #[tokio::test(start_paused = true)]
 async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retirement_does() {
     let shapes = [

@@ -46,8 +46,8 @@ fn hosted_claude() -> (
     (harness, io, ready, tasks, path)
 }
 
-// T3: a restart of the same hosting claim takes a new port; the old run's mailbox is closed, a
-// request naming it is refused by the new run, and its reply is no longer consumed as current.
+// A restart of the same claim takes a new port: the old mailbox is closed, a request naming the old
+// run is refused, and the old run's reply is no longer consumed as current.
 #[tokio::test(start_paused = true)]
 async fn transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_replies() {
     let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
@@ -94,8 +94,8 @@ async fn transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_re
     assert_eq!(job.as_deref(), Ok("hrot-host"), "[T3:current_reply]");
 }
 
-// T17: a hosted actor whose port no request reaches posts and alarms as before, builds no
-// cleanup snapshot, starts no probe and writes no cleanup field.
+// A hosted actor whose port no request reaches posts and alarms as before, builds no cleanup
+// snapshot, starts no probe and writes no cleanup field.
 #[tokio::test(start_paused = true)]
 async fn transition_port_without_requests_leaves_the_hosted_actor_as_it_was() {
     let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);

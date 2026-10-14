@@ -1,6 +1,5 @@
 //! The execution a transition cleanup protects, read through the real hook judgment and binding
-//! log: only the request's spawn nonce counts, and a history that cannot name every source the
-//! execution holds is an error, never an empty set.
+//! log: only the request's spawn nonce counts, and an unnamed source is an error, never no set.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,9 +26,8 @@ fn sessions<'a>(names: &[&'a str]) -> BTreeSet<&'a str> {
     names.iter().copied().collect()
 }
 
-// B2: after a /clear the pane holds the source it is in, and the launch session it left without
-// a pinned source fails for a candidate of that session, as does a /clear not written yet;
-// another or a reset spawn nonce reads no history, and an empty fresh history is no set.
+// A left launch session or a pending /clear without a pinned source fails for a candidate of it;
+// another or reset spawn nonce reads no history, and an empty fresh one is no protected set.
 #[tokio::test(start_paused = true)]
 async fn transition_execution_is_the_request_nonces_history_and_never_an_empty_set() {
     let [a, b, x] = [(); 3].map(|_| uuid::Uuid::new_v4().to_string());
@@ -75,8 +73,8 @@ async fn transition_execution_is_the_request_nonces_history_and_never_an_empty_s
     assert!(empty.is_err(), "[B2:empty_complete] {empty:?}");
 }
 
-// B2: a session the pane left without a pinned source fails once a candidate may be it, and a
-// history not known whole fails whatever it names.
+// A session the pane left without a pinned source fails once a candidate may be it, and a history
+// not known whole fails whatever it names.
 #[test]
 fn transition_execution_refuses_a_left_session_without_its_pinned_source() {
     let current = SourceId {
