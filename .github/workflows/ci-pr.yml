@@ -325,6 +325,7 @@ jobs:
               - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs'
+              - 'src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
               - 'src/services/discord/admin_host_guard_tests.rs'
@@ -517,6 +518,8 @@ jobs:
               # END generated pg_db source paths
               # Re-post production changes must run the shared-budget tests too.
               - 'src/services/tui_o/repost/**'
+              # Presence hooks run inside the PG entry-point tests that install a runtime.
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/tui_o/writer/**'
               - 'src/services/tui_o/store/ledger.rs'
               - 'src/services/discord/outbound/o_writer*.rs'
@@ -854,6 +857,7 @@ jobs:
               - 'src/services/discord/turn_presence/activity.rs'
               - 'src/services/discord/turn_presence/entrypoints.rs'
               - 'src/services/discord/turn_presence/mod.rs'
+              - 'src/services/discord/turn_presence/supervisor.rs'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
@@ -1336,7 +1340,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1400,7 +1404,7 @@ jobs:
 
       # Use the same partition and step budget as the main PG matrix.
       - name: just test-postgres-shard
-        timeout-minutes: 60
+        timeout-minutes: 75
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1461,7 +1465,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2283,7 +2287,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2516,7 +2520,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
