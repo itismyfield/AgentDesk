@@ -2424,6 +2424,7 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_
 services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
