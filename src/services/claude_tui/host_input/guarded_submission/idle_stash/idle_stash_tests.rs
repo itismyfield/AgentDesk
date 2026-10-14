@@ -151,7 +151,7 @@ fn missing_capability_and_off_do_no_preparation_or_io() {
         }
     }
     let target = InputTarget::legacy_tmux("nonexistent-idle-stash-target");
-    let request = Request {
+    let invalid_request = Request {
         target: &target,
         gate: &Never,
         prompt: "\0invalid",
@@ -159,8 +159,7 @@ fn missing_capability_and_off_do_no_preparation_or_io() {
         cancel: None,
         timing: &FAST,
     };
-    assert_eq!(run(None, true, &request), None);
-    assert_eq!(run(Some(&Never), false, &request), None);
+    assert_eq!(run(None, true, &invalid_request), None);
     assert!(!composer_lock::draft_guarded(
         "nonexistent-idle-stash-target"
     ));
@@ -198,6 +197,7 @@ fn missing_capability_and_off_do_no_preparation_or_io() {
     assert!(!tape.exists(), "OFF/None queried the pane");
     assert!(events(&root).is_empty());
     assert!(!composer_lock::draft_guarded("idle-off"));
+    assert_eq!(run(Some(&Never), false, &invalid_request), None);
 }
 
 #[test]
