@@ -1,10 +1,11 @@
-//! Dormant queue-authorized stash adapter; the production capability arrives with queue wiring.
+//! A managed idle attempt parks a flat person draft, submits once, and watches it return.
 
 use super::*;
 use crate::services::claude_tui::busy_inject::{
     self, Delivery, DraftState, Outcome, Report, Timing, Unconfirmed, Veto, screen,
     stash::{self, StashEffects},
 };
+use crate::services::claude_tui::host_input::LegacyTmuxGate;
 use crate::services::tui_input::submission_tmux::guarded::{GuardedObserver, GuardedPane};
 use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
 use std::path::Path;
@@ -12,9 +13,12 @@ use std::time::Instant;
 
 mod receipt;
 
-// The adapter never derives queue authority from a channel or a candidate capture.
-trait QueueAuthority {
+// A channel selects policy; only the managed attempt can authorize a mutation.
+trait StashAuthority {
     fn admits(&self, pane: &GuardedPane) -> bool;
+    fn claim(&self, _pane: &GuardedPane) -> Result<(), String> {
+        submission_fence::before_first_payload()
+    }
 }
 
 struct Request<'a> {
@@ -32,17 +36,23 @@ struct IdleStashCandidate(Vec<String>);
 struct IdleReport {
     delivery: Delivery,
     draft: DraftState,
+    entered: bool,
+    retryable: bool,
+    refusal: Option<InputRefusal>,
 }
 
 fn stopped(draft: DraftState) -> IdleReport {
     IdleReport {
         delivery: Delivery::NotAttempted,
         draft,
+        entered: false,
+        retryable: false,
+        refusal: None,
     }
 }
 
 fn run(
-    authority: Option<&dyn QueueAuthority>,
+    authority: Option<&dyn StashAuthority>,
     allowed: bool,
     request: &Request<'_>,
 ) -> Option<IdleReport> {
@@ -61,25 +71,44 @@ fn run(
     };
     let result = composer_lock::try_with_composer_permit(session, |permit| {
         let Ok(pane) = SubmissionTmux.pin_guarded(session) else {
-            return stopped(DraftState::Unchanged);
+            return Some(stopped(DraftState::Unchanged));
         };
         let Some(before) = pane.capture_draft() else {
-            return stopped(DraftState::Unchanged);
+            return Some(stopped(DraftState::Unchanged));
         };
+        if !authority.admits(&pane)
+            || request.gate.admit(session).is_err()
+            || cancel_requested(request.cancel)
+        {
+            let mut held = stopped(DraftState::Unchanged);
+            held.refusal = Some(InputRefusal::IdentityMismatch);
+            return Some(held);
+        }
+        if observe_claude_jsonl_turn_state(request.transcript).is_busy() {
+            return None;
+        }
         let admission = composer_lock::composer_admission(session, || Some(before.clone()));
+        if admission == composer_lock::ComposerAdmission::Any
+            && busy_inject::composer_owner(&before) == busy_inject::ComposerOwner::Empty
+        {
+            return None;
+        }
         if admission == composer_lock::ComposerAdmission::Held
             || busy_inject::composer_owner(&before) != busy_inject::ComposerOwner::Person
             || judge_pane(ShadowProvider::Claude, &before) == PaneVerdict::Modal
             || observe_claude_jsonl_turn_state(request.transcript) != TuiTurnState::Idle
         {
-            return stopped(DraftState::Unchanged);
+            return Some(stopped(DraftState::Unchanged));
         }
         let Some(draft) = screen::stashable(&before, &text, Some(pane.dimensions())) else {
-            return stopped(DraftState::Unchanged);
+            composer_lock::guard_draft(session, composer_lock::DraftGuard::DraftRestored);
+            let mut held = stopped(DraftState::Unchanged);
+            held.retryable = true;
+            return Some(held);
         };
         let candidate = IdleStashCandidate(draft);
         let Some(receipt) = receipt::Receipt::before(request.transcript) else {
-            return stopped(DraftState::Unchanged);
+            return Some(stopped(DraftState::Unchanged));
         };
         let mut effects = Effects {
             pane: Some(pane),
@@ -90,9 +119,14 @@ fn run(
             receipt,
             started: false,
             permit: &permit,
+            draft: &candidate.0,
         };
-        if !effects.generation_unchanged() || submission_fence::before_first_payload().is_err() {
-            return stopped(DraftState::Unchanged);
+        if !effects.generation_unchanged() {
+            return Some(stopped(DraftState::Unchanged));
+        }
+        guarded_outcome::begin();
+        if authority.claim(effects.pane.as_ref().unwrap()).is_err() {
+            return Some(stopped(DraftState::Unchanged));
         }
         crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
             "claude",
@@ -110,7 +144,7 @@ fn run(
                 composer_lock::guard_draft(session, composer_lock::DraftGuard::RecoveryRequired)
             }
         }
-        IdleReport {
+        let result = IdleReport {
             delivery: if report.outcome == Outcome::Injected {
                 Delivery::Observed
             } else if effects.started {
@@ -119,20 +153,26 @@ fn run(
                 Delivery::NotAttempted
             },
             draft: report.draft,
-        }
+            entered: true,
+            retryable: false,
+            refusal: None,
+        };
+        guarded_outcome::retain(session, &result.input_run(request.cancel));
+        Some(result)
     });
-    Some(result.unwrap_or_else(|| stopped(DraftState::Unchanged)))
+    result.unwrap_or_else(|| Some(stopped(DraftState::Unchanged)))
 }
 
 struct Effects<'a, 'p> {
     pane: Option<GuardedPane>,
     observer: Option<GuardedObserver>,
-    authority: &'a dyn QueueAuthority,
+    authority: &'a dyn StashAuthority,
     request: &'a Request<'a>,
     text: &'a str,
     receipt: receipt::Receipt,
     started: bool,
     permit: &'a composer_lock::ComposerPermit<'p>,
+    draft: &'a [String],
 }
 
 fn failed(outcome: Outcome, draft: DraftState) -> Report {
@@ -153,6 +193,16 @@ impl StashEffects for Effects<'_, '_> {
                 DraftState::Unchanged,
             ));
         }
+        let fresh = self.capture().and_then(|capture| {
+            screen::stashable(
+                &capture,
+                self.text,
+                Some(self.pane.as_ref().unwrap().dimensions()),
+            )
+        });
+        if fresh.as_deref() != Some(self.draft) {
+            return Err(failed(Outcome::NotSent(Veto::Draft), DraftState::Unchanged));
+        }
         let effect = self.pane.as_mut().unwrap().stash();
         self.started = effect != EffectOutcome::Held;
         match effect {
@@ -172,6 +222,15 @@ impl StashEffects for Effects<'_, '_> {
             return Err(failed(
                 Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste),
                 DraftState::StashedVerified,
+            ));
+        }
+        if !self.capture().is_some_and(|capture| {
+            screen::stashed(&capture)
+                && judge_pane(ShadowProvider::Claude, &capture) != PaneVerdict::Modal
+        }) {
+            return Err(failed(
+                Outcome::Unconfirmed(Unconfirmed::DraftNotOwned),
+                DraftState::Unknown,
             ));
         }
         match self
@@ -234,6 +293,12 @@ impl StashEffects for Effects<'_, '_> {
         if !self.generation_unchanged() {
             return Outcome::Unconfirmed(Unconfirmed::AttachedAfterPaste);
         }
+        if !self.capture().is_some_and(|capture| {
+            screen::owns(&capture, self.text)
+                && judge_pane(ShadowProvider::Claude, &capture) != PaneVerdict::Modal
+        }) {
+            return Outcome::Unconfirmed(Unconfirmed::DraftNotOwned);
+        }
         if !self.receipt.unchanged() {
             return Outcome::Unconfirmed(Unconfirmed::CursorChangedBeforeEnter);
         }
@@ -267,6 +332,162 @@ impl StashEffects for Effects<'_, '_> {
     }
 }
 
+impl IdleReport {
+    fn input_run(&self, cancel: Option<&CancelToken>) -> InputRun {
+        if self.entered {
+            if self.delivery == Delivery::Observed {
+                InputRun::Applied
+            } else {
+                InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: StopCause::Send("managed idle stash delivery unconfirmed".into()),
+                }
+            }
+        } else if cancel_requested(cancel) {
+            InputRun::Cancelled { confirmed: 0 }
+        } else {
+            InputRun::Refused(
+                self.refusal
+                    .clone()
+                    .unwrap_or(InputRefusal::Composer(Refusal::NotReady)),
+            )
+        }
+    }
+}
+
+struct ManagedAuthority {
+    fence: std::sync::Arc<dyn submission_fence::SubmissionFence>,
+    session: String,
+    pin: std::cell::RefCell<
+        Option<crate::services::tui_input::submission_tmux::guarded::PaneIdentity>,
+    >,
+}
+impl StashAuthority for ManagedAuthority {
+    fn admits(&self, pane: &GuardedPane) -> bool {
+        pane.session_matches(&self.session)
+            && self.fence.idle_stash_admits(&self.session)
+            && self
+                .pin
+                .borrow()
+                .as_ref()
+                .is_none_or(|pin| *pin == pane.identity())
+    }
+    fn claim(&self, pane: &GuardedPane) -> Result<(), String> {
+        self.fence
+            .claim_idle_stash(&self.session)
+            .map_err(|error| error.to_string())?;
+        *self.pin.borrow_mut() = Some(pane.identity());
+        Ok(())
+    }
+}
+
+pub(crate) fn managed_enabled(session: &str) -> bool {
+    submission_fence::idle_stash_scope().is_some_and(|(_, context)| {
+        context.available
+            && context.target == session
+            && busy_inject::stash_enabled(Some(context.channel))
+    })
+}
+
+pub(crate) fn submit(
+    session: &str,
+    prompt: &str,
+    cancel: Option<&CancelToken>,
+    transcript: Option<&Path>,
+    selected: Option<&super::Request>,
+) -> Option<Result<(), guarded_outcome::SubmissionError>> {
+    let (fence, context) = submission_fence::idle_stash_scope()?;
+    if !busy_inject::stash_enabled(Some(context.channel)) {
+        return None;
+    }
+    if !context.available || context.target != session {
+        let held = InputRun::Refused(InputRefusal::IdentityMismatch);
+        guarded_outcome::finish(&held);
+        return Some(guarded_outcome::SubmissionError::from_run(held));
+    }
+    let path = transcript
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+                .filter(|binding| {
+                    binding.runtime_kind
+                        == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+                })
+                .map(|binding| binding.output_path.into())
+        })
+        .unwrap_or_default();
+    let target = InputTarget::legacy_tmux(session);
+    let (target, gate): (&InputTarget, &dyn MutationGate) = selected
+        .map_or((&target, &LegacyTmuxGate as &dyn MutationGate), |request| {
+            (&request.target, &*request.gate)
+        });
+    let authority = ManagedAuthority {
+        fence,
+        session: session.into(),
+        pin: Default::default(),
+    };
+    let request = Request {
+        target,
+        gate,
+        prompt,
+        transcript: &path,
+        cancel,
+        timing: &busy_inject::TIMING,
+    };
+    let report = run(Some(&authority), true, &request)?;
+    if !report.entered && report.retryable {
+        return Some(Err(guarded_outcome::SubmissionError::Legacy(
+            "timeout waiting for claude tui follow-up prompt input readiness held; reason=draft_recovery_hold; previous_tui_turn_still_running=false; prompt_marker_detected=true".into())));
+    }
+    let result = report.input_run(cancel);
+    guarded_outcome::finish(&result);
+    Some(guarded_outcome::SubmissionError::from_run(result))
+}
+
+// A watcher can suggest a wake; it neither claims an attempt nor removes draft protection.
+pub(crate) fn wake_hint(session: &str) -> Option<String> {
+    wake_hint_observed(session).ok().flatten()
+}
+
+/// A contended composer on a known idle runtime is unresolved, rather than evidence that a
+/// capped head may be skipped. A busy or unbound runtime keeps its existing selection meaning.
+pub(crate) fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
+    let Some(binding) =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+    else {
+        return Ok(None);
+    };
+    let path = std::path::PathBuf::from(binding.output_path);
+    if binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
+        || observe_claude_jsonl_turn_state(&path) != TuiTurnState::Idle
+    {
+        return Ok(None);
+    }
+    composer_lock::try_with_composer_permit(session, |_| {
+        let pane = SubmissionTmux.pin_guarded(session).ok()?;
+        let capture = pane.capture_draft()?;
+        if composer_lock::composer_admission(session, || Some(capture.clone()))
+            != composer_lock::ComposerAdmission::StashOnly
+        {
+            return None;
+        }
+        if observe_claude_jsonl_turn_state(&path) != TuiTurnState::Idle {
+            return None;
+        }
+        let draft = screen::stashable(&capture, "wake", Some(pane.dimensions()))?;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(format!(
+            "{:?}/{draft:?}/{}/{}/{}",
+            pane.identity(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len()
+        ))
+    })
+    .ok_or(())
+}
+
 #[cfg(test)]
 #[path = "idle_stash/idle_stash_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -410,7 +410,7 @@ pub(in crate::services::claude_tui) fn owns(capture: &str, frame: &str) -> bool 
 }
 
 /// The C-s took: an empty composer under the stash marker.
-pub(super) fn stashed(capture: &str) -> bool {
+pub(in crate::services::claude_tui) fn stashed(capture: &str) -> bool {
     let screen = read(capture);
     screen.stash == Stash::Present && screen.composer == Composer::Empty
 }

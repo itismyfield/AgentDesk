@@ -159,6 +159,12 @@ pub(super) fn producer_error(
             tracing::warn!(channel_id, %refused, "provider held the prompt before submit");
             return None;
         }
+        Some(SubmissionFailure::IdleStashObserved) => {
+            tracing::warn!(
+                channel_id,
+                "provider failed after an observed idle-stash delivery"
+            );
+        }
         Some(SubmissionFailure::SubmissionIndeterminate) => {
             tracing::warn!(channel_id, "provider failed after the submission fence");
         }
@@ -649,6 +655,10 @@ mod codex_herdr_tests;
 #[cfg(test)]
 #[path = "provider_dispatch_submission_tests.rs"]
 mod submission_tests;
+
+#[cfg(all(test, unix))]
+#[path = "provider_dispatch_idle_stash_tests.rs"]
+mod idle_stash_tests;
 
 #[cfg(test)]
 pub(super) mod producer_error_test_support;

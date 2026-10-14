@@ -572,6 +572,15 @@ fn stash_channels_configured() -> &'static [u64] {
     CHANNELS.get_or_init(|| stash_channels(raw().as_deref()))
 }
 
+#[cfg(unix)]
+pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
+    #[cfg(test)]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return stash_channel_listed(channel, &stash_tests::configured_channels());
+    }
+    stash_channel_listed(channel, stash_channels_configured())
+}
+
 fn stash_channels(raw: Option<&str>) -> Vec<u64> {
     let ids = raw.unwrap_or_default().split(',');
     ids.filter_map(|id| id.trim().parse().ok()).collect()

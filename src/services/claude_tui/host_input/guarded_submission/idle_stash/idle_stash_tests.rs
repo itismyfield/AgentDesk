@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-const PROMPT: &str = "[User: test]\nprepared question";
-const FAST: Timing = Timing {
+pub(crate) const PROMPT: &str = "[User: test]\nprepared question";
+pub(crate) const FAST: Timing = Timing {
     lock_retries: &[],
     settle: Duration::from_millis(30),
     rechecks: 8,
@@ -22,7 +22,7 @@ const FAST: Timing = Timing {
     restore_window: Duration::from_millis(200),
 };
 
-fn view(text: &str, stashed: bool) -> String {
+pub(crate) fn view(text: &str, stashed: bool) -> String {
     format!(
         "{}\n{}\n❯\u{a0}{}\n{}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
         if stashed { "› stashed" } else { "" },
@@ -51,27 +51,42 @@ struct Authority {
     identity: crate::services::tui_input::submission_tmux::guarded::PaneIdentity,
     admitted: Cell<bool>,
 }
-impl QueueAuthority for Authority {
+impl StashAuthority for Authority {
     fn admits(&self, pane: &GuardedPane) -> bool {
         self.admitted.get() && pane.identity() == self.identity
     }
 }
 
-fn renderer(f: &Fixture, name: &str, mode: &str) -> PathBuf {
+pub(crate) fn renderer(f: &Fixture, name: &str, mode: &str) -> PathBuf {
+    renderer_with(
+        f,
+        name,
+        mode,
+        view("js", false),
+        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+        PROMPT,
+    )
+}
+
+pub(crate) fn renderer_with(
+    f: &Fixture,
+    name: &str,
+    mode: &str,
+    before: String,
+    transcript: &str,
+    prompt: &str,
+) -> PathBuf {
     let root = f.root.path().join(name);
     fs::create_dir(&root).unwrap();
     for (file, bytes) in [
-        ("before", view("js", false)),
+        ("before", before),
         ("stashed", view("", true)),
-        ("own", view(PROMPT, true)),
+        ("own", view(prompt, true)),
         (
             "after",
             view(if mode == "never" { "" } else { "js" }, mode == "never"),
         ),
-        (
-            "transcript",
-            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n".into(),
-        ),
+        ("transcript", transcript.into()),
         ("mode", mode.into()),
     ] {
         fs::write(root.join(file), bytes).unwrap();
@@ -93,7 +108,13 @@ render('before')
 pending = b''
 while True:
     pending += os.read(0, 65536)
+    if pending.startswith(b'\x12'):
+        if (root/'body').exists(): (root/'body').write_text((root/'body').read_text()+' changed by person')
+        render('tampered'); pending=pending[1:]
     if pending.startswith(b'\x13'):
+        if (root/'inflight').exists():
+            state=json.loads(pathlib.Path((root/'inflight').read_text()).read_text())
+            (root/'phase-at-stash').write_text(state['managed_submission']['phase'])
         event('C-s'); pending=pending[1:]; render('stashed')
     if pending.startswith(b'\x1b[200~') and b'\x1b[201~' in pending:
         body, pending = pending[6:].split(b'\x1b[201~',1)
@@ -123,13 +144,14 @@ while True:
         &command,
     ]);
     f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
+    f.tmux(&["resize-window", "-t", &pane, "-x", "160", "-y", "40"]);
     wait("renderer-started", || root.join("ready").exists());
     wait("renderer-capture", || {
-        f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("js")
+        f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("❯")
     });
     root
 }
-fn events(root: &Path) -> Vec<String> {
+pub(crate) fn events(root: &Path) -> Vec<String> {
     fs::read_to_string(root.join("events"))
         .unwrap_or_default()
         .lines()
@@ -140,7 +162,7 @@ fn events(root: &Path) -> Vec<String> {
 #[test]
 fn missing_capability_and_off_do_no_preparation_or_io() {
     struct Never;
-    impl QueueAuthority for Never {
+    impl StashAuthority for Never {
         fn admits(&self, _: &GuardedPane) -> bool {
             panic!("authority was queried");
         }
@@ -251,9 +273,14 @@ fn pinned_idle_stash_preserves_delivery_and_protects_unrestored_draft() {
         let before = events(&root);
         assert_eq!(
             super::super::run(&target, &LegacyTmuxGate, "next question", None),
-            refused(Refusal::NotReady)
+            if got.delivery == Delivery::Observed {
+                refused(Refusal::NotReady)
+            } else {
+                got.input_run(None)
+            }
         );
         assert_eq!(events(&root), before);
+        guarded_outcome::forget_test_hold(&name);
     }
 }
 
@@ -313,7 +340,13 @@ fn fence_and_revoked_authority_precede_any_stash_effect() {
         )
         .unwrap();
         if revoked || fail {
-            assert_eq!(got, stopped(DraftState::Unchanged));
+            assert_eq!(got.delivery, Delivery::NotAttempted);
+            assert_eq!(got.draft, DraftState::Unchanged);
+            assert!(!got.entered);
+            assert_eq!(
+                got.refusal,
+                revoked.then_some(InputRefusal::IdentityMismatch)
+            );
             assert!(events(&root).is_empty());
         } else {
             assert_eq!(got.delivery, Delivery::Observed);
@@ -606,4 +639,68 @@ fn restore_observation_holds_same_pane_writer_while_other_pane_proceeds() {
     assert_eq!(ended.delivery, Delivery::Observed);
     assert_eq!(ended.draft, DraftState::RestoredObserved);
     assert_eq!(events(&root), ["C-s", "paste", "Enter"]);
+}
+
+#[test]
+fn managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fence() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Count(AtomicUsize);
+    impl SubmissionFence for Count {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+    }
+    let f = Fixture::new();
+    for kind in ["busy", "stash", "modal", "agentdesk", "folded", "long"] {
+        let name = format!("negative-{kind}");
+        let mut before = view("js", kind == "stash");
+        if kind == "modal" {
+            before = format!(
+                "  ❯ 1. Resume from summary (recommended)\n    2. Resume full session as-is\n  Enter to confirm · Esc to cancel\n{before}"
+            );
+        }
+        if kind == "agentdesk" {
+            before = view("[User: test]\nprevious", false);
+            assert_eq!(
+                busy_inject::composer_owner(&before),
+                busy_inject::ComposerOwner::AgentDesk
+            );
+        }
+        let transcript = if kind == "busy" {
+            "{\"type\":\"user\",\"message\":{\"content\":\"previous\"}}\n"
+        } else {
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n"
+        };
+        let long = "x".repeat(801);
+        let prompt = match kind {
+            "long" => long.as_str(),
+            "folded" => "a\nb\nc\nd",
+            _ => PROMPT,
+        };
+        let root = renderer_with(&f, &name, "normal", before, transcript, prompt);
+        let authority = Authority {
+            identity: SubmissionTmux.pin_guarded(&name).unwrap().identity(),
+            admitted: Cell::new(true),
+        };
+        let target = InputTarget::legacy_tmux(&name);
+        let path = root.join("transcript");
+        let request = Request {
+            target: &target,
+            gate: &LegacyTmuxGate,
+            prompt,
+            transcript: &path,
+            cancel: None,
+            timing: &FAST,
+        };
+        let fence = Arc::new(Count(AtomicUsize::new(0)));
+        let _result = with_scope(Some(fence.clone()), || {
+            run(Some(&authority), true, &request)
+        });
+        assert!(events(&root).is_empty(), "{kind}: no C-s, paste or Enter");
+        assert_eq!(fence.0.load(Ordering::SeqCst), 0, "{kind}: no fence entry");
+    }
 }

@@ -35,6 +35,7 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
+        "src/services/discord/router/message_handler/provider_dispatch_idle_stash_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_draft_tests.rs",
@@ -724,8 +725,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
-        "src/services/claude_tui/host_input/guarded_submission/idle_stash.rs",
-        "src/services/claude_tui/host_input/guarded_submission/idle_stash/receipt.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
