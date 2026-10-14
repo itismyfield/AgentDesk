@@ -1214,3 +1214,6 @@ async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retireme
         }
     }
 }
+
+#[path = "transition_route_tests.rs"]
+mod route_tests;
