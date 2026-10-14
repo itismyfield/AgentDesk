@@ -532,9 +532,8 @@ async fn s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg() {
     fixture.assert_still_busy().await;
 }
 
-/// The attempt row names a delivery or a kept head only where the actor committed it. A paste the
-/// pane took but the queue could not settle reads unknown; an idle pane, or a head another worker
-/// settled before this attempt's claim, reads unavailable; no row carries text.
+/// A row names a delivery or a kept head only where the actor committed it: an unsettled paste is
+/// unknown, an idle pane or a head settled before the claim is unavailable, and no row has text.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -780,9 +779,8 @@ async fn s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg() {
     }
 }
 
-/// A thread whose parent alone opens the gate keeps its backlog watched while the thread cannot be
-/// read: the enqueue's look and an armed check both wait, and the slow timer types each input
-/// once the read succeeds again, with no new input and no kick from the test.
+/// A thread gated by its parent alone stays watched while it cannot be read: the enqueue's look and
+/// an armed check both wait, and the slow timer alone types each input once the read succeeds.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
