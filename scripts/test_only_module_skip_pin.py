@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/cluster/stream_relay/source_read_proof_tests.rs",
         "src/db/intake_outbox/owner_fence_pg_tests.rs",
         "src/db/intake_outbox/postgres_tests.rs",
         "src/services/cluster/intake_worker/owner_fence_pg_tests.rs",
