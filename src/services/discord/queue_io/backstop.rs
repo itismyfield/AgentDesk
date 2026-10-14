@@ -5,6 +5,10 @@ use super::*;
 pub(in crate::services) struct BackstopSlot {
     pub(in crate::services) wake: tokio::sync::Notify,
     pub(super) pending_request: std::sync::atomic::AtomicBool,
+    worker_active: std::sync::atomic::AtomicBool,
+    pub(super) custody:
+        std::sync::Mutex<std::collections::VecDeque<Box<router::QueuedLedgerOutcome>>>,
+    pub(super) custody_inflight: std::sync::atomic::AtomicUsize,
 }
 
 impl BackstopSlot {
@@ -12,6 +16,9 @@ impl BackstopSlot {
         Self {
             wake: tokio::sync::Notify::new(),
             pending_request: std::sync::atomic::AtomicBool::new(false),
+            worker_active: std::sync::atomic::AtomicBool::new(false),
+            custody: Default::default(),
+            custody_inflight: Default::default(),
         }
     }
 
@@ -27,6 +34,67 @@ impl BackstopSlot {
         self.pending_request
             .swap(false, std::sync::atomic::Ordering::AcqRel);
     }
+
+    pub(super) fn has_custody(&self) -> bool {
+        self.custody_inflight
+            .load(std::sync::atomic::Ordering::Acquire)
+            != 0
+            || !self
+                .custody
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
+}
+
+async fn retry_retained_custody(shared: &Arc<SharedData>, slot: &Arc<BackstopSlot>) {
+    let Some(transport) = QueueTransport::from_runtime(shared) else {
+        return;
+    };
+    let owner = slot
+        .custody
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front();
+    let Some(owner) = owner else {
+        return;
+    };
+    let mut loan = CustodyLoan::new(shared, slot.clone(), owner);
+    let Some(owner) = loan.owner.as_mut() else {
+        return;
+    };
+    let result = router::consume_queued_ledger_outcome(&transport.intake_deps(shared), owner).await;
+    match result {
+        Ok(_) => {
+            loan.owner.take();
+        }
+        Err(()) => tracing::error!(
+            error = loan
+                .owner
+                .as_ref()
+                .map_or("MissingQueuedOwner", |owner| owner.failure()),
+            "queued input custody recovery failed; original and lease remain owned"
+        ),
+    }
+}
+
+pub(in crate::services::discord) async fn arm_kickoff_result_backstop(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    outcome: Result<IdleQueueKickoffChannelOutcome, Error>,
+    reason: &'static str,
+) -> bool {
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(provider = provider.as_str(), channel_id = channel.get(), error = %error,
+                "queued kickoff failed; retaining its input custody for the slow backstop");
+            IdleQueueKickoffChannelOutcome::default()
+        }
+    };
+    arm_event_backstop_after_no_start_if_queue_nonempty(shared, provider, channel, outcome, reason)
+        .await
 }
 /// Count each live task once, including panic cleanup, while preserving arm requests.
 struct DeferredHookBacklogGuard {
@@ -88,6 +156,14 @@ pub(super) fn idle_queue_backstop_backlog_units(
     channel_id: ChannelId,
     snapshot: &ChannelMailboxSnapshot,
 ) -> usize {
+    if shared
+        .restart
+        .deferred_hook_channels
+        .get(&channel_id)
+        .is_some_and(|slot| slot.has_custody())
+    {
+        return 1;
+    }
     if !idle_queue_snapshot_has_raw_rearm_backlog(shared, provider, channel_id, snapshot) {
         return 0;
     }
@@ -119,7 +195,18 @@ impl Drop for DeferredHookBacklogGuard {
             self.shared
                 .restart
                 .deferred_hook_channels
-                .remove_if(&self.channel_id, |_, slot| Arc::ptr_eq(slot, &self.slot));
+                .remove_if(&self.channel_id, |_, slot| {
+                    if !Arc::ptr_eq(slot, &self.slot) {
+                        return false;
+                    }
+                    #[cfg(all(test, unix))]
+                    if let Some(result) = custody_tests::mutate_worker_drop() {
+                        return result;
+                    }
+                    slot.worker_active
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    !slot.has_custody()
+                });
             tracing::warn!(
                 channel_id = self.channel_id.get(),
                 "Idle queue backstop task dropped before normal slot release"
@@ -149,10 +236,16 @@ impl DeferredHookBacklogGuard {
                 .restart
                 .deferred_hook_channels
                 .remove_if(&self.channel_id, |_, slot| {
-                    Arc::ptr_eq(slot, &self.slot)
+                    let release = Arc::ptr_eq(slot, &self.slot)
+                        && !slot.has_custody()
                         && !slot
                             .pending_request
-                            .load(std::sync::atomic::Ordering::Acquire)
+                            .load(std::sync::atomic::Ordering::Acquire);
+                    if release {
+                        slot.worker_active
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    }
+                    release
                 });
         let own_slot_remains = removed.is_none()
             && self
@@ -373,7 +466,7 @@ async fn run_single_slow_idle_queue_backstop(
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-    slot: &BackstopSlot,
+    slot: &Arc<BackstopSlot>,
     wait_for_trigger: bool,
 ) -> Option<IdleQueueBackstopRearm> {
     let timed_out = if wait_for_trigger {
@@ -391,6 +484,14 @@ async fn run_single_slow_idle_queue_backstop(
     };
     // This snapshot evaluates all requests received before it; newer requests remain pending.
     slot.consume_requests();
+    if slot.has_custody() {
+        // Each slow pass makes one recovery attempt; the caller's failed result stays an error.
+        retry_retained_custody(shared, slot).await;
+        let snapshot = super::mailbox_snapshot(shared, channel_id).await;
+        let backlog_units =
+            idle_queue_backstop_backlog_units(shared, provider, channel_id, &snapshot);
+        return (backlog_units != 0).then_some(IdleQueueBackstopRearm { backlog_units });
+    }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
@@ -413,13 +514,14 @@ async fn run_single_slow_idle_queue_backstop(
         let kickoff =
             kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason);
         #[cfg(test)]
-        let _ = queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
+        let outcome = queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
             "idle_queue_backstop",
             kickoff,
         )
         .await;
         #[cfg(not(test))]
-        let _ = kickoff.await;
+        let outcome = kickoff.await;
+        arm_kickoff_result_backstop(shared, provider, channel_id, outcome, reason).await;
     }
 
     // A reported start can still have re-preserved the message at the hosted-TUI gate.
@@ -473,7 +575,7 @@ async fn run_slow_idle_queue_backstop_loop(
     }
 }
 
-fn schedule_single_slow_idle_queue_backstop(
+pub(super) fn schedule_single_slow_idle_queue_backstop(
     shared: Arc<SharedData>,
     provider: ProviderKind,
     channel_id: ChannelId,
@@ -483,17 +585,27 @@ fn schedule_single_slow_idle_queue_backstop(
     let slot = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
             entry.get().request(false);
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                reason,
-                backlog_units,
-                "Idle queue slow backstop already active for channel; coalescing event-path no-start"
-            );
-            return false;
+            if !entry
+                .get()
+                .worker_active
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                entry.get().clone()
+            } else {
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    reason,
+                    backlog_units,
+                    "Idle queue slow backstop already active for channel; coalescing event-path no-start"
+                );
+                return false;
+            }
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
             let slot = Arc::new(BackstopSlot::new());
+            slot.worker_active
+                .store(true, std::sync::atomic::Ordering::Release);
             entry.insert(slot.clone());
             slot
         }
@@ -586,7 +698,7 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
                         "turn_completion_event",
                     )
                     .await;
-                    arm_event_backstop_after_no_start_if_queue_nonempty(
+                    arm_kickoff_result_backstop(
                         &shared,
                         &provider,
                         event.channel_id,
@@ -662,18 +774,28 @@ fn schedule_deferred_idle_queue_kickoff_inner(
     let slot = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
             entry.get().request(profile.wakes_existing_task());
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                reason,
-                immediate = matches!(profile, DeferredIdleQueueKickoffProfile::ImmediateOnce),
-                wake_existing = profile.wakes_existing_task(),
-                "Deferred drain: kickoff already active for channel; coalescing duplicate request"
-            );
-            return;
+            if !entry
+                .get()
+                .worker_active
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                entry.get().clone()
+            } else {
+                tracing::debug!(
+                    provider = provider.as_str(),
+                    channel_id = channel_id.get(),
+                    reason,
+                    immediate = matches!(profile, DeferredIdleQueueKickoffProfile::ImmediateOnce),
+                    wake_existing = profile.wakes_existing_task(),
+                    "Deferred drain: kickoff already active for channel; coalescing duplicate request"
+                );
+                return;
+            }
         }
         dashmap::mapref::entry::Entry::Vacant(entry) => {
             let slot = Arc::new(BackstopSlot::new());
+            slot.worker_active
+                .store(true, std::sync::atomic::Ordering::Release);
             entry.insert(slot.clone());
             slot
         }
@@ -697,9 +819,13 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             }
         }
 
-        let _ =
-            kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
-                .await;
+        if !slot.has_custody() {
+            let outcome = kick_idle_queue_channel_if_context_available(
+                &shared, &provider, channel_id, reason,
+            )
+            .await;
+            arm_kickoff_result_backstop(&shared, &provider, channel_id, outcome, reason).await;
+        }
         run_slow_idle_queue_backstop_loop(
             &shared,
             &provider,
@@ -711,3 +837,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         .await;
     });
 }
+
+#[cfg(all(test, unix))]
+#[path = "custody_tests.rs"]
+pub(super) mod custody_tests;

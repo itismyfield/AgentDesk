@@ -1238,7 +1238,7 @@ async fn t5_kickoff_busy_reports_no_start_after_durable_restore() {
     })
     .await
     .expect("KICKOFF must reach real intake");
-    assert!(!outcome.started);
+    assert!(!outcome.expect("busy kickoff durable restore").started);
     assert_eq!(f.ids().await, [8_013_002, 8_013_003]);
     assert_eq!(
         discord::mailbox_snapshot(&f.shared, f.channel)
@@ -1458,9 +1458,7 @@ fn full_queued_original(original: &Intervention) -> impl std::fmt::Debug + Parti
     )
 }
 
-async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
-    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let f = Fixture::new(channel).await;
+fn rich_queued_ledger_item(channel: u64) -> Intervention {
     let mut head = item(channel + 2);
     head.author_is_bot = true;
     head.author_id = UserId::new(42);
@@ -1499,6 +1497,13 @@ async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
         stt_mode: Some("file".into()),
         stt_latency_ms: Some(120),
     });
+    head
+}
+
+async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    let head = rich_queued_ledger_item(channel);
     f.enqueue(head).await;
     f.enqueue(item(channel + 3)).await;
     let taken = f.take().await;
@@ -1512,11 +1517,9 @@ async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
         .as_ref()
         .expect("real R1 lease")
         .clone();
-    let admission = if received {
-        super::super::ledger::test_received(channel)
-    } else {
-        super::super::ledger::test_deferred(channel)
-    };
+    let [receipt, deferred] = super::super::ledger::test_payloads(channel);
+    let admission = if received { receipt } else { deferred };
+    let proof = super::super::ledger::observe_payload(&admission);
     super::super::ledger::inject_test_admission(admission);
     let admitted = f.admit(&taken).await;
     assert!(admitted.local_permit.is_none());
@@ -1532,8 +1535,12 @@ async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
         "C error must retain original and actual lease"
     );
     let outcome = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    assert_eq!(
+        super::super::ledger::observe_payload(outcome.admission.as_ref().unwrap()),
+        proof
+    );
     assert!(matches!(
-        (&outcome.admission, received),
+        (outcome.admission.as_ref().unwrap(), received),
         (IntakeAdmission::LedgerReceived(_), true) | (IntakeAdmission::LedgerDeferred(_), false)
     ));
     assert_eq!(
@@ -1543,7 +1550,7 @@ async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
     assert_eq!(outcome.provider, f.provider);
     assert_eq!(outcome.channel_id, f.channel);
     assert!(
-        Arc::ptr_eq(&outcome.dispatch_lease, &lease),
+        Arc::ptr_eq(outcome.dispatch_lease.as_ref().unwrap(), &lease),
         "actual R1 lease must survive"
     );
     let after = discord::mailbox_snapshot(&f.shared, f.channel).await;
@@ -1579,4 +1586,653 @@ async fn c2c1_queued_received_preserves_original_and_actual_lease() {
 #[tokio::test]
 async fn c2c1_queued_deferred_preserves_original_and_actual_lease() {
     queued_ledger_keeps_actual_owner(8_017_000, false).await;
+}
+
+async fn queued_missing_lease_keeps_proof(channel: u64, received: bool) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    f.enqueue(rich_queued_ledger_item(channel)).await;
+    f.enqueue(item(channel + 3)).await;
+    let taken = f.take().await;
+    let original = taken
+        .intervention
+        .as_ref()
+        .expect("actual dequeued original");
+    assert!(
+        taken.dispatch_lease.is_some(),
+        "fixture must take an actual R1 lease"
+    );
+    let [receipt, deferred] = super::super::ledger::test_payloads(channel);
+    let admission = if received { receipt } else { deferred };
+    let proof = super::super::ledger::observe_payload(&admission);
+    super::super::ledger::inject_test_admission(admission);
+    let before = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    let disposition = admit_queued_intake(
+        &f.deps(),
+        f.provider.clone(),
+        f.channel,
+        original,
+        original.author_id,
+        "original owner".into(),
+        false,
+        false,
+        "c2c2 missing lease fixture",
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&disposition, QueuedAdmissionDisposition::Admitted(_)),
+        "a missing dispatch lease must preserve the already received canonical proof and original"
+    );
+    let QueuedAdmissionDisposition::Admitted(admitted) = disposition else {
+        unreachable!()
+    };
+    assert_eq!(
+        super::super::ledger::observe_payload(
+            admitted
+                .ledger_outcome
+                .as_ref()
+                .expect("missing lease C carrier retains its owner")
+                .admission
+                .as_ref()
+                .expect("missing lease C carrier retains its proof")
+        ),
+        proof
+    );
+    let result = finish_admitted_queued_intake(&f.deps(), admitted).await;
+    assert!(
+        result.is_err(),
+        "missing lease is a typed failure, never execution"
+    );
+    let error = result.err().unwrap();
+    assert!(
+        error.is::<QueuedLedgerOutcome>(),
+        "missing lease must carry complete C custody"
+    );
+    let mut outcome = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    assert_eq!(
+        super::super::ledger::observe_payload(outcome.admission.as_ref().unwrap()),
+        proof
+    );
+    assert_eq!(
+        full_queued_original(&outcome.original),
+        full_queued_original(original)
+    );
+    assert_eq!(outcome.provider, f.provider);
+    assert_eq!(outcome.channel_id, f.channel);
+    assert_eq!(
+        format!("{:?}", outcome.dispatch_lease),
+        "None",
+        "a missing lease must not be invented"
+    );
+    assert!(
+        consume_queued_ledger_outcome(&f.deps(), &mut outcome)
+            .await
+            .is_err()
+    );
+    assert_eq!(outcome.failure(), "MissingDispatchLease");
+    assert_eq!(
+        super::super::ledger::observe_payload(outcome.admission.as_ref().unwrap()),
+        proof
+    );
+    let after = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.pending_user_dispatch_source_ids,
+        before.pending_user_dispatch_source_ids
+    );
+    assert_eq!(
+        f.ids().await,
+        [channel + 3],
+        "missing lease must not restore or consume the original"
+    );
+    assert_eq!(
+        f.shared.core.lock().await.sessions[&f.channel].pending_uploads,
+        ["U"]
+    );
+    assert!(!crate::voice::announce_meta::global_store().contains(original.message_id));
+    println!(
+        "C2C2_QUEUED_MISSING_LEASE received={received} real_dequeue=true injected_canonical_payload=true proof_preserved=true"
+    );
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+}
+
+#[tokio::test]
+async fn c2c2_queued_received_missing_lease_keeps_the_complete_proof() {
+    queued_missing_lease_keeps_proof(8_018_000, true).await;
+}
+
+#[tokio::test]
+async fn c2c2_queued_deferred_missing_lease_keeps_the_complete_proof() {
+    queued_missing_lease_keeps_proof(8_019_000, false).await;
+}
+
+#[tokio::test]
+async fn c2c2_received_readback_retry_never_abandons_a_new_dispatch_lease() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(8_020_000).await;
+    f.enqueue(rich_queued_ledger_item(8_020_000)).await;
+    let taken = f.take().await;
+    let original = taken.intervention.as_ref().unwrap().clone();
+    let lease = taken.dispatch_lease.as_ref().unwrap().clone();
+    QueuedAdmissionDisposition::inject_ledger_for_test(f.channel.get(), true);
+    let admitted = f.admit(&taken).await;
+    let error = finish_admitted_queued_intake(&f.deps(), admitted)
+        .await
+        .unwrap_err();
+    let mut owner = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    let marker = discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join(f.provider.as_str())
+        .join(&f.shared.token_hash)
+        .join(format!("{}.dispatch", f.channel.get()));
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::create_dir(&marker).unwrap();
+    assert!(
+        consume_queued_ledger_outcome(&f.deps(), &mut owner)
+            .await
+            .is_err(),
+        "actual authorization alone cannot certify durable marker removal"
+    );
+    assert!(
+        owner.reservation_released,
+        "the actual actor acknowledged the same Arc"
+    );
+    assert!(owner.failure().starts_with("DispatchMarkerReadbackFailed"));
+    assert_eq!(
+        full_queued_original(&owner.original),
+        full_queued_original(&original)
+    );
+    assert!(Arc::ptr_eq(owner.dispatch_lease.as_ref().unwrap(), &lease));
+    std::fs::remove_dir(&marker).unwrap();
+    f.enqueue(item(8_020_009)).await;
+    let newer = f.take().await;
+    let new_lease = newer.dispatch_lease.as_ref().unwrap();
+    assert!(
+        !Arc::ptr_eq(new_lease, &lease),
+        "fixture must create a different actual lease"
+    );
+    assert!(
+        consume_queued_ledger_outcome(&f.deps(), &mut owner)
+            .await
+            .is_err(),
+        "old receipt retry cannot clear the new durable reservation"
+    );
+    assert_eq!(owner.failure(), "PendingDispatchMarkerStillPresent");
+    let snapshot = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    assert_eq!(
+        snapshot.pending_user_dispatch,
+        Some(MessageId::new(8_020_009))
+    );
+    assert!(snapshot.pending_user_dispatch_lease_held_by_caller);
+    let disk = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+        &f.provider,
+        &f.shared.token_hash,
+        f.channel,
+    )
+    .unwrap()
+    .unwrap()
+    .0;
+    assert_eq!(disk.message_id, MessageId::new(8_020_009));
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+    println!(
+        "C2C2_RECEIVED_READBACK actual_authorization=true unlink_failed=true actual_new_lease=true old_retry_kept_new_marker=true"
+    );
+}
+
+async fn mismatched_fallback_keeps_proof_and_original(channel: u64, received: bool) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    f.enqueue(rich_queued_ledger_item(channel)).await;
+    f.enqueue(item(channel + 3)).await;
+    let taken = f.take().await;
+    let original = taken.intervention.as_ref().unwrap().clone();
+    let lease = taken.dispatch_lease.as_ref().unwrap().clone();
+    let [receipt, deferred] = super::super::ledger::test_payloads(channel);
+    let admission = if received { receipt } else { deferred };
+    let proof = super::super::ledger::observe_payload(&admission);
+    TEST_FALLBACK_ADMISSION.with(|slot| assert!(slot.replace(Some(admission)).is_none()));
+    let before = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    let ui_before = f.shared.turn_view_reconciler.ops().len();
+    let admitted = f.admit(&taken).await;
+    assert!(
+        admitted.is_ledger(),
+        "post-central C proof retains a typed owner"
+    );
+    let error = finish_admitted_queued_intake(&f.deps(), admitted)
+        .await
+        .unwrap_err();
+    let mut owner = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    assert!(
+        owner.blocked_proof,
+        "mismatched original binding cannot authorize custody"
+    );
+    assert!(
+        consume_queued_ledger_outcome(&f.deps(), &mut owner)
+            .await
+            .is_err()
+    );
+    assert_eq!(owner.failure(), "CanonicalProofDoesNotCoverQueuedOriginal");
+    assert_eq!(
+        super::super::ledger::observe_payload(owner.admission.as_ref().unwrap()),
+        proof
+    );
+    assert_eq!(
+        full_queued_original(&owner.original),
+        full_queued_original(&original)
+    );
+    assert!(Arc::ptr_eq(owner.dispatch_lease.as_ref().unwrap(), &lease));
+    let after = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.pending_user_dispatch_source_ids,
+        before.pending_user_dispatch_source_ids
+    );
+    assert_eq!(
+        f.ids().await,
+        [channel + 3],
+        "a mismatched proof cannot restore or execute"
+    );
+    assert_eq!(f.shared.turn_view_reconciler.ops().len(), ui_before);
+    assert_eq!(
+        f.shared.core.lock().await.sessions[&f.channel].pending_uploads,
+        ["U"]
+    );
+    assert!(!crate::voice::announce_meta::global_store().contains(original.message_id));
+    let disk = crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+        &f.provider,
+        &f.shared.token_hash,
+        f.channel,
+    )
+    .unwrap()
+    .unwrap()
+    .0;
+    assert_eq!(disk.source_message_ids, original.source_message_ids);
+    assert_eq!(disk.pending_uploads, original.pending_uploads);
+    assert_eq!(disk.reply_context, original.reply_context);
+    assert_eq!(disk.voice_announcement, original.voice_announcement);
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+    println!(
+        "C2C2_FALLBACK_BINDING received={received} actual_dequeue=true same_arc=true proof_preserved=true restore_ui_abandon_zero=true"
+    );
+}
+
+#[tokio::test]
+async fn c2c2_fallback_received_mismatch_keeps_canonical_proof_original_and_actual_lease() {
+    mismatched_fallback_keeps_proof_and_original(8_021_000, true).await;
+}
+
+#[tokio::test]
+async fn c2c2_fallback_deferred_mismatch_keeps_canonical_proof_original_and_actual_lease() {
+    mismatched_fallback_keeps_proof_and_original(8_022_000, false).await;
+}
+
+async fn actor_ack_before_caller_cancel_recovers(channel: u64, received: bool) {
+    use futures::FutureExt;
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    f.enqueue(rich_queued_ledger_item(channel)).await;
+    let taken = f.take().await;
+    let original = taken.intervention.as_ref().unwrap().clone();
+    let lease = taken.dispatch_lease.as_ref().unwrap().clone();
+    QueuedAdmissionDisposition::inject_ledger_for_test(channel, received);
+    let admitted = f.admit(&taken).await;
+    let error = finish_admitted_queued_intake(&f.deps(), admitted)
+        .await
+        .unwrap_err();
+    let mut owner = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    let proof = super::super::ledger::observe_payload(owner.admission.as_ref().unwrap());
+    let deps = f.deps();
+    let mut attempt = consume_queued_ledger_outcome(&deps, &mut owner);
+    let mut actor_finished = false;
+    let mut polls = 0;
+    for _ in 0..20 {
+        polls += 1;
+        assert!(
+            attempt.as_mut().now_or_never().is_none(),
+            "cancel window must precede the caller observing completion"
+        );
+        tokio::task::yield_now().await;
+        let snapshot = f.shared.mailbox(f.channel).try_snapshot().await.unwrap();
+        let marker =
+            crate::services::turn_orchestrator::load_channel_pending_dispatch_marker_checked(
+                &f.provider,
+                &f.shared.token_hash,
+                f.channel,
+            )
+            .unwrap();
+        let disk = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
+            &f.provider,
+            &f.shared.token_hash,
+            f.channel,
+        )
+        .unwrap()
+        .0;
+        actor_finished = if received {
+            snapshot.pending_user_dispatch.is_none() && marker.is_none()
+        } else {
+            snapshot
+                .intervention_queue
+                .iter()
+                .any(|item| same_queued_original(&original, item))
+                && disk
+                    .iter()
+                    .any(|item| same_queued_original(&original, item))
+        };
+        if actor_finished {
+            break;
+        }
+    }
+    assert!(
+        actor_finished,
+        "actual actor/disk mutation must precede the next caller poll"
+    );
+    drop(attempt);
+    assert!(
+        !owner.reservation_released && !owner.restore_committed,
+        "actor ACK was not observed by the cancelled caller"
+    );
+    assert!(Arc::ptr_eq(owner.dispatch_lease.as_ref().unwrap(), &lease));
+    assert_eq!(
+        full_queued_original(&owner.original),
+        full_queued_original(&original)
+    );
+    assert_eq!(
+        super::super::ledger::observe_payload(owner.admission.as_ref().unwrap()),
+        proof
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        consume_queued_ledger_outcome(&deps, &mut owner),
+    )
+    .await
+    .expect("one retry must resolve already durable custody");
+    assert_eq!(
+        result,
+        Ok(if received {
+            QueuedCustody::Received
+        } else {
+            QueuedCustody::Restored
+        })
+    );
+    assert_eq!(
+        super::super::ledger::observe_payload(owner.admission.as_ref().unwrap()),
+        proof
+    );
+    if received {
+        assert!(owner.reservation_released);
+        assert!(f.ids().await.is_empty());
+    } else {
+        assert!(owner.restore_committed);
+        assert_eq!(
+            f.ids().await,
+            [original.message_id.get()],
+            "retry cannot duplicate restore"
+        );
+    }
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+    println!(
+        "C2C2_ACTOR_ACK_CANCEL received={received} polls={polls} actual_actor_ack=true durable_disk_before_caller_poll=true cancelled_owner_kept=true finite_retry=true"
+    );
+}
+
+#[tokio::test]
+async fn c2c2_received_actor_ack_before_caller_cancel_recovers_on_one_retry() {
+    actor_ack_before_caller_cancel_recovers(8_023_000, true).await;
+}
+
+#[tokio::test]
+async fn c2c2_deferred_actor_ack_before_caller_cancel_recovers_on_one_retry() {
+    actor_ack_before_caller_cancel_recovers(8_024_000, false).await;
+}
+
+async fn actual_replacement_keeps_old_owner_and_new_lease(channel: u64, received: bool) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    f.enqueue(rich_queued_ledger_item(channel)).await;
+    let taken = f.take().await;
+    let original = taken.intervention.as_ref().unwrap().clone();
+    let lease = taken.dispatch_lease.as_ref().unwrap().clone();
+    QueuedAdmissionDisposition::inject_ledger_for_original_test(channel, &original, 41, received);
+    let admitted = f.admit(&taken).await;
+    let error = finish_admitted_queued_intake(&f.deps(), admitted)
+        .await
+        .unwrap_err();
+    let mut owner = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    let proof = owner.proof_for_test();
+    assert!(
+        proof.is_some(),
+        "fixture must preserve a complete original-bound proof"
+    );
+    drop(taken);
+    let old_actor = f.shared.mailbox(f.channel);
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+    let replacement = f.shared.mailbox(f.channel);
+    assert!(
+        !old_actor.same_actor(&replacement),
+        "fixture must replace the actual actor after C admission"
+    );
+    drop(old_actor);
+    let recovered = f.take().await;
+    let newer = if recovered.selection_stale {
+        assert!(
+            recovered.intervention.is_none(),
+            "marker recovery invalidates Observed(None)"
+        );
+        f.take().await
+    } else {
+        recovered
+    };
+    let new_original = newer
+        .intervention
+        .as_ref()
+        .expect("fresh actor must take its recovered marker");
+    let new_lease = newer
+        .dispatch_lease
+        .as_ref()
+        .expect("fresh actor must mint a real dispatch lease");
+    assert_eq!(new_original.source_message_ids, original.source_message_ids);
+    assert!(
+        !Arc::ptr_eq(new_lease, &lease),
+        "actual replacement lease must differ from the held old Arc"
+    );
+    for source in new_original.source_message_queued_generations() {
+        discord::queue_marker::note_added_queued_generation(
+            &f.shared,
+            &f.http,
+            f.channel,
+            source.message_id,
+            discord::queue_reactions::QUEUE_STANDALONE_PENDING_REACTION,
+            source.queued_generation,
+            "replacement owner fixture",
+        )
+        .await;
+    }
+    let marker = discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join(f.provider.as_str())
+        .join(&f.shared.token_hash)
+        .join(format!("{}.dispatch", f.channel.get()));
+    let marker_before = std::fs::read(&marker).unwrap();
+    let snapshot_before = replacement.try_snapshot().await.unwrap();
+    let ui_before = f.shared.turn_view_reconciler.ops().len();
+    assert!(
+        ui_before > 0,
+        "the replacement fixture must contain actual queued UI effects"
+    );
+    assert_eq!(
+        snapshot_before.pending_user_dispatch,
+        Some(original.message_id)
+    );
+    assert!(snapshot_before.pending_user_dispatch_lease_held_by_caller);
+    assert!(
+        consume_queued_ledger_outcome(&f.deps(), &mut owner)
+            .await
+            .is_err(),
+        "old C owner cannot acquire or settle the replacement actor's same-source lease"
+    );
+    assert_eq!(owner.proof_for_test(), proof);
+    assert_eq!(
+        full_queued_original(&owner.original),
+        full_queued_original(&original)
+    );
+    assert!(Arc::ptr_eq(owner.dispatch_lease.as_ref().unwrap(), &lease));
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        marker_before,
+        "the new durable marker must remain byte-identical"
+    );
+    let after = replacement.try_snapshot().await.unwrap();
+    assert_eq!(
+        after.pending_user_dispatch,
+        snapshot_before.pending_user_dispatch
+    );
+    assert_eq!(
+        after.pending_user_dispatch_source_ids,
+        snapshot_before.pending_user_dispatch_source_ids
+    );
+    assert!(after.pending_user_dispatch_lease_held_by_caller);
+    assert_eq!(
+        after.intervention_queue.len(),
+        snapshot_before.intervention_queue.len()
+    );
+    assert!(
+        after.intervention_queue.is_empty(),
+        "old payload must not be restored beside the new same-source owner"
+    );
+    assert_eq!(f.shared.turn_view_reconciler.ops().len(), ui_before);
+    assert_eq!(
+        f.shared.core.lock().await.sessions[&f.channel].pending_uploads,
+        ["U"]
+    );
+    assert!(!crate::voice::announce_meta::global_store().contains(original.message_id));
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+    println!(
+        "C2C2_ACTOR_REPLACEMENT received={received} replaced_after_admission=true actual_new_arc=true same_source=true old_proof_and_arc_preserved=true new_marker_bytes_unchanged=true queue_ui_unchanged=true"
+    );
+}
+
+#[tokio::test]
+async fn c2c2_received_actual_actor_replacement_preserves_old_owner_and_new_lease() {
+    actual_replacement_keeps_old_owner_and_new_lease(100_000_008_025_000, true).await;
+}
+
+#[tokio::test]
+async fn c2c2_deferred_actual_actor_replacement_preserves_old_owner_and_new_lease() {
+    actual_replacement_keeps_old_owner_and_new_lease(100_000_008_026_000, false).await;
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn c2c2_actual_queued_lookup_preserves_canonical_superset_and_original_author() {
+    use crate::services::discord::input_runtime::{intake, supervisor as runtime};
+    let channel = 963_259_850_121;
+    let ((), evidence) = runtime::run_scan_fixture(
+        channel,
+        false,
+        |registry, client, prepared, capability| async move {
+            let committed = intake::client::apply_from_scan(
+                &client,
+                intake::Classification::Target,
+                prepared,
+                capability,
+            )
+            .await
+            .unwrap();
+            let intake::client::Applied::Receipt(commit) = committed else {
+                panic!("actual WAL commit required")
+            };
+            let runtime::receipt::Receipt::Accepted(canonical) = commit.receipt else {
+                panic!("fresh canonical row must be durably received")
+            };
+            assert_eq!(canonical.identity.source_ids, [10, 11]);
+            let shared = discord::make_shared_data_for_tests();
+            let channel_id = ChannelId::new(channel);
+            let provider = ProviderKind::Claude;
+            let http = Arc::new(serenity::Http::new("c2c2-canonical-queued"));
+            let deps = IntakeDeps {
+                http: &http,
+                cache: None,
+                ctx_for_chained_dispatch: None,
+                shared: &shared,
+                token: "c2c2-canonical-queued",
+            };
+            for (primary, sources, author, received) in [
+                (10, vec![10, 11], 7, true),
+                (11, vec![11], 7, true),
+                (10, vec![10, 12], 7, false),
+                (10, vec![10, 11], 8, false),
+                (12, vec![12], 7, false),
+            ] {
+                let mut original = rich_queued_ledger_item(channel);
+                original.message_id = MessageId::new(primary);
+                original.source_message_ids = sources.into_iter().map(MessageId::new).collect();
+                original.author_id = UserId::new(author);
+                original.voice_announcement.as_mut().unwrap().control_channel_id = Some(channel);
+                original.source_message_queued_generations = original
+                    .source_message_ids
+                    .iter()
+                    .map(|id| SourceMessageQueuedGeneration {
+                        message_id: *id,
+                        queued_generation: original.queued_generation,
+                        enqueued_at_epoch_us: Some(123456),
+                        preserve_on_cancel: true,
+                    })
+                    .collect();
+                let disposition = with_registry_for_test(
+                    registry,
+                    admit_queued_intake(
+                        &deps,
+                        provider.clone(),
+                        channel_id,
+                        &original,
+                        UserId::new(99),
+                        "execution request owner differs from original author".into(),
+                        false,
+                        false,
+                        "c2c2 canonical queued",
+                        None,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(&disposition, QueuedAdmissionDisposition::Admitted(_)),
+                    "actual queued caller must preserve full canonical responsibility before Legacy guards"
+                );
+                let QueuedAdmissionDisposition::Admitted(admitted) = disposition else {
+                    unreachable!()
+                };
+                let admission = admitted.ledger_outcome.as_ref().unwrap().admission.as_ref().expect("actual C producer");
+                match (admission, received) {
+                    (IntakeAdmission::LedgerReceived(proof), true) => {
+                        assert_eq!(proof.receipt, canonical, "canonical identity must not become query identity");
+                        assert_eq!(proof.original.identity().author_id, author);
+                        assert_eq!(proof.original.identity().source_ids, original.source_message_ids.iter().map(|id| id.get()).collect::<Vec<_>>());
+                    }
+                    (IntakeAdmission::LedgerDeferred(proof), false) => {
+                        use crate::services::tui_input::rows::receipt_identity::Responsibility;
+                        let expected = if primary == 12 { Responsibility::Absent } else { Responsibility::Conflict };
+                        assert_eq!(proof.reason, super::super::ledger::DeferReason::Lookup(expected),
+                            "the existing full-identity lookup must decide the canonical responsibility");
+                        assert_eq!(proof.original.identity().author_id, author);
+                        assert_eq!(proof.original.identity().source_ids, original.source_message_ids.iter().map(|id| id.get()).collect::<Vec<_>>());
+                    }
+                    _ => panic!("full coverage and original author decide custody: {admission:?}"),
+                }
+                let error = finish_admitted_queued_intake(&deps, admitted)
+                    .await
+                    .expect_err("C retains a typed custody owner");
+                let owner = error.downcast::<QueuedLedgerOutcome>().unwrap();
+                assert_eq!(full_queued_original(&owner.original), full_queued_original(&original));
+                drop(owner);
+            }
+            shared.mailboxes.remove_fixture_for_test(channel_id);
+            println!("C2C2_QUEUED_CANONICAL actual_queued_caller=true actual_actor_dequeue=false actual_wal=true full_identity=true original_author=true cases=5");
+        },
+    ).await;
+    assert_eq!(evidence.open_rows, 1);
+    assert!(
+        evidence.persisted_row.is_some(),
+        "canonical WAL row must remain real"
+    );
 }

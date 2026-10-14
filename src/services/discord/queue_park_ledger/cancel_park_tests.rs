@@ -1023,7 +1023,8 @@ async fn dequeued_then_represerved_source_remains_waiting() {
         discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel),
     )
     .await
-    .expect("actual hosted-TUI kickoff finishes its pre-submit defer");
+    .expect("actual hosted-TUI kickoff finishes its pre-submit defer")
+    .expect("legacy kickoff outcome");
     assert!(
         outcome.started,
         "the production kickoff reports Ok/started after deferral"

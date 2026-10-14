@@ -92,10 +92,23 @@ fn intake_dispatch_invariant_worker_post_claim_is_the_only_router_bypass() {
 
 #[test]
 fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish() {
+    let gateway = include_str!("../../gateway.rs")
+        .split_once("impl TurnGateway for DiscordGateway {")
+        .expect("actual Discord gateway implementation")
+        .1;
+    let checked = gateway
+        .split_once("fn dispatch_queued_turn_checked<'a>(")
+        .expect("actual checked queued entrypoint")
+        .1
+        .split_once("fn validate_live_routing<'a>(")
+        .expect("queued entrypoint ends before routing validation")
+        .0;
+    assert_eq!(checked.matches("queued_dispatch::dispatch(").count(), 1);
+    assert!(checked.contains("Box::pin(queued_dispatch::dispatch("));
     for (name, source, promotion) in [
         (
             "gateway",
-            include_str!("../../gateway.rs"),
+            include_str!("../../gateway/queued_dispatch.rs"),
             "drain_dispatched_queue_markers(",
         ),
         (
@@ -118,6 +131,7 @@ fn intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_
             "{name} must promote persisted queue markers only after admission and before finish"
         );
         assert_eq!(source.matches(promotion).count(), 1);
+        assert_eq!(source.matches("admit_queued_intake(").count(), 1);
         assert_eq!(source.matches("finish_admitted_queued_intake(").count(), 1);
     }
 }

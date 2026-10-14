@@ -35,6 +35,7 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
+        "src/services/discord/queue_io/custody_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/turn_orchestrator/overflow_s2b_tests.rs",
         "src/services/turn_orchestrator/pending_queue_persistence/queue_exit_debt_tests.rs",
@@ -408,6 +409,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_paths/o_anchor_repost_tests.rs",
         "src/services/discord/relay_coord_tests.rs",
         "src/services/discord/relay_recovery/tests.rs",
+        "src/services/discord/router/intake_dispatch/queued/custody_support_tests.rs",
         "src/services/discord/router/intake_dispatch/queued/transition_busy_tests.rs",
         "src/services/discord/router/intake_dispatch/tests.rs",
         "src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs",
@@ -605,6 +607,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs",
         "src/services/discord/turn_bridge/tmux_runtime/judged_stop_tests.rs",
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
+        "src/services/discord/router/intake_gate/ledger_live_scan_tests.rs",
         "src/services/discord/router/intake_gate/ledger_io_tests.rs",
         "src/services/discord/router/intake_gate/ledger_tests.rs",
         "src/services/discord/router/intake_dispatch/ledger_tests.rs",
@@ -698,6 +701,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/queue_dispatch/kickoff/ledger_tests.rs",
     }
 )
 
@@ -705,7 +709,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
-        "src/services/discord/router/intake_dispatch/ledger.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",

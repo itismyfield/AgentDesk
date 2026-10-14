@@ -26,6 +26,7 @@ use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;
 
 mod outbound_messages;
+mod queued_dispatch;
 #[cfg(test)]
 use self::outbound_messages::await_answer_flush_if_queued_notice;
 pub(super) use self::outbound_messages::{
@@ -34,6 +35,7 @@ pub(super) use self::outbound_messages::{
     send_outbound_message, send_outbound_message_with_nonce_classified,
 };
 use outbound_messages::outbound_delivery_error;
+pub(super) use queued_dispatch::QueuedDispatchSuccess;
 
 pub(super) type GatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -219,6 +221,28 @@ pub(super) trait TurnGateway: Send + Sync {
         has_more_queued_turns: bool,
         dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
     ) -> GatewayFuture<'a, Result<(), String>>;
+
+    fn dispatch_queued_turn_checked<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        intervention: &'a Intervention,
+        request_owner_name: &'a str,
+        has_more_queued_turns: bool,
+        dispatch_lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> GatewayFuture<'a, Result<QueuedDispatchSuccess, super::Error>> {
+        Box::pin(async move {
+            self.dispatch_queued_turn(
+                channel_id,
+                intervention,
+                request_owner_name,
+                has_more_queued_turns,
+                dispatch_lease,
+            )
+            .await
+            .map(|()| QueuedDispatchSuccess::Legacy)
+            .map_err(Into::into)
+        })
+    }
 
     fn validate_live_routing<'a>(
         &'a self,
@@ -738,119 +762,38 @@ impl TurnGateway for DiscordGateway {
         intervention: &'a Intervention,
         request_owner_name: &'a str,
         has_more_queued_turns: bool,
-        dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
+        dispatch_lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
     ) -> GatewayFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            // #4270 A — pre-drain hosted-TUI readiness gate: a busy TUI defers
-            // the promotion (front-requeue + slow backstop, zero view teardown)
-            // BEFORE the marker drain / merged-card deletion below. `Ok` keeps
-            // the epilogue from re-arming the fast ~2s kickoff (the #4270 spin).
-            if router::defer_promoted_dispatch_if_hosted_tui_busy(
-                &self.shared,
-                &self.provider,
+            self.dispatch_queued_turn_checked(
                 channel_id,
                 intervention,
-                dispatch_lease
-                    .clone()
-                    .ok_or_else(|| "queued dispatch is missing its dispatch lease".to_string())?,
-            )
-            .await
-            {
-                return Ok(());
-            }
-
-            let Some(live_turn) = self.live_turn.as_ref() else {
-                return Err("missing live Discord context".to_string());
-            };
-
-            // #2266: voice-tagged queue items retain the original announce-bot
-            // author; ordinary queued items retain the live-turn owner.
-            let dispatch_request_owner =
-                queued_intervention_request_owner(intervention, live_turn.request_owner);
-            let deps = router::IntakeDeps {
-                http: &live_turn.ctx.http,
-                cache: Some(&live_turn.ctx.cache),
-                ctx_for_chained_dispatch: Some(&live_turn.ctx),
-                shared: &self.shared,
-                token: &live_turn.token,
-            };
-            let admitted = match router::admit_queued_intake(
-                &deps,
-                self.provider.clone(),
-                channel_id,
-                intervention,
-                dispatch_request_owner,
-                request_owner_name.to_string(),
+                request_owner_name,
                 has_more_queued_turns,
-                true,
-                "intake_admission_pre_drain_defer",
-                dispatch_lease.clone(),
+                dispatch_lease,
             )
             .await
-            {
-                router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
-                router::QueuedAdmissionDisposition::Deferred
-                | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
-                | router::QueuedAdmissionDisposition::ConsumedToHold => {
-                    return Ok(());
-                }
-                router::QueuedAdmissionDisposition::RejectedRestore => {
-                    return Err("queued admission failed to restore dequeued head".to_string());
-                }
-            };
-
-            let late_settlement = router::checkpoint_waits_for_admission(channel_id);
-            if !late_settlement {
-                let source_message_generations = intervention.source_message_queued_generations();
-                queue_marker::drain_dispatched_queue_markers(
-                    &self.shared,
-                    &self.http,
-                    channel_id,
-                    intervention.message_id,
-                    &source_message_generations,
-                )
-                .await;
-
-                // Dormant queued dispatch keeps the legacy marker/card handoff order.
-                let drained = drain_merged_queued_placeholders(
-                    &self.shared,
-                    channel_id,
-                    intervention.message_id,
-                    &intervention.source_message_ids,
-                )
-                .await;
-                for teardown in drained {
-                    let placeholder_msg_id = teardown.card();
-                    let result =
-                        queued_card_gate::teardown_delete(&self.http, &self.shared, teardown).await;
-                    // #3607: observe the merged-queued-placeholder drain delete.
-                    crate::services::observability::emit_relay_delete_result(
-                        self.provider.as_str(),
-                        channel_id.get(),
-                        placeholder_msg_id.get(),
-                        "gateway_queued_placeholder_drain",
-                        "delete_nonterminal",
-                        &result,
-                    );
-                }
-            }
-
-            let result = router::finish_admitted_queued_intake(&deps, admitted)
-                .await
-                .map_err(|e| e.to_string())?;
-            if late_settlement && result == router::IntakeExecution::Executed {
-                super::queue_dispatch::settle_executed_queued_intake(
-                    &self.shared,
-                    &self.http,
-                    &self.provider,
-                    channel_id,
-                    intervention,
-                    "gateway_queued_placeholder_drain",
-                )
-                .await;
-            }
-            Ok(())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         })
+    }
+
+    fn dispatch_queued_turn_checked<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        intervention: &'a Intervention,
+        request_owner_name: &'a str,
+        has_more_queued_turns: bool,
+        dispatch_lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> GatewayFuture<'a, Result<QueuedDispatchSuccess, super::Error>> {
+        Box::pin(queued_dispatch::dispatch(
+            self,
+            channel_id,
+            intervention,
+            request_owner_name,
+            has_more_queued_turns,
+            dispatch_lease,
+        ))
     }
 
     fn validate_live_routing<'a>(

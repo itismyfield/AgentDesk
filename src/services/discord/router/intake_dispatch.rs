@@ -25,8 +25,7 @@ impl std::error::Error for QueuedTransitionBusyHandoff {}
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
-#[cfg(test)]
-mod ledger;
+pub(in crate::services::discord) mod ledger;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -43,6 +42,9 @@ pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachmen
 use notice::notify_blocked_intake;
 pub(crate) use queued::{
     QueuedAdmissionDisposition, admit_queued_intake, finish_admitted_queued_intake,
+};
+pub(in crate::services::discord) use queued::{
+    QueuedCustody, QueuedLedgerOutcome, consume_queued_ledger_outcome,
 };
 pub(crate) use skill::dispatch_skill_intake;
 
@@ -103,9 +105,7 @@ impl LocalAdmissionPermit {
 
 #[derive(Debug)]
 pub(crate) enum IntakeAdmission {
-    #[cfg(test)]
     LedgerReceived(Box<ledger::LedgerReceived>),
-    #[cfg(test)]
     LedgerDeferred(Box<ledger::LedgerDeferred>),
     Local(LocalAdmissionPermit),
     Forwarded {
@@ -165,6 +165,9 @@ pub(crate) async fn admit_text_intake(
     deps: &IntakeDeps<'_>,
     submission: &IntakeSubmission,
 ) -> IntakeAdmission {
+    if let Some(admission) = ledger::admit_submission(submission).await {
+        return admission;
+    }
     let channel_id = submission.request.channel_id.get().to_string();
     if let Some(pool) = deps.shared.pg_pool.as_ref()
         && replay_starts_dormant(&channel_id)
@@ -511,6 +514,9 @@ pub(crate) async fn dispatch_text_intake(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    if let Some(admission) = ledger::admit_submission(&submission).await {
+        return finish_text_intake_admission(deps, admission, submission).await;
+    }
     legacy_allowed(
         deps.shared,
         deps.http,
@@ -535,6 +541,18 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     checkpoint: impl FnOnce() + Send + 'a,
 ) -> BoxedIntake<'a> {
     Box::pin(async move {
+        let c_before_legacy = true;
+        #[cfg(test)]
+        let c_before_legacy = c_before_legacy
+            && !crate::services::discord::input_runtime::supervisor::mutant(
+                "c2c2_live_c_after_legacy_guard",
+            );
+        if c_before_legacy && let Some(admission) = ledger::admit_submission(&submission).await {
+            let result = finish_text_intake_admission(deps, admission, submission).await;
+            #[cfg(test)]
+            let result = ledger::mutate_result(result, "live");
+            return result;
+        }
         legacy_allowed(
             deps.shared,
             deps.http,
@@ -545,13 +563,17 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
         let admission = admit_text_intake(deps, &submission).await;
         #[cfg(test)]
         let admission = ledger::take_test_admission(admission);
+        let c_without_checkpoint = ledger::is_ledger(&admission);
         #[cfg(test)]
-        if ledger::is_ledger(&admission)
+        let c_without_checkpoint = c_without_checkpoint
             && !crate::services::discord::input_runtime::supervisor::mutant(
                 "c2c1_c_receipt_checkpoints",
-            )
-        {
-            return finish_text_intake_admission(deps, admission, submission).await;
+            );
+        if c_without_checkpoint {
+            let result = finish_text_intake_admission(deps, admission, submission).await;
+            #[cfg(test)]
+            let result = ledger::mutate_result(result, "live");
+            return result;
         }
         legacy_allowed(
             deps.shared,
@@ -575,13 +597,16 @@ pub(crate) async fn finish_text_intake_admission(
     admission: IntakeAdmission,
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    let c_before_legacy = ledger::is_ledger(&admission);
     #[cfg(test)]
-    if ledger::is_ledger(&admission)
+    let c_before_legacy = c_before_legacy
         && !crate::services::discord::input_runtime::supervisor::mutant(
             "c2c1_generic_guard_precedes_c",
-        )
-    {
-        return Err(Box::new(ledger::LedgerOutcome(admission)));
+        );
+    if c_before_legacy {
+        #[cfg(test)]
+        let admission = ledger::mutate_payload(admission, "central");
+        return Err(ledger::retained(admission));
     }
     legacy_allowed(
         deps.shared,
@@ -591,9 +616,10 @@ pub(crate) async fn finish_text_intake_admission(
     )
     .await?;
     match admission {
-        #[cfg(test)]
         admission @ (IntakeAdmission::LedgerReceived(_) | IntakeAdmission::LedgerDeferred(_)) => {
-            return Err(Box::new(ledger::LedgerOutcome(admission)));
+            #[cfg(test)]
+            let admission = ledger::mutate_payload(admission, "central");
+            return Err(ledger::retained(admission));
         }
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
@@ -763,11 +789,9 @@ async fn defer_live_submission(
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
     match admission {
-        #[cfg(test)]
         IntakeAdmission::LedgerReceived(received) => {
             tracing::debug!(?received, "input ledger responsibility retained")
         }
-        #[cfg(test)]
         IntakeAdmission::LedgerDeferred(deferred) => {
             tracing::debug!(?deferred, "input ledger rescan or restore required")
         }

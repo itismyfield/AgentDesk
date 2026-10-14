@@ -5,17 +5,20 @@ use super::super::*;
 #[path = "cancel_backstop_race_support_tests.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod ledger_tests;
+
 pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> IdleQueueKickoffChannelOutcome {
+) -> Result<IdleQueueKickoffChannelOutcome, Error> {
     let permit = match input_runtime::fence::lookup(provider, channel_id.get())
         .map(|gate| gate.admit())
         .transpose()
     {
         Ok(permit) => permit,
-        Err(_) => return IdleQueueKickoffChannelOutcome::default(),
+        Err(_) => return Ok(IdleQueueKickoffChannelOutcome::default()),
     };
     input_runtime::fence::effect::scope(
         permit,
@@ -28,7 +31,7 @@ async fn kickoff_admitted_queue_channel(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
-) -> IdleQueueKickoffChannelOutcome {
+) -> Result<IdleQueueKickoffChannelOutcome, Error> {
     let shared = deps.shared;
     let settings_snapshot = shared.settings.read().await.clone();
     if let Err(reason) = session_runtime::validate_rest_channel_routing(
@@ -47,20 +50,20 @@ async fn kickoff_admitted_queue_channel(
             channel_id,
             reason
         );
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     }
 
     let queued_gate =
         Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
     if queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate).await {
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     }
     let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
     if !idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &fresh_snapshot).await
     {
         turn_finalizer::handle_idle_queue_guard_skip(shared, provider, channel_id, &fresh_snapshot)
             .await;
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     }
 
     // #4270 A — pre-dequeue hosted-TUI readiness gate. A verifiably busy hosted
@@ -71,7 +74,7 @@ async fn kickoff_admitted_queue_channel(
     // backstop on a no-start with backlog, and the watcher-idle re-drain
     // delivers the fast edge once the TUI reaches Idle.
     if router::hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     }
 
     #[cfg(test)]
@@ -85,11 +88,22 @@ async fn kickoff_admitted_queue_channel(
             error = %error,
             "KICKOFF: preserving queued turn after pending-queue persistence failure"
         );
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     }
     let Some((intervention, has_more, dispatch_lease)) = take_next.into_intervention() else {
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     };
+
+    let mut admission_owner =
+        router::QueuedAdmissionDisposition::ledger_candidate(provider, channel_id).then(|| {
+            queue_io::QueuedAdmissionOwner::new(
+                shared,
+                provider,
+                channel_id,
+                &intervention,
+                dispatch_lease.clone(),
+            )
+        });
 
     let owner_name = if intervention.author_id.get() <= 1 {
         "system".to_string()
@@ -108,7 +122,18 @@ async fn kickoff_admitted_queue_channel(
         channel_id
     );
 
-    let admitted = match router::admit_queued_intake(
+    if admission_owner.is_none()
+        && router::QueuedAdmissionDisposition::ledger_candidate(provider, channel_id)
+    {
+        admission_owner = Some(queue_io::QueuedAdmissionOwner::new(
+            shared,
+            provider,
+            channel_id,
+            &intervention,
+            dispatch_lease.clone(),
+        ));
+    }
+    let disposition = router::admit_queued_intake(
         deps,
         provider.clone(),
         channel_id,
@@ -120,24 +145,33 @@ async fn kickoff_admitted_queue_channel(
         "intake_admission_pre_kickoff_defer",
         dispatch_lease.clone(),
     )
-    .await
+    .await;
+    if !matches!(&disposition, router::QueuedAdmissionDisposition::Admitted(admitted) if admitted.is_ledger())
+        && let Some(owner) = admission_owner.take()
     {
+        return Err(Box::new(
+            owner.fail("ledger candidate lost its typed admission".into()),
+        ));
+    }
+    let admitted = match disposition {
         router::QueuedAdmissionDisposition::Admitted(admitted) => admitted,
         router::QueuedAdmissionDisposition::Deferred
         | router::QueuedAdmissionDisposition::RejectedNonPortableAttachment
         | router::QueuedAdmissionDisposition::ConsumedToHold => {
             drop(dispatch_lease);
-            return IdleQueueKickoffChannelOutcome::default();
+            return Ok(IdleQueueKickoffChannelOutcome::default());
         }
         router::QueuedAdmissionDisposition::RejectedRestore => {
             queue_dispatch::log_kickoff_rejected_restore(provider, channel_id);
             drop(dispatch_lease);
-            return IdleQueueKickoffChannelOutcome::default();
+            return Ok(IdleQueueKickoffChannelOutcome::default());
         }
     };
 
+    #[cfg(all(test, unix))]
+    ledger_tests::after_admission(channel_id);
     let late_settlement = router::checkpoint_waits_for_admission(channel_id);
-    if !late_settlement {
+    if !late_settlement && !admitted.is_ledger() {
         let source_message_generations = intervention.source_message_queued_generations();
         queue_marker::start_and_drain_kickoff_markers(
             shared,
@@ -163,7 +197,17 @@ async fn kickoff_admitted_queue_channel(
 
     let dispatch_result = router::finish_admitted_queued_intake(deps, admitted).await;
     match dispatch_result {
-        Err(e) => {
+        Err(error) => {
+            let e = match error.downcast::<router::QueuedLedgerOutcome>() {
+                Ok(outcome) => {
+                    queue_io::consume_queued_custody(deps, outcome, admission_owner).await?;
+                    return Ok(IdleQueueKickoffChannelOutcome::default());
+                }
+                Err(error) => match admission_owner {
+                    Some(owner) => return Err(Box::new(owner.fail(error.to_string()))),
+                    None => error,
+                },
+            };
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
@@ -193,11 +237,11 @@ async fn kickoff_admitted_queue_channel(
                 );
             }
             drop(dispatch_lease);
-            IdleQueueKickoffChannelOutcome { started: false }
+            Ok(IdleQueueKickoffChannelOutcome { started: false })
         }
         Ok(router::IntakeExecution::Deferred | router::IntakeExecution::ConsumedProtected) => {
             drop(dispatch_lease);
-            IdleQueueKickoffChannelOutcome { started: false }
+            Ok(IdleQueueKickoffChannelOutcome { started: false })
         }
         Ok(router::IntakeExecution::Executed) => {
             if late_settlement {
@@ -223,7 +267,7 @@ async fn kickoff_admitted_queue_channel(
             )
             .await;
             drop(dispatch_lease);
-            IdleQueueKickoffChannelOutcome { started: true }
+            Ok(IdleQueueKickoffChannelOutcome { started: true })
         }
     }
 }
@@ -279,8 +323,17 @@ pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
     let mut started_count = 0usize;
     for channel_id in channels_to_kick {
         let outcome = kickoff_idle_queue_channel(deps, provider, channel_id).await;
-        if outcome.started {
+        if matches!(&outcome, Ok(result) if result.started) {
             started_count += 1;
+        } else if outcome.is_err() {
+            queue_io::arm_kickoff_result_backstop(
+                shared,
+                provider,
+                channel_id,
+                outcome,
+                "boot kickoff custody error",
+            )
+            .await;
         } else if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
             // Boot and full reconcile have no later no-start arm; a held direct turn needs one.
             let reason = "boot kickoff turn-mode no-start";

@@ -355,6 +355,7 @@ mod kickoff_tests {
             channel,
         )
         .await
+        .expect("legacy kickoff outcome")
     }
 
     async fn assert_restart_custody(
@@ -468,6 +469,7 @@ mod kickoff_tests {
             channel,
         );
         let (outcome, submitted) = start(channel, entry).await;
+        let outcome = outcome.expect("legacy kickoff outcome");
         assert!(
             !outcome.started,
             "replacement cannot issue a second start permit for a lost ACK"

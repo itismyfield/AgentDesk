@@ -1,5 +1,5 @@
+use super::super::queue_reactions;
 use super::super::*;
-use super::super::{queue_marker, queue_reactions};
 use super::intake_queue_transaction::{
     IntakeQueueAuthorClass, IntakeQueueCommitOptions, IntakeQueueCommitSource,
     IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest, SoftInterventionSpec,
@@ -774,27 +774,12 @@ pub(in crate::services::discord) async fn handle_event(
                     super::super::stale_dispatch_turn_for_text(data.shared.pg_pool.as_ref(), text)
                         .await
             {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⏭ DISPATCH-GUARD: skipped terminal dispatch message {} in channel {} (dispatch={}, status={})",
-                    new_message.id,
-                    channel_id,
-                    stale.dispatch_id,
-                    stale.status
-                );
-                super::super::advance_last_message_checkpoint(
-                    &data.shared,
-                    &data.provider,
-                    channel_id,
-                    new_message.id,
-                );
-                let emoji = super::super::queue_exit_feedback_emoji(stale.queue_exit_kind);
-                queue_marker::note_exit_feedback_added(
+                ledger::terminal_feedback(
                     &data.shared,
                     &ctx.http,
-                    channel_id,
-                    new_message.id,
-                    emoji,
+                    &data.provider,
+                    new_message,
+                    stale,
                 )
                 .await;
                 return Ok(());

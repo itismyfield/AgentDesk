@@ -17,6 +17,10 @@ use std::sync::{
 };
 use tokio::sync::{Notify, mpsc};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "ledger_live_scan_tests.rs"]
+pub(super) mod live_scan_tests;
+
 #[derive(Clone, Copy)]
 enum Mode {
     PauseReply,
@@ -305,6 +309,25 @@ async fn hold_case(
         .admit_pending(&sources)
         .unwrap()))
         .unwrap();
+    let lookup = tokio::select! {
+        command = receiver.recv() => command.unwrap(),
+        result = &mut pending => panic!("original must query responsibility before IO: {}", result.is_ok()),
+        () = transport.state.entered.notified() => panic!("reply/download bypassed canonical responsibility lookup"),
+    };
+    let SupervisorCmd::LookupResponsibility {
+        identity,
+        reply: respond,
+    } = lookup
+    else {
+        panic!("retry preparation uses the existing responsibility command")
+    };
+    assert_eq!(&identity, source.identity());
+    respond
+        .send(runtime::supervisor::receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Absent,
+            receipt: None,
+        })
+        .unwrap();
     if cancel {
         tokio::select! { () = transport.state.entered.notified() => {}, result = &mut pending => panic!("live source did not pause at real HTTP: {}", result.is_ok()) }
         drop(pending);
@@ -566,4 +589,54 @@ fn c2b_io_fixtures_keep_global_registry_unused_before_standby_health() {
         "the IO fixtures must leave the process registry unused"
     );
     println!("{CONFIRMED}");
+}
+
+pub(super) async fn lookup_or_absent<F>(
+    lookup: F,
+) -> Result<runtime::supervisor::receipt::ResponsibilityLookup, Deferred>
+where
+    F: std::future::Future<
+            Output = Result<runtime::supervisor::receipt::ResponsibilityLookup, Deferred>,
+        >,
+{
+    if runtime::supervisor::mutant("c2c2_live_lookup_bypassed") {
+        return Ok(runtime::supervisor::receipt::ResponsibilityLookup {
+            responsibility: Responsibility::Absent,
+            receipt: None,
+        });
+    }
+    lookup.await
+}
+
+pub(super) fn checkpoint_for_test(allowed: bool) -> bool {
+    allowed || runtime::supervisor::mutant("c2c2_terminal_direct_checkpoint")
+}
+
+pub(super) fn preservation_for_test(preserves: bool) -> bool {
+    preserves && !runtime::supervisor::mutant("c2c2_human_preservation_removed")
+}
+
+pub(super) async fn policy_before_terminal(
+    shared: &Arc<SharedData>,
+    http: &Arc<Http>,
+    message: &Message,
+    source: &PreparedSource,
+) -> Option<(runtime::intake::PolicyFacts, bool)> {
+    if !runtime::supervisor::mutant("c2c2_terminal_uses_early_policy_snapshot") {
+        return None;
+    }
+    let earlier = (
+        runtime::source_policy_facts(shared, http, source).await,
+        preserves_message(shared, message).await,
+    );
+    println!("C2C2_TERMINAL_EARLY_POLICY_SNAPSHOT_CAPTURED");
+    Some(earlier)
+}
+
+pub(super) fn restore_policy_snapshot(
+    earlier: Option<(runtime::intake::PolicyFacts, bool)>,
+    facts: runtime::intake::PolicyFacts,
+    preserves: bool,
+) -> (runtime::intake::PolicyFacts, bool) {
+    earlier.unwrap_or((facts, preserves))
 }

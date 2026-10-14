@@ -141,7 +141,7 @@ pub(super) async fn finalize_and_drain_queued_turns(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] 📋 Processing next queued command");
                     let dispatch_result = gateway
-                        .dispatch_queued_turn(
+                        .dispatch_queued_turn_checked(
                             channel_id,
                             &intervention,
                             &request_owner_name,
@@ -149,7 +149,19 @@ pub(super) async fn finalize_and_drain_queued_turns(
                             dispatch_lease.clone(),
                         )
                         .await;
+                    #[cfg(test)]
+                    let dispatch_result = tests::dispatch_result_for_mutant(dispatch_result);
                     match dispatch_result {
+                        Err(e) if e.is::<super::super::queue_io::QueuedCustodyError>() => {
+                            tracing::error!(channel_id = channel_id.get(), error = %e, "queued custody retained for retry");
+                            super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                                &shared_owned,
+                                &bot_owner_provider,
+                                channel_id,
+                                "finalize queued custody error",
+                            )
+                            .await;
+                        }
                         Err(e) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!("  [{ts}]   ⚠ queued command failed: {e}");
@@ -185,7 +197,7 @@ pub(super) async fn finalize_and_drain_queued_turns(
                                 );
                             }
                         }
-                        Ok(()) => {
+                        Ok(super::super::gateway::QueuedDispatchSuccess::Legacy) => {
                             super::super::mailbox_abandon_unclaimed_dispatch_after_success(
                                 &shared_owned,
                                 &bot_owner_provider,
@@ -198,6 +210,7 @@ pub(super) async fn finalize_and_drain_queued_turns(
                             )
                             .await;
                         }
+                        Ok(super::super::gateway::QueuedDispatchSuccess::Ledger) => {}
                     }
                     drop(dispatch_lease);
                 }
@@ -238,11 +251,61 @@ mod tests {
     struct FailingQueuedDispatchGateway;
     struct DisconnectedGateway;
 
+    pub(super) fn dispatch_result_for_mutant(
+        result: Result<
+            super::super::super::gateway::QueuedDispatchSuccess,
+            super::super::super::Error,
+        >,
+    ) -> Result<super::super::super::gateway::QueuedDispatchSuccess, super::super::super::Error>
+    {
+        if matches!(
+            &result,
+            Ok(super::super::super::gateway::QueuedDispatchSuccess::Ledger)
+        ) && super::super::super::input_runtime::supervisor::mutant(
+            "c2c2_epilogue_ledger_success_as_legacy",
+        ) {
+            Ok(super::super::super::gateway::QueuedDispatchSuccess::Legacy)
+        } else {
+            result
+        }
+    }
+
+    thread_local! { static LEDGER_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    struct LedgerDispatchGuard;
+    impl Drop for LedgerDispatchGuard {
+        fn drop(&mut self) {
+            LEDGER_DISPATCH.with(|value| value.set(false));
+        }
+    }
+
     struct RecordingFailingQueuedDispatchGateway {
         dispatched_message_ids: Arc<std::sync::Mutex<Vec<MessageId>>>,
     }
 
     impl TurnGateway for FailingQueuedDispatchGateway {
+        fn dispatch_queued_turn_checked<'a>(
+            &'a self,
+            channel: ChannelId,
+            intervention: &'a Intervention,
+            owner_name: &'a str,
+            has_more: bool,
+            lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+        ) -> TestGatewayFuture<
+            'a,
+            Result<super::super::super::gateway::QueuedDispatchSuccess, super::super::super::Error>,
+        > {
+            if LEDGER_DISPATCH.with(|value| value.get()) {
+                Box::pin(async { Ok(super::super::super::gateway::QueuedDispatchSuccess::Ledger) })
+            } else {
+                Box::pin(async move {
+                    self.dispatch_queued_turn(channel, intervention, owner_name, has_more, lease)
+                        .await
+                        .map(|()| super::super::super::gateway::QueuedDispatchSuccess::Legacy)
+                        .map_err(Into::into)
+                })
+            }
+        }
+
         fn send_message<'a>(
             &'a self,
             _channel_id: ChannelId,
@@ -743,6 +806,55 @@ mod tests {
                     "requeue-front after dispatch failure must re-arm the drain"
                 );
             });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn c2c2_epilogue_ledger_success_does_not_abandon_the_dispatch() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let _ledger = LedgerDispatchGuard;
+        LEDGER_DISPATCH.with(|value| value.set(true));
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+        shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(8_131_000);
+        let original = queued_intervention(8_131_001);
+        shared
+            .mailbox(channel)
+            .replace_queue(
+                vec![original.clone()],
+                super::super::super::queue_persistence_context(&shared, &provider, channel),
+            )
+            .await;
+        finalize_and_drain_queued_turns(
+            shared.clone(),
+            true,
+            false,
+            Arc::new(FailingQueuedDispatchGateway),
+            channel,
+            provider.clone(),
+            "owner".into(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        assert_eq!(
+            super::super::super::mailbox_snapshot(&shared, channel)
+                .await
+                .pending_user_dispatch,
+            Some(original.message_id),
+            "typed Ledger success must not be provider success abandon"
+        );
+        assert!(
+            crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+                &provider,
+                &shared.token_hash,
+                channel
+            )
+            .is_some()
+        );
+        shared.mailboxes.remove_fixture_for_test(channel);
     }
 
     /// A turn-mode channel whose transcript reads busy or unknown keeps its queue, dispatch marker

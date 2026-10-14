@@ -155,7 +155,9 @@ pub(super) async fn kick_off(harness: &RelayE2eHarness) -> bool {
         token: &harness.data.token,
     };
     let channel = harness.channel_id;
-    let outcome = kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel).await;
+    let outcome = kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel)
+        .await
+        .expect("legacy registered kickoff outcome");
     outcome.started
 }
 

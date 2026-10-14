@@ -384,6 +384,7 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/replay_admission_tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
+              - 'src/services/discord/router/intake_gate/ledger_live_scan_tests.rs'
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'

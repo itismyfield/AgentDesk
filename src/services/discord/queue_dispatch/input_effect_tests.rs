@@ -220,7 +220,8 @@ async fn c1_closing_refuses_kickoff_before_settings_and_dequeue_without_spending
     };
     let result = kickoff::kickoff_idle_queue_channel(&deps, &provider, channel)
         .now_or_never()
-        .expect("Closing refusal occurs before the held settings lock");
+        .expect("Closing refusal occurs before the held settings lock")
+        .expect("closed kickoff safely reports no start");
     assert!(!result.started);
     drop(settings);
     let soft = mailbox_take_next_soft_intervention(&shared, &provider, channel).await;

@@ -147,7 +147,8 @@ async fn rest_queue_rejected_by_changed_policy_keeps_durable_head_and_lease_free
         &provider,
         channel,
     )
-    .await;
+    .await
+    .expect("legacy kickoff outcome");
     assert!(!outcome.started);
     assert!(
         count.load(Ordering::SeqCst) > 0,

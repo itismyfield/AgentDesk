@@ -24,7 +24,9 @@ use tokio::time::Instant;
 
 #[path = "intake/client_tests.rs"]
 mod c2_intake_client;
-pub(in crate::services::discord) use c2_intake_client::{ScanFixtureEvidence, run_scan_fixture};
+pub(in crate::services::discord) use c2_intake_client::{
+    ScanFixtureEvidence, run_messages, run_scan_fixture,
+};
 
 const HOST: &str = "node-a";
 

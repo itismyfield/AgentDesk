@@ -1,8 +1,16 @@
+use super::super::intake_dispatch::{IntakeAdmission, ledger as custody};
 use crate::services::discord::{Error, SharedData, input_runtime as runtime};
+use crate::services::discord::{
+    bot_role::UtilityBotRole as Role, health::UtilityBotUserIdResolution as Resolution,
+};
 use crate::services::provider::ProviderKind;
+use crate::services::tui_input::rows::receipt_identity::Responsibility;
+use custody::{DeferReason as Reason, Recovery};
 use poise::serenity_prelude::{Channel, ChannelId, ChannelType, Http, Message, MessageType};
 use runtime::intake::admit::{self, SourceKind};
-use runtime::intake::{Classification, Origin, SourceDraft, StagedAttachment};
+use runtime::intake::client::{self, Access};
+use runtime::intake::{Classification, Origin, PreparedSource, SourceDraft, StagedAttachment};
+use runtime::supervisor::{ordering::ScanCapability, receipt::Deferred};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -142,23 +150,106 @@ async fn fetch_attachment(url: &str) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-/// Register the original before reply/download IO; only a later valid scan can settle it.
+struct ScanCursor {
+    client: Arc<runtime::intake::Client>,
+    channel: u64,
+    capability: Option<ScanCapability>,
+    last_settled: Option<u64>,
+    complete_after: bool,
+    completion: Option<Result<(), Deferred>>,
+}
+
+type MessageAdmission = (Option<IntakeAdmission>, Option<ScanCursor>);
+
+fn rescan(original: PreparedSource, reason: Reason) -> IntakeAdmission {
+    custody::deferred(original, reason, Recovery::Rescan)
+}
+
+/// Raw delivery keeps its pending obligation; the same body consumes caller-held scans.
 pub(in crate::services::discord) async fn hold_live(
+    shared: &Arc<SharedData>,
+    http: &Arc<Http>,
+    provider: &ProviderKind,
+    message: &Message,
+    kind: SourceKind,
+    prompt: Option<String>,
+) -> Result<bool, Error> {
+    let result = prepare_message(shared, http, provider, message, kind, prompt, None).await?;
+    debug_assert!(result.1.is_none());
+    match result.0 {
+        Some(admission) => Err(custody::retained(admission)),
+        None => Ok(false),
+    }
+}
+
+async fn preserves_message(shared: &Arc<SharedData>, message: &Message) -> bool {
+    let roles = if let Some(registry) = shared.health_registry() {
+        (
+            registry
+                .utility_bot_user_id_resolution(Role::Announce)
+                .await,
+            registry.utility_bot_user_id_resolution(Role::Notify).await,
+        )
+    } else {
+        (Resolution::Unconfigured, Resolution::Unconfigured)
+    };
+    let allowed = shared.settings.read().await.allowed_bot_ids.clone();
+    let preserves = !message.author.bot
+        && !super::gate::live_sender_excluded_from_human_preservation(
+            &allowed,
+            message.author.id.get(),
+            roles.0,
+            roles.1,
+        );
+    #[cfg(all(test, unix))]
+    let preserves = io_tests::preservation_for_test(preserves);
+    preserves
+}
+
+async fn message_classification(
+    shared: &Arc<SharedData>,
+    http: &Arc<Http>,
+    message: &Message,
+    source: &PreparedSource,
+) -> Classification {
+    #[cfg(all(test, unix))]
+    let earlier = io_tests::policy_before_terminal(shared, http, message, source).await;
+    let terminal = !preserves_message(shared, message).await
+        && crate::services::discord::stale_dispatch_turn_for_text(
+            shared.pg_pool.as_ref(),
+            &message.content,
+        )
+        .await
+        .is_some();
+    let preserves = terminal && preserves_message(shared, message).await;
+    let facts = runtime::source_policy_facts(shared, http, source).await;
+    #[cfg(all(test, unix))]
+    let (facts, preserves) = io_tests::restore_policy_snapshot(earlier, facts, preserves);
+    let mut facts = facts;
+    if terminal && !preserves {
+        facts.disposition = Some(runtime::intake::InputDisposition::Terminal);
+    }
+    runtime::intake::classify(&facts, source)
+}
+
+async fn prepare_message(
     shared: &Arc<SharedData>,
     http: &Arc<Http>,
     provider: &ProviderKind,
     message: &Message,
     mut kind: SourceKind,
     prompt: Option<String>,
-) -> Result<bool, Error> {
+    mut scan: Option<ScanCursor>,
+) -> Result<MessageAdmission, Error> {
     #[cfg(test)]
     if runtime::supervisor::mutant("c2b_bypass_live_gate") {
-        return Ok(false);
+        return Ok((None, scan));
     }
-    if runtime::fence::channel_gate(message.channel_id.get()).is_none()
+    if scan.is_none()
+        && runtime::fence::channel_gate(message.channel_id.get()).is_none()
         && !derived_targets_enabled()
     {
-        return Ok(false);
+        return Ok((None, scan));
     }
     let message_kind = match message.kind {
         MessageType::Regular => "regular",
@@ -171,26 +262,28 @@ pub(in crate::services::discord) async fn hold_live(
         draft(message, message.channel_id.get(), prompt.clone()),
         Some(message_kind),
     )?;
-    let initial = admit::begin_live(
-        runtime::runtime::registry(),
-        provider,
-        original.key(),
-        original.identity(),
-    )
-    .await
-    .map_err(|reason| std::io::Error::other(format!("original pending unavailable: {reason:?}")))?;
+    let initial = if scan.is_none() {
+        admit::begin_live(
+            runtime::runtime::registry(),
+            provider,
+            original.key(),
+            original.identity(),
+        )
+        .await
+        .map_err(|reason| custody::retained(rescan(original.clone(), Reason::Receipt(reason))))?
+    } else {
+        None
+    };
     let facts = runtime::source_policy_facts(shared, http, &original).await;
     let execution = facts.execution.channel_id;
-    let mut material = draft(message, execution, prompt.clone());
     let prepared = admit::prepare(
         kind,
-        draft(message, execution, material.prompt.clone()),
+        draft(message, execution, prompt.clone()),
         Some(message_kind),
     )?;
     let facts = runtime::source_policy_facts(shared, http, &prepared).await;
-    let classification = runtime::intake::classify(&facts, &prepared);
-    if classification == Classification::Legacy {
-        return Ok(false);
+    if runtime::intake::classify(&facts, &prepared) == Classification::Legacy {
+        return Ok((None, scan));
     }
     if kind == SourceKind::LiveMessage {
         if let Some(skill) =
@@ -202,8 +295,6 @@ pub(in crate::services::discord) async fn hold_live(
             kind = SourceKind::RawAttachment;
         }
     }
-    material = draft(message, execution, prompt);
-    let identity = prepared.identity();
     let target = match &facts.voice_target {
         runtime::intake::VoiceTarget::Resolved(target)
             if !matches!(target.protection, runtime::intake::Protection::Unprotected) =>
@@ -212,9 +303,9 @@ pub(in crate::services::discord) async fn hold_live(
         }
         _ => execution,
     };
-    let mut routed = identity.clone();
+    let mut routed = prepared.identity().clone();
     routed.execution_channel_id = target;
-    let _pending = if initial.is_none() {
+    let _pending = if scan.is_none() && initial.is_none() {
         admit::begin_live(
             runtime::runtime::registry(),
             provider,
@@ -222,30 +313,154 @@ pub(in crate::services::discord) async fn hold_live(
             &routed,
         )
         .await
-        .map_err(|reason| {
-            std::io::Error::other(format!("routed pending unavailable: {reason:?}"))
-        })?
+        .map_err(|reason| custody::retained(rescan(prepared.clone(), Reason::Receipt(reason))))?
     } else {
         None
     };
-    let actual = admit::prepare(
+    let mut material = draft(message, execution, prompt);
+    let mut actual = admit::prepare(
         kind,
         draft(message, execution, material.prompt.clone()),
         Some(message_kind),
     )?;
-    let facts = runtime::source_policy_facts(shared, http, &actual).await;
-    let classification = runtime::intake::classify(&facts, &actual);
-    if classification != Classification::Target {
-        return Err(format!("original input held: {classification:?}").into());
+    let mut classification = message_classification(shared, http, message, &actual).await;
+    if classification == Classification::NonTarget && scan.is_none() {
+        return Ok((None, scan));
     }
-    material = enrich(material, message, http).await?;
-    let staged = admit::prepare(kind, material, Some(message_kind))?;
-    let final_facts = runtime::source_policy_facts(shared, http, &staged).await;
-    Err(format!(
-        "original input remains pending for a valid scan: {:?}",
-        runtime::intake::classify(&final_facts, &staged)
+    let client = match client::lookup(runtime::runtime::registry(), provider, execution) {
+        Access::Ready(client) => client,
+        Access::Deferred(reason) => {
+            return Err(custody::retained(rescan(actual, Reason::Receipt(reason))));
+        }
+        Access::Legacy => {
+            return Err(custody::retained(rescan(
+                actual,
+                Reason::Receipt(Deferred::Conflict),
+            )));
+        }
+    };
+    if scan
+        .as_ref()
+        .is_some_and(|cursor| cursor.channel != execution || !Arc::ptr_eq(&cursor.client, &client))
+    {
+        return Err(custody::retained(rescan(
+            actual,
+            Reason::Receipt(Deferred::Conflict),
+        )));
+    }
+    if classification == Classification::Target {
+        let lookup = client.lookup_responsibility(actual.identity().clone());
+        #[cfg(all(test, unix))]
+        let lookup = io_tests::lookup_or_absent(lookup);
+        let lookup = lookup.await;
+        let absent = matches!(&lookup, Ok(value) if value.responsibility == Responsibility::Absent && value.receipt.is_none());
+        if !absent {
+            let admission = custody::lookup_for_rescan(actual.clone(), lookup);
+            if scan.is_none() || !matches!(admission, IntakeAdmission::LedgerReceived(_)) {
+                return Ok((Some(admission), scan));
+            }
+        } else {
+            material = enrich(material, message, http).await?;
+            actual = admit::prepare(kind, material, Some(message_kind))?;
+        }
+        classification = message_classification(shared, http, message, &actual).await;
+    }
+    let Some(mut cursor) = scan.take() else {
+        return Ok((
+            Some(rescan(actual, Reason::Classification(classification))),
+            scan,
+        ));
+    };
+    let requested_last = actual.identity().source_ids.last().copied();
+    let outcome = custody::consume_scan(
+        runtime::runtime::registry(),
+        provider,
+        actual,
+        classification,
+        cursor
+            .capability
+            .take()
+            .ok_or("scan capability unavailable; rescan required")?,
     )
-    .into())
+    .await;
+    let (admission, capability, settled) = match outcome {
+        custody::ScanAdmission::Admission {
+            admission,
+            capability,
+        } => {
+            let settled = custody::settled(&admission);
+            (Some(admission), capability, settled)
+        }
+        custody::ScanAdmission::NonTarget(capability) => (None, Some(capability), true),
+        custody::ScanAdmission::Legacy {
+            original,
+            capability,
+        } => (
+            Some(rescan(
+                original,
+                Reason::Classification(Classification::Legacy),
+            )),
+            Some(capability),
+            false,
+        ),
+    };
+    cursor = ScanCursor {
+        capability,
+        ..cursor
+    };
+    if settled {
+        cursor.last_settled = requested_last;
+    }
+    if settled
+        && cursor.complete_after
+        && let Some(capability) = cursor.capability.take()
+    {
+        cursor.completion = Some(cursor.client.complete_scan(capability).await.map(|_| ()));
+        if cursor.completion == Some(Ok(()))
+            && let Some(last) = cursor.last_settled
+        {
+            crate::services::discord::advance_last_message_checkpoint(
+                shared,
+                provider,
+                ChannelId::new(cursor.channel),
+                poise::serenity_prelude::MessageId::new(last),
+            );
+        }
+    }
+    Ok((admission, Some(cursor)))
+}
+
+pub(super) async fn terminal_feedback(
+    shared: &Arc<SharedData>,
+    http: &Arc<Http>,
+    provider: &ProviderKind,
+    message: &Message,
+    stale: crate::services::discord::dispatch_policy::StaleDispatchTurn,
+) {
+    tracing::info!(message_id = %message.id, dispatch = %stale.dispatch_id, status = %stale.status,
+        "skipped terminal dispatch message");
+    let checkpoint_allowed = legacy_allowed(shared, http, provider, message.channel_id)
+        .await
+        .is_ok();
+    #[cfg(all(test, unix))]
+    let checkpoint_allowed = io_tests::checkpoint_for_test(checkpoint_allowed);
+    if checkpoint_allowed {
+        crate::services::discord::advance_last_message_checkpoint(
+            shared,
+            provider,
+            message.channel_id,
+            message.id,
+        );
+    }
+    let emoji = crate::services::discord::queue_exit_feedback_emoji(stale.queue_exit_kind);
+    crate::services::discord::queue_marker::note_exit_feedback_added(
+        shared,
+        http,
+        message.channel_id,
+        message.id,
+        emoji,
+    )
+    .await;
 }
 
 async fn enrich(

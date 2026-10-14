@@ -14,7 +14,11 @@ fn resolve_attachment_admission_with<T>(
 ) -> Result<T, IntakeAdmission> {
     match admission {
         IntakeAdmission::Local(permit) => Ok(on_local(permit)),
-        nonlocal => Err(nonlocal),
+        nonlocal => {
+            #[cfg(test)]
+            let nonlocal = super::ledger::mutate_payload(nonlocal, "attachment");
+            Err(nonlocal)
+        }
     }
 }
 

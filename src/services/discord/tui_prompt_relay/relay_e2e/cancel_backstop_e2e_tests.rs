@@ -1661,7 +1661,8 @@ async fn active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer() {
         &CLAUDE,
         h.channel_id,
     )
-    .await;
+    .await
+    .expect("duplicate kickoff safely reports no start");
     assert!(
         !kicked.started,
         "a real duplicate kickoff cannot claim the running Q"

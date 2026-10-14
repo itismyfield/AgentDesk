@@ -448,7 +448,8 @@ async fn c2c1_central_results_preserve_proof_before_generic_legacy_guard() {
             .build(),
     );
     let shared = make_shared_data_for_tests();
-    for admission in [test_received(channel), test_deferred(channel)] {
+    for admission in test_payloads(channel) {
+        let expected = observe_payload(&admission);
         let result = super::super::finish_text_intake_admission(
             &deps(&http, &shared),
             admission,
@@ -462,7 +463,11 @@ async fn c2c1_central_results_preserve_proof_before_generic_legacy_guard() {
             "C evidence must survive the generic guard: {error:?}"
         );
         let outcome = error.downcast::<LedgerOutcome>().unwrap();
-        assert!(is_ledger(&outcome.0));
+        assert_eq!(
+            observe_payload(&outcome.0),
+            expected,
+            "central consumer preserves the whole payload"
+        );
     }
     assert!(shared.core.lock().await.sessions.is_empty());
 }
@@ -482,7 +487,8 @@ async fn c2c1_live_c_results_never_checkpoint_or_report_execution() {
             .build(),
     );
     let shared = make_shared_data_for_tests();
-    for admission in [test_received(channel), test_deferred(channel)] {
+    for admission in test_payloads(channel) {
+        let expected = observe_payload(&admission);
         inject_test_admission(admission);
         let checkpoints = AtomicUsize::new(0);
         let result = super::super::dispatch_live_text_intake(
@@ -498,32 +504,109 @@ async fn c2c1_live_c_results_never_checkpoint_or_report_execution() {
             0,
             "ledger receipt is not a checkpoint authority"
         );
-        assert!(result.unwrap_err().is::<LedgerOutcome>());
+        let outcome = result.unwrap_err().downcast::<LedgerOutcome>().unwrap();
+        assert_eq!(
+            observe_payload(&outcome.0),
+            expected,
+            "live consumer preserves the whole payload"
+        );
     }
     assert!(shared.core.lock().await.sessions.is_empty());
 }
 
 #[test]
 fn c2c1_attachment_returns_both_ledger_payloads_intact() {
-    for admission in [
-        test_received(963_259_850_009),
-        test_deferred(963_259_850_009),
-    ] {
-        let kind = std::mem::discriminant(&admission);
+    for admission in test_payloads(963_259_850_009) {
+        let expected = observe_payload(&admission);
         let result = super::super::attachment::resolve_attachment_admission(admission);
         assert!(result.is_err());
         let admission = result.unwrap_err();
-        assert_eq!(std::mem::discriminant(&admission), kind);
-        match admission {
-            IntakeAdmission::LedgerReceived(value) => assert_eq!(
-                value.original.input(),
-                test_original(963_259_850_009).input()
-            ),
-            IntakeAdmission::LedgerDeferred(value) => assert_eq!(
-                value.original.input(),
-                test_original(963_259_850_009).input()
-            ),
-            _ => panic!("attachment must not fold C results into Legacy results"),
-        }
+        assert_eq!(
+            observe_payload(&admission),
+            expected,
+            "attachment consumer preserves the whole payload"
+        );
     }
+}
+
+#[tokio::test]
+async fn c2c2_protected_missing_client_reaches_typed_defer_before_legacy_planning() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        "disabled".as_ref(),
+    );
+    let channel = 963_259_860_001;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
+    let http = Arc::new(
+        serenity::HttpBuilder::new("protected-missing-client")
+            .proxy("http://127.0.0.1:1")
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let shared = make_shared_data_for_tests();
+    let admission =
+        super::super::admit_text_intake(&deps(&http, &shared), &submission(channel)).await;
+    println!("C2C2_PROTECTED_MISSING_CLIENT_ADMISSION={admission:?}");
+    assert!(
+        matches!(admission, IntakeAdmission::LedgerDeferred(_)),
+        "a protected source without a ready client must retain a typed ledger defer before Legacy planning: {admission:?}"
+    );
+    let IntakeAdmission::LedgerDeferred(value) = admission else {
+        unreachable!()
+    };
+    assert_eq!(value.original.key(), 10);
+    assert_eq!(value.original.identity().source_ids, vec![10, 11]);
+    assert_eq!(value.original.identity().author_id, 7);
+    assert_eq!(value.original.identity().original_channel_id, channel);
+    assert_eq!(value.original.identity().execution_channel_id, channel);
+    assert_eq!(value.original.input()["original_text"], "original");
+    assert!(matches!(
+        value.reason,
+        DeferReason::Receipt(Deferred::Unknown)
+    ));
+    assert!(shared.core.lock().await.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn c2c2_live_protected_defer_precedes_initial_legacy_guard() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        "disabled".as_ref(),
+    );
+    let channel = 963_259_860_002;
+    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let _closing = gate.close().unwrap();
+    let http = Arc::new(
+        serenity::HttpBuilder::new("protected-before-legacy-guard")
+            .proxy("http://127.0.0.1:1")
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let shared = make_shared_data_for_tests();
+    let checkpoints = AtomicUsize::new(0);
+    let result =
+        super::super::dispatch_live_text_intake(&deps(&http, &shared), submission(channel), || {
+            checkpoints.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+    assert_eq!(checkpoints.load(Ordering::SeqCst), 0);
+    let error = result.expect_err("a protected source retains its retry obligation");
+    assert!(
+        error.is::<LedgerOutcome>(),
+        "the actual live caller retains typed custody before the first Legacy guard: {error:?}"
+    );
+    let outcome = error.downcast::<LedgerOutcome>().unwrap();
+    let IntakeAdmission::LedgerDeferred(value) = outcome.0 else {
+        panic!("a protected source without a ready client remains deferred");
+    };
+    assert_eq!(value.original.identity().source_ids, [10, 11]);
+    assert_eq!(value.original.identity().execution_channel_id, channel);
+    assert_eq!(value.original.input()["original_text"], "original");
+    assert_eq!(value.reason, DeferReason::Receipt(Deferred::Unknown));
+    assert!(shared.core.lock().await.sessions.is_empty());
 }

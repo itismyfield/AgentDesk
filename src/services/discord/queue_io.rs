@@ -1,16 +1,18 @@
 use super::*;
 mod backstop;
 pub(in crate::services) use backstop::BackstopSlot;
-pub(in crate::services::discord) use backstop::spawn_turn_completion_idle_queue_listener;
 pub(super) use backstop::{
-    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, arm_event_backstop_after_no_start_if_queue_nonempty,
-    arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
-    schedule_deferred_idle_queue_kickoff_immediate,
+    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, arm_slow_idle_queue_backstop_if_queue_nonempty,
+    schedule_deferred_idle_queue_kickoff, schedule_deferred_idle_queue_kickoff_immediate,
 };
 #[cfg(test)]
 use backstop::{
-    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY, deferred_idle_queue_initial_presleep,
-    emit_idle_queue_backstop_warn, idle_queue_backstop_backlog_units,
+    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY, arm_event_backstop_after_no_start_if_queue_nonempty,
+    deferred_idle_queue_initial_presleep, emit_idle_queue_backstop_warn,
+    idle_queue_backstop_backlog_units,
+};
+pub(in crate::services::discord) use backstop::{
+    arm_kickoff_result_backstop, spawn_turn_completion_idle_queue_listener,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use backstop::{
@@ -30,6 +32,166 @@ pub(super) use turn_admission::{
     mailbox_recovery_kickoff, mailbox_try_start_turn_adopting, mailbox_try_start_turn_behind_queue,
     mailbox_try_start_turn_kinded_with_feedback, mailbox_try_start_turn_unless_released,
 };
+
+#[derive(Debug)]
+pub(in crate::services::discord) struct QueuedCustodyError {
+    slot: Arc<BackstopSlot>,
+    cause: String,
+}
+
+impl std::fmt::Debug for BackstopSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackstopSlot")
+            .field("retained_custody", &self.has_custody())
+            .finish()
+    }
+}
+impl std::fmt::Display for QueuedCustodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; original custody retained={}",
+            self.cause,
+            self.slot.has_custody()
+        )
+    }
+}
+impl std::error::Error for QueuedCustodyError {}
+
+struct CustodyLoan {
+    shared: Arc<SharedData>,
+    slot: Arc<BackstopSlot>,
+    owner: Option<Box<router::QueuedLedgerOutcome>>,
+}
+impl CustodyLoan {
+    fn new(
+        shared: &Arc<SharedData>,
+        slot: Arc<BackstopSlot>,
+        owner: Box<router::QueuedLedgerOutcome>,
+    ) -> Self {
+        slot.custody_inflight
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self {
+            shared: shared.clone(),
+            slot,
+            owner: Some(owner),
+        }
+    }
+    fn failure(&self, cause: String) -> QueuedCustodyError {
+        QueuedCustodyError {
+            slot: self.slot.clone(),
+            cause,
+        }
+    }
+}
+impl Drop for CustodyLoan {
+    fn drop(&mut self) {
+        #[cfg(all(test, unix))]
+        backstop::custody_tests::mutate_loan(&mut self.owner);
+        let retained = self.owner.take().map(|owner| {
+            let key = (owner.provider().clone(), owner.channel_id());
+            self.slot
+                .custody
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(owner);
+            key
+        });
+        self.slot
+            .custody_inflight
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if let Some((provider, channel)) = retained
+            && tokio::runtime::Handle::try_current().is_ok()
+        {
+            backstop::schedule_single_slow_idle_queue_backstop(
+                self.shared.clone(),
+                provider,
+                channel,
+                "retained queued input custody",
+                1,
+            );
+        }
+    }
+}
+
+pub(in crate::services::discord) struct QueuedAdmissionOwner(CustodyLoan);
+impl QueuedAdmissionOwner {
+    pub(in crate::services::discord) fn new(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        original: &Intervention,
+        lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> Self {
+        let owner = router::QueuedLedgerOutcome::pending(
+            provider.clone(),
+            channel,
+            original.clone(),
+            lease,
+        );
+        let loan = match shared.restart.deferred_hook_channels.entry(channel) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                CustodyLoan::new(shared, entry.get().clone(), owner)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let slot = Arc::new(BackstopSlot::new());
+                let loan = CustodyLoan::new(shared, slot.clone(), owner);
+                entry.insert(slot);
+                loan
+            }
+        };
+        let result = Self(loan);
+        backstop::schedule_single_slow_idle_queue_backstop(
+            shared.clone(),
+            provider.clone(),
+            channel,
+            "queued input admission owner",
+            1,
+        );
+        result
+    }
+
+    pub(in crate::services::discord) fn fail(self, cause: String) -> QueuedCustodyError {
+        self.0.failure(cause)
+    }
+}
+
+pub(in crate::services::discord) fn consume_queued_custody<'a>(
+    deps: &'a router::IntakeDeps<'a>,
+    outcome: Box<router::QueuedLedgerOutcome>,
+    provisional: Option<QueuedAdmissionOwner>,
+) -> impl std::future::Future<Output = Result<router::QueuedCustody, QueuedCustodyError>> + Send + 'a
+{
+    let mut loan = match provisional {
+        Some(owner) => owner.0,
+        None => {
+            QueuedAdmissionOwner::new(
+                deps.shared,
+                outcome.provider(),
+                outcome.channel_id(),
+                outcome.original(),
+                outcome.dispatch_lease().cloned(),
+            )
+            .0
+        }
+    };
+    loan.owner = Some(outcome);
+    async move {
+        let Some(owner) = loan.owner.as_mut() else {
+            return Err(loan.failure("MissingQueuedOwner".into()));
+        };
+        match router::consume_queued_ledger_outcome(deps, owner).await {
+            Ok(custody) => {
+                loan.owner.take();
+                Ok(custody)
+            }
+            Err(()) => Err(loan.failure(loan.owner.as_ref().map_or_else(
+                || "MissingQueuedOwner".into(),
+                |owner| owner.failure().to_owned(),
+            ))),
+        }
+    }
+}
 
 tokio::task_local! {
     static SUPPRESS_POST_ENQUEUE_IDLE_QUEUE_KICK: bool;
@@ -198,7 +360,7 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
             "race_loss_requeue_idle_recheck",
         )
         .await;
-        arm_event_backstop_after_no_start_if_queue_nonempty(
+        arm_kickoff_result_backstop(
             &shared,
             &provider,
             channel_id,
@@ -243,7 +405,7 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
                 "post_enqueue_idle_snapshot",
             )
             .await;
-            arm_event_backstop_after_no_start_if_queue_nonempty(
+            arm_kickoff_result_backstop(
                 &shared,
                 &provider,
                 channel_id,
@@ -260,13 +422,13 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
-) -> IdleQueueKickoffChannelOutcome {
+) -> Result<IdleQueueKickoffChannelOutcome, Error> {
     #[cfg(test)]
     if let Some(outcome) =
         idle_queue_kick_hook_outcome_for_tests(shared.clone(), provider.clone(), channel_id, reason)
             .await
     {
-        return outcome;
+        return Ok(outcome);
     }
 
     let Some(transport) = QueueTransport::from_runtime(shared) else {
@@ -276,7 +438,7 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
             reason,
             "Deferred drain: Discord REST credentials unavailable; preserving queued work for the slow backstop"
         );
-        return IdleQueueKickoffChannelOutcome::default();
+        return Ok(IdleQueueKickoffChannelOutcome::default());
     };
 
     let ts = chrono::Local::now().format("%H:%M:%S");

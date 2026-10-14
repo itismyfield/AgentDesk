@@ -18,6 +18,18 @@ pub(super) async fn settle_executed_queued_intake(
     intervention: &Intervention,
     source: &'static str,
 ) {
+    settle_received_queued_custody(shared, http, provider, channel_id, intervention, source).await;
+}
+
+/// Durable input custody releases queued UI without marking a provider turn as started.
+pub(super) async fn settle_received_queued_custody(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+    source: &'static str,
+) {
     for owner in intervention.source_message_queued_generations() {
         for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
             queue_marker::note_removed_queued_generation(

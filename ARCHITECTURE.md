@@ -936,7 +936,8 @@ src/
 │   │   │   ├── streaming_status.rs
 │   │   │   └── tool_markdown.rs
 │   │   ├── gateway/
-│   │   │   └── outbound_messages.rs
+│   │   │   ├── outbound_messages.rs
+│   │   │   └── queued_dispatch.rs
 │   │   ├── health/
 │   │   │   ├── legacy_supervision/
 │   │   │   │   ├── boot_status.rs
@@ -1290,6 +1291,8 @@ src/
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
 │   │   ├── queue_dispatch/
+│   │   │   ├── kickoff/
+│   │   │   │   └── ledger_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
@@ -1299,6 +1302,7 @@ src/
 │   │   │   ├── backstop.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
+│   │   │   ├── custody_tests.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── queued_head_inject.rs
@@ -1417,6 +1421,7 @@ src/
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
+│   │   │   │   │   ├── custody_support_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── final_guards.rs
@@ -1440,6 +1445,7 @@ src/
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── ledger.rs
 │   │   │   │   ├── ledger_io_tests.rs
+│   │   │   │   ├── ledger_live_scan_tests.rs
 │   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs

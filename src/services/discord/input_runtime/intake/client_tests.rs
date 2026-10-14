@@ -449,6 +449,95 @@ pub(in crate::services::discord) struct ScanFixtureEvidence {
     pub(crate) pending: ordering::PendingSource,
 }
 
+pub(in crate::services::discord) struct MessageFixtureEvidence {
+    pub(crate) rows: Vec<crate::services::tui_input::rows::Row>,
+    pub(crate) pending: ordering::PendingSource,
+    pub(crate) commands: Vec<&'static str>,
+}
+
+pub(in crate::services::discord) async fn run_messages<F, Fut, T>(
+    registry: &'static Registry,
+    channel: u64,
+    root: &Path,
+    fail_settlement: bool,
+    callback: F,
+) -> (T, MessageFixtureEvidence)
+where
+    F: FnOnce(Arc<Client>, ordering::PendingOverflow) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let world = Arc::new(World::default());
+    let reserved = registry
+        .reserve_for_test(&ProviderKind::Claude, channel, root)
+        .unwrap();
+    let config = Config {
+        provider: ProviderKind::Claude,
+        channel,
+        root: root.to_owned(),
+        request: Request::Ledger,
+        refusal: None,
+        binding: Binding::new(channel, &world),
+    };
+    let ports = Fake {
+        channel,
+        world,
+        registry,
+        inputs: vec![],
+        mailbox: ChannelMailboxRegistry::default(),
+    };
+    let mut supervisor = Supervisor::start(reserved, config, ports).unwrap();
+    assert_eq!(Box::pin(supervisor.boot()).await, Landing::Admitted);
+    let (sender, mut receiver) = mpsc::channel(8);
+    let client = supervisor.bind_intake(sender).unwrap();
+    supervisor.adopt_task(channel).unwrap();
+    supervisor.publish_intake();
+    let overflow = supervisor.pending_overflow();
+    if fail_settlement {
+        supervisor.after_receipt_io = Some(overflow.clone());
+    }
+    let request = callback(client, overflow);
+    tokio::pin!(request);
+    let mut commands = vec![];
+    let result = loop {
+        tokio::select! {
+            biased;
+            result = &mut request => break result,
+            command = receiver.recv() => {
+                let command = command.expect("fixture retains the actual supervisor client");
+                let pending = match &command {
+                    SupervisorCmd::PendingSource { sources, .. } => Some(sources.clone()),
+                    _ => None,
+                };
+                commands.push(match &command {
+                    SupervisorCmd::PendingSource { .. } => "pending",
+                    SupervisorCmd::LookupResponsibility { .. } => "lookup",
+                    SupervisorCmd::FetchTicket { .. } => "ticket",
+                    SupervisorCmd::BeginScan { .. } => "begin",
+                    SupervisorCmd::CommitFromScan { .. } => "commit",
+                    SupervisorCmd::SettleFromScan { .. } => "settle",
+                    SupervisorCmd::CompleteScan { .. } => "complete",
+                    _ => panic!("message fixture never starts or offers provider execution"),
+                });
+                Box::pin(supervisor.input_command(command, true)).await;
+                if let Some(sources) = pending {
+                    let actual = supervisor.pending_snapshot().sources;
+                    assert!(sources.iter().all(|source| actual.contains(source)),
+                        "fixture observes real pending ACK before reply/download IO");
+                    println!("C2C2_MESSAGE_FIXTURE_PENDING_ACK sources={sources:?}");
+                }
+            }
+        }
+    };
+    let rows = supervisor.slot().get().unwrap().rows().unwrap();
+    let evidence = MessageFixtureEvidence {
+        rows: rows.open_rows().map(|(_, row)| row.clone()).collect(),
+        pending: supervisor.pending_snapshot(),
+        commands,
+    };
+    assert!(supervisor.release());
+    (result, evidence)
+}
+
 pub(in crate::services::discord) fn run_scan_fixture<F, Fut, T>(
     channel: u64,
     fail_settlement: bool,

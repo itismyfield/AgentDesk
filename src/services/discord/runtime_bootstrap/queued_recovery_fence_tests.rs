@@ -203,7 +203,8 @@ fn boot_restore_old_format_case(closed: bool) {
             ChannelId::new(protected),
         )
         .now_or_never()
-        .expect("closed restore channel refuses kickoff before settings or dequeue");
+        .expect("closed restore channel refuses kickoff before settings or dequeue")
+        .expect("closed kickoff safely reports no start");
         assert!(!kickoff.started);
         drop(settings);
         (
