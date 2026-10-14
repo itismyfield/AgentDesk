@@ -89,21 +89,24 @@ fn transition_cli_posts_its_bases_origin_and_no_token() {
     );
 }
 
-// A redirect is a failure answered by the first server alone; its target never hears of it.
+// A redirect is a failure answered by the first server alone; its target never hears of it. A 303
+// is one an HTTP client follows for a POST by default.
 #[test]
 fn transition_cli_never_follows_a_redirect() {
-    let target = Mock::start(&answer("200 OK", INSPECTED));
-    let location = format!("location: {}/api/o/transition\r\n", target.base());
-    let first = Mock::start(&format!(
-        "HTTP/1.1 307 X\r\n{location}content-length: 0\r\nconnection: close\r\n\r\n"
-    ));
-    let answered = post(&first.base(), &json!({}), READ);
-    assert!(
-        matches!(answered, Err(PostError::Redirect(307))),
-        "[C2] {answered:?}"
-    );
-    assert_eq!(first.seen().len(), 1, "[C2:first]");
-    assert!(target.seen().is_empty(), "[C2:target_untouched]");
+    for code in [303, 307] {
+        let target = Mock::start(&answer("200 OK", INSPECTED));
+        let location = format!("location: {}/api/o/transition\r\n", target.base());
+        let first = Mock::start(&format!(
+            "HTTP/1.1 {code} X\r\n{location}content-length: 0\r\nconnection: close\r\n\r\n"
+        ));
+        let answered = post(&first.base(), &json!({}), READ);
+        assert!(
+            matches!(answered, Err(PostError::Redirect(status)) if status == code),
+            "[C2:{code}] {answered:?}"
+        );
+        assert_eq!(first.seen().len(), 1, "[C2:{code}:first]");
+        assert!(target.seen().is_empty(), "[C2:{code}:target_untouched]");
+    }
 }
 
 // A proxy named in the environment is never dialled; the request goes straight to the base.

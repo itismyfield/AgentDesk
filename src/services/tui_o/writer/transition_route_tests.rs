@@ -457,9 +457,9 @@ mod pg {
                 Some(Termination::Confirmed(end)) => json!({"Confirmed": end}),
                 _ => unreachable!(),
             };
-            let body = |nonce: &str| {
+            let body = |nonce: &str, channel: u64| {
                 json!({
-                    "operation": "inspect", "channel": CHANNEL, "session_key": KEY_OF_ROW,
+                    "operation": "inspect", "channel": channel, "session_key": KEY_OF_ROW,
                     "execution_nonce": nonce, "cutoff": request.cutoff, "job_id": JOB,
                     "operator": "operator", "reason": "herdr transition", "termination": ended,
                 })
@@ -469,52 +469,63 @@ mod pg {
                 change(&mut changed);
                 changed
             };
-            let other_channel = with(|o| o.channel_id = "8".into());
             let codex = with(|o| o.provider = "codex".into());
             let other_node = with(|o| o.owner_node = "mac-book".into());
             let other_bot = with(|o| o.discord_token_hash = "another-bot".into());
             let other_root = with(|o| o.runtime_root = "/elsewhere".into());
+            // The row and its launch name channel 7; `other_channel` names 8 for that same row.
             let cases = [
-                ("missing_row", None, nonce.as_str()),
+                ("missing_row", None, nonce.as_str(), CHANNEL),
                 (
-                    "other_channel",
-                    Some((&other_channel, located(&other_channel, NODE, KEY))),
-                    &*nonce,
+                    "codex",
+                    Some((&codex, located(&codex, NODE, KEY))),
+                    &nonce,
+                    CHANNEL,
                 ),
-                ("codex", Some((&codex, located(&codex, NODE, KEY))), &nonce),
                 (
                     "other_node",
                     Some((&other_node, located(&other_node, "mac-book", KEY))),
                     &nonce,
+                    CHANNEL,
                 ),
                 (
                     "other_bot",
                     Some((&other_bot, located(&other_bot, NODE, KEY))),
                     &nonce,
+                    CHANNEL,
                 ),
                 (
                     "other_root",
                     Some((&other_root, located(&other_root, NODE, KEY))),
                     &nonce,
+                    CHANNEL,
                 ),
                 (
                     "unregistered_endpoint",
                     Some((&owner, located(&owner, NODE, "elsewhere"))),
                     &nonce,
+                    CHANNEL,
                 ),
                 (
                     "other_nonce",
                     Some((&owner, located(&owner, NODE, KEY))),
                     "0123456789abcdef0123456789abcdef",
+                    CHANNEL,
+                ),
+                (
+                    "other_channel",
+                    Some((&owner, located(&owner, NODE, KEY))),
+                    &nonce,
+                    CHANNEL + 1,
                 ),
             ];
             let before = files(&chain.dir());
-            for (case, row, asked) in cases {
+            for (case, row, asked, channel) in cases {
                 if let Some((owner, record)) = row {
                     store(&pool, owner, &record).await;
                 }
                 let (sent, read) = (sends(), hooks::snapshots());
-                let (status, answer) = post(&app, &body(asked)).await;
+                let (status, answer) = post(&app, &body(asked, channel)).await;
                 let refused = (status, answer["result"].clone());
                 assert_eq!(
                     refused,
@@ -529,7 +540,7 @@ mod pg {
                 assert_eq!(files(&chain.dir()), before, "[P1:{case}] writes");
             }
             std::fs::write(&marker, "0123456789abcdef0123456789abcdef").unwrap();
-            let (status, answer) = post(&app, &body(&nonce)).await;
+            let (status, answer) = post(&app, &body(&nonce, CHANNEL)).await;
             assert_eq!(
                 (status, answer["result"].clone()),
                 (StatusCode::CONFLICT, json!("refused")),
@@ -537,7 +548,7 @@ mod pg {
             );
             std::fs::write(&marker, &nonce).unwrap();
             let sent = sends();
-            let (status, answer) = post(&app, &body(&nonce)).await;
+            let (status, answer) = post(&app, &body(&nonce, CHANNEL)).await;
             assert_eq!(
                 (status, answer["result"].clone()),
                 (StatusCode::OK, json!("inspected")),
