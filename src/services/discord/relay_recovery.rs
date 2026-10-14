@@ -276,7 +276,6 @@ async fn run_relay_recovery_at(
         ),
         None => None,
     };
-
     let observed_before = std::time::Instant::now();
     let snapshot = match parsed_provider.as_ref() {
         Some(provider) => {
@@ -290,14 +289,13 @@ async fn run_relay_recovery_at(
         channel_id,
         provider: provider_filter.map(str::to_string),
     })?;
-
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
+    decision.evidence.tail_observation = snapshot.tail_observation;
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
     decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, apply);
-
     if !apply {
         return Ok(RelayRecoveryResponse {
             ok: true,
@@ -484,6 +482,7 @@ async fn auto_apply_relay_recovery_for_shared_at(
         snapshot.relay_stall_state
     };
     let mut decision = plan_relay_recovery(&planning_health, planning_stall_state, now_ms);
+    decision.evidence.tail_observation = snapshot.tail_observation;
     if source == RelayRecoveryApplySource::StallWatchdog
         && decision.relay_stall_state == RelayStallState::OrphanPendingToken
         && decision.auto_heal.skipped_reason == Some("orphan_token_within_admission_grace")
@@ -652,6 +651,7 @@ mod axis_b_tests {
         channel_id: u64,
     ) -> health::WatcherStateSnapshot {
         health::WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: "codex".to_string(),
             attached: false,
             tmux_session: None,
