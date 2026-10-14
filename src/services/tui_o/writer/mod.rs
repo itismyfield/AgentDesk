@@ -161,6 +161,9 @@ pub enum WriterAlarm {
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
         source: SourceId,
+        /// The job of an operator's transition cleanup its cursor records: a past cleanup of the
+        /// source, which need not be what retired it this time.
+        cleanup_history: Option<String>,
     },
     CleanupRetired {
         source: SourceId,
@@ -191,6 +194,9 @@ pub trait AlarmSink: Send + Sync {
 mod historical_hops;
 mod past_bind;
 mod renumbered;
+mod transition_cleanup;
+/// Dormant: no request is sent to it outside the tests yet.
+pub(crate) mod transition_port;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]
