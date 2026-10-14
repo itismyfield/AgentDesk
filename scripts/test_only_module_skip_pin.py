@@ -523,6 +523,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_restart_handoff_mailbox_tests.rs",
         "src/services/discord/turn_view_reconciler/tests.rs",
         "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs",
+        "src/services/discord/voice_barge_in/tests/retired_text_reply_tests.rs",
         "src/services/discord/watchers/dispatched_origin_ghost_tests.rs",
         "src/services/discord/watchers/lifecycle/liveness_tests.rs",
         "src/services/discord/watchers/lifecycle/restore_tests.rs",
@@ -724,6 +725,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs",
         "src/services/platform/tmux/session_inventory/unit_tests.rs",
         "src/services/platform/tmux/session_inventory/real_tests.rs",
+        "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
     }
 )
 

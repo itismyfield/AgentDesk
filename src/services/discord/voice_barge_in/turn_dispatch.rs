@@ -35,6 +35,20 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(source_channel_id, target_channel_id)
             .await;
+        // Inside the durable-claim winner: refused before the model, any ack, TTS or handoff.
+        if let Err(retired) = super::utterance_pipeline::foreground_runtime(&foreground) {
+            let key = (source_channel_id.get(), announcement.utterance_id.clone());
+            match shared.serenity_http_or_token_fallback() {
+                Some(http) => {
+                    super::utterance_pipeline::attempt_retired_notice(key, http, retired).await
+                }
+                None => tracing::warn!(
+                    source_channel_id = source_channel_id.get(),
+                    "voice runtime retirement notice has no Discord client"
+                ),
+            }
+            return true;
+        }
         // #3906 (P1): redundant foreground-start chime removed — superseded by the
         // deterministic Phase-1 intake chime in process_completed_utterance.
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());

@@ -486,12 +486,14 @@ pub(super) fn tui_busy_followup_diagnostic(
     if remote_profile_present {
         return None;
     }
+    // A retired runtime is no hosted TUI; its dispatch refuses the input.
     let selection =
-        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
+        crate::services::provider_hosting::try_resolve_provider_session_selection_with_channel(
             provider,
             claude::is_tmux_available(),
             Some(channel_id.get()),
-        );
+        )
+        .ok()?;
     if selection.driver != crate::services::provider_hosting::ProviderSessionDriver::TuiHosting
         || crate::services::claude_tui::hook_server::current_hook_endpoint().is_none()
         || !crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name)
