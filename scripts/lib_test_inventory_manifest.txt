@@ -906,6 +906,9 @@ engine::ops::exec_ops::bridge_deadline_tests::clamp_shortens_to_remaining_budget
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_is_unbounded_without_armed_deadline
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_returns_error_after_deadline_elapses
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_uses_remaining_budget_when_armed
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_handoffs_without_observer
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_receipt_and_busy_precede_handoff
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_storage_failure_is_not_ok
 engine::ops::exec_ops::exec_allowlist_tests::public_and_raw_exec_enforce_allowlist_before_runner
 engine::ops::exec_ops::inflight_list_tests::inflight_list_exposes_synthetic_rebind_fields
 engine::ops::exec_ops::inflight_list_tests::inflight_remove_refuses_receipt_rows_and_never_reports_a_failed_unlink_as_removed
@@ -4470,6 +4473,16 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::circuit_evidence_tests::alpha_abandon_handoffs_without_observer
+services::discord::inflight::circuit_evidence_tests::alpha_conflicting_identity_cannot_fork_into_escrow
+services::discord::inflight::circuit_evidence_tests::alpha_distinct_unresolved_evidence_retained
+services::discord::inflight::circuit_evidence_tests::alpha_journal_failure_escrows
+services::discord::inflight::circuit_evidence_tests::alpha_no_evidence_eviction
+services::discord::inflight::circuit_evidence_tests::alpha_no_retroactive_binding
+services::discord::inflight::circuit_evidence_tests::alpha_origin_and_range_survive_path_reuse
+services::discord::inflight::circuit_evidence_tests::alpha_pending_carry_forward_keeps_origin
+services::discord::inflight::circuit_evidence_tests::alpha_storage_failure_preserves_row
+services::discord::inflight::circuit_evidence_tests::alpha_unknown_evidence_version_preserved
 services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_pin_mismatch_never_unlinks
 services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_rereads_guarded_bytes_and_removes_rebind_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_clears_its_matching_row
@@ -6616,6 +6629,7 @@ services::discord::relay_recovery::axis_b_tests::automatic_reattach_sources_keep
 services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers
 services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
 services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
+services::discord::relay_recovery::circuit_breaker::circuit_evidence_tests::alpha_existing_open_identity_preserved
 services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
 services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
 services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
