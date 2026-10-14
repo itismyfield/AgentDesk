@@ -723,9 +723,10 @@ async fn actual_driver_case(mode: &'static str) {
         outcomes.push((
             worker.await.unwrap(),
             rx.try_iter().collect::<Vec<_>>(),
-            row.clone(),
             row_before,
+            std::fs::read(&row).unwrap(),
             row_modified,
+            std::fs::metadata(&row).unwrap().modified().unwrap(),
         ));
         tokens.push(token);
         mailbox
@@ -781,7 +782,15 @@ async fn actual_driver_case(mode: &'static str) {
         "two" | "unknown" | "first_poll" | "no_receipt" | "cancel_after_enter"
     );
     let expects_payload = expects_enter || matches!(mode, "cancel_after_payload" | "s1w_enter");
-    for ((result, calls, expired, stages), frames, row, row_before, row_modified) in outcomes {
+    for (
+        (result, calls, expired, stages),
+        frames,
+        row_before,
+        row_after,
+        row_modified,
+        row_modified_after,
+    ) in outcomes
+    {
         assert!(result.is_ok(), "{mode}: {result:?}; {calls:?}; {stages:?}");
         assert!(
             !expired,
@@ -800,14 +809,9 @@ async fn actual_driver_case(mode: &'static str) {
             usize::from(expects_enter),
             "Enter once: {mode}; {calls:?}"
         );
+        assert_eq!(row_after, row_before, "caller episode bytes preserved");
         assert_eq!(
-            std::fs::read(&row).unwrap(),
-            row_before,
-            "caller episode bytes preserved"
-        );
-        assert_eq!(
-            std::fs::metadata(row).unwrap().modified().unwrap(),
-            row_modified,
+            row_modified_after, row_modified,
             "caller episode mtime preserved"
         );
         if mode.starts_with("s1w_") {

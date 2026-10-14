@@ -35,6 +35,7 @@ from pathlib import Path
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
         "src/services/tui_o/store/codex_provenance/p5a2_projection_tests.rs",
+        "src/services/tui_o/writer/source_read_tests.rs",
         "src/services/tui_o/writer/p5a2_actor_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/live_grant_tests.rs",
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
@@ -757,6 +758,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/server/routes/tests/preflight_harness/validation.rs",
         "src/services/discord/delivery_lease_cell/exact_lease.rs",
         "src/services/discord/delivery_lease_cell/exact_lease/token.rs",
+        "src/services/discord/inflight/read_only_owner_snapshot.rs",
         "src/services/discord/inflight/invariant_test_capture.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",
