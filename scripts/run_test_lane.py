@@ -524,14 +524,11 @@ def _report_set(errors: list[str], label: str, ids: set[str] | frozenset[str],
     errors.append(f"{len(ids)} {label} id(s), named above. {explanation}")
 
 
-def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
-             expected_selected: frozenset[str], max_summaries: int
-             ) -> tuple[list[str], list[str], dict[str, int]]:
+def verify_structure(outcome: Outcome, declared_ignored: set[str] | frozenset[str],
+                     expected_selected: frozenset[str], max_summaries: int
+                     ) -> list[str]:
+    """Checks (1)-(3b): which ids ran and which failed, before any ledger policy applies."""
     errors: list[str] = []
-    warnings: list[str] = []
-
-    declared_ignored = {entry.pattern for entry in entries
-                        if entry.mode == "ignored"}
     observed_selected = outcome.executed | outcome.ignored
     expected_executed = expected_selected - declared_ignored
 
@@ -640,6 +637,18 @@ def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
                 "list does not. A foreign write was read as a verdict, or a "
                 "verdict was attributed to the wrong id.",
             )
+    return errors
+
+
+def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
+             expected_selected: frozenset[str], max_summaries: int
+             ) -> tuple[list[str], list[str], dict[str, int]]:
+    warnings: list[str] = []
+    declared_ignored = {entry.pattern for entry in entries
+                        if entry.mode == "ignored"}
+    observed_selected = outcome.executed | outcome.ignored
+    errors = verify_structure(outcome, declared_ignored, expected_selected,
+                              max_summaries)
 
     known: set[str] = set()
     unexpected: list[str] = []

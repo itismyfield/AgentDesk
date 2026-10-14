@@ -3221,18 +3221,48 @@ jobs:
                 self.assertEqual(journal.read_text().splitlines(),
                                  ["-m", "unittest", "tests.test_nightly_ci_triage"])
 
-    def test_ci_script_checks_runs_lane_coverage_contract(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
-            encoding="utf-8"
+    def test_lane_coverage_cli_and_parity_suites_run_fatally_in_the_contracts_shard(self) -> None:
+        title = "Rust test-lane coverage ratchet (#4846/#4910)"
+        script = REPO_ROOT / "scripts/ci-script-checks.sh"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SCRIPT_CHECK_")}
+        listing = subprocess.run(
+            ["bash", str(script)], cwd=REPO_ROOT, capture_output=True, text=True,
+            env={**env, "SCRIPT_CHECK_LIST": "1", "SCRIPT_CHECK_SHARD": "contracts"},
         )
-        self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            script,
-        )
-        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
-        )
+        self.assertIn(f"contracts\t{title}", listing.stdout.splitlines(), listing.stderr)
+        lines = script.read_text(encoding="utf-8").splitlines()
+        start = lines.index(f'if run_check contracts "{title}"; then') + 1
+        after = next(i for i in range(start, len(lines)) if lines[i].startswith("if run_check "))
+        block = "\n".join(lines[start:max(i for i in range(start, after) if lines[i] == "fi")])
+        calls = [
+            "scripts/check_test_lane_coverage.py --baseline-ref base-sha",
+            "-m unittest tests.test_test_lane_coverage",
+            "-m unittest tests.test_lane_source_parity",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            probe, journal = Path(tmp) / "python-probe", Path(tmp) / "argv"
+            probe.write_text(
+                '#!/bin/bash\nprintf "%s\\n" "$*" >> "$JOURNAL"\n[ "$*" != "$FAIL_ON" ]\n'
+            )
+            probe.chmod(0o755)
+
+            def run(fail_on: str = "", **extra: str) -> tuple[int, list[str]]:
+                journal.write_text("")
+                done = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c", "set -euo pipefail\n" + block],
+                    env={"PATH": os.environ["PATH"], "PYTHON": str(probe),
+                         "JOURNAL": str(journal), "FAIL_ON": fail_on, **extra},
+                    capture_output=True, text=True,
+                )
+                return done.returncode, journal.read_text().splitlines()
+
+            self.assertEqual(run(TEST_LANE_BASELINE_REF="base-sha"), (0, calls))
+            # No default comparison snapshot: an unset ref fails before any check runs.
+            self.assertEqual(run(), (1, []))
+            for index, call in enumerate(calls):
+                with self.subTest(failing=call):
+                    self.assertEqual(run(call, TEST_LANE_BASELINE_REF="base-sha"),
+                                     (1, calls[:index + 1]))
 
 
 if __name__ == "__main__":

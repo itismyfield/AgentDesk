@@ -546,6 +546,11 @@ if run_check contracts "D4-B acceptance manifest (#5340)"; then
 "$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
 fi
 
+if run_check contracts "B3b-4 recovery custody dormancy (#5340)"; then
+"$PYTHON" scripts/check_b3b4_dormancy.py
+"$PYTHON" -m unittest tests.test_check_b3b4_dormancy
+fi
+
 if run_check contracts "New production file comment-ratio gate"; then
 # Diff comment growth blocks; the stricter new-file ratio is advisory.
 "$PYTHON" scripts/check_new_file_comment_ratio.py --base-ref "$TEST_LANE_BASELINE_REF"
@@ -559,6 +564,10 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 # panics were PoisonError). A rule that only exists as prose is #5003.
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
+fi
+
+if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
+"$PYTHON" -m unittest tests.test_lane_retry_verdict
 fi
 
 if run_check contracts "Test ROOT file-reference policy"; then

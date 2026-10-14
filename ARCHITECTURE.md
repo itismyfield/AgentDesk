@@ -1011,6 +1011,7 @@ src/
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── probe_runtime.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
@@ -2132,7 +2133,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   └── pcm_harness_tests.rs
+│   │   │   │   ├── pcm_harness_tests.rs
+│   │   │   │   └── retired_text_reply_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
@@ -2469,6 +2471,7 @@ src/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── availability.rs
+│   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
@@ -2741,6 +2744,8 @@ src/
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
+│   │   │   │   ├── p5a2_projection_tests.rs
+│   │   │   │   ├── projection.rs
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
@@ -2757,6 +2762,8 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── actor/
+│   │   │   │   └── codex_submission.rs
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
 │   │   │   │   ├── fold.rs
@@ -2823,6 +2830,7 @@ src/
 │   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── owed.rs
 │   │   │   ├── owed_tests.rs
+│   │   │   ├── p5a2_actor_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── readers_host_tests.rs
@@ -2881,9 +2889,12 @@ src/
 │   │   │   │   ├── provenance/
 │   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── admission_tests.rs
+│   │   │   │   │   ├── decisions.rs
 │   │   │   │   │   ├── dormant.rs
 │   │   │   │   │   ├── dormant_construction.rs
 │   │   │   │   │   ├── dormant_tests.rs
+│   │   │   │   │   ├── live_grant.rs
+│   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
@@ -2920,6 +2931,9 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── dispatch_reservation/
+│   │   │   └── tests/
+│   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queue_exit_debt.rs
 │   │   │   ├── queue_exit_debt_tests.rs
@@ -2936,6 +2950,12 @@ src/
 │   │   │   ├── operation.rs
 │   │   │   ├── reconcile.rs
 │   │   │   └── reconcile_pg_tests.rs
+│   │   ├── recovery_registry/
+│   │   │   ├── entry.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── registry_pg_tests.rs
+│   │   │   ├── rehydrate.rs
+│   │   │   └── witness.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
