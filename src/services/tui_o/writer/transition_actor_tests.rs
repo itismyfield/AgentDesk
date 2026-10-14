@@ -875,9 +875,8 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
     );
 }
 
-// A stop raised while the poll that would retire a source awaits a POST is read again before the
-// write, the host's too before its stop reaches the actor: nothing is written, and the job answers
-// with its permit released.
+// A stop, the actor's or only its host's so far, raised while the retiring poll awaits a POST is
+// read again before the write: nothing is written, and the job answers with its permit released.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held() {
     for host in [false, true] {
@@ -1072,9 +1071,8 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     halt(actor.stop, actor.task).await;
 }
 
-// The job in progress answers its own ID asked again with its receipt only for the same operation
-// and request, `at` aside, whatever scope it asks for; a change of operation, operator, reason,
-// cutoff or end is a conflict that writes nothing.
+// The job in progress gives its receipt only to the same operation and request, `at` and scope
+// aside; another operation, operator, reason, cutoff or end is a conflict that writes nothing.
 #[tokio::test(start_paused = true)]
 async fn transition_job_in_progress_refuses_its_id_asked_with_another_request() {
     let chain = chain(8);

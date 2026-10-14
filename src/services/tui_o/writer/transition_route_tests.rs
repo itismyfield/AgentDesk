@@ -592,9 +592,8 @@ mod pg {
         ran.await.unwrap()
     }
 
-    // The CLI's Inspect writes its manifest and its Apply sends that manifest back, over TCP to the
-    // router and the actor of a real PG row: the one hop the scope holds is retired with its audit,
-    // the hop past the cutoff is untouched, and the manifest is never rewritten.
+    // The CLI's Inspect manifest, applied over TCP through the router to a real PG row's actor,
+    // retires the one hop its scope holds with its audit; the hop past it and the manifest stay.
     #[test]
     fn transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();

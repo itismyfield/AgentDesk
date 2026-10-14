@@ -1,6 +1,5 @@
-//! `POST /api/o/transition`: an operator's Inspect of the transition cleanup the channel's writer
-//! actor would do, or its Apply under the scope digest that Inspect gave. This handler is the
-//! cleanup's only production sender.
+//! `POST /api/o/transition`: an operator's Inspect of the channel writer's transition cleanup, or
+//! its Apply under the scope digest that Inspect gave; this handler is the only production sender.
 
 use std::net::SocketAddr;
 

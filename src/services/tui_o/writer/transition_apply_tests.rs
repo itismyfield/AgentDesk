@@ -1,6 +1,5 @@
-//! An Apply runs only on the scope its Inspect approved: the actor compares the digest when it takes
-//! the Apply and again before each retirement, and an Inspect issues one only from its final
-//! snapshot. Also the probe deadline's edge, receipts past a busy budget and the host's stop.
+//! An Apply runs only on the scope its Inspect approved, compared on admission and each retirement;
+//! also the probe deadline's edge and receipts past a busy candidate budget.
 
 use axum::Json;
 use serde_json::{Value, json};
@@ -172,9 +171,8 @@ async fn transition_scope_keeps_every_hop_past_the_candidate_limit_across_a_part
     halt(actor.stop, actor.task).await;
 }
 
-// An Inspect's scope and verdicts come from one final snapshot, so a hop bound during its probes is
-// in both; a final snapshot that cannot be read, or an execution that cannot be verified, issues
-// no scope.
+// An Inspect's scope and verdicts come from one final snapshot, a hop bound during its probes in
+// both; an unreadable final snapshot or an unverified execution issues no scope.
 #[tokio::test(start_paused = true)]
 async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
     let chain = chain(2);
@@ -211,9 +209,8 @@ async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
     halt(actor.stop, actor.task).await;
 }
 
-// A scope change once the Apply was admitted holds every source still to write: before the first
-// write nothing is written; after it, that retirement stays and the rest is held. Common's check
-// would hold them too, so this guards the final write path, not the digest alone.
+// A scope change after admission holds every source still to write, keeping one already retired;
+// Common's check would hold them too, so this guards the final write path, not the digest alone.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_holds_the_rest_once_its_scope_changes_after_admission() {
     for after_first in [false, true] {

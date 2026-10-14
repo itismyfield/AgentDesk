@@ -1,6 +1,5 @@
 //! `agentdesk o transition`: asks the local server what its writer actor would clean up after a
-//! transcript transition, then has it clean up exactly the scope an Inspect manifest approved.
-//! Neither opens a store here.
+//! transcript transition, then applies exactly the scope an Inspect manifest approved; no store.
 
 use std::path::PathBuf;
 
