@@ -101,6 +101,7 @@ impl Fixture {
             captured_through: header_end,
             prefix_hash: checkpoint.prefix_hash.clone(),
             retired: false,
+            transition_cleanup: None,
         };
         let floor = NativeSubmitFloor::capture_before_submit(&proof, &cursor).unwrap();
         let (writer, port) = owed_writer(store);

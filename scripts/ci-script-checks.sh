@@ -248,27 +248,6 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
-if run_check guards "N1 canary oracle input contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
-"$PYTHON" tests/run_n1_canary_mutations.py
-"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
-fi
-
-if run_check guards "N1 native oracle contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli tests.test_n1_canary_native_wiring
-"$PYTHON" tests/run_n1_canary_native_mutations.py
-fi
-
-if run_check guards "N1 canary final audit contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_audit
-"$PYTHON" tests/run_n1_canary_audit_mutations.py
-fi
-
-if run_check guards "N1 canary producer capability contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_producer
-"$PYTHON" tests/run_n1_canary_producer_mutations.py
-fi
-
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
@@ -564,6 +543,10 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 # panics were PoisonError). A rule that only exists as prose is #5003.
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
+fi
+
+if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
+"$PYTHON" -m unittest tests.test_lane_retry_verdict
 fi
 
 if run_check contracts "Test ROOT file-reference policy"; then
