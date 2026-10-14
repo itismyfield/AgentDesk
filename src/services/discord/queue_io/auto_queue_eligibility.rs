@@ -1,6 +1,5 @@
-//! Whether an automatic entry point may offer the queue's first ready input to a busy TUI. This is
-//! decided apart from whether it may start an idle turn: a live foreground turn or a backlog that
-//! is partly parked ends the idle start, not the paste.
+//! Whether an automatic entry point may offer the queue's first ready input to a busy TUI,
+//! decided apart from whether it may start an idle turn: a live turn ends the start, not the paste.
 use super::*;
 use crate::services::discord::busy_followup_retry_store::input_class;
 use crate::services::turn_orchestrator::prefix::{self, Prefix};
@@ -41,9 +40,8 @@ fn held(
         )
 }
 
-/// The switch is read first and alone decides a closed process: no REST call, classifier read or
-/// claim follows it. The channel gate is then asked with the channel's actual parent; `http` is
-/// the caller's REST handle, or `None` to use the runtime's.
+/// The switch is read first: closed, no REST call, classifier read or claim follows. The gate is
+/// then asked with the channel's actual parent, over `http` or, for `None`, the runtime's handle.
 pub(in crate::services::discord) async fn queued_reach(
     http: Option<&Arc<serenity::Http>>,
     shared: &SharedData,

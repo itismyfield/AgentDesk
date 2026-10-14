@@ -1,6 +1,5 @@
-//! Which queued input an automatic busy-TUI paste may take: the first ready one behind nothing but
-//! parked inputs, and the shape a typed paste needs. The caller's look and the actor's claim both
-//! decide here, so they cannot disagree on the rule.
+//! Which queued input an automatic busy-TUI paste may take, and the shape a typed paste needs.
+//! The caller's look and the actor's claim both decide here, so they cannot disagree on the rule.
 use crate::services::discord::busy_followup_retry_store::RetryClass;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 

@@ -59,9 +59,8 @@ async fn claim(handle: &ChannelMailboxHandle, expected: &Intervention) -> &'stat
     )
 }
 
-/// Parked inputs ahead of the first ready one move behind it, in their order, in the same write
-/// that records the reservation; a second claim moves nothing, and a proven NotSent leaves the
-/// input where the reservation put it.
+/// Parked inputs ahead of the first ready one move behind it, in order, in the reserving write;
+/// a second claim moves nothing, and a proven NotSent leaves the input where it was put.
 #[test]
 fn parked_inputs_ahead_move_behind_the_first_ready_one_in_the_reserving_write() {
     let _root = root();
@@ -186,9 +185,8 @@ fn nothing_behind_an_untypable_or_unreadable_input_overtakes_it() {
     });
 }
 
-/// A reservation whose write fails restores the queue order and every record it held: the
-/// submitted sources stay, no head is left in memory, and the next claim reserves as if the
-/// failed one never ran.
+/// A reservation whose write fails restores the queue order and every record it held, so the
+/// next claim reserves as if the failed one never ran; Unknown then holds the tail back.
 #[test]
 fn a_prefix_reservation_that_cannot_be_saved_restores_the_queue_and_its_records() {
     let _root = root();

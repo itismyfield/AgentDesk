@@ -107,16 +107,14 @@ impl Fixture {
     }
 }
 
-/// An enqueue alone reaches a busy pane: H is typed before any 60-second timer, a later input
-/// queues behind what is still ready, and the tail is reached with no further input at all.
+/// An enqueue alone reaches a busy pane before any 60-second timer, and inputs queued behind a
+/// ready one are typed after it, in order, each by its own enqueue.
 #[tokio::test(flavor = "current_thread")]
-async fn s3_an_enqueue_reaches_the_busy_pane_and_the_tail_follows_without_new_input_pg() {
+async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let fixture = Fixture::build(6_813_501, "all").await;
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let h = fixture.arrive_held("H waits for the pane").await;
-    // H is ready, so B queues behind it; B's own enqueue is the only trigger left.
-    fixture.enqueue("B behind H").await;
     fixture
         .until_receipts(1, "the enqueue alone must reach the busy pane")
         .await;
@@ -127,33 +125,31 @@ async fn s3_an_enqueue_reaches_the_busy_pane_and_the_tail_follows_without_new_in
         "no slow check had run"
     );
     until("H is settled", || fixture.terminal() == [h.get()]).await;
-    let queue = fixture.queue().await;
-    assert_eq!(queue.len(), 1);
-    let b = queue[0].message_id;
+    assert!(fixture.queue().await.is_empty());
     fixture.assert_still_busy().await;
 
-    // C arrives while B is ready: it queues behind B, and its enqueue types B, not itself.
-    fixture.submit_composer();
+    let transition = fixture
+        .shared
+        .session_transition_lock(fixture.channel)
+        .lock_owned()
+        .await;
+    fixture.enqueue("B next").await;
+    // C arrives while B is ready: it queues behind B rather than being typed ahead of it.
     fixture.enqueue("C behind B").await;
+    let queue = fixture.queue().await;
+    let (b, c) = (queue[0].message_id, queue[1].message_id);
+    drop(transition);
     fixture
-        .until_receipts(2, "the next enqueue reaches the next ready input")
+        .until_receipts(3, "each enqueue types the next ready input")
         .await;
-    assert_eq!(fixture.receipts()[1], "B behind H");
-    until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
-    let c = fixture.queue().await[0].message_id;
-
-    // Nothing else arrives: the slow backstop the last paste left armed reaches C.
-    fixture.submit_composer();
-    fixture.slow_check().await;
-    fixture
-        .until_receipts(3, "the tail is reached without a new input")
-        .await;
-    assert_eq!(fixture.receipts()[2], "C behind B");
-    until("C is settled", || {
+    assert_eq!(
+        fixture.receipts(),
+        ["H waits for the pane", "B next", "C behind B"]
+    );
+    until("B and C are settled", || {
         fixture.terminal() == [h.get(), b.get(), c.get()]
     })
     .await;
-    assert!(fixture.queue().await.is_empty());
     let typed: Vec<(u64, &str, &str)> = fixture
         .rows()
         .iter()
@@ -168,6 +164,7 @@ async fn s3_an_enqueue_reaches_the_busy_pane_and_the_tail_follows_without_new_in
             (c.get(), "injected", "terminal"),
         ]
     );
+    assert_eq!(backstop::completed_fires(fixture.channel), 0);
     fixture.assert_still_busy().await;
 }
 
@@ -293,19 +290,24 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
     );
     assert_eq!(payloads(items(fixture.disk())), parked);
 
-    let h = fixture.arrive_held("H behind parked P").await;
-    fixture.enqueue("B behind H").await;
-    fixture
-        .until_receipts(1, "a ready input behind a parked one is reached")
+    let transition = fixture
+        .shared
+        .session_transition_lock(fixture.channel)
+        .lock_owned()
         .await;
-    until("H is settled", || fixture.terminal() == [h.get()]).await;
-    let b = fixture.queue().await[0].message_id;
-    assert_ne!(b, p, "the ready tail leads the queue once H is settled");
-    fixture.submit_composer();
-    fixture.slow_check().await;
-    fixture.until_receipts(2, "the tail follows").await;
-    until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
+    fixture.enqueue("H behind parked P").await;
+    fixture.enqueue("B behind H").await;
+    let queue = fixture.queue().await;
+    let (h, b) = (queue[1].message_id, queue[2].message_id);
+    drop(transition);
+    fixture
+        .until_receipts(2, "ready inputs behind a parked one are reached in order")
+        .await;
     assert_eq!(fixture.receipts(), ["H behind parked P", "B behind H"]);
+    until("H and B are settled", || {
+        fixture.terminal() == [h.get(), b.get()]
+    })
+    .await;
     let left = fixture.queue().await;
     assert_eq!(left.len(), 1);
     assert_eq!(
@@ -320,8 +322,8 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
     fixture.assert_still_busy().await;
 }
 
-/// A slow check that fires while an enqueue's owner holds the reservation types nothing: the
-/// input is pasted once and settled once.
+/// A slow check that fires while an enqueue's owner holds the reservation types nothing, and the
+/// tail that enqueue left is reached by the next slow check with no new input.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -369,13 +371,24 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     until("H is settled", || fixture.terminal() == [h.get()]).await;
     assert_eq!(fixture.receipts(), ["H raced by two workers"]);
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-    assert_eq!(fixture.queue().await.len(), 1);
+
+    // B's own enqueue only typed H; nothing new arrives, and the backstop left armed reaches B.
+    let b = fixture.queue().await[0].message_id;
+    fixture.slow_check().await;
+    fixture
+        .until_receipts(2, "the tail is reached without a new input")
+        .await;
+    until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
+    assert_eq!(
+        fixture.receipts(),
+        ["H raced by two workers", "B behind raced H"]
+    );
+    assert!(fixture.queue().await.is_empty());
     fixture.assert_still_busy().await;
 }
 
-/// With the switch, the mode or the channel gate closed, or another provider, every automatic
-/// entry point leaves the queue file's bytes, the holder and the pane exactly as the enqueue left
-/// them, arms nothing of its own and emits no attempt.
+/// With the switch, the mode or the channel gate closed, every automatic entry point leaves the
+/// queue file's bytes, the holder and the pane as they were, arms nothing and emits no attempt.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -492,38 +505,43 @@ async fn s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let fixture = Fixture::new(6_813_531, "all").await;
-    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
-    let h = fixture.queue().await[0].message_id;
-    let (after_effect, resume) = inject_hook::park_queued(fixture.channel.get(), "after_effect");
-    queue_io::schedule_post_enqueue_idle_queue_kick(
-        fixture.shared.clone(),
-        CLAUDE,
-        fixture.channel,
-    );
-    reached(&after_effect).await;
-    assert!(fixture.pane.transcript_recorded_the_paste());
-    assert!(fixture.rows().is_empty(), "no row precedes the settlement");
-    crate::services::turn_orchestrator::test_support::fail_queue_saves(fixture.channel, 1);
-    resume.notify_one();
-    until("the attempt was reported", || !fixture.rows().is_empty()).await;
-    let rows = fixture.rows();
-    assert_eq!(
-        (rows[0].head_message_id, rows[0].outcome, rows[0].head_state),
-        (h.get(), "unconfirmed", "unknown"),
-        "the pane took the paste but the actor never committed it"
-    );
-    assert_eq!(fixture.disk()["head_injection"]["phase"], "unknown");
+    // One fixture at a time: each owns the thread's REST mock and its own database.
+    let unknown_rows = {
+        let fixture = Fixture::new(6_813_531, "all").await;
+        let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+        let h = fixture.queue().await[0].message_id;
+        let (after_effect, resume) =
+            inject_hook::park_queued(fixture.channel.get(), "after_effect");
+        queue_io::schedule_post_enqueue_idle_queue_kick(
+            fixture.shared.clone(),
+            CLAUDE,
+            fixture.channel,
+        );
+        reached(&after_effect).await;
+        assert!(fixture.pane.transcript_recorded_the_paste());
+        assert!(fixture.rows().is_empty(), "no row precedes the settlement");
+        crate::services::turn_orchestrator::test_support::fail_queue_saves(fixture.channel, 1);
+        resume.notify_one();
+        until("the attempt was reported", || !fixture.rows().is_empty()).await;
+        let rows = fixture.rows();
+        assert_eq!(
+            (rows[0].head_message_id, rows[0].outcome, rows[0].head_state),
+            (h.get(), "unconfirmed", "unknown"),
+            "the pane took the paste but the actor never committed it"
+        );
+        assert_eq!(fixture.disk()["head_injection"]["phase"], "unknown");
 
-    // The unknown head is never typed again and nothing behind it is typed in its place.
-    let calls = fixture.pane.tmux_calls();
-    fixture.slow_check().await;
-    quiet().await;
-    assert_eq!(fixture.pane.tmux_calls(), calls);
-    assert_eq!(fixture.receipts(), ["status?"]);
-    let blocked = fixture.rows();
-    let last = blocked.last().unwrap();
-    assert_eq!((last.outcome, last.head_state), ("blocked", "unknown"));
+        // The unknown head is never typed again and nothing behind it is typed in its place.
+        let calls = fixture.pane.tmux_calls();
+        fixture.slow_check().await;
+        quiet().await;
+        assert_eq!(fixture.pane.tmux_calls(), calls);
+        assert_eq!(fixture.receipts(), ["status?"]);
+        let blocked = fixture.rows();
+        let last = blocked.last().unwrap();
+        assert_eq!((last.outcome, last.head_state), ("blocked", "unknown"));
+        blocked
+    };
 
     let idle = Fixture::new(6_813_532, "all").await;
     let _idle_gate = router::busy_inject_support::open_gate(idle.channel.get());
@@ -538,6 +556,25 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
         (row.outcome, row.reason, row.head_state),
         ("not_sent", "not_busy", "queued")
     );
-    let text = format!("{:?}{:?}", fixture.rows(), idle.rows());
+    // The queued-only lane ends at the paste even where an idle start would now be allowed.
+    crate::services::discord::health::end_turn(&idle.shared, idle.channel.get()).await;
+    let before = idle.bytes();
+    let reason = "s3 queued-only boundary";
+    queue_io::kick_queued_only_channel_if_context_available(
+        &idle.shared,
+        &CLAUDE,
+        idle.channel,
+        reason,
+    )
+    .await;
+    assert_eq!(
+        idle.bytes(),
+        before,
+        "the queued-only lane dequeued nothing"
+    );
+    let snapshot = idle.shared.mailbox(idle.channel).snapshot().await;
+    assert_eq!(snapshot.intervention_queue.len(), 2);
+    assert!(snapshot.pending_user_dispatch.is_none() && snapshot.cancel_token.is_none());
+    let text = format!("{unknown_rows:?}{:?}", idle.rows());
     assert!(!text.contains("status?") && !text.contains("distinct tail B"));
 }

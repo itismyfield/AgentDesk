@@ -592,9 +592,8 @@ mod claim {
         }
     }
 
-    /// Reserves the first ready input when it is still `expected`, eligible and owned by nobody
-    /// else. Parked inputs ahead of it move behind it in the same write that records the
-    /// reservation, which is durable before a ticket exists.
+    /// Reserves the first ready input when it is still `expected`, eligible and unowned. Parked
+    /// inputs ahead of it move behind it in the one write that makes the reservation durable.
     fn claim(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
