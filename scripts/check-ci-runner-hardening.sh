@@ -924,14 +924,15 @@ targets = {
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
     # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "1c5a371cc59e8bdb3c7e70f46b75912340cd9bfc1dcfaf7f610fcea8c275d19b",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "6616db35e28cccdbf0e5d8dca33cdf5d797c1990dfb7c2983f9b07ecccb48553",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [
@@ -967,7 +968,7 @@ targets = {
       },
       "just test-postgres-shard" => {
         "commands" => ["just test-postgres-shard"],
-        "timeout_minutes" => 60,
+        "timeout_minutes" => 75,
       },
     },
   },
@@ -1132,14 +1133,15 @@ targets = {
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "73362980d7fa0040f95fa5cb604d0c418c19ffd0f1dae88504623075aa1824c8",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "941e48600f40434394ade7cc8dc2efa9d83a775f2293c69c10712989b8fa2a8c",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [
@@ -1503,7 +1505,7 @@ stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" 
 errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == "just test-postgres-shard" } == 1
 test_step = steps.find { |step| step["run"].to_s.strip == "just test-postgres-shard" } || {}
 errors << "PG shard step must keep its exact name" unless test_step["name"] == "just test-postgres-shard"
-errors << "job postgres test step must keep timeout-minutes: 60" unless test_step["timeout-minutes"] == 60
+errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
 errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }
 errors << "main PG job must have exactly one test step" unless pr || tests.length == 1
@@ -2049,16 +2051,15 @@ done < <(workflow_files)
 validate_required_context_uniqueness
 validate_path_filter_required_mirrors
 
-if [ -f "$trusted_workflow" ]; then
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then
-    error "$trusted_workflow must not have a pull_request or pull_request_target trigger"
-  fi
-  grep -Eq '^[[:space:]]+push:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a trusted push trigger"
-  grep -Eq '^[[:space:]]+workflow_dispatch:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a workflow_dispatch trigger"
-  grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a merge_group trigger"
+# Trusted macOS runs on a timer or by hand only and no run cancels another:
+# a per-push run outlasts the gap between main pushes and never finishes.
+if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
+  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
+  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
+    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
+    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
+  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

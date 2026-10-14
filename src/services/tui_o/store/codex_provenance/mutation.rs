@@ -1,13 +1,23 @@
 //! Read-modify-replace of the sidecar, only through the channel actor's one store.
 
 use super::super::{ChannelStore, StoreError, durable};
+use super::CodexEpisodeDeny;
 use super::submit_floor::{DurableClosedEpisode, Schema2, SubmitFloor};
 #[cfg(test)]
 use super::valid;
 use super::{CODEX_PROVENANCE_FILE, CodexEpisodeSpan};
 #[cfg(test)]
-use super::{CodexEpisodeDeny, CodexProvenance, SCHEMA};
+use super::{CodexProvenance, SCHEMA};
 use super::{Sidecar, retained};
+use crate::services::tui_prompt_dedupe::codex_verified::provenance::decisions::PersistenceReason;
+
+#[derive(Debug)]
+pub(crate) struct DurableDenyRecorded(CodexEpisodeDeny);
+impl DurableDenyRecorded {
+    pub(crate) fn deny(&self) -> &CodexEpisodeDeny {
+        &self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommitStage {
@@ -169,10 +179,80 @@ impl ChannelStore {
         Ok(DurableClosedEpisode::new(span))
     }
 
+    pub(crate) fn record_codex_deny(
+        &mut self,
+        deny: CodexEpisodeDeny,
+    ) -> Result<DurableDenyRecorded, PersistenceReason> {
+        if !crate::services::discord::runtime_store::PARENT_DIR_FSYNC_FLUSHES {
+            return Err(PersistenceReason::StorageFailed);
+        }
+        let read = match self.codex_provenance() {
+            Sidecar::Present(read) => read,
+            Sidecar::Missing => return Err(PersistenceReason::MissingEvidence),
+            Sidecar::Unavailable(_) => return Err(PersistenceReason::ReadBackMismatch),
+        };
+        if deny.execution.proof_seq == 0
+            || !super::whole(self.init.channel, &deny.episode, &deny.execution)
+            || read.spans().iter().any(|span| {
+                span.episode.user_message_id == deny.episode.user_message_id
+                    && span.episode.turn_nonce == deny.episode.turn_nonce
+                    && (span.execution != deny.execution
+                        || span.episode.request_owner_id != deny.episode.request_owner_id
+                        || (!deny.episode.native_turn_id.is_empty()
+                            && span.episode.native_turn_id != deny.episode.native_turn_id))
+            })
+            || read.floors().iter().any(|floor| {
+                let launch = floor.launch();
+                launch.episode.user_message_id == deny.episode.user_message_id
+                    && launch.episode.turn_nonce == deny.episode.turn_nonce
+                    && (launch.episode.channel_id != deny.episode.channel_id
+                        || launch.episode.request_owner_id != deny.episode.request_owner_id
+                        || (!launch.episode.native_turn_id.is_empty()
+                            && launch.episode.native_turn_id != deny.episode.native_turn_id)
+                        || match floor {
+                            SubmitFloor::NativeFloor(native) => {
+                                native.execution() != &deny.execution
+                            }
+                            SubmitFloor::PreparedLaunch(_) => {
+                                launch.context.execution_nonce != deny.execution.execution_nonce
+                                    || launch.context.tmux_session != deny.execution.tmux_session
+                                    || launch.context.owner_runtime_root
+                                        != deny.execution.owner_runtime_root
+                            }
+                        })
+            })
+        {
+            return Err(PersistenceReason::IdentityMismatch);
+        }
+        let mut next = read.1.unwrap_or(Schema2 {
+            schema: 2,
+            channel: read.0.channel,
+            spans: read.0.spans,
+            denies: read.0.denies,
+            floors: Vec::new(),
+        });
+        if !next.denies.contains(&deny) {
+            next.denies.push(deny.clone());
+        }
+        let mut reason = PersistenceReason::IdentityMismatch;
+        self.publish_codex_floor_checked(next, false, &mut reason)
+            .map_err(|_| reason)?;
+        Ok(DurableDenyRecorded(deny))
+    }
+
     fn publish_codex_floor(
         &mut self,
         next: Schema2,
         create: bool,
+    ) -> Result<super::ValidatedCodexProvenance, StoreError> {
+        self.publish_codex_floor_checked(next, create, &mut PersistenceReason::IdentityMismatch)
+    }
+
+    fn publish_codex_floor_checked(
+        &mut self,
+        next: Schema2,
+        create: bool,
+        reason: &mut PersistenceReason,
     ) -> Result<super::ValidatedCodexProvenance, StoreError> {
         if !next.valid(self.init.channel) {
             return Err(StoreError::Rejected("conflicting submit provenance".into()));
@@ -193,6 +273,7 @@ impl ChannelStore {
             Sidecar::Missing if create => {}
             _ => return Err(StoreError::Rejected("submit provenance changed".into())),
         }
+        *reason = PersistenceReason::StorageFailed;
         let bytes = serde_json::to_vec(&next)?;
         let path = self.dir.join(CODEX_PROVENANCE_FILE);
         let temp = self.dir.join(format!(
@@ -209,7 +290,10 @@ impl ChannelStore {
             stage(CommitStage::ReadBack)?;
             match store.codex_provenance() {
                 Sidecar::Present(read) if read.1.as_ref() == Some(&next) => Ok(read),
-                _ => Err(std::io::Error::other("Codex provenance read-back failed").into()),
+                _ => {
+                    *reason = PersistenceReason::ReadBackMismatch;
+                    Err(std::io::Error::other("Codex provenance read-back failed").into())
+                }
             }
         })
     }

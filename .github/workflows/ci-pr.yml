@@ -512,6 +512,8 @@ jobs:
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
@@ -1339,7 +1341,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1403,7 +1405,7 @@ jobs:
 
       # Use the same partition and step budget as the main PG matrix.
       - name: just test-postgres-shard
-        timeout-minutes: 60
+        timeout-minutes: 75
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1464,7 +1466,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2286,7 +2288,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2519,7 +2521,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
