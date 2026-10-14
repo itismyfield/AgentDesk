@@ -1,6 +1,7 @@
 //! Reconciles an operation from its durable progress, the canonical owner's observation and
 //! whether the earlier execution can still run; only a truly undecided case holds.
 
+use super::capability::EndProof;
 use super::model::{CanonicalSeal, CustodyRecord, IssuedEpisode, Observed, Phase};
 use super::operation::{ActiveOperation, OperationKind, Root, Stage, StageStatus};
 
@@ -15,13 +16,21 @@ pub(crate) enum Action {
 /// Whether the earlier execution of the operation can still apply anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PriorExecution {
-    /// Revoked, cooperatively ended, or its process is gone.
-    Ended,
-    /// This process incarnation still runs it (a live lease, the actual actor).
-    SameOwnerLive {
-        process_incarnation: String,
-    },
+    /// The proof's arm is revoked and drained, or its process is gone.
+    Ended(EndProof),
+    /// This process still serves the operation (a live lease, the actual actor); an incarnation
+    /// match alone is not this.
+    SameOwnerLive(LiveOwner),
     Unknown,
+}
+
+/// The registry's account of the same operation still served in this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveOwner {
+    pub(crate) process_incarnation: String,
+    pub(crate) operation_id: String,
+    /// The end proof of the armed stage's own arm, once its applier is over.
+    pub(crate) applier_ended: Option<EndProof>,
 }
 
 /// How an owned return gets its sources back into the queue.
@@ -72,12 +81,16 @@ pub(crate) enum Verdict {
     Owned {
         by: String,
     },
-    /// The operation becomes an owned return of its sources.
+    /// The operation becomes an owned return of its sources; `confirmed` is the armed stage this
+    /// reconcile saw applied, which the return keeps answering for.
     Return {
         path: ReturnPath,
+        confirmed: Option<Stage>,
     },
     /// Responsibility ended with evidence.
     Close,
+    /// A hold over a settled stage lifts with its stored seal seen again; nothing new is confirmed.
+    Restored,
     Held {
         missing: &'static str,
     },
@@ -120,14 +133,35 @@ fn last_debt(op: &ActiveOperation) -> Option<String> {
     op.handoffs.last().cloned()
 }
 
-/// A legacy result ends the responsibility only with the evidence its kind names.
+fn unsettled(op: &ActiveOperation) -> Option<Verdict> {
+    matches!(
+        op.status,
+        StageStatus::ApplyArmed | StageStatus::Indeterminate
+    )
+    .then_some(Verdict::Refused {
+        reason: "an armed stage settles through its outcome",
+    })
+}
+
+/// A "nothing ran" claim ends only an unarmed reservation that applied nothing; an armed stage
+/// settles through its own outcome. `None` leaves the claim to the caller.
+pub(crate) fn not_run_verdict(op: &ActiveOperation) -> Option<Verdict> {
+    unsettled(op).or_else(|| {
+        (op.status == StageStatus::ReservedNotArmed && !op.has_applied())
+            .then_some(Verdict::NoApply)
+    })
+}
+
+/// A legacy result ends the responsibility only with the evidence its kind names, and never
+/// while an armed stage's outcome is still unsettled.
 pub(crate) fn legacy_verdict(op: &ActiveOperation, result: &LegacyResult) -> Verdict {
+    if let Some(refused) = unsettled(op) {
+        return refused;
+    }
     match result {
-        LegacyResult::NoApply(_)
-            if !op.has_applied() && op.status != StageStatus::Indeterminate =>
-        {
-            Verdict::NoApply
-        }
+        LegacyResult::NoApply(_) => not_run_verdict(op).unwrap_or(Verdict::Held {
+            missing: "proof that nothing was applied",
+        }),
         LegacyResult::LocalClaim { bound_to: Some(by) } => Verdict::Owned { by: by.clone() },
         LegacyResult::ConsumedToHold {
             hold_id: Some(_),
@@ -135,11 +169,10 @@ pub(crate) fn legacy_verdict(op: &ActiveOperation, result: &LegacyResult) -> Ver
         }
         | LegacyResult::Forwarded { receipt: Some(_) }
         | LegacyResult::Duplicate { evidence: Some(_) } => Verdict::Close,
+        // A return request alone confirms no effect.
         LegacyResult::ReturnRequired => Verdict::Return {
             path: ReturnPath::LiveLease,
-        },
-        LegacyResult::NoApply(_) => Verdict::Held {
-            missing: "proof that nothing was applied",
+            confirmed: None,
         },
         _ => Verdict::Held {
             missing: "the legacy result's evidence",
@@ -166,9 +199,36 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
             missing: "an observation by the canonical owner",
         };
     };
-    let ended = evidence.prior == PriorExecution::Ended;
-    let same_live = matches!(&evidence.prior, PriorExecution::SameOwnerLive { process_incarnation }
-        if *process_incarnation == record.owner.process_incarnation);
+    // An end proof counts only for the row's current operation and arm.
+    let ended = matches!(&evidence.prior, PriorExecution::Ended(proof) if proof.names(op));
+    let same_live = matches!(&evidence.prior, PriorExecution::SameOwnerLive(live)
+        if live.process_incarnation == record.owner.process_incarnation
+            && live.operation_id == op.operation_id
+            && live.applier_ended.as_ref().is_some_and(|proof| proof.names(op)));
+    // A held stage whose result is known leaves only the root's disposition undecided; it is judged
+    // against the seal its outcome stored.
+    let held_known = record.phase == Phase::Held
+        && op.status == StageStatus::KnownOutcome
+        && op.applied.contains(&op.stage);
+    // A held stage with nothing undecided (unapplied known outcome, unarmed later stage) only
+    // returns to work, keeping its stage, grant and applied stages.
+    let held_settled = record.phase == Phase::Held
+        && match op.status {
+            StageStatus::KnownOutcome => !op.applied.contains(&op.stage),
+            StageStatus::ReservedNotArmed => op.has_applied(),
+            _ => false,
+        };
+    if held_settled {
+        return match (*seen == record.canonical_seal, ended || same_live) {
+            (true, true) => Verdict::Restored,
+            (true, false) => Verdict::Held {
+                missing: "the end of the earlier execution",
+            },
+            (false, _) => Verdict::Held {
+                missing: "stores that still match the stored seal",
+            },
+        };
+    }
     match op.status {
         StageStatus::ReservedNotArmed if !op.has_applied() => {
             if action != Action::RecheckApply {
@@ -183,6 +243,7 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
                 missing: "stores that still match the reservation",
             };
         }
+        StageStatus::KnownOutcome if held_known => {}
         StageStatus::ReservedNotArmed | StageStatus::KnownOutcome => {
             return Verdict::Refused {
                 reason: "nothing is undecided",
@@ -190,19 +251,23 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
         }
         StageStatus::ApplyArmed | StageStatus::Indeterminate => {}
     }
-    let Some(expected) = op.expected_after.as_ref() else {
+    let expected = if held_known {
+        &record.canonical_seal
+    } else if let Some(expected) = op.expected_after.as_ref() {
+        expected
+    } else {
         return Verdict::Held {
             missing: "the armed stage's expected state",
         };
     };
-    match op.stage {
+    let verdict = match op.stage {
         Stage::MarkerPublish if present(&expected.marker) && seen.marker == expected.marker => {
             if seen.queue != op.before.queue {
                 return Verdict::Held {
                     missing: "a queue still in its old state",
                 };
             }
-            marker_only(action, ended, evidence.followup_granted)
+            marker_only(action, evidence.followup_granted)
         }
         Stage::QueueCommit if seen.queue == expected.queue && seen.marker == expected.marker => {
             queue_committed(op, action, evidence, ended, same_live)
@@ -222,22 +287,26 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
             },
         },
         // An armed step whose stores still read as before, with its execution ended, never published.
-        stage if *seen == op.before && ended && action == Action::RecheckApply => Verdict::Resume {
-            stage,
-            reuse: last_debt(op),
-        },
+        stage if *seen == op.before && ended && !held_known && action == Action::RecheckApply => {
+            Verdict::Resume {
+                stage,
+                reuse: last_debt(op),
+            }
+        }
         _ => Verdict::Held {
             missing: "the step's outcome",
         },
-    }
-}
-
-fn marker_only(action: Action, ended: bool, followup_granted: bool) -> Verdict {
-    if !ended {
+    };
+    // A new stage or an end needs the earlier execution over, not merely the same process alive.
+    if !ended && !same_live && !matches!(verdict, Verdict::Held { .. } | Verdict::Refused { .. }) {
         return Verdict::Held {
             missing: "the end of the earlier execution",
         };
     }
+    verdict
+}
+
+fn marker_only(action: Action, followup_granted: bool) -> Verdict {
     if followup_granted {
         return Verdict::Held {
             missing: "the result of the granted follow-up",
@@ -251,6 +320,7 @@ fn marker_only(action: Action, ended: bool, followup_granted: bool) -> Verdict {
         // The queue still holds the sources, so returning them leaves only the exact Marker.
         Action::CompleteReturn => Verdict::Return {
             path: ReturnPath::CleanupOnly,
+            confirmed: Some(Stage::MarkerPublish),
         },
         _ => Verdict::Refused {
             reason: "a published Marker resumes or returns",
@@ -279,9 +349,11 @@ fn queue_committed(
         },
         Action::CompleteReturn if same_live => Verdict::Return {
             path: ReturnPath::LiveLease,
+            confirmed: Some(Stage::QueueCommit),
         },
         Action::CompleteReturn if ended => Verdict::Return {
             path: ReturnPath::DurableReconstruct,
+            confirmed: Some(Stage::QueueCommit),
         },
         Action::CompleteReturn => Verdict::Held {
             missing: "the end of the earlier execution",
@@ -352,6 +424,7 @@ fn source_return(
         } else {
             Verdict::Return {
                 path: ReturnPath::CleanupOnly,
+                confirmed: Some(Stage::SourceReturn),
             }
         };
     }
@@ -363,11 +436,13 @@ fn source_return(
     if same_live {
         return Verdict::Return {
             path: ReturnPath::LiveLease,
+            confirmed: None,
         };
     }
     if ended && present(&seen.marker) && seen.marker == op.before.marker {
         return Verdict::Return {
             path: ReturnPath::DurableReconstruct,
+            confirmed: None,
         };
     }
     Verdict::Held {
@@ -392,9 +467,21 @@ fn closed(record: &CustodyRecord) -> CustodyRecord {
     }
 }
 
-/// The row a verdict writes; `None` for a refusal, which writes nothing.
-pub(crate) fn next_record(record: &CustodyRecord, verdict: &Verdict) -> Option<CustodyRecord> {
+/// The row a verdict writes; `None` for a refusal, which writes nothing. A decided transition
+/// stores the seal it was verified against; a hold keeps the last known one.
+pub(crate) fn next_record(
+    record: &CustodyRecord,
+    verdict: &Verdict,
+    verified: Option<&CanonicalSeal>,
+) -> Option<CustodyRecord> {
     let mut op = record.active_operation.clone()?;
+    let record = &match verified {
+        Some(seen) if !matches!(verdict, Verdict::Held { .. }) => CustodyRecord {
+            canonical_seal: seen.clone(),
+            ..record.clone()
+        },
+        _ => record.clone(),
+    };
     let note_applied = |op: &mut ActiveOperation, stage| {
         if !op.applied.contains(&stage) {
             op.applied.push(stage);
@@ -403,6 +490,7 @@ pub(crate) fn next_record(record: &CustodyRecord, verdict: &Verdict) -> Option<C
     match verdict {
         Verdict::Refused { .. } => return None,
         Verdict::NoApply | Verdict::Close => return Some(closed(record)),
+        Verdict::Restored => {}
         Verdict::Held { .. } => {
             if op.status == StageStatus::ApplyArmed {
                 op.status = StageStatus::Indeterminate;
@@ -413,7 +501,7 @@ pub(crate) fn next_record(record: &CustodyRecord, verdict: &Verdict) -> Option<C
                 ..record.clone()
             });
         }
-        Verdict::Resume { stage, .. } => {
+        Verdict::Resume { stage, reuse } => {
             // Moving on to a later stage confirms the current one.
             if *stage != op.stage {
                 let current = op.stage;
@@ -422,6 +510,7 @@ pub(crate) fn next_record(record: &CustodyRecord, verdict: &Verdict) -> Option<C
             op.stage = *stage;
             op.status = StageStatus::ReservedNotArmed;
             op.expected_after = None;
+            op.reuse.clone_from(reuse);
         }
         Verdict::Confirmed => {
             // Only an armed stage is confirmed applied; a known outcome stays as it was.
@@ -436,10 +525,14 @@ pub(crate) fn next_record(record: &CustodyRecord, verdict: &Verdict) -> Option<C
         }
         Verdict::Owned { by } => {
             note_applied(&mut op, Stage::ActorInstall);
-            op.handoffs.push(by.clone());
+            op.record_handoff(by);
             op.status = StageStatus::KnownOutcome;
         }
-        Verdict::Return { .. } => {
+        Verdict::Return { confirmed, .. } => {
+            if let Some(stage) = *confirmed {
+                note_applied(&mut op, stage);
+            }
+            op.reuse = None;
             op.kind = OperationKind::ReturnOnly;
             op.stage = Stage::SourceReturn;
             op.status = StageStatus::ReservedNotArmed;
@@ -471,7 +564,9 @@ pub(crate) fn settled_record(
             if !op.applied.contains(&op.stage) {
                 op.applied.push(op.stage);
             }
-            op.handoffs.extend(handoff.iter().cloned());
+            if let Some(handoff) = handoff {
+                op.record_handoff(handoff);
+            }
             op.status = StageStatus::KnownOutcome;
             Some(CustodyRecord {
                 phase: working_phase(&op),
@@ -495,6 +590,7 @@ pub(crate) fn settled_record(
             &Verdict::Held {
                 missing: "the armed stage's outcome",
             },
+            None,
         ),
     }
 }
