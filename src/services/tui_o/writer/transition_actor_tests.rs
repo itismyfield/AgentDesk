@@ -1,7 +1,7 @@
 //! An operator's transition cleanup sent to a running actor through its run's mailbox, over a
 //! real store, real readers and the actor's own loop.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -457,7 +457,8 @@ async fn transition_apply_settles_all_fifty_nine_hops_of_both_fixtures() {
     }
 }
 
-// A job probes at most 64 candidates; the rest are held for a later job.
+// A job probes at most 64 candidates, sources still to retire first, so a second job retires
+// what the first held at the limit.
 #[tokio::test(start_paused = true)]
 async fn transition_job_probes_at_most_sixty_four_candidates() {
     let chain = chain(65);
@@ -481,6 +482,18 @@ async fn transition_job_probes_at_most_sixty_four_candidates() {
         (0..65).all(|n| !chain.cursor(n).retired),
         "[B4:inspect_writes]"
     );
+    let apply = || {
+        ask(
+            &actor,
+            Operation::Apply(chain.request(JOB)),
+            chain.context(),
+        )
+    };
+    apply().await;
+    let reply = apply().await;
+    let done = (0..65).filter(|n| chain.cursor(*n).retired && chain.audit(*n).is_some());
+    assert_eq!(done.count(), 65, "[B4:second_job_retires_the_rest]");
+    assert_eq!(reply.unsettled, Some(0), "[B4:second_job_settles]");
     halt(actor.stop, actor.task).await;
 }
 
@@ -549,6 +562,41 @@ async fn transition_probes_run_on_one_worker_however_slow_it_is() {
     assert!((0..5).all(|n| !chain.cursor(n).retired), "[B4:unapplied]");
     let limit = (reply.hops.iter()).all(|hop| hop.outcome == Outcome::Held(Hold::Limit));
     assert!(limit, "[B4:deadline] {:?}", reply.hops);
+    halt(actor.stop, actor.task).await;
+}
+
+// A second probe back only past the deadline stays unrecorded: the source is held at the limit
+// and nothing is written.
+#[tokio::test(start_paused = true)]
+async fn transition_second_probe_back_past_the_deadline_writes_nothing() {
+    let chain = chain(1);
+    let _current = chain.current();
+    let held = Arc::new(AtomicBool::new(false));
+    let release = Release(Arc::clone(&held));
+    let actor = run_with(&chain, None, Arc::clone(&held));
+    settle(&chain).await;
+    let (base, before) = (hooks::started(), files(&chain.dir()));
+    let asked = send(
+        &actor,
+        Operation::Apply(chain.request(JOB)),
+        chain.context(),
+    );
+    for _ in 0..5 {
+        if hooks::started() > base {
+            break;
+        }
+        polls(1).await;
+    }
+    hooks::settle_workers();
+    held.store(true, Ordering::Release);
+    steps(75).await;
+    assert_eq!(hooks::started() - base, 2, "[late:second_probe]");
+    drop(release);
+    let reply = answered(asked).await;
+    assert_eq!(files(&chain.dir()), before, "[late:bytes]");
+    assert_eq!(chain.audit(0), None, "[late:audit]");
+    let outcome = outcomes(&reply)[&chain.key(0)].clone();
+    assert_eq!(outcome, Outcome::Held(Hold::Limit), "[late:limit]");
     halt(actor.stop, actor.task).await;
 }
 
@@ -811,6 +859,74 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
     );
 }
 
+// A stop raised while the poll that would retire a source awaits a POST is read again before the
+// write: nothing is written, and the job answers with its permit released.
+#[tokio::test(start_paused = true)]
+async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held() {
+    let chain = chain(1);
+    let _current = chain.current();
+    let held = Arc::new(AtomicBool::new(false));
+    let release = Release(Arc::clone(&held));
+    let actor = run_with(&chain, None, Arc::clone(&held));
+    settle(&chain).await;
+    let home = admitting_home();
+    let context = Context {
+        permit: home.admit_command("claude"),
+        ..chain.context()
+    };
+    let (base, kept) = (hooks::started(), chain.cursor_file(0));
+    let asked = send(&actor, Operation::Apply(chain.request(JOB)), context);
+    for _ in 0..5 {
+        if hooks::started() > base {
+            break;
+        }
+        polls(1).await;
+    }
+    hooks::settle_workers();
+    held.store(true, Ordering::Release);
+    let (port, lease) = (&chain.harness.port, &chain.harness.lease);
+    lease.busy.store(true, Ordering::SeqCst);
+    append(&chain.paths[1], &row("n9", "held back"));
+    for _ in 0..30 {
+        if hooks::started() - base == 2 {
+            break;
+        }
+        steps(1).await;
+    }
+    assert_eq!(hooks::started() - base, 2, "[stop:second_probe]");
+    drop(release);
+    hooks::settle_workers();
+    for _ in 0..5 {
+        if actor.unsettled.borrow().is_none() {
+            break;
+        }
+        steps(1).await;
+    }
+    assert_eq!(*actor.unsettled.borrow(), None, "[stop:applying]");
+    let (unhold, hold) = tokio::sync::oneshot::channel();
+    port.lazy.store(true, Ordering::SeqCst);
+    *port.hold.lock().unwrap() = Some(hold);
+    lease.busy.store(false, Ordering::SeqCst);
+    for _ in 0..5 {
+        if !port.started.lock().unwrap().is_empty() {
+            break;
+        }
+        steps(1).await;
+    }
+    assert_eq!(*port.started.lock().unwrap(), ["http"], "[stop:posting]");
+    actor.stop.send_replace(true);
+    unhold.send(()).unwrap();
+    let reply = asked.await.unwrap().unwrap();
+    assert_eq!(chain.audit(0), None, "[stop:audit]");
+    assert_eq!(chain.cursor_file(0), kept, "[stop:cursor]");
+    let outcome = outcomes(&reply)[&chain.key(0)].clone();
+    assert_eq!(outcome, Outcome::Held(Hold::Stopping), "[stop:outcome]");
+    assert_eq!(home.commands_in_flight(), 0, "[stop:permit]");
+    let last = port.posts().last().cloned();
+    assert_eq!(last.as_deref(), Some("held back"), "[stop:delivered]");
+    actor.task.await.unwrap();
+}
+
 // Output the actor still queues refuses every hop until it is delivered.
 #[tokio::test(start_paused = true)]
 async fn transition_judges_what_the_actor_still_owes_from_its_own_state() {
@@ -930,6 +1046,62 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     assert_eq!(chain.cursor_file(0), kept, "[B3:read_again_not_retired]");
     let outcome = outcomes(&reply)[&chain.key(0)].clone();
     assert_eq!(outcome, Outcome::Held(Hold::PriorCleanup), "[B3:prior]");
+    halt(actor.stop, actor.task).await;
+}
+
+// The job in progress answers its own ID asked again with its receipt only for the same request,
+// `at` aside; a change of operator, reason, cutoff or end is a conflict that writes nothing.
+#[tokio::test(start_paused = true)]
+async fn transition_job_in_progress_refuses_its_id_asked_with_another_request() {
+    let chain = chain(8);
+    let _current = chain.current();
+    let actor = run(&chain);
+    settle(&chain).await;
+    type Change = (&'static str, fn(&mut Request));
+    let changes: [Change; 5] = [
+        ("operator", |r| r.operator = "another".into()),
+        ("reason", |r| r.reason = "another".into()),
+        ("cutoff", |r| r.cutoff += 1),
+        ("termination", |r| r.termination = None),
+        ("at", |r| r.at += TimeDelta::hours(1)),
+    ];
+    let mut asks: Vec<_> = (changes.iter())
+        .map(|(case, change)| {
+            let mut request = chain.request(JOB);
+            change(&mut request);
+            (*case, Operation::Apply(request), chain.context())
+        })
+        .collect();
+    let (port, writes, sent) = (actor.port.clone(), Rc::new(Cell::new(0)), Rc::default());
+    let (count, record): (_, Rc<RefCell<Vec<_>>>) = (Rc::clone(&writes), Rc::clone(&sent));
+    let _hook = hooks::on_retire(move || {
+        count.set(count.get() + 1);
+        for (case, operation, context) in asks.drain(..) {
+            let port = port.clone();
+            let asked = tokio::spawn(async move { port.request(operation, context).await });
+            record.borrow_mut().push((case, asked));
+        }
+    });
+    ask(
+        &actor,
+        Operation::Apply(chain.request(JOB)),
+        chain.context(),
+    )
+    .await;
+    assert_eq!(writes.get(), 8, "[B3:in_progress] writes");
+    let audited = |n: usize| {
+        let audit = chain.cursor(n).transition_cleanup;
+        audit.is_some_and(|a| a.operator == "operator" && a.reason == "herdr transition")
+    };
+    assert!((0..8).all(audited), "[B3:in_progress] audits");
+    for (case, asked) in sent.take() {
+        let refused = asked.await.unwrap().unwrap().refused;
+        let wanted = match case {
+            "at" => Refused::InProgress,
+            _ => Refused::JobConflict,
+        };
+        assert_eq!(refused, Some(wanted), "[B3:in_progress:{case}]");
+    }
     halt(actor.stop, actor.task).await;
 }
 
