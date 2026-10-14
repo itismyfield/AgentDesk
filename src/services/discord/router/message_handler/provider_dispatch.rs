@@ -177,6 +177,9 @@ pub(super) fn execute(
     start: ReplayStart,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    // A retired runtime refuses before the permit, the host branch and the capacity slot.
+    let channel = Some(turn.channel_id);
+    crate::services::provider_hosting::ensure_runtime_executable(turn.provider, channel)?;
     // Spent before any driver, Herdr included, so a protected start's first input needs its permit.
     let target = EffectTarget::ProviderStart {
         provider: turn.provider.as_str().to_string(),
@@ -716,6 +719,107 @@ mod tests {
                 .session
                 .is_none()
         );
+    }
+
+    /// A retired runtime refuses before permit, host branch, capacity and driver, and the bridge
+    /// still reports it; a supported runtime, even a claude-e channel, reaches the Claude driver.
+    #[test]
+    fn a_retired_runtime_refuses_before_the_host_branch_and_the_driver() {
+        use crate::services::discord::inflight::{
+            InflightTurnState, install_managed_submission_boundary,
+        };
+        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const CHANNEL: u64 = 6_570_641;
+        let provider = ProviderKind::Claude;
+        let driven = Arc::new(AtomicUsize::new(0));
+        let mut state = InflightTurnState::new(
+            provider.clone(),
+            CHANNEL,
+            Some("zp1".into()),
+            7,
+            CHANNEL + 10,
+            CHANNEL + 11,
+            "managed prompt".into(),
+            None,
+            Some(format!("AgentDesk-claude-zp1-{CHANNEL}")),
+            None,
+            None,
+            0,
+        );
+        state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
+        let submission = install_managed_submission_boundary(&mut state, &TurnHost::Tmux)
+            .expect("managed route");
+        let refused_host = TurnHost::Refused(HerdrRefusal::ExecutorNotWired);
+        let run = |host: &TurnHost, submission: Option<&ManagedSubmission>| {
+            let driven = Arc::clone(&driven);
+            let probe: ClaudeLegacyProbe = Box::new(move || {
+                driven.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            *CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((CHANNEL, probe));
+            let (sender, _receiver) = std::sync::mpsc::channel();
+            let turn = StreamingTurn {
+                pool: None,
+                provider: &provider,
+                prompt: "question",
+                session_id: None,
+                working_dir: ".",
+                system_prompt: None,
+                allowed_tools: &[],
+                cancel: Arc::new(CancelToken::new()),
+                remote_profile: None,
+                tmux_session_name: None,
+                teardown: None,
+                host,
+                channel_id: CHANNEL,
+                model: None,
+                native_fast_mode: None,
+                codex_goals: None,
+                compact_percent: None,
+                compact_lower_bound_tokens: 0,
+                compact_token_limit: None,
+                cache_ttl_minutes: None,
+                dispatch_type: None,
+                force_fresh: false,
+                submission,
+            };
+            use crate::services::discord::router::intake_dispatch::replay_admission;
+            let result = execute(
+                turn,
+                replay_admission::dormant_start("test").unwrap(),
+                sender,
+            );
+            CLAUDE_LEGACY_PROBE.lock().unwrap().take();
+            result
+        };
+        {
+            let _retired = retired_runtime_for_tests::retire(&provider, Some(CHANNEL));
+            for host in [&TurnHost::Tmux, &refused_host] {
+                let error = run(host, Some(&submission)).unwrap_err();
+                let message = producer_error(Some(&submission), CHANNEL, error);
+                let notice = |text: &str| text.contains(RetiredRuntimeError::CODE);
+                assert!(
+                    matches!(&message, Some(StreamMessage::Error { message, .. }) if notice(message)),
+                    "{message:?}"
+                );
+            }
+        }
+        assert_eq!(
+            driven.load(Ordering::SeqCst),
+            0,
+            "a retired runtime ran a driver"
+        );
+        for runtime in ["pipe", "tui", "claude-e"] {
+            let _runtime = retired_runtime_for_tests::install_channel_runtime(CHANNEL, runtime);
+            assert_eq!(run(&TurnHost::Tmux, None), Ok(()), "{runtime}");
+            let herdr = run(&refused_host, None).unwrap_err();
+            assert!(
+                !herdr.contains(RetiredRuntimeError::CODE),
+                "{runtime}: {herdr}"
+            );
+        }
+        assert_eq!(driven.load(Ordering::SeqCst), 3);
     }
 
     // A configured Claude channel is refused at the dispatch entry, before the capacity slot and any
