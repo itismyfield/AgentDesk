@@ -12,6 +12,8 @@ use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 use super::activity::{Activity, Reading, reading_now};
+#[cfg(all(test, unix))]
+use super::strict_runtime::Strict;
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 
@@ -190,6 +192,9 @@ trait Effects: Send + Sync + 'static {
 struct Supervisor<E: Effects> {
     effects: Arc<E>,
     channels: HashMap<u64, Arc<Mutex<Presence>>>,
+    /// Reads, sends and notices go through this runtime when given; production gives none.
+    #[cfg(all(test, unix))]
+    strict: Option<Arc<Strict>>,
 }
 
 impl<E: Effects> Supervisor<E> {
@@ -197,6 +202,16 @@ impl<E: Effects> Supervisor<E> {
         Self {
             effects,
             channels: HashMap::new(),
+            #[cfg(all(test, unix))]
+            strict: None,
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn strict(effects: Arc<E>, strict: Arc<Strict>) -> Self {
+        Self {
+            strict: Some(strict),
+            ..Self::new(effects)
         }
     }
 
@@ -220,9 +235,22 @@ impl<E: Effects> Supervisor<E> {
         let presence = self.channels.entry(channel).or_insert_with(|| {
             let presence = Arc::new(Mutex::new(Presence::new()));
             lock(&PRESENCE).insert(channel, presence.clone());
+            #[cfg(all(test, unix))]
+            if let Some(strict) = &self.strict {
+                strict.presences().show(channel, &presence);
+            }
             presence
         });
         presence.clone()
+    }
+
+    /// A strict runtime reads under the channel's registration and withholds a stale reading.
+    #[cfg(all(test, unix))]
+    async fn read(&self, channel: u64) -> Option<Reading> {
+        match &self.strict {
+            Some(strict) => strict.read(channel).await,
+            None => Some(self.effects.read(channel).await),
+        }
     }
 
     fn earliest_deadline(&self) -> Option<Instant> {
@@ -236,8 +264,18 @@ impl<E: Effects> Supervisor<E> {
     }
 
     async fn tick(&mut self, now: Instant) {
+        #[cfg(all(test, unix))]
+        if let Some(strict) = &self.strict {
+            strict.prune();
+            strict.presences().prune(&mut self.channels);
+        }
         for channel in self.effects.channels() {
             let presence = self.presence(channel);
+            #[cfg(all(test, unix))]
+            let Some(reading) = self.read(channel).await else {
+                continue;
+            };
+            #[cfg(not(all(test, unix)))]
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
@@ -288,6 +326,11 @@ impl<E: Effects> Supervisor<E> {
         generation: u64,
         at: Instant,
     ) {
+        #[cfg(all(test, unix))]
+        if let Some(strict) = &self.strict {
+            start_strict(strict, channel, presence, generation, at);
+            return;
+        }
         let (effects, state) = (self.effects.clone(), presence.clone());
         let mut guard = lock(presence);
         guard.next_typing_at = None;
@@ -328,11 +371,17 @@ impl<E: Effects> Supervisor<E> {
             Action::Notice(text) => {
                 tracing::warn!(channel, "[turn_presence] unknown_notice channel={channel}");
                 let effects = self.effects.clone();
-                tokio::spawn(async move {
+                let notice = async move {
                     if let Err(error) = effects.notice(channel, text).await {
                         tracing::warn!(channel, %error, "[turn_presence] notice failed");
                     }
-                });
+                };
+                #[cfg(all(test, unix))]
+                if let Some(strict) = &self.strict {
+                    strict.spawn(channel, notice);
+                    return;
+                }
+                tokio::spawn(notice);
             }
         }
     }
@@ -505,6 +554,123 @@ fn typed(
     }
 }
 
+/// Sends under the channel's current registration, which owns the task before its first poll. A
+/// completion counts only while that registration holds; a refusal sent nothing and keeps the cadence.
+#[cfg(all(test, unix))]
+fn start_strict(
+    strict: &Arc<Strict>,
+    channel: u64,
+    presence: &Arc<Mutex<Presence>>,
+    generation: u64,
+    at: Instant,
+) {
+    let Some(ticket) = strict.ticket(channel) else {
+        return;
+    };
+    let (send, held, state) = (
+        strict.clone().send(ticket.clone()),
+        ticket.clone(),
+        presence.clone(),
+    );
+    let work = async move {
+        let sent = send.await;
+        let ok = matches!(sent, Some(Ok(())));
+        let counted = held.with_current(|_| {
+            let mut presence = lock(&state);
+            match sent {
+                Some(sent) => typed(&mut presence, channel, generation, at, sent),
+                None if presence.generation == generation
+                    && presence.activity == Activity::Busy =>
+                {
+                    presence.sending = None;
+                    presence.next_typing_at = Some(at + TYPING_EVERY);
+                }
+                None => {}
+            }
+        });
+        if counted.is_none() {
+            lock(&state).late_ok_total += u64::from(ok);
+        }
+    };
+    ticket.own_child(work, |sending| {
+        let mut presence = lock(presence);
+        presence.next_typing_at = None;
+        presence.sending = Some(sending);
+    });
+}
+
+/// The presences a strict runtime's registrations show; each reset clears its own under the fence.
+#[cfg(all(test, unix))]
+#[derive(Default)]
+pub(super) struct Presences(Mutex<HashMap<u64, Arc<Mutex<Presence>>>>);
+
+#[cfg(all(test, unix))]
+impl Presences {
+    fn show(&self, channel: u64, presence: &Arc<Mutex<Presence>>) {
+        lock(&self.0).insert(channel, presence.clone());
+    }
+
+    /// Drops what no longer shows, so a retired channel starts over fresh on the next tick.
+    fn prune(&self, channels: &mut HashMap<u64, Arc<Mutex<Presence>>>) {
+        let shown = lock(&self.0);
+        channels.retain(|channel, presence| {
+            shown.get(channel).is_some_and(|p| Arc::ptr_eq(p, presence))
+        });
+    }
+
+    /// Takes down every display this runtime still shows; another runtime's entry stays.
+    pub(super) fn retire_all(&self) {
+        let channels: Vec<u64> = lock(&self.0).keys().copied().collect();
+        for channel in channels {
+            super::lifecycle::Shown::withdrawn(self, channel, true);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl super::lifecycle::Shown for Presences {
+    fn withdrawn(&self, channel: u64, retire: bool) {
+        let mut shown = lock(&self.0);
+        let Some(presence) = shown.get(&channel).cloned() else {
+            return;
+        };
+        {
+            let mut state = lock(&presence);
+            if let Some(sending) = state.sending.take() {
+                sending.abort();
+            }
+            state.next_typing_at = None;
+        }
+        if retire {
+            shown.remove(&channel);
+            let mut global = lock(&PRESENCE);
+            if global
+                .get(&channel)
+                .is_some_and(|p| Arc::ptr_eq(p, &presence))
+            {
+                global.remove(&channel);
+            }
+        }
+    }
+
+    fn seated(&self, channel: u64) {
+        if let Some(presence) = lock(&self.0).get(&channel) {
+            lock(presence).observed_at = None;
+        }
+    }
+}
+
+/// The strict supervisor's loop over the live effects of `shared`.
+#[cfg(all(test, unix))]
+pub(super) fn strict(
+    shared: Arc<SharedData>,
+    provider: ProviderKind,
+    strict: Arc<Strict>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let effects = Arc::new(LiveEffects { shared, provider });
+    Supervisor::strict(effects, strict).run()
+}
+
 fn clock() -> String {
     chrono::Local::now().format("%H:%M").to_string()
 }
@@ -618,3 +784,7 @@ impl Effects for LiveEffects {
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 pub(in crate::services::discord) mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "strict_supervisor_tests.rs"]
+mod strict_tests;

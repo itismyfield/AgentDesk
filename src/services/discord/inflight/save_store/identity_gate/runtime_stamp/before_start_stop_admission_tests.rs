@@ -138,6 +138,17 @@ async fn admission_refuses_every_fresh_row_that_is_not_this_bridge_turn() {
         );
         assert_eq!(fixture.bytes(), before, "{case}");
     }
+    // The receipt names its own row's turn: a close carrying another nonce is refused.
+    {
+        let fixture = Fixture::new();
+        let before = fixture.bytes();
+        let other = fixture
+            .row
+            .admit_before_start_receipt("other-turn", CloseBasis::NoAttempt, ADMITTED)
+            .await;
+        assert!(other.is_none());
+        assert_eq!(fixture.bytes(), before);
+    }
     // A nameless turn's finalizer id is the only axis that tells two of them apart.
     let fixture = Fixture::with(|row| {
         row.user_msg_id = 0;
@@ -280,15 +291,16 @@ async fn the_durable_receipt_survives_stale_writes() {
     fixture.overwrite(&unknown);
     inflight::save_inflight_state(&admitted).unwrap();
     assert_eq!(fixture.receipt().unwrap().0["notice"], "shown_v2");
-    // The restart marker rewrite reads the durable row, so it keeps the receipt too.
-    inflight::mark_restart_mode_blocking(ProviderKind::Claude, InflightRestartMode::DrainRestart)
-        .await;
-    let marked = fixture.durable().unwrap();
-    assert!(marked.restart_mode.is_some());
-    assert_eq!(
-        marked.herdr_before_start_stop.unwrap().0["notice"],
-        "shown_v2"
-    );
+    // Restart marking skips a receipt row, leaving it byte-identical, and is no failure.
+    let before = fixture.bytes();
+    let report = inflight::mark_restart_mode_blocking(
+        ProviderKind::Claude,
+        InflightRestartMode::DrainRestart,
+    )
+    .await;
+    assert!(report.skipped_receipt.contains(&fixture.row.channel_id));
+    assert!(!report.failed.contains(&fixture.row.channel_id));
+    assert_eq!(fixture.bytes(), before);
     // A create-only write never replaces an existing row.
     assert!(inflight::save_inflight_state_create_new(&fixture.row).is_err());
     let mut successor = fixture.row.clone();
@@ -445,4 +457,70 @@ fn old_rows_and_unknown_receipts_keep_their_shape() {
         .durable()
         .expect("a malformed receipt keeps the row readable");
     assert!(!loaded.herdr_before_start_stop.unwrap().supported());
+}
+
+/// A panicking transition answers `None` like any refusal, and the scheduler keeps serving.
+#[tokio::test(flavor = "current_thread")]
+async fn off_scheduler_answers_a_transition_panic_with_none() {
+    let panicked = off_scheduler(|| -> Option<u8> { panic!("injected transition panic") }).await;
+    assert_eq!(panicked, None);
+    assert_eq!(off_scheduler(|| Some(7)).await, Some(7));
+}
+
+/// A caller dropped after its worker started leaves that worker running: the transition ends, and
+/// the same pooled worker reads its own settlement switch again.
+#[test]
+fn off_scheduler_caller_cancel_lets_the_worker_finish_and_restore() {
+    use crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available;
+    use crate::services::turn_orchestrator::policy_close::test_hooks::Settlement;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .thread_keep_alive(std::time::Duration::from_secs(600))
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let worker = || {
+            tokio::task::spawn_blocking(|| {
+                (
+                    std::thread::current().id(),
+                    herdr_stop_settlement_available(),
+                )
+            })
+        };
+        let (thread, on) = worker().await.unwrap();
+        assert!(on, "the worker's own switch");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let finished = std::sync::Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let off = Settlement::set(false);
+        let mut call = Box::pin(off_scheduler(move || {
+            let seen = (
+                std::thread::current().id(),
+                herdr_stop_settlement_available(),
+            );
+            started_tx.send(seen).unwrap();
+            release_rx.recv().unwrap();
+            done.store(true, Ordering::SeqCst);
+            Some(())
+        }));
+        assert!(futures::poll!(call.as_mut()).is_pending());
+        drop(off);
+        let started = started_rx.recv().unwrap();
+        drop(call);
+        release_tx.send(()).unwrap();
+        let after = worker().await.unwrap();
+        assert_eq!(
+            started,
+            (thread, false),
+            "the worker ran with the caller's off"
+        );
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the cancelled call's worker finished"
+        );
+        assert_eq!(after, (thread, true), "and restored its own switch");
+    });
 }

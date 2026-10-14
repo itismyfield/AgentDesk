@@ -9,12 +9,13 @@ dedicated Discord channel. The legacy single-pair smoke against
 | Cell           | Provider | Runtime    | Worker agent            | Channel                  |
 | -------------- | -------- | ---------- | ----------------------- | ------------------------ |
 | `claude-pipe`  | claude   | `pipe`     | `adk-claude-pipe-e2e`   | `adk-claude-pipe-e2e`    |
-| `claude-tui`   | claude   | `tui`      | `adk-claude-tui-e2e`    | `adk-claude-tui-e2e`     |
+| `claude-tui`   | claude   | `tui`      | `adk-claude-tui-2-e2e`  | `adk-claude-tui-2-e2e`   |
 | `codex-pipe`   | codex    | `pipe`     | `adk-codex-pipe-e2e`    | `adk-codex-pipe-e2e`     |
 | `codex-tui`    | codex    | `tui`      | `adk-codex-tui-e2e`     | `adk-codex-tui-e2e`      |
 
-The four worker channels above plus the orchestrator channel
-`adk-e2e-orchestrator` (five channels total) all live under the dedicated
+The four worker channels above, the `claude-herdr` worker channel
+`adk-claude-tui-e2e` (Herdr-mapped) and the orchestrator channel
+`adk-e2e-orchestrator` (six channels total) all live under the dedicated
 `ADK E2E` Discord category. Channel IDs are looked up from `agentdesk.yaml`
 — no hard-coded ids in scripts or docs.
 
@@ -424,7 +425,7 @@ release.
    invocations by parent/name. Forum and media parents require `--message`;
    pass repeatable `--tag-id <ID>` values when the parent requires or accepts
    forum tags. News parents create announcement (`NewsThread`) threads.
-2. Confirm the operator's Obsidian vault has the 6 prompt files
+2. Confirm the operator's Obsidian vault has the 7 prompt files
    (`adk-claude-pipe-e2e.prompt.md` ... `adk-e2e-orchestrator.prompt.md`)
    under `~/ObsidianVault/RemoteVault/adk-config/agents/`. Re-run
    `scripts/deploy-release.sh` if the release `config/agents/` mirror is
@@ -467,7 +468,8 @@ yq '.agents[] | select(.id == "adk-claude-pipe-e2e") | .channels.claude.id' \
     ~/.adk/release/config/agentdesk.yaml
 ```
 
-Substitute the cell id for the agent id (`adk-<cell>-e2e`). The
+Substitute the cell's worker agent id (`adk-<cell>-e2e`, except
+`claude-tui`, which uses `adk-claude-tui-2-e2e`). The
 orchestrator entry follows the same shape with id `adk-e2e-orchestrator`.
 
 ## Skill

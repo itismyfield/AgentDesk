@@ -44,7 +44,11 @@ pub(super) fn backfill_finalizer_turn_id_under_lock(
     let content = fs::read_to_string(path).ok()?;
     let (state, backfilled) =
         parse_inflight_state_content_with_finalizer_backfill(&content).ok()?;
-    if backfilled && state.provider_kind().as_ref() == Some(provider) {
+    // A policy receipt row is served backfilled in memory but never rewritten.
+    if backfilled
+        && state.provider_kind().as_ref() == Some(provider)
+        && !super::raw_before_start_receipt(&content)
+    {
         let _ = persist_under_lock(
             root,
             path,

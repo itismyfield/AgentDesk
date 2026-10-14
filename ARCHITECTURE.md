@@ -709,6 +709,7 @@ src/
 │   │   │   │   ├── drain_pg_tests.rs
 │   │   │   │   ├── force_pg_tests.rs
 │   │   │   │   ├── harness_tests.rs
+│   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
@@ -1435,6 +1436,8 @@ src/
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -2009,6 +2012,7 @@ src/
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_policy_tests.rs
+│   │   │   ├── before_start_stop_protected_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2084,6 +2088,9 @@ src/
 │   │   ├── turn_lease/
 │   │   │   └── registry.rs
 │   │   ├── turn_presence/
+│   │   │   ├── activity/
+│   │   │   │   ├── tail.rs
+│   │   │   │   └── tail_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
@@ -2093,6 +2100,8 @@ src/
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── strict_runtime.rs
+│   │   │   ├── strict_supervisor_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
@@ -2697,6 +2706,10 @@ src/
 │   │   │   ├── send.rs
 │   │   │   └── writer_activation_tests.rs
 │   │   ├── shadow/
+│   │   │   ├── capture/
+│   │   │   │   ├── observation/
+│   │   │   │   │   └── observation_tests.rs
+│   │   │   │   └── observation.rs
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
 │   │   │   ├── derive.rs
@@ -2737,6 +2750,7 @@ src/
 │   │   │   ├── host/
 │   │   │   │   └── recover.rs
 │   │   │   ├── input_facts/
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
