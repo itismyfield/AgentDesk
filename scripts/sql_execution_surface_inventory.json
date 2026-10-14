@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "dc572dfe246c7ce5f6dbae4269fd4ad11ab1b519",
+  "measured_at_sha": "d1817f85078534ad78dc7d3a725a5785e7a1acbf",
   "records": [
     {
       "root": "migrations/postgres",
@@ -41163,6 +41163,15 @@
       "root": "src",
       "kind": "RUST",
       "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:22e01718e38cce08d843d78d1bb02c9f5680da56d26c2a5e453d559cd6397f65"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
@@ -41265,7 +41274,25 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:ad6cc85e3b5752fa4d4bbe6afe2078b0fbe69b4a3db60342637e3f6a25716e9a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:b8e7a2fce09f7b1d2edcbdfe6731d06bece7d88b9d415f81dd8c661bd49a691b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b9b8899017baa406c7667b2334ff51ad5f3c9b7dc3e1b930b689712460f49457"
     },
     {
       "root": "src",
