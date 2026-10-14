@@ -193,7 +193,7 @@
 | `POST` | `/api/message-outbox/monitor-alerts` | `message_outbox::enqueue_monitor_alert` | `src/server/routes/message_outbox.rs:144` | `src/server/routes/domains/ops.rs:28` |
 | `GET` | `/api/messages` | `messages::list_messages` | `src/server/routes/messages.rs:51` | `src/server/routes/domains/ops.rs:150` |
 | `POST` | `/api/messages` | `messages::create_message` | `src/server/routes/messages.rs:71` | `src/server/routes/domains/ops.rs:150` |
-| `POST` | `/api/o/transition` | `super::super::o_transition::transition` | `src/server/routes/o_transition.rs:61` | `src/server/routes/domains/runtime.rs:159` |
+| `POST` | `/api/o/transition` | `super::super::o_transition::transition` | `src/server/routes/o_transition.rs:66` | `src/server/routes/domains/runtime.rs:159` |
 | `GET` | `/api/onboarding/channels` | `onboarding::channels` | `src/server/routes/onboarding.rs:33` | `src/server/routes/domains/onboarding.rs:24` |
 | `POST` | `/api/onboarding/channels` | `onboarding::channels_post` | `src/server/routes/onboarding.rs:40` | `src/server/routes/domains/onboarding.rs:24` |
 | `POST` | `/api/onboarding/check-provider` | `onboarding::check_provider` | `src/server/routes/onboarding.rs:54` | `src/server/routes/domains/onboarding.rs:29` |

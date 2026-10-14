@@ -652,6 +652,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/cli/o_transition_tests.rs",
         "src/server/routes/o_transition_tests.rs",
         "src/services/tui_o/writer/transition_route_tests.rs",
+        "src/services/tui_o/writer/transition_apply_tests.rs",
+        "src/services/tui_o/writer/transition_scope_tests.rs",
         "src/services/tui_o/writer/rotation/transition_tests.rs",
         "src/services/tui_o/writer/owed_tests.rs",
         "src/services/tui_o/writer/verified_delivery_tests.rs",

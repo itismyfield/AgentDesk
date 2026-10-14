@@ -1387,7 +1387,7 @@ server::routes::message_outbox::tests::monitor_alert_routing_separates_actionabl
 server::routes::message_outbox::tests::protected_message_outbox_routes_are_registered_contract
 server::routes::message_outbox::tests::redrive_contract_defaults_to_dry_run_and_denies_mass_field
 server::routes::o_transition::tests::transition_route_refuses_all_but_a_loopback_peer_with_this_ports_origin
-server::routes::o_transition::tests::transition_route_refuses_apply_before_any_read
+server::routes::o_transition::tests::transition_route_refuses_an_apply_without_its_inspects_digest_before_any_read
 server::routes::pipeline::stage_save_tests::stage_save_routes_preserve_legacy_settings_only_for_the_same_stage_pg
 server::routes::pipeline::stage_save_tests::stage_save_routes_reject_unsupported_settings_without_writes_pg
 server::routes::pr_summary::tests::ensure_valid_query_accepts_good_input
@@ -13073,6 +13073,15 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_recent_missing_halts_without_retirement
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_resume_publishes_after_init_only_eof_pending_flush
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_configless_actor_keeps_the_legacy_off_path
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_apply_holds_the_rest_once_its_scope_changes_after_admission
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_apply_keeps_one_candidate_for_a_receipt_in_turns
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_apply_under_an_older_scope_than_the_actors_writes_nothing
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_inspect_in_progress_is_never_promoted_by_an_apply_of_its_id
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_inspect_issues_its_scope_from_its_final_snapshot_only
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_probes_taken_just_past_the_deadline_write_nothing
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_scope_keeps_every_hop_past_the_candidate_limit_across_a_partial_apply
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::apply_tests::transition_scope_keeps_its_digest_when_another_job_retires_its_hops
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_consumes_no_reply_of_a_run_replaced_meanwhile
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_lists_every_unpinned_session_a_source_may_be
@@ -13155,6 +13164,10 @@ services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_tells_a_replaced_path_from_a_deleted_one
 services::tui_o::writer::transition_cleanup::tests::operations_shape::transition_cleanup_operations_shaped_store_judges_all_59_hops_eligible
 services::tui_o::writer::transition_cleanup::tests::operations_shape::transition_cleanup_retired_missing_source_retry_reads_its_witness_back_from_the_store
+services::tui_o::writer::transition_cleanup::tests::scope_tests::transition_scope_digest_follows_the_request_execution_and_hops_only
+services::tui_o::writer::transition_cleanup::tests::scope_tests::transition_scope_encodes_to_its_golden_bytes_and_digest
+services::tui_o::writer::transition_cleanup::tests::scope_tests::transition_scope_holds_every_hop_up_to_the_cutoff_in_seq_order
+services::tui_o::writer::transition_cleanup::tests::scope_tests::transition_scope_is_refused_rather_than_narrowed_when_a_hop_cannot_be_placed
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_first_version_refuses_codex_moving_homes_and_bad_requests
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_mapped_seq_and_pane_meet_cutoff_range_and_pane_each
 services::tui_o::writer::transition_cleanup::tests::transition_cleanup_missing_file_needs_a_fresh_witness_bound_to_the_cursor
