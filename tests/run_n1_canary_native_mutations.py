@@ -35,7 +35,7 @@ MUTANTS = [
     ("code-fence-reopen-missing", "policy.py", r'prefix = "```" + language + "\n" if in_fence else ""', 'prefix = ""', SPLIT + "test_hand_defined_split_boundaries_utf16_and_fences"),
     ("python-trim-instead-of-rust", "policy.py", '.strip(WHITE_SPACE) if unit["payload"]', '.strip() if unit["payload"]', SPLIT + "test_payload_trim_is_rust_white_space_and_hash_is_utf8"),
     ("native-hook-disconnected", "n1_turn_canary_oracle.py", 'native = reconstruct(raw["transcript"], manifest["scope"])', 'raise Unknown("native_disconnected")', CLI + "test_actual_cli_derives_native_counts_without_pass"),
-    ("cli-pass", "n1_turn_canary_oracle.py", 'return 2\n', 'return 0\n', CLI + "test_fifty_completions_still_leave_origin_and_audit_unknown"),
+    ("cli-pass", "n1_turn_canary_oracle.py", 'code = finish(result)', 'code = 0', CLI + "test_fifty_completions_still_leave_origin_and_audit_unknown"),
     ("remove-ci-wiring", "ci-script-checks.sh", '"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli', 'true', "tests.test_n1_canary_native_wiring.NativeWiring.test_required_guards_recipe_executes_both_native_suites_and_mutants"),
 ]
 

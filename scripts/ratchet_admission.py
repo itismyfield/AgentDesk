@@ -1,24 +1,4 @@
-"""Shared cap-admission validation for the giant and hot-file ratchets (#4269).
-
-The checked-in cap manifests describe the current ceilings.  A cap increase is
-an admission only when the current manifest value is greater than the value at
-the branch's merge-base with ``origin/main``.  Every such increase must append
-one event to ``ratchet_admission_history.toml``.
-
-The history is deliberately small and append-only.  Each ``[[admission]]`` has
-this schema::
-
-    ratchet = "hotfile_ratchet"  # or "giant_file_ratchet"
-    file = "repo/relative/path.rs"
-    old_cap = 100
-    new_cap = 120
-    decompose_issue = 4269        # positive integer, no leading '#'
-    count = 2                     # previous event count for this file + 1
-
-``count`` is global per file (across both metrics), so churn audit #4265 can
-read a single monotonic sequence.  The checker only warns after repeated
-admissions; it never creates issues or invokes ``gh``.
-"""
+"""Freeze ratchet cap growth; admission history is advisory planning data."""
 
 from __future__ import annotations
 
@@ -30,9 +10,8 @@ from pathlib import Path
 
 HISTORY_REL_PATH = "scripts/ratchet_admission_history.toml"
 ADMISSION_WARN_THRESHOLD = 3
-# Lines a ratcheted file may sit above its frozen cap so wiring (a call or a
-# registration) needs no new module or admission. The cap itself never moves.
-WIRING_SLACK_LINES = 30
+# No wiring exception may increase a giant or hotfile.
+WIRING_SLACK_LINES = 0
 
 
 @dataclass(frozen=True)
@@ -49,6 +28,7 @@ class AdmissionEvent:
 class AdmissionAudit:
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
+    base_sha: str | None = None
 
 
 def parse_cap_table(text: str, table_name: str) -> dict[str, int]:
@@ -165,62 +145,10 @@ def validate_admission_delta(
     prior_events: list[AdmissionEvent],
     prior_history_exists: bool = True,
 ) -> list[str]:
-    """Require one valid newly appended history event for every raised cap."""
-
-    errors = validate_history(current_events)
-    if prior_history_exists and current_events[: len(prior_events)] != prior_events:
-        errors.append(
-            f"{HISTORY_REL_PATH} is append-only; existing admission events "
-            "must not be edited, reordered, or removed"
-        )
-        return errors
-
-    # The first schema commit may migrate reviewable annotated admissions such
-    # as #3983 without those historical events corresponding to a current cap
-    # raise.  Once the history exists at the base, every appended event must
-    # correspond exactly to a raise in the same change.
-    new_events = current_events[len(prior_events) :] if prior_history_exists else []
-    raised = {
-        file: (prior_caps[file], cap)
-        for file, cap in current_caps.items()
-        if file in prior_caps and cap > prior_caps[file]
-    }
-
-    for file, (old_cap, new_cap) in sorted(raised.items()):
-        matches = [
-            event
-            for event in new_events
-            if event.ratchet == ratchet
-            and event.file == file
-            and event.old_cap == old_cap
-            and event.new_cap == new_cap
-        ]
-        if not matches:
-            errors.append(
-                f"{ratchet} cap raised for {file}: {old_cap} -> {new_cap}; "
-                f"append a matching [[admission]] to {HISTORY_REL_PATH} with "
-                "a mandatory decompose_issue issue number"
-            )
-        elif len(matches) > 1:
-            errors.append(
-                f"{ratchet} cap raised for {file}: {old_cap} -> {new_cap}; "
-                "history contains duplicate matching admission events"
-            )
-
-    if prior_history_exists:
-        expected = [
-            (ratchet, file, old_cap, new_cap)
-            for file, (old_cap, new_cap) in raised.items()
-        ]
-        for event in new_events:
-            key = (event.ratchet, event.file, event.old_cap, event.new_cap)
-            if event.ratchet == ratchet and key not in expected:
-                errors.append(
-                    f"unmatched {ratchet} admission history event for "
-                    f"{event.file!r}: {event.old_cap!r} -> {event.new_cap!r}; "
-                    "only append an event in the change that raises that cap"
-                )
-    return errors
+    """History cannot authorize a cap increase."""
+    return [f"{ratchet} cap raised for {file}: {prior_caps[file]} -> {cap}; shrink the file"
+            for file, cap in sorted(current_caps.items())
+            if file in prior_caps and cap > prior_caps[file]]
 
 
 def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -232,40 +160,53 @@ def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[st
     )
 
 
-def _merge_base(repo_root: Path) -> tuple[str | None, str | None]:
+def comparison_base(repo_root: Path) -> tuple[str | None, str | None]:
+    """Resolve one immutable comparison SHA; explicit or CI inputs never fall back."""
+    if os.environ.get("GFP_EVENT_NAME") == "pull_request":
+        try:
+            def oid(ref):
+                result = _run_git(repo_root, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+                if result.returncode or not result.stdout.strip():
+                    raise ValueError(f"cannot resolve ratchet object {ref!r}")
+                return result.stdout.strip()
+            candidate = oid(os.environ.get("GFP_CANDIDATE_SHA", ""))
+            event_base = oid(os.environ.get("GFP_BASE_SHA", ""))
+            head = oid(os.environ.get("GFP_HEAD_SHA", ""))
+            parents = _run_git(repo_root, ["rev-list", "--parents", "-n1", candidate])
+            lineage = parents.stdout.split()
+            if (parents.returncode or oid("HEAD") != candidate or len(lineage) != 3
+                    or lineage[0] != candidate or lineage[2] != head):
+                raise ValueError("ratchet candidate/base/head provenance mismatch")
+            ancestry = _run_git(repo_root, ["merge-base", "--is-ancestor", event_base, lineage[1]])
+            if ancestry.returncode:
+                raise ValueError("ratchet comparison base ancestry unavailable or invalid")
+            return lineage[1], None
+        except ValueError as error:
+            return None, str(error)
     configured = os.environ.get("RATCHET_ADMISSION_BASE_REF")
-    candidates = [configured] if configured else []
     github_base = os.environ.get("GITHUB_BASE_REF")
-    if github_base:
-        candidates.append(f"origin/{github_base}")
-    candidates.extend(["origin/main", "main"])
-
+    candidates = ([configured] if configured else
+                  ([f"origin/{github_base}"] if github_base else ["origin/main", "main"]))
     for candidate in candidates:
-        if not candidate:
-            continue
         result = _run_git(repo_root, ["merge-base", "HEAD", candidate])
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip(), None
-    return None, (
-        "cannot resolve a ratchet admission base (tried "
-        + ", ".join(candidate for candidate in candidates if candidate)
-        + "); set RATCHET_ADMISSION_BASE_REF to a fetched base ref"
-    )
+    return None, "cannot resolve a ratchet comparison base: " + ", ".join(candidates)
+
+
+def _merge_base(repo_root: Path) -> tuple[str | None, str | None]:
+    return comparison_base(repo_root)
 
 
 def _git_text(repo_root: Path, commit: str, rel_path: str) -> tuple[str | None, bool]:
     result = _run_git(repo_root, ["show", f"{commit}:{rel_path}"])
     if result.returncode == 0:
         return result.stdout, True
-    # A missing file is expected for the first history-schema commit.  Distinguish
-    # it from a broader git failure by asking whether the path exists at all.
-    exists = _run_git(repo_root, ["cat-file", "-e", f"{commit}:{rel_path}"])
-    if exists.returncode != 0:
+    exists = _run_git(repo_root, ["ls-tree", "--name-only", commit, "--", rel_path])
+    if exists.returncode == 0 and not exists.stdout.strip():
         return None, False
-    raise ValueError(
-        f"git could not read {rel_path} at {commit}: "
-        f"{result.stderr.strip() or 'unknown error'}"
-    )
+    raise ValueError(f"git could not read {rel_path} at {commit}: "
+                     f"{result.stderr.strip() or 'unknown error'}")
 
 
 def admission_warning_messages(
@@ -291,59 +232,38 @@ def admission_warning_messages(
 
 
 def audit_repository_admissions(
-    *,
-    repo_root: Path,
-    ratchet: str,
-    config_rel_path: str,
-    table_name: str,
+    *, repo_root: Path, ratchet: str, config_rel_path: str, table_name: str,
 ) -> AdmissionAudit:
-    """Audit current cap raises against the base manifest and event history."""
-
+    """Cap input/read failures block; history shape and chronology only warn."""
+    warnings = []
     try:
-        current_text = (repo_root / config_rel_path).read_text(encoding="utf-8")
-        current_caps = parse_cap_table(current_text, table_name)
-        history_path = repo_root / HISTORY_REL_PATH
-        current_events = parse_history(history_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, ValueError) as exc:
-        return AdmissionAudit((f"ratchet admission metadata invalid: {exc}",), ())
-
-    schema_errors = validate_history(current_events)
-    warnings = admission_warning_messages(current_events, ratchet)
-
-    # Unit fixtures and source exports do not carry git metadata.  The schema is
-    # still validated there; branch-delta enforcement runs in every CI checkout.
+        current_caps = parse_cap_table((repo_root / config_rel_path).read_text(encoding="utf-8"), table_name)
+    except (OSError, ValueError) as error:
+        return AdmissionAudit((f"ratchet cap metadata invalid: {error}",), ())
+    try:
+        current_events = parse_history((repo_root / HISTORY_REL_PATH).read_text(encoding="utf-8"))
+        warnings.extend(f"WARN: {message}" for message in validate_history(current_events))
+        warnings.extend(admission_warning_messages(current_events, ratchet))
+    except (OSError, ValueError) as error:
+        current_events = []
+        warnings.append(f"WARN: ratchet admission history invalid: {error}")
     if not (repo_root / ".git").exists():
-        return AdmissionAudit(tuple(schema_errors), tuple(warnings))
-
-    base, base_error = _merge_base(repo_root)
+        return AdmissionAudit((), tuple(warnings))
+    base, error = comparison_base(repo_root)
     if base is None:
-        return AdmissionAudit(
-            tuple(schema_errors + [base_error or "missing base"]), tuple(warnings)
-        )
-
+        return AdmissionAudit((error or "missing base",), tuple(warnings))
     try:
-        prior_config_text, prior_config_exists = _git_text(
-            repo_root, base, config_rel_path
-        )
-        if not prior_config_exists or prior_config_text is None:
-            return AdmissionAudit(tuple(schema_errors), tuple(warnings))
-        prior_caps = parse_cap_table(prior_config_text, table_name)
-        prior_history_text, prior_history_exists = _git_text(
-            repo_root, base, HISTORY_REL_PATH
-        )
-        prior_events = (
-            parse_history(prior_history_text)
-            if prior_history_text is not None
-            else []
-        )
-        errors = validate_admission_delta(
-            ratchet=ratchet,
-            current_caps=current_caps,
-            prior_caps=prior_caps,
-            current_events=current_events,
-            prior_events=prior_events,
-            prior_history_exists=prior_history_exists,
-        )
-    except (tomllib.TOMLDecodeError, ValueError) as exc:
-        errors = schema_errors + [f"ratchet admission base metadata invalid: {exc}"]
-    return AdmissionAudit(tuple(errors), tuple(warnings))
+        prior_text, exists = _git_text(repo_root, base, config_rel_path)
+        prior_caps = parse_cap_table(prior_text, table_name) if exists else {}
+        prior_history, _ = _git_text(repo_root, base, HISTORY_REL_PATH)
+        try:
+            prior_events = parse_history(prior_history) if prior_history is not None else []
+            if current_events[:len(prior_events)] != prior_events:
+                warnings.append(f"WARN: {HISTORY_REL_PATH} is not append-only")
+        except ValueError as error:
+            warnings.append(f"WARN: ratchet base admission history invalid: {error}")
+        errors = validate_admission_delta(ratchet=ratchet, current_caps=current_caps,
+            prior_caps=prior_caps, current_events=current_events, prior_events=[])
+    except (OSError, ValueError) as error:
+        errors = [f"ratchet base cap metadata invalid: {error}"]
+    return AdmissionAudit(tuple(errors), tuple(warnings), base)

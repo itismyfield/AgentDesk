@@ -339,6 +339,7 @@ jobs:
               - 'src/services/discord/commands/control/native_policy_tests.rs'
               - 'src/services/discord/commands/control/native_tests.rs'
               - 'src/services/discord/commands/restart.rs'
+              - 'src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs'
               - 'src/services/discord/commands/tui_passthrough.rs'
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
@@ -372,6 +373,7 @@ jobs:
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
+              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
@@ -416,6 +418,8 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
+              - 'src/services/discord/tmux_watcher/injected_bridge_tests.rs'
+              - 'src/services/discord/tmux_watcher/injected_watcher_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
@@ -497,6 +501,7 @@ jobs:
               - 'src/services/tui_o/repost/allowlist_runner_tests.rs'
               - 'src/services/tui_o/repost/allowlist_writer_tests.rs'
               - 'src/services/tui_o/repost/backlog_tests.rs'
+              - 'src/services/tui_o/repost/projection_tests.rs'
               - 'src/services/tui_o/repost/runner_activation_tests.rs'
               - 'src/services/tui_o/repost/runner_tests.rs'
               - 'src/services/tui_o/repost/runtime_host_activation_tests.rs'
@@ -815,6 +820,7 @@ jobs:
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/replace_outcome_policy.rs'
               - 'src/services/discord/replay_policy.rs'
+              - 'src/services/discord/replay_policy/**'
               - 'src/services/discord/restart_mode/**'
               - 'src/services/discord/router/**'
               - 'src/services/discord/runtime_bootstrap.rs'
@@ -1248,12 +1254,30 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.dashboard.result }}
         run: ./scripts/required-check-mirror.sh
 
-  test_fast:
-    name: PostgreSQL tests (ubuntu-postgres)
+  pg_shards:
     needs: changes
     if: needs.changes.outputs.pg_db == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        run: |
+          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  test_fast:
+    name: PostgreSQL tests (shard ${{ matrix.shard }})
+    needs: [changes, pg_shards]
+    if: needs.changes.outputs.pg_db == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
+      PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
       POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
@@ -1373,18 +1397,15 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
           env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
-      # Run 34926677210 selected 845 serial tests and completed 642 without
-      # failure before the 20-minute budget expired during active migrations.
-      # Preserve all tests and fail-closed results; bound the complete run at 60m,
-      # the same budget as each ci-main.yml PostgreSQL shard.
-      - name: just test-postgres
+      # Use the same partition and step budget as the main PG matrix.
+      - name: just test-postgres-shard
         timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: just test-postgres
+        run: just test-postgres-shard
 
       - name: Stop PostgreSQL service
         if: always()
@@ -2261,7 +2282,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52
+          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2494,7 +2515,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52
+          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -73,6 +73,7 @@ async fn c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unse
         RestartMarkReport {
             marked: 2,
             failed: vec![failed_a, failed_b],
+            skipped_receipt: Vec::new(),
             incomplete: true,
         }
     );
@@ -140,6 +141,7 @@ async fn c2b_failed_protected_marker_write_records_gate_health_until_a_complete_
         RestartMarkReport {
             marked: 1,
             failed: vec![open],
+            skipped_receipt: Vec::new(),
             incomplete: false,
         }
     );
@@ -170,8 +172,93 @@ async fn c2b_failed_protected_marker_write_records_gate_health_until_a_complete_
         RestartMarkReport {
             marked: 2,
             failed: Vec::new(),
+            skipped_receipt: Vec::new(),
             incomplete: false,
         }
     );
     assert_eq!(codex_pass(), None, "a complete pass keeps the short pass");
+}
+
+/// Restart marking leaves receipt rows byte-identical and reports them apart from marked and failed
+/// rows, so the pass stays complete; a malformed receipt row still leaves the scan incomplete.
+#[tokio::test]
+async fn receipt_rows_are_skipped_byte_identical_and_never_counted_as_failed() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        temp.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let root = inflight_runtime_root().unwrap();
+    let (plain, supported, unknown, null) = (6_534_901, 6_534_902, 6_534_903, 6_534_904);
+    let malformed = 6_534_905;
+    let path = |channel| inflight_state_path(&root, &provider, channel);
+    let receipt = serde_json::json!({"protocol": 1, "kind": "unsubmitted_before_start_stop",
+        "turn_nonce": "c2b-mark", "admitted_generation": 2, "basis": "no_attempt",
+        "notice": "pending"});
+    let mut before = std::collections::BTreeMap::new();
+    for (channel, shape) in [
+        (supported, Some(receipt.clone())),
+        (unknown, Some(serde_json::json!({"protocol": 9}))),
+        (null, Some(serde_json::Value::Null)),
+        (plain, None),
+    ] {
+        save_inflight_state_in_root(&root, &row(channel)).unwrap();
+        if let Some(shape) = shape {
+            make_old_format(&path(channel));
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path(channel)).unwrap()).unwrap();
+            raw["herdr_before_start_stop"] = shape;
+            std::fs::write(path(channel), serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+            before.insert(channel, std::fs::read(path(channel)).unwrap());
+        }
+    }
+    let codex_pass = || {
+        short_passes()
+            .into_iter()
+            .any(|pass| serde_json::to_value(pass).unwrap()["provider"] == "codex")
+    };
+
+    let mut report =
+        mark_restart_mode_blocking(provider.clone(), InflightRestartMode::DrainRestart).await;
+    report.skipped_receipt.sort_unstable();
+
+    assert_eq!(
+        report,
+        RestartMarkReport {
+            marked: 1,
+            failed: Vec::new(),
+            skipped_receipt: vec![supported, unknown, null],
+            incomplete: false,
+        }
+    );
+    assert!(!codex_pass(), "a skipped receipt row is no short pass");
+    assert_eq!(
+        read_inflight_state_content(&path(plain)).and_then(|row| row.restart_mode),
+        Some(InflightRestartMode::DrainRestart),
+        "the receipt-free sibling is marked"
+    );
+    for (channel, bytes) in &before {
+        assert_eq!(&std::fs::read(path(*channel)).unwrap(), bytes, "{channel}");
+    }
+
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path(supported)).unwrap()).unwrap();
+    raw["channel_id"] = malformed.into();
+    let mut text = serde_json::to_string_pretty(&raw).unwrap();
+    text.truncate(text.len() - 3);
+    std::fs::write(path(malformed), &text).unwrap();
+
+    let mut report =
+        mark_restart_mode_blocking(provider.clone(), InflightRestartMode::DrainRestart).await;
+    report.skipped_receipt.sort_unstable();
+
+    assert_eq!(report.failed, Vec::<u64>::new());
+    assert_eq!(report.skipped_receipt, vec![supported, unknown, null]);
+    assert!(report.incomplete, "the malformed row stays unseen");
+    assert_eq!(std::fs::read_to_string(path(malformed)).unwrap(), text);
+    for (channel, bytes) in &before {
+        assert_eq!(&std::fs::read(path(*channel)).unwrap(), bytes, "{channel}");
+    }
 }

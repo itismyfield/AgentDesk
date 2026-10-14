@@ -8,7 +8,6 @@ use crate::services::process::{configure_child_process_group, wait_with_output_t
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// Format session name as an exact-match target (prefix with `=`, suffix with
@@ -930,6 +929,16 @@ pub enum PaneLiveness {
     /// present session). The answer is unknown — callers must not treat this as
     /// death.
     ProbeError,
+}
+
+impl From<bool> for PaneLiveness {
+    fn from(alive: bool) -> Self {
+        if alive {
+            Self::Live
+        } else {
+            Self::DeadOrAbsent
+        }
+    }
 }
 
 const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);

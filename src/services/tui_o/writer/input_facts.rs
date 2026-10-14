@@ -4,7 +4,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::services::codex_tui::rollout_index::strict_parent_session;
-use crate::services::tui_o::shadow::capture::SourceCapture;
+use crate::services::tui_o::n1_observation as observation;
+use crate::services::tui_o::shadow::capture::{SourceCapture, observation::ObservationCapture};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
 use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
 use crate::services::tui_o::shadow::{
@@ -57,7 +58,8 @@ pub struct Resume {
 
 pub struct InputFacts {
     binding: SourceBinding,
-    capture: SourceCapture,
+    capture: Capture,
+    boundaries: Vec<Boundary>,
     tracker: TurnTracker,
     state: TurnState,
     halted: Option<String>,
@@ -67,6 +69,8 @@ pub struct InputFacts {
     /// A resumed reader's carried state; only the carried turn's own closer may end it.
     carried: TurnState,
     awaiting_boundary: bool,
+    /// Offset of the record being read, or of the capture end before the first one.
+    reading: u64,
 }
 
 impl InputFacts {
@@ -77,6 +81,14 @@ impl InputFacts {
 
     /// Reads from a complete-line `offset`; a turn open there stays Unknown until it closes.
     pub fn open_at(binding: SourceBinding, offset: u64) -> Result<Self, String> {
+        Self::open_capture(binding, offset, false)
+    }
+
+    fn open_capture(
+        binding: SourceBinding,
+        offset: u64,
+        observation: bool,
+    ) -> Result<Self, String> {
         let child_path = binding
             .source
             .path
@@ -93,11 +105,20 @@ impl InputFacts {
         if child {
             return Err("input facts require a parent transcript".into());
         }
-        let capture =
-            SourceCapture::open(binding.source.clone(), offset).map_err(|e| e.to_string())?;
+        let capture = if observation {
+            Capture::Observation(
+                ObservationCapture::open(binding.source.clone(), offset)
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            Capture::Full(
+                SourceCapture::open(binding.source.clone(), offset).map_err(|e| e.to_string())?,
+            )
+        };
         Ok(Self {
             binding,
             capture,
+            boundaries: Vec::new(),
             tracker: TurnTracker::starting_at(offset),
             state: TurnState::Unknown,
             halted: None,
@@ -106,6 +127,7 @@ impl InputFacts {
             resume: None,
             carried: TurnState::Unknown,
             awaiting_boundary: false,
+            reading: offset,
         })
     }
 
@@ -115,6 +137,40 @@ impl InputFacts {
         facts.awaiting_boundary = true;
         facts.carried = resume.carried.clone();
         Ok(facts)
+    }
+
+    /// Read-only observation: no prefix hash or durable checkpoint validation.
+    pub fn open_observation_at(binding: SourceBinding, offset: u64) -> Result<Self, String> {
+        Self::open_capture(binding, offset, true)
+    }
+    pub fn resume_observation(binding: SourceBinding, resume: &Resume) -> Result<Self, String> {
+        let mut facts = Self::open_observation_at(binding, resume.after)?;
+        facts.awaiting_boundary = true;
+        facts.carried = resume.carried.clone();
+        Ok(facts)
+    }
+    pub fn boundaries(&self) -> &[Boundary] {
+        &self.boundaries
+    }
+    pub fn observation_progress(&self) -> (u64, u64) {
+        match &self.capture {
+            Capture::Full(c) => (c.read_through(), c.read_through()),
+            Capture::Observation(c) => (c.read_through(), c.forward_bytes()),
+        }
+    }
+    pub fn source_len(&self) -> Result<u64, String> {
+        self.capture.file_len().map_err(|e| e.to_string())
+    }
+    pub fn poll_observation_until(
+        &mut self,
+        max: u64,
+        end: u64,
+        budget: u64,
+    ) -> Result<ChannelFact, String> {
+        if !matches!(self.capture, Capture::Observation(_)) {
+            return Err("bounded poll requires an observation capture".into());
+        }
+        self.poll_limited(max, Some((end, budget)))
     }
 
     /// Set only when a typed `Blocked` record halted this reader.
@@ -143,18 +199,30 @@ impl InputFacts {
 
     /// Whether the captured prefix reaches the file's current end.
     pub fn caught_up(&self) -> Result<bool, String> {
-        let len = self.capture.file_len().map_err(|e| e.to_string())?;
-        Ok(self.capture.captured_through() == len)
+        self.capture.caught_up().map_err(|e| e.to_string())
     }
 
     /// Only a fully captured prefix at the file's current end can supply Idle.
     pub fn poll(&mut self, max_bytes: u64) -> Result<ChannelFact, String> {
+        self.poll_limited(max_bytes, None)
+    }
+
+    fn poll_limited(
+        &mut self,
+        max_bytes: u64,
+        end: Option<(u64, u64)>,
+    ) -> Result<ChannelFact, String> {
         if let Some(error) = &self.halted {
             return Err(error.clone());
         }
-        match self.poll_inner(max_bytes) {
+        match self.poll_inner(max_bytes, end) {
             Ok(fact) => Ok(fact),
             Err(error) => {
+                // A turn this reader held open loses its outcome here; read it before it is reset.
+                if let Some(open) = self.open_turn() {
+                    let native = open.map(String::as_str);
+                    observation::turn_unknown(&self.binding, self.reading, native, "reader_halted");
+                }
                 self.state = TurnState::Unknown;
                 self.halted = Some(error.clone());
                 Err(error)
@@ -162,17 +230,35 @@ impl InputFacts {
         }
     }
 
-    fn poll_inner(&mut self, max_bytes: u64) -> Result<ChannelFact, String> {
+    /// The turn this reader treats as running, with its native id when one is known.
+    fn open_turn(&self) -> Option<Option<&String>> {
+        match (&self.state, &self.carried) {
+            (TurnState::Open { native_turn_id }, _) => Some(native_turn_id.as_ref()),
+            (_, TurnState::Open { native_turn_id }) if self.awaiting_boundary => {
+                Some(native_turn_id.as_ref())
+            }
+            _ => None,
+        }
+    }
+
+    fn poll_inner(
+        &mut self,
+        max_bytes: u64,
+        end: Option<(u64, u64)>,
+    ) -> Result<ChannelFact, String> {
         self.events.clear();
+        self.boundaries.clear();
+        self.reading = self.capture.captured_through();
         if self.binding.provider == ShadowProvider::Codex {
             strict_parent_session(&self.binding.source.path, &self.binding.source.session_id)
                 .map_err(|e| e.to_string())?;
         }
-        let batch = match self.capture.poll(max_bytes) {
+        let batch = match self.capture.poll(max_bytes, end) {
             CaptureOutcome::Batch(batch) => batch,
             CaptureOutcome::Anomaly(anomaly) => return Err(anomaly.detail),
         };
         for record in batch.records {
+            self.reading = record.start;
             if record.line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
@@ -185,19 +271,32 @@ impl InputFacts {
             for fact in classify(self.binding.provider, &value) {
                 self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
                 // A foreign closer cannot release this channel's running parent turn.
-                let open = match (&self.state, &self.carried) {
-                    (TurnState::Open { native_turn_id }, _) => native_turn_id.as_ref(),
-                    (_, TurnState::Open { native_turn_id }) if self.awaiting_boundary => {
-                        native_turn_id.as_ref()
-                    }
-                    _ => None,
-                };
-                if let (RecordFact::Idle(Some(close)), Some(open)) = (&fact, open)
+                if let (RecordFact::Idle(Some(close)), Some(open)) =
+                    (&fact, self.open_turn().flatten())
                     && open != close
                 {
                     continue;
                 }
+                if matches!(self.capture, Capture::Observation(_)) {
+                    let kind = match &fact {
+                        RecordFact::TurnStart(_) => Some(BoundaryKind::Start),
+                        RecordFact::Idle(_) => Some(BoundaryKind::Close),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        let id = match &fact {
+                            RecordFact::TurnStart(id) | RecordFact::Idle(id) => id.clone(),
+                            _ => None,
+                        };
+                        self.boundaries.push(Boundary {
+                            kind,
+                            native_turn_id: id,
+                            range,
+                        });
+                    }
+                }
                 let event = self.tracker.observe(&fact, row.as_ref(), range, Utc::now());
+                self.observe_unresolved(&event, &fact, range.0);
                 let (next, closed) = match event {
                     TurnEvent::Opened(id) => (
                         Some(TurnState::Open {
@@ -206,7 +305,7 @@ impl InputFacts {
                         None,
                     ),
                     TurnEvent::Closed(turn) => {
-                        crate::services::tui_o::n1_observation::turn_closed(
+                        observation::turn_closed(
                             &self.binding,
                             &turn,
                             aborted(self.binding.provider, &value),
@@ -252,7 +351,7 @@ impl InputFacts {
             }
         }
         let through = self.capture.captured_through();
-        let complete = through == self.capture.file_len().map_err(|e| e.to_string())?;
+        let complete = self.capture.caught_up().map_err(|e| e.to_string())?;
         let state = if !complete && self.state == TurnState::Idle {
             TurnState::Unknown
         } else {
@@ -263,6 +362,21 @@ impl InputFacts {
             through,
             state,
         })
+    }
+
+    /// A closer without its own turn's opener cannot be counted completed or aborted.
+    fn observe_unresolved(&self, event: &TurnEvent, fact: &RecordFact, at: u64) {
+        let RecordFact::Idle(close) = fact else {
+            return;
+        };
+        let reason = match (event, self.open_turn()) {
+            (TurnEvent::EdgeTurn, _) => "edge_turn",
+            // Normal repeated closers with nothing open stay silent.
+            (TurnEvent::StrayIdle | TurnEvent::None, Some(_)) => "unattributed_close",
+            _ => return,
+        };
+        let native = close.as_ref().or(self.open_turn().flatten());
+        observation::turn_unknown(&self.binding, at, native.map(String::as_str), reason);
     }
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {
@@ -298,3 +412,53 @@ fn aborted(provider: ShadowProvider, value: &Value) -> bool {
 mod resume_tests;
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryKind {
+    Start,
+    Close,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Boundary {
+    pub kind: BoundaryKind,
+    pub native_turn_id: Option<String>,
+    pub range: (u64, u64),
+}
+
+enum Capture {
+    Full(SourceCapture),
+    Observation(ObservationCapture),
+}
+impl Capture {
+    fn captured_through(&self) -> u64 {
+        match self {
+            Self::Full(c) => c.captured_through(),
+            Self::Observation(c) => c.captured_through(),
+        }
+    }
+    fn file_len(&self) -> std::io::Result<u64> {
+        match self {
+            Self::Full(c) => c.file_len(),
+            Self::Observation(c) => c.file_len(),
+        }
+    }
+    fn caught_up(&self) -> std::io::Result<bool> {
+        match self {
+            Self::Full(c) => Ok(c.captured_through() == c.file_len()?),
+            Self::Observation(c) => c.caught_up(),
+        }
+    }
+    fn poll(&mut self, max: u64, end: Option<(u64, u64)>) -> CaptureOutcome {
+        match self {
+            Self::Full(c) => c.poll(max),
+            Self::Observation(c) => match end {
+                Some((end, budget)) => c.poll_until(max, end, budget),
+                None => c.poll(max),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests;

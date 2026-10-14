@@ -247,6 +247,18 @@ pub(crate) async fn finish_admitted_queued_intake(
 pub(in crate::services::discord::router) mod transition_busy_tests;
 
 #[cfg(test)]
+fn local_admission_config_after_shared_test_env_lock(
+    root: &std::path::Path,
+) -> crate::config::TestEnvVarGuard {
+    crate::config::test_env_lock::assert_shared_test_env_lock_held();
+    // Keep Postgres-less local admission independent of a host's cluster configuration.
+    let config = crate::runtime_layout::config_file_path(root);
+    std::fs::create_dir_all(config.parent().expect("config dir")).expect("create config dir");
+    std::fs::write(&config, "server: {}\ndata: {dir: data}\n").expect("write config");
+    crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -257,12 +269,12 @@ mod tests {
             "ADK_INTAKE_ROUTING_MODE",
             std::ffi::OsStr::new("disabled"),
         );
-        // An isolated runtime root keeps local admission independent of host routing.
         let root = tempfile::tempdir().expect("runtime root");
         let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_ROOT_DIR",
             root.path(),
         );
+        let _config = local_admission_config_after_shared_test_env_lock(root.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
         let http = std::sync::Arc::new(serenity::Http::new("Bot queued-source-id-test"));
         let deps = super::super::super::message_handler::IntakeDeps {

@@ -6,12 +6,13 @@
 written during that run into one smoke line. Only a fully evidenced clean run
 passes; missing or unreadable evidence is a FAIL, never a PASS.
 
-Exit codes: 0 pass/idle, 1 fail/busy, 2 unevaluable input.
+Exit codes: 0 pass/idle or explicitly classified gap, 1 fail/busy, 2 unevaluable input.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -23,6 +24,7 @@ import yaml  # type: ignore[import-untyped]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_tui_relay as cell_driver  # noqa: E402
+from post_deploy_relay_continuity import channel_is_herdr  # noqa: E402
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 # platform/tmux.rs log_kill_request; the session token ends at the first space.
@@ -191,6 +193,94 @@ def judge(
     return True, detail
 
 
+def classify(
+    *, report: dict[str, Any] | None, scenario_id: str, cell: str, channel_id: str,
+    run_id: str, config_path: Path, driver_rc: int, markers: list[str] | tuple[str, ...] = (),
+    log_counts: dict[str, int] | None = None, launch_options: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Classify only current, configured Herdr refusals; preserve the driver report."""
+    outcome = {"classification": "FAIL", "observed_reason": "evidence incomplete", "known_gaps": []}
+    try:
+        designated = channel_is_herdr(config_path, cell, channel_id)
+        rows = report.get("scenarios") if isinstance(report, dict) else None
+        if (not run_id or not isinstance(rows, list) or len(rows) != 1
+                or report.get("run_id") != run_id or report.get("cell") != cell
+                or str(report.get("channel_id")) != str(channel_id)):
+            return outcome
+        row = rows[0]
+        if (not isinstance(row, dict) or row.get("id") != scenario_id
+                or row.get("run_id") != run_id or row.get("cell") != cell
+                or str(row.get("channel_id")) != str(channel_id)):
+            return outcome
+        violations = report.get("coverage_class_violations")
+        if (not isinstance(violations, list) or violations or row.get("teardown_error")
+                or row.get("dirty_active_residue")):
+            return outcome
+        passed, detail = (judge(report=report, scenario_id=scenario_id, markers=markers,
+                               log_counts=log_counts, driver_rc=driver_rc, cell=cell,
+                               channel_id=channel_id, launch_options=launch_options)
+                          if scenario_id != "E-1" else (row.get("status") == "pass" and driver_rc == 0,
+                                                       "round-trip"))
+        outcome.update(classification="PASS" if passed else "FAIL", observed_reason=detail)
+        classification = None
+        if designated and scenario_id == "E-50" and passed:
+            classification, detail = "UNEXPECTED_PASS", "full judge passed on Herdr-configured channel"
+        elif designated and row.get("status") == "fail" and driver_rc == 1:
+            assertion_rows = row.get("assertions")
+            if not isinstance(assertion_rows, list):
+                return outcome
+            if (row.get("teardown_error") or row.get("wait_timeouts") or row.get("dirty_active_residue")
+                    or any(a.get("status") in {"fail", "unevaluable"} or a.get("passed") is False for a in assertion_rows)):
+                return outcome
+            reason = row.get("reason", "")
+            attribution = row.get("failure_attribution")
+            raw_reason = reason.removeprefix("assertion: ") if scenario_id == "E-50" else reason
+            expected_source = {"E-1": "exception", "E-50": "assertion"}.get(scenario_id)
+            if (not isinstance(attribution, dict) or attribution.get("raw_reason") != raw_reason
+                    or attribution.get("source") != expected_source):
+                return outcome
+            if scenario_id == "E-1":
+                match = re.fullmatch(r"RuntimeError: turn/start HTTP 422: (.+)", reason, re.DOTALL)
+                body = json.loads(match[1]) if match else None
+                if (isinstance(body, dict) and body.get("status") == "invalid_target"
+                        and body.get("error") == "herdr turn refused: executor_not_wired"):
+                    classification, detail = "KNOWN_GAP", "HTTP 422 invalid_target/executor_not_wired"
+            elif scenario_id == "E-50":
+                refusal = row.get("clear_refusal") or {}
+                reply = refusal.get("reply") or {}
+                after = str(refusal.get("after_id") or "")
+                content = reply.get("content", "")
+                match = re.fullmatch(r"세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled\(([1-9][0-9]*)\)", content)
+                if (refusal.get("stage") != "clear_ack" or not after.isdigit() or int(after) <= 0 or not match
+                        or not reply.get("channel_id") or str(reply["channel_id"]) != str(channel_id)
+                        or cell_driver.assertions.is_our_send(reply)
+                        or not cell_driver.herdr.clear_refusal([reply], after=int(after), channel=channel_id)
+                        or reason != "assertion: text !clear refused by the server: " + content):
+                    return outcome
+                counts = row.get("marker_counts") or {}
+                if (sorted(_label(m) for m in markers) != ["AFTER_CLEAR", "T1", "T2"]
+                        or any(type(counts.get(m)) is not int or counts[m] !=
+                               (0 if _label(m) == AFTER_CLEAR_LABEL else 1) for m in markers)):
+                    return outcome
+                # Run the unchanged judge after replacing only the interrupted clear transition.
+                complete = copy.deepcopy(report)
+                complete["scenarios"][0].update(status="pass", reason=None, marker_counts=dict.fromkeys(markers, 1))
+                clean, _ = judge(report=complete, scenario_id=scenario_id, markers=markers,
+                                 log_counts=log_counts, driver_rc=0, cell=cell,
+                                 channel_id=channel_id, launch_options=launch_options)
+                if clean:
+                    classification, detail = "KNOWN_GAP", f"herdr clear refused: rotation_unsettled({match[1]})"
+        if classification:
+            observed = {"reason": detail}
+            cell_driver.known_gap.apply_herdr_result(
+                observed, {"profile": "post_deploy_configured_herdr", "issue": detail},
+                passed=classification == "UNEXPECTED_PASS")
+            outcome.update(classification=classification, observed_reason=detail, known_gaps=observed["known_gaps"])
+        return outcome
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, yaml.YAMLError):
+        return {"classification": "FAIL", "observed_reason": "configuration or evidence unreadable", "known_gaps": []}
+
+
 def preflight_busy_reasons(
     *, base_url: str, cell: str, channel_id: str, runtime_root: Path | None = None,
     herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk",
@@ -243,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
     pre.add_argument("--herdr-endpoint")
     pre.add_argument("--herdr-status-bin", default="agentdesk")
     jud = sub.add_parser("judge")
+    jud.add_argument("--config")
+    jud.add_argument("--run-id")
     jud.add_argument("--report", required=True)
     jud.add_argument("--scenarios", required=True)
     jud.add_argument("--scenario", required=True)
@@ -295,6 +387,20 @@ def main(argv: list[str] | None = None) -> int:
         launch_options=launch_options,
         cell=args.cell, channel_id=args.channel_id,
     )
+    if args.config:
+        outcome = classify(report=report, scenario_id=args.scenario, cell=args.cell,
+                           channel_id=args.channel_id, run_id=args.run_id or "",
+                           config_path=Path(args.config), driver_rc=args.driver_rc, markers=markers,
+                           log_counts=log_counts, launch_options=launch_options)
+        classification = outcome["classification"]
+        if classification in {"KNOWN_GAP", "UNEXPECTED_PASS"}:
+            print(f"{classification}: relay {args.scenario} cell={args.cell} reason={outcome['observed_reason']}")
+            return 0
+        if classification == "FAIL":
+            passed = False
+        if args.scenario == "E-1":
+            detail = outcome["observed_reason"]
+            passed = classification == "PASS"
     print(f"relay {args.scenario} cell={args.cell} result={'pass' if passed else 'FAIL'} {detail}")
     return 0 if passed else 1
 

@@ -160,6 +160,8 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     file.take(len).read_to_end(&mut bytes)?;
+    #[cfg(test)]
+    self::io_trace::record(offset, bytes.len() as u64, false);
     Ok(bytes)
 }
 
@@ -167,11 +169,20 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
 fn hash_prefix(mut file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    if io::copy(&mut file.take(len), &mut hasher)? < len {
+    let copied = io::copy(&mut file.take(len), &mut hasher)?;
+    #[cfg(test)]
+    self::io_trace::record(0, copied, true);
+    if copied < len {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
     let guard_len = len.min(TAIL_GUARD_BYTES);
     Ok((hasher, read_at(file, len - guard_len, guard_len)?))
+}
+
+fn update_guard(guard: &mut Vec<u8>, chunk: &[u8]) {
+    guard.extend_from_slice(chunk);
+    let excess = guard.len().saturating_sub(TAIL_GUARD_BYTES as usize);
+    guard.drain(..excess);
 }
 
 impl SourceCapture {
@@ -318,9 +329,7 @@ impl SourceCapture {
                 return Err((Kind::PrefixMismatch, "buffered partial line changed".into()));
             }
         }
-        self.guard.extend_from_slice(&chunk);
-        let excess = self.guard.len().saturating_sub(TAIL_GUARD_BYTES as usize);
-        self.guard.drain(..excess);
+        update_guard(&mut self.guard, &chunk);
         let mut search = self.partial.len();
         self.partial.extend_from_slice(&chunk);
         let (mut records, mut consumed) = (Vec::new(), 0);
@@ -566,5 +575,55 @@ mod tests {
         std::fs::set_permissions(dir.path(), prior).unwrap();
         assert_eq!(raw.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(result, Err(Kind::Unreadable));
+    }
+}
+
+pub mod observation;
+
+#[cfg(test)]
+pub(crate) mod io_trace {
+    use std::cell::RefCell;
+    thread_local! {
+        static READS: RefCell<Vec<(u64, u64, bool)>> = const { RefCell::new(Vec::new()) };
+    }
+    #[test]
+    fn s0o_read_range_probe_records_actual_seek_reads() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"abcdef").unwrap();
+        take();
+        assert_eq!(super::read_at(&file, 2, 3).unwrap(), b"cde");
+        assert_eq!(take(), vec![(2, 5, false)]);
+    }
+    struct ReadHook {
+        at: u64,
+        action: Box<dyn FnOnce()>,
+    }
+    thread_local! {
+        static HOOK: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
+    }
+    pub(crate) fn after_read_at(at: u64, action: impl FnOnce() + 'static) {
+        HOOK.with_borrow_mut(|hook| {
+            *hook = Some(ReadHook {
+                at,
+                action: Box::new(action),
+            })
+        });
+    }
+    pub(crate) fn record(start: u64, len: u64, hash: bool) {
+        READS.with_borrow_mut(|reads| reads.push((start, start + len, hash)));
+        let action = HOOK.with_borrow_mut(|hook| {
+            if len > 0 && hook.as_ref().is_some_and(|h| h.at == start) {
+                hook.take()
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = action {
+            (hook.action)();
+        }
+    }
+    pub(crate) fn take() -> Vec<(u64, u64, bool)> {
+        READS.with_borrow_mut(std::mem::take)
     }
 }

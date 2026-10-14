@@ -20,6 +20,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import yaml
@@ -620,19 +621,19 @@ class H2ContractCliTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("H2 contract symbol-ref check passed", proc.stdout)
 
-    def test_document_only_symbol_fails_the_script_with_diagnostic(self):
+    def test_document_only_symbol_warns_with_diagnostic(self):
         text = CHECKER.H2_DOC.read_text(encoding="utf-8") + "\n`sym:missing::entry`\n"
         proc = self.run_contract(text)
-        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
         self.assertIn("H2 contract: sym:missing::entry has no imported reference", proc.stdout)
 
-    def test_import_only_symbol_fails_the_script_with_diagnostic(self):
+    def test_import_only_symbol_warns_with_diagnostic(self):
         for symbol in ("h2_cfg_compare::compare_cfgs", "h2_cfg_collect::seal", "h2_cfg_collect::read_manifest",
                        "h2_env::environment", "h2_env::check_host"):
             with self.subTest(symbol=symbol):
                 text = CHECKER.H2_DOC.read_text(encoding="utf-8").replace(f"`sym:{symbol}`", "")
                 proc = self.run_contract(text)
-                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertEqual(proc.returncode, 0, proc.stdout)
                 self.assertIn(f"H2 contract: imported {symbol} is not documented", proc.stdout)
 
     def test_main_preserves_import_search_path_on_h2_success_and_error(self):
@@ -654,6 +655,30 @@ class H2ContractCliTest(unittest.TestCase):
                     )
                     self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                     self.assertEqual(proc.stderr, "")
+
+
+class CliSeverityTest(unittest.TestCase):
+    def test_equality_floor_and_form_drift_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            doc, source = Path(tmp, "contract.md"), Path(tmp, "source.rs")
+            doc.write_text("`sym:module::old`", encoding="utf-8")
+            source.write_text(_block("    use super::new as _;", cfg="#[cfg(windows)]"), encoding="utf-8")
+            report = CHECKER.build_report(doc=doc, rust_sources={source: ("module",)})
+        with patch.object(CHECKER, "build_report", return_value=report), \
+                patch.object(CHECKER, "check_h2_contract", return_value=[]), patch("sys.stdout") as stdout:
+            self.assertEqual(CHECKER.main([]), 0)
+        self.assertIn("warning", str(stdout.write.call_args_list))
+
+    def test_missing_reference_source_still_fails(self) -> None:
+        report = CHECKER.build_report(doc_anchors=set(), rust_sources={Path("/missing/source.rs"): ("module",)})
+        with patch.object(CHECKER, "build_report", return_value=report), \
+                patch.object(CHECKER, "check_h2_contract", return_value=[]), patch("sys.stdout"):
+            self.assertEqual(CHECKER.main([]), 1)
+
+    def test_scanner_exception_cannot_pass(self) -> None:
+        with patch.object(CHECKER, "build_report", side_effect=RuntimeError("scanner failed")):
+            with self.assertRaisesRegex(RuntimeError, "scanner failed"):
+                CHECKER.main([])
 
 
 class IntegrationTest(unittest.TestCase):

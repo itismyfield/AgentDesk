@@ -1013,10 +1013,11 @@ const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midwa
 
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
-    use crate::services::turn_orchestrator::policy_close::PolicyClear;
+    use crate::services::turn_orchestrator::policy_close::{PolicyClear, test_hooks};
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
     let clear = |row: &InflightTurnState, generation| {
-        row.clone().into_policy_receipt(generation).try_clear()
+        let receipt = row.clone().into_policy_receipt(generation);
+        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
     };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;
@@ -1147,17 +1148,15 @@ async fn crash_phase(phase: &str) {
         let close = Close::open_in(generation, CRASH_CHANNEL, |_| {}).await;
         // The clear runs inside the close's mailbox step; this process dies right after it.
         if std::env::var(test_hooks::STOP_AT).as_deref() == Ok("after_policy_clear") {
-            crate::services::turn_orchestrator::policy_close::test_hooks::observe(Some(Box::new(
-                |stage| {
-                    if stage == "after_clear" {
-                        println!(
-                            "COLDSTOP_B_STOP after_policy_clear pid={}",
-                            std::process::id()
-                        );
-                        std::process::exit(0);
-                    }
-                },
-            )));
+            crate::services::turn_orchestrator::policy_close::test_hooks::arm(Box::new(|stage| {
+                if stage == crate::services::turn_orchestrator::policy_close::test_hooks::Stage::AfterClear {
+                    println!(
+                        "COLDSTOP_B_STOP after_policy_clear pid={}",
+                        std::process::id()
+                    );
+                    std::process::exit(0);
+                }
+            }));
         }
         assert_eq!(
             close.shared.restart.current_generation,

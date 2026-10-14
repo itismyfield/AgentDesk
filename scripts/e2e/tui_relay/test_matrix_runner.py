@@ -35,6 +35,9 @@ agents:
       claude: {id: "111"}
   - id: adk-claude-tui-e2e
     channels:
+      claude: {id: "221"}
+  - id: adk-claude-tui-2-e2e
+    channels:
       claude: {id: "222"}
   - id: adk-codex-pipe-e2e
     channels:
@@ -270,7 +273,7 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(
             [(p["cell"], p["channel_id"], p["handoff_to_agent"]) for p in participants],
             [
-                ("claude-tui", "111", "adk-claude-tui-e2e"),
+                ("claude-tui", "111", "adk-claude-tui-2-e2e"),
                 ("codex-tui", "222", "adk-codex-tui-e2e"),
             ],
         )
@@ -473,7 +476,7 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(FakeClient.max_active, 2)
         self.assertIn(
             (
-                "adk-claude-tui-e2e",
+                "adk-claude-tui-2-e2e",
                 "111",
                 "cc",
                 "응답에 정확히 한 줄로 [E2E:E11:CC-MARKER] 만 출력해줘.",

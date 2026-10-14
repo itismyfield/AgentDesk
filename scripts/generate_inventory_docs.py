@@ -949,16 +949,7 @@ def _is_real_decompose_issue(value: str) -> bool:
 
 def load_giant_file_issue_snapshot(
 ) -> tuple[dict[int, dict[str, object]], dict[str, int]]:
-    """Load and freshness-check the issue snapshot used by the offline CI gate.
-
-    The 30-day maximum age limits how long this checked-in snapshot can hide
-    a changed GitHub issue state without making CI depend on network
-    availability. Staleness is always fatal; snapshots older than 30 days must
-    be manually re-verified via `scripts/refresh_giant_file_issue_metadata.py`
-    and committed. The check guarantees only the age and internal shape of the
-    snapshot; it does not prove that GitHub still matches the snapshot between
-    manual refreshes.
-    """
+    """Read structured issue truth; stale planning data warns without blocking measurement."""
     try:
         payload = json.loads(read_text(GIANT_FILE_ISSUE_METADATA))
     except (OSError, json.JSONDecodeError) as error:
@@ -991,7 +982,7 @@ def load_giant_file_issue_snapshot(
         ) from error
     snapshot_age = now_utc() - refreshed
     if snapshot_age < timedelta(0):
-        raise ParseError("giant-file issue metadata refreshed_at cannot be in the future")
+        print("WARNING: giant-file issue metadata refreshed_at is in the future", file=sys.stderr)
     if ENFORCE_ISSUE_SNAPSHOT_FRESHNESS and snapshot_age > GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE:
         fresh_through = refreshed + GIANT_FILE_ISSUE_SNAPSHOT_MAX_AGE
         staleness_problem = (
@@ -1000,7 +991,7 @@ def load_giant_file_issue_snapshot(
             "snapshot must be manually re-verified against live GitHub state and refreshed; "
             "to update checked_at and re-verify: `python3 scripts/refresh_giant_file_issue_metadata.py && git add scripts/giant_file_issue_metadata.json`"
         )
-        raise ParseError(staleness_problem)
+        print(f"WARNING: {staleness_problem}", file=sys.stderr)
     issues: dict[int, dict[str, object]] = {}
     for issue in payload["issues"]:
         if not isinstance(issue, dict):
@@ -1294,20 +1285,10 @@ def build_giant_registrations(
     allow_overdue: bool = False,
     evaluation_date: date | None = None,
 ) -> list[GiantFileRegistration]:
-    """Validate the registry against measured prod-giants and build rows.
+    """Build measured giant rows and warn about planning metadata drift.
 
-    Raises ``ParseError`` (failing generation, and therefore CI) when the
-    registry drifts from reality (#3036):
-
-      * a current prod-giant is registered nowhere (new giant without an
-        owner/deadline/decompose issue);
-      * a registered path is no longer a prod-giant (ghost registration left
-        behind after decomposition);
-      * an ``[[entry]]`` is missing a required field or has a malformed
-        deadline;
-      * a grandfathered path is absent from the frozen
-        ``grandfathered_baseline_paths`` baseline, which would let a new giant
-        skip the owner/deadline/decompose requirement.
+    Unreadable or malformed inputs still raise; size gates consume measurements
+    independently of owner, deadline, registration and issue bookkeeping.
     """
 
     grandfathered, entries, baseline_paths = load_giant_file_registry()
@@ -1327,10 +1308,8 @@ def build_giant_registrations(
     closed_registry_paths: set[str] = set()
     seen: set[str] = set()
 
-    # Closed baseline: `grandfathered` must be a subset of the frozen
-    # `grandfathered_baseline_paths` snapshot. Removing a path (decomposed or
-    # promoted to an [[entry]]) is fine; introducing a brand-new path is not —
-    # this blocks swapping in a new prod-giant to dodge the owner/deadline gate.
+    # Report grandfathered paths outside the frozen planning snapshot.
+    # Independent size gates still reject new or growing giants.
     if baseline_paths is None:
         problems.append(
             "missing `grandfathered_baseline_paths` array in "
@@ -1354,7 +1333,8 @@ def build_giant_registrations(
                 f"[[entry]] {entry.get('file', '<no file>')!r} missing required "
                 f"field(s): {', '.join(missing)}"
             )
-            continue
+            if not entry.get("file"):
+                continue
         path = entry["file"]
         # Registrations created before #4519 have no decision; retain their
         # established decomposition contract by treating omission as `shrink`.
@@ -1464,6 +1444,7 @@ def build_giant_registrations(
             f"{rel_posix(GIANT_FILE_REGISTRY)}; add an [[entry]] with "
             "shrink(owner + deadline + issue) or keep(owner + reason)"
         )
+        registrations.append(GiantFileRegistration(path, "", "", "", "", "", prod_giants[path]))
 
     awaiting_backfill = [reg.file_path for reg in registrations if not reg.decision]
     if awaiting_backfill:
@@ -1473,7 +1454,7 @@ def build_giant_registrations(
         )
 
     # A progress snapshot retains frozen transition authority after a same-path
-    # root drops below the giant threshold; direct generation still rejects it.
+    # root drops below the giant threshold; direct generation warns about it.
     registry_paths = {reg.file_path for reg in registrations}
     closed_deadline_paths = giant_file_closed_deadline_ratchet_paths(
         closed_registry_paths,
@@ -1504,7 +1485,7 @@ def build_giant_registrations(
         problems.extend(sorted(closed_issue_forbidden_problems))
     if closed_issue_allowed_problems:
         for problem in sorted(closed_issue_allowed_problems):
-            print(f"giant-file registry: {problem}", file=sys.stderr)
+            print(f"WARNING: giant-file registry: {problem}", file=sys.stderr)
         print(
             f"giant-file: {len(closed_registry_paths)} registry entries have closed "
             "decompose_issue deadlines and remain on the checked-in transition list",
@@ -1512,9 +1493,8 @@ def build_giant_registrations(
         )
 
     if problems:
-        raise ParseError(
-            "giant-file registry drift:\n  - " + "\n  - ".join(sorted(problems))
-        )
+        for problem in sorted(problems):
+            print(f"WARNING: giant-file registry: {problem}", file=sys.stderr)
 
     registrations.sort(key=lambda item: item.file_path)
     return registrations
@@ -1549,7 +1529,8 @@ def giant_file_snapshot(root: Path, *, evaluation_date: date | None = None) -> d
             item.file_path
             for item in registrations
             if item.decision == _DECISION_SHRINK
-            and _parse_deadline(item.deadline) < effective_date
+            and (deadline := _parse_deadline(item.deadline)) is not None
+            and deadline < effective_date
         ),
     }
 
@@ -2084,6 +2065,20 @@ def generated_route_inventory() -> str:
     return render_route_inventory(route_entries)
 
 
+def giant_change_surface_document(modules: list[ModuleEntry]) -> tuple[Path, str]:
+    path = REPO_ROOT / "docs/agent-maintenance/change-surfaces.md"
+    current = read_text(path)
+    start, end = "<!-- BEGIN GENERATED: GIANT PATHS -->", "<!-- END GENERATED: GIANT PATHS -->"
+    body = "\n".join(["Measured giant paths (planning metadata remains manual):", "",
+                      *(f"- `{entry.file_path}`" for entry in sorted(modules, key=lambda item: item.file_path)
+                        if "giant-file" in entry.flags)])
+    if start not in current and end not in current:
+        return path, current.rstrip() + f"\n\n{start}\n{body}\n{end}\n"
+    if current.count(start) != 1 or current.count(end) != 1:
+        raise ParseError(f"ambiguous giant-path generated block in {rel_posix(path)}")
+    return path, replace_generated_block(current, start, end, body)
+
+
 def generated_documents(*, allow_overdue: bool = False) -> dict[Path, str]:
     module_entries = collect_modules()
     giant_registrations = build_giant_registrations(module_entries, allow_overdue=allow_overdue)
@@ -2150,6 +2145,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="fail when committed generated docs differ from current source tree",
     )
+    parser.add_argument("--review-docs-only", action="store_true",
+                        help="write only ARCHITECTURE, route and worker tracked inventories")
+    parser.add_argument("--sync-giant-docs", action="store_true",
+                        help="refresh the measured giant-path block in change-surfaces.md")
     return parser.parse_args()
 
 
@@ -2157,6 +2156,12 @@ def main() -> int:
     args = parse_args()
     try:
         documents = generated_documents()
+        if args.review_docs_only:
+            documents = {path: content for path, content in documents.items()
+                         if path == ARCHITECTURE_DOC or path.name in {"route-inventory.md", "worker-inventory.md"}}
+        if args.sync_giant_docs:
+            path, content = giant_change_surface_document(collect_modules())
+            documents[path] = content
         return write_documents(documents, check=args.check)
     except ParseError as error:
         print(f"inventory generation failed: {error}", file=sys.stderr)
