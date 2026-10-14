@@ -73,7 +73,7 @@ async fn lookup(driven: &mut Driven, rig: &Rig, alias: u64) -> Responsibility {
     let (reply, response) = oneshot::channel();
     let command = SupervisorCmd::LookupResponsibility { identity, reply };
     driven.supervisor.input_command(command, true).await;
-    response.await.unwrap()
+    response.await.unwrap().responsibility
 }
 
 #[tokio::test]

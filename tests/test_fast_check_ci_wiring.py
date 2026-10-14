@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52"
+    "3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -2776,6 +2776,25 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_hardening_keeps_trusted_macos_scheduled_and_uncancelled(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "push": ("  workflow_dispatch:\n", "  push:\n    branches: [main]\n  workflow_dispatch:\n"),
+            "no-cron": ("    - cron: ", "    - not-cron: "),
+            "cancel": ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
+            "shared-group": ("${{ github.event_name }}-", ""),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(mutation=name):
+                mutated = trusted.replace(old, new, 1)
+                self.assertNotEqual(mutated, trusted)
+                result = self.run_hardening_fixture(
+                    pr_workflow, extra_workflows={"ci-macos-trusted.yml": mutated}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no run may cancel another", result.stderr)
+
     def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
         variants = {
             "step-name": ("name", "Verify self-hosted routing is absent", True),
@@ -3202,18 +3221,48 @@ jobs:
                 self.assertEqual(journal.read_text().splitlines(),
                                  ["-m", "unittest", "tests.test_nightly_ci_triage"])
 
-    def test_ci_script_checks_runs_lane_coverage_contract(self) -> None:
-        script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
-            encoding="utf-8"
+    def test_lane_coverage_cli_and_parity_suites_run_fatally_in_the_contracts_shard(self) -> None:
+        title = "Rust test-lane coverage ratchet (#4846/#4910)"
+        script = REPO_ROOT / "scripts/ci-script-checks.sh"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SCRIPT_CHECK_")}
+        listing = subprocess.run(
+            ["bash", str(script)], cwd=REPO_ROOT, capture_output=True, text=True,
+            env={**env, "SCRIPT_CHECK_LIST": "1", "SCRIPT_CHECK_SHARD": "contracts"},
         )
-        self.assertIn(
-            'scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"',
-            script,
-        )
-        self.assertNotIn("TEST_LANE_BASELINE_REF:-HEAD", script)
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_test_lane_coverage', script
-        )
+        self.assertIn(f"contracts\t{title}", listing.stdout.splitlines(), listing.stderr)
+        lines = script.read_text(encoding="utf-8").splitlines()
+        start = lines.index(f'if run_check contracts "{title}"; then') + 1
+        after = next(i for i in range(start, len(lines)) if lines[i].startswith("if run_check "))
+        block = "\n".join(lines[start:max(i for i in range(start, after) if lines[i] == "fi")])
+        calls = [
+            "scripts/check_test_lane_coverage.py --baseline-ref base-sha",
+            "-m unittest tests.test_test_lane_coverage",
+            "-m unittest tests.test_lane_source_parity",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            probe, journal = Path(tmp) / "python-probe", Path(tmp) / "argv"
+            probe.write_text(
+                '#!/bin/bash\nprintf "%s\\n" "$*" >> "$JOURNAL"\n[ "$*" != "$FAIL_ON" ]\n'
+            )
+            probe.chmod(0o755)
+
+            def run(fail_on: str = "", **extra: str) -> tuple[int, list[str]]:
+                journal.write_text("")
+                done = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-c", "set -euo pipefail\n" + block],
+                    env={"PATH": os.environ["PATH"], "PYTHON": str(probe),
+                         "JOURNAL": str(journal), "FAIL_ON": fail_on, **extra},
+                    capture_output=True, text=True,
+                )
+                return done.returncode, journal.read_text().splitlines()
+
+            self.assertEqual(run(TEST_LANE_BASELINE_REF="base-sha"), (0, calls))
+            # No default comparison snapshot: an unset ref fails before any check runs.
+            self.assertEqual(run(), (1, []))
+            for index, call in enumerate(calls):
+                with self.subTest(failing=call):
+                    self.assertEqual(run(call, TEST_LANE_BASELINE_REF="base-sha"),
+                                     (1, calls[:index + 1]))
 
 
 if __name__ == "__main__":
