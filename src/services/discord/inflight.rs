@@ -150,10 +150,10 @@ use self::watcher_state::{
     persist_watcher_relay_watermark_locked_in_root, persist_watcher_stream_progress_locked_in_root,
 };
 
-// #3835: typed status-panel / current-message ownership writes (the #3077
-// panel-lifecycle race family) moved into a child module; re-exported below so
-// `inflight::*` paths stay byte-identical for discord-module callers.
+// Typed status-panel / current-message ownership writes, re-exported for `inflight::*` callers.
 mod ownership_ops;
+#[cfg(test)]
+pub(in crate::services::discord) use self::ownership_ops::clear_status_panel_if_owned_generation;
 pub(in crate::services::discord) use self::ownership_ops::{
     StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard, bind_status_panel,
     clear_current_msg_if_matches, clear_status_panel_if_current,
