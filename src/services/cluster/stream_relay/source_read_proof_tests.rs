@@ -218,6 +218,7 @@ pub(crate) fn exhaust_revision(session: &str) {
     assert!(tc::with_tmux_source_authority(session, |authority| authority.pin()).is_none());
 }
 
+#[cfg(unix)]
 pub(crate) fn hold_revisions_for_tests() -> impl Drop {
     REVISIONS.lock().unwrap_or_else(|error| error.into_inner())
 }
