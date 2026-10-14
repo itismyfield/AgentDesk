@@ -22,6 +22,9 @@ fn port() -> u16 {
     crate::config::Config::default().server.port
 }
 
+/// A named caller: the router it reaches, its peer and its headers.
+type Case<'a> = (&'a str, &'a Router, &'a str, Vec<(&'a str, &'a str)>);
+
 /// The API router with its auth middleware over a registry and a closed pool.
 async fn app(token: Option<&str>) -> Router {
     let mut engine_config = crate::config::Config::default();
@@ -89,7 +92,7 @@ async fn transition_route_refuses_all_but_a_loopback_peer_with_this_ports_origin
         format!("http://evil.example:{port}"),
         format!("http://127.0.0.1.evil.example:{port}"),
     );
-    let cases: [(&str, &Router, &str, Vec<(&str, &str)>); 10] = [
+    let cases: [Case; 10] = [
         ("remote", &open, REMOTE, vec![("origin", &origin)]),
         (
             "remote_bearer",
