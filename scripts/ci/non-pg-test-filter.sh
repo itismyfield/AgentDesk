@@ -919,6 +919,15 @@ NON_PG_FILTER_REPLAY=(
 readonly -a NON_PG_SKIP_ARGS
 readonly -a NON_PG_FILTER_REPLAY
 
+# Only PR artifact consumers use the shared harness; other lanes keep Cargo.
+run_prepared_lib_test() {
+  if [ -n "${ADK_LIB_TEST_ARTIFACT:-}" ]; then
+    python3 scripts/ci/lib-test-artifact.py run -- "$@"
+  else
+    "$@"
+  fi
+}
+
 # Derive the positive PostgreSQL selector from the same canonical pairs. This
 # keeps the nightly PG/non-PG selection sets complementary as the filter moves.
 PG_INCLUDE_ARGS=()
@@ -932,7 +941,7 @@ case "${PG_INCLUDE_SHARD-}" in
   "") ;;
   *)
     python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "$PG_INCLUDE_SHARD" || return 1
-    PG_SELECTED_TESTS="$(set -o pipefail; cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
+    PG_SELECTED_TESTS="$(set -o pipefail; run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
     mapfile -t PG_INCLUDE_ARGS <<< "$PG_SELECTED_TESTS"
     PG_INCLUDE_ARGS=(--exact "${PG_INCLUDE_ARGS[@]}")
     unset PG_SELECTED_TESTS
@@ -951,7 +960,7 @@ run_non_pg_filter_replay() {
   for test_filter in "${NON_PG_FILTER_REPLAY[@]}"; do
     if [ "${#batch[@]}" -gt 0 ] \
       && [ $((budget + ${#test_filter} + 1)) -gt "$NON_PG_REPLAY_BATCH_BYTES" ]; then
-      cargo test --lib -- --exact "${batch[@]}" || return 1
+      run_prepared_lib_test cargo test --lib -- --exact "${batch[@]}" || return 1
       batch=()
       budget=0
     fi
@@ -960,6 +969,6 @@ run_non_pg_filter_replay() {
   done
 
   if [ "${#batch[@]}" -gt 0 ]; then
-    cargo test --lib -- --exact "${batch[@]}" || return 1
+    run_prepared_lib_test cargo test --lib -- --exact "${batch[@]}" || return 1
   fi
 }

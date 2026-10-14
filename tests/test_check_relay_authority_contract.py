@@ -46,7 +46,7 @@ def write_workflow(
     mutation_step: str | None = None,
 ) -> None:
     commands = [
-        "env -u AGENTDESK_ROOT_DIR "
+        "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- "
         + " ".join(lane["command"])
         + " -- --test-threads=1"
         for lane in lanes
@@ -68,7 +68,9 @@ def write_workflow(
                 "if": "${{ !cancelled() }}",
                 "needs": [contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
             },
-            contract.RELAY_AUTHORITY_TARGETS_JOB: {"steps": steps},
+            contract.RELAY_AUTHORITY_TARGETS_JOB: {
+                "needs": ["lib_test_prepare"], "if": "${{ !cancelled() }}", "steps": steps,
+            },
             contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
                 "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
                 "env": {
@@ -111,6 +113,8 @@ class ManifestContract(unittest.TestCase):
             (contract.RELAY_AUTHORITY_JOB, "if", None),
             (contract.RELAY_AUTHORITY_JOB, "needs", [contract.RELAY_AUTHORITY_TARGETS_JOB]),
             (contract.RELAY_AUTHORITY_JOB, "continue-on-error", True),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", None),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", None),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", ["changes"]),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "false"),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "continue-on-error", True),
@@ -219,8 +223,8 @@ class ManifestContract(unittest.TestCase):
         self.assertIn("t5-structural-signal-authority-teardown",
                       {gap["name"] for gap in gaps})
         job = contract.load_relay_authority_job(REPO_ROOT)
-        self.assertNotIn("if", job)
-        self.assertNotIn("needs", job)
+        self.assertEqual(job["if"], "${{ !cancelled() }}")
+        self.assertIn(job["needs"], ("lib_test_prepare", ["lib_test_prepare"]))
         workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
         for lane in selected:
             command = contract.expected_workflow_command(lane)
@@ -409,7 +413,7 @@ class ManifestContract(unittest.TestCase):
 
 RELAY_C1_LANE = "t5-c1-rowless-terminal-ledger-and-lease"
 CENSUS_COMMAND = (
-    "          env -u AGENTDESK_ROOT_DIR cargo test --lib "
+    "          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
     "services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1"
 )
 
@@ -442,7 +446,7 @@ def add_undeclared_lane(payload: dict, root: Path) -> None:
         command=["cargo", "test", "--lib", "services::discord::inflight"], minimum=1,
     ) | {"name": "new-lane"})
     replace_once(root / contract.PR_WORKFLOW, CENSUS_COMMAND,
-                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight -- --test-threads=1")
+                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::inflight -- --test-threads=1")
 
 
 def drop_entry(path: str):

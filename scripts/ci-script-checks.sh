@@ -491,13 +491,11 @@ fi
 fi
 
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
-# cargo exits 0 on zero filter matches, so a curated lane with the wrong
-# --lib/--bin/--test flag can run 0 tests while its required check stays
-# green. The gate consumes workflow and justfile command sites and is enforced
-# here. The unittest run below is the gate's own mutation proof.
+# Zero-match cargo is green; verify selectors and the shared compiled oracle.
+# Mutation tests retain the static/compiled and artifact fallback contracts.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity
+"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing
 AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
