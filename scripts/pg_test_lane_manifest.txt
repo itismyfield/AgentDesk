@@ -19,6 +19,8 @@ src/db/dispatches/outbox/delivery.rs
 src/db/idempotency.rs
 src/db/imsg_reply_tests.rs
 src/db/intake_outbox.rs
+src/db/intake_outbox/owner_fence_pg_tests.rs
+src/db/intake_outbox/postgres_tests.rs
 src/db/intake_outbox_delivery_proof.rs
 src/db/intake_outbox_dispatch_stamp/tests.rs
 src/db/intake_outbox_dispatched_audit.rs
@@ -115,6 +117,7 @@ src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
 src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
+src/services/cluster/intake_worker/owner_fence_pg_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs
@@ -152,6 +155,8 @@ src/services/discord/inflight/rebind_reap/tests.rs
 src/services/discord/inflight/receipt_boundary_tests.rs
 src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs
+src/services/discord/ingress_shadow/compat_tests.rs
+src/services/discord/ingress_shadow/shadow_tests.rs
 src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
@@ -332,6 +337,7 @@ db::idempotency::tests::pg_integration
 db::imsg_reply::tests
 db::intake_outbox::home_tests
 db::intake_outbox::migration_pg_tests
+db::intake_outbox::owner_fence_pg_tests
 db::intake_outbox::postgres_tests
 db::intake_outbox_delivery_proof::tests
 db::intake_outbox_dispatch_stamp::tests
@@ -438,6 +444,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
 services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
+services::cluster::intake_worker::owner_fence_pg_tests
 services::cluster::intake_worker::replay_hold_tests
 services::cluster::machine_resources::store::tests
 services::discord::admin_host_guard::tests
@@ -474,6 +481,8 @@ services::discord::inflight::rebind_reap::tests
 services::discord::inflight::receipt_boundary_tests
 services::discord::inflight::removal::custody_notice_tests
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+services::discord::ingress_shadow::compat_tests
+services::discord::ingress_shadow::shadow_tests
 services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
@@ -863,6 +872,16 @@ db::intake_outbox::migration_pg_tests::intake_outbox_status_check_rejects_unreco
 db::intake_outbox::migration_pg_tests::intake_outbox_touch_updated_at_trigger_advances_on_update
 db::intake_outbox::migration_pg_tests::intake_outbox_unique_message_attempt_blocks_duplicate_attempt_no
 db::intake_outbox::migration_pg_tests::migration_0080_recovers_provider_from_claim_owner_and_fails_closed_by_accept_phase
+db::intake_outbox::owner_fence_pg_tests::owner_fence_all_writers_reject_transferred_and_same_instance_generation_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_capacity_and_replay_projection_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_claim_progress_normalization_and_commit_boundary_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_fresh_snapshot_after_transfer_wait_in_repeatable_read_session_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_legacy_current_partial_and_target_matrix_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_legacy_read_cannot_overwrite_new_stamp_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_lock_survives_replay_trigger_and_two_writers_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_snapshot_cas_and_sweep_token_age_revalidation_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_sweep_transfer_wait_revalidates_in_repeatable_read_session_pg
+db::intake_outbox::owner_fence_pg_tests::owner_fence_sweeps_and_partial_progress_pg
 db::intake_outbox::postgres_tests::a_claim_holding_no_channel_runs_the_original_two_parameter_statement
 db::intake_outbox::postgres_tests::cancelled_owned_claim_returns_exact_row_to_pending_without_failure_pollution
 db::intake_outbox::postgres_tests::claim_pending_for_target_filters_by_row_provider
@@ -913,6 +932,7 @@ db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_i
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
+db::o_channel_homes::tests::a_row_read_carries_pgs_clock_from_the_same_statement_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
@@ -1444,6 +1464,11 @@ services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
 services::cluster::intake_worker::o_route_tests::readiness_lost_after_runtime_and_uploads_resolve_holds_the_row_at_the_last_check_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_after_claim_transfer_never_executes_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_final_done_preserves_stale_row_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_final_failure_preserves_stale_row_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg
+services::cluster::intake_worker::owner_fence_pg_tests::owner_fence_tick_preaccept_transfer_never_executes_pg
 services::cluster::intake_worker::replay_hold_tests::replay_hold_committed_after_worker_claim_blocks_accept_and_provider_pg
 services::cluster::intake_worker::replay_hold_tests::replay_hold_survives_worker_replacement_and_foreign_claim_owners_pg
 services::cluster::intake_worker::replay_hold_tests::replay_schema_preserves_normal_worker_delivery_and_preaccept_attempt_budget_pg
@@ -1592,6 +1617,8 @@ services::discord::inflight::removal::custody_notice_tests::without_postgres_the
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
+services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
+services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_clear_move_fail_closed_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg

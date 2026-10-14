@@ -16,6 +16,8 @@ use tokio::time::Instant;
 use crate::db::o_channel_homes::{self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 
+pub(crate) mod ingress_snapshot;
+
 /// How often a holder renews its lease.
 pub(crate) const RENEW_EVERY: Duration = Duration::from_secs(5);
 /// A holder closes its own gate this long after sending its last successful renewal (H).

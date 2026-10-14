@@ -218,19 +218,20 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 ## 5. Observe
 
-Compare the parent transcript's completed JSON units with the channel's Discord history.
-Retain the source path, identity, complete record boundaries and delivery range for each
-comparison. Include historical and abandoned ranges when reconciling deferred adoption;
-elapsed time alone does not establish that all output was delivered.
+The N1 turn canary was dropped and its manifest, producer and 50-turn oracle tooling removed.
+Post marked prompts in the canary channel from your own Discord account, for example
+`Reply with exactly [E2E:CANARY:<RUN_ID>:1]`, one or more turns each with its own marker. The
+comparison counts your Discord message as the input; prompts sent through `/turn/start` (as the
+E2E driver's `send_prompt` does) leave no Discord input and read as `lost`. Do not use the E2E
+driver here: its default run includes E-50 (`!clear`) and its reset cancels the turn and clears the
+queue. Then compare that run's markers in the native transcript and Discord read-only:
 
-Read health, watcher state and turn presence through the existing read-only endpoints.
-A healthy process alone does not establish successful delivery: also inspect the channel's
-degraded reasons and delivery records. Preserve ordinary dcserver logs for the same process
-and channel. Other channels remain control samples; verify their Legacy delivery separately.
+```sh
+python3 -m scripts.e2e.tui_relay.source_compare --channel-id <CHANNEL_ID> --run-id <RUN_ID>
+```
 
-Capture only into a separate evidence directory. Keep the source, stores, cursors, bindings
-and Discord history unchanged during the comparison. Repeated transcript reads and aborted
-turns do not supply additional completed turns.
+Require exit 0. Evidence without markers exits 2; a `missing_relay`, `lost` or `duplicated`
+verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 
 ## 6. Forbidden during the canary
 
