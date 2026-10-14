@@ -21,6 +21,8 @@ use self::operation::{
     ActiveOperation, OperationKind, OutcomeReport, Root, Stage, StageStatus, StepOutcome,
 };
 use self::reconcile::{Action, Evidence, LegacyResult, Verdict};
+#[cfg(unix)]
+use super::recovery_registry::entry::{ArmRefusal, QuiescencePermit, WorkerPermit};
 use crate::db::channel_recovery_custody::{self as store, CasWrite};
 use crate::services::agent_recovery::admission::AdmissionGuard;
 
@@ -37,7 +39,8 @@ pub(crate) enum Refusal {
     NotArmable,
     /// The verdict refused the action; nothing was written.
     Unfit(&'static str),
-    /// Another owner's closed row, with no registry permit that its attempt is closed and drained.
+    /// A closed row with an arm here that has not ended, or another owner's without the registry's
+    /// current permit that its attempt is closed and drained.
     NotQuiescent,
 }
 
@@ -99,32 +102,23 @@ pub(crate) struct ArmStep<'a> {
     pub(crate) grant: Option<String>,
 }
 
-/// The registry's word that the attempt answering for a channel in one process is closed, its
-/// workers gone and every arm drained. It holds no lock; the successor's commit asks it again.
-pub(crate) struct QuiescencePermit {
-    channel_id: String,
-    process_incarnation: String,
-    still: Box<dyn Fn() -> bool + Send + Sync>,
+/// The registry's drain evidence as a reservation of a closed row asks it.
+trait Vouch: Sync {
+    /// Whether it vouches, now, for the process that owns `row`.
+    fn vouches(&self, row: &CustodyRecord) -> bool;
+    /// Holds the slot for this succession until the value drops; `None` once it no longer vouches.
+    fn begin(&self, row: &CustodyRecord) -> Option<Box<dyn Send>>;
 }
 
-impl QuiescencePermit {
-    pub(super) fn issue(
-        channel_id: String,
-        process_incarnation: String,
-        still: impl Fn() -> bool + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            channel_id,
-            process_incarnation,
-            still: Box::new(still),
-        }
+#[cfg(unix)]
+impl Vouch for QuiescencePermit {
+    fn vouches(&self, row: &CustodyRecord) -> bool {
+        QuiescencePermit::vouches(self, row)
     }
 
-    /// Whether it vouches, now, for the process that owns `row`.
-    fn vouches(&self, row: &CustodyRecord) -> bool {
-        self.channel_id == row.channel_id
-            && self.process_incarnation == row.owner.process_incarnation
-            && (self.still)()
+    fn begin(&self, row: &CustodyRecord) -> Option<Box<dyn Send>> {
+        let succession = QuiescencePermit::begin(self, row)?;
+        Some(Box::new(succession))
     }
 }
 
@@ -160,6 +154,11 @@ impl CustodyStore {
         self.admission_open.store(false, Ordering::SeqCst);
     }
 
+    /// The index entry the sync writers see for the channel, without creating one.
+    pub(crate) fn mirrored(&self, channel_id: &str) -> Option<denial_index::IndexState> {
+        self.index.entry(channel_id)
+    }
+
     /// Shows the sync writers a row found in PG as undecided before anything is rebuilt from it.
     pub(crate) fn attach(&self, channel_id: &str, revision: i64) {
         self.index.attach(channel_id, revision);
@@ -174,8 +173,8 @@ impl CustodyStore {
     }
 
     /// Reserves inside the admission's own transaction and commits it; the transaction's lock ends
-    /// there, and the custody row holds the responsibility from then on. Another owner's closed row
-    /// is refused here; only [`Self::reserve_successor`] takes it over.
+    /// there, and the custody row holds the responsibility from then on. A closed row is reserved
+    /// again only once its arms here ended; another owner's needs [`Self::reserve_successor`].
     pub(crate) async fn reserve(
         &self,
         admission: AdmissionGuard,
@@ -184,22 +183,23 @@ impl CustodyStore {
         self.reserve_with(admission, request, None).await
     }
 
-    /// Takes over another owner's closed row with the registry's permit for the process that owns
-    /// it; the permit is asked again right before the commit.
+    /// Reserves a closed row again with the registry's permit for the process that owns it. The
+    /// slot stays held for this succession from the last check until the commit is decided.
+    #[cfg(unix)]
     pub(crate) async fn reserve_successor(
         &self,
         admission: AdmissionGuard,
         request: ReserveRequest,
         permit: QuiescencePermit,
     ) -> Result<Reservation, CustodyError> {
-        self.reserve_with(admission, request, Some(permit)).await
+        self.reserve_with(admission, request, Some(&permit)).await
     }
 
     async fn reserve_with(
         &self,
         mut admission: AdmissionGuard,
         request: ReserveRequest,
-        permit: Option<QuiescencePermit>,
+        permit: Option<&dyn Vouch>,
     ) -> Result<Reservation, CustodyError> {
         if !self.admission_open.load(Ordering::SeqCst) {
             return Err(refused(Refusal::AdmissionClosed));
@@ -234,23 +234,22 @@ impl CustodyStore {
         let current = store::read(&mut **tx, &channel_id)
             .await
             .map_err(store_error)?;
-        let (expected, ever_scoped, replaced) = match current.map(CustodyRecord::decode) {
+        let (expected, ever_scoped, closed) = match current.map(CustodyRecord::decode) {
             None => (None, false, None),
             Some(Inspection::Row(row)) if row.phase == Phase::Closed => {
-                let replaced = (row.owner != *self.owner).then(|| row.clone());
-                (Some(row.revision), row.ever_scoped, replaced)
+                (Some(row.revision), row.ever_scoped, Some(row))
             }
             Some(Inspection::Row(row)) => return Err(refused(Refusal::Busy(row.phase))),
             Some(Inspection::Unsupported { .. } | Inspection::Absent) => {
                 return Err(refused(Refusal::Held));
             }
         };
-        let vouched = || match (&replaced, &permit) {
-            (None, _) => true,
-            (Some(row), Some(permit)) => permit.vouches(row),
-            (Some(_), None) => false,
+        // Every arm this store issued on the row has ended; another owner's needs the registry too.
+        let drained = |row: &CustodyRecord| {
+            let vouched = permit.is_some_and(|permit| permit.vouches(row));
+            self.index.arms_ended(&channel_id) && (vouched || row.owner == *self.owner)
         };
-        if !vouched() {
+        if closed.as_deref().is_some_and(|row| !drained(row)) {
             return Err(refused(Refusal::NotQuiescent));
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
@@ -296,9 +295,19 @@ impl CustodyStore {
         let CasWrite::Applied { revision } = written else {
             return Err(refused(Refusal::Stale));
         };
-        if !vouched() {
-            return Err(refused(Refusal::NotQuiescent));
-        }
+        #[cfg(test)]
+        commit_fault::pause(&channel_id, "reserve-checked").await;
+        // The last check takes the slot for the succession until the commit is decided.
+        let _succession = match (closed.as_deref(), permit) {
+            (Some(row), _) if !drained(row) => return Err(refused(Refusal::NotQuiescent)),
+            (Some(row), Some(permit)) => match permit.begin(row) {
+                Some(succession) => Some(succession),
+                None => return Err(refused(Refusal::NotQuiescent)),
+            },
+            _ => None,
+        };
+        #[cfg(test)]
+        commit_fault::pause(&channel_id, "reserve-held").await;
         admission.commit().await.map_err(store_error)?;
         self.index.block(&channel_id, revision);
         Ok(Reservation::Reserved {
@@ -373,13 +382,22 @@ impl CustodyStore {
         self.arm_step(step, None).await
     }
 
-    /// Arms for one registry attempt; the capability names that attempt.
-    pub(super) async fn arm_for(
+    /// Arms one stage for `worker`'s open attempt and keeps it there before returning, so the
+    /// worker covers the arm from commit to keeping; a refused keep settles it as not applied.
+    #[cfg(unix)]
+    pub(crate) async fn arm_for(
         &self,
+        worker: &WorkerPermit,
         step: ArmStep<'_>,
-        attempt: AttemptKey,
-    ) -> Result<Armed, CustodyError> {
-        self.arm_step(step, Some(attempt)).await
+    ) -> Result<Armed, ArmRefusal> {
+        worker.open().map_err(ArmRefusal::Registry)?;
+        let armed = self.arm_step(step, Some(worker.key())).await;
+        let armed = armed.map_err(ArmRefusal::Custody)?;
+        if let Err(refusal) = worker.keep(&armed) {
+            armed.report.send(StepOutcome::NotApplied);
+            return Err(ArmRefusal::Registry(refusal));
+        }
+        Ok(armed)
     }
 
     async fn arm_step(
@@ -413,6 +431,7 @@ impl CustodyStore {
         });
         let target = (channel_id, operation_id, stage, arm_id.as_str());
         let (capability, revoke) = ApplyCapability::issue(target, &namespace, attempt);
+        self.index.track(channel_id, revoke.clone());
         let (report, receiver) = OutcomeReport::pair();
         let collector = tokio::spawn({
             let (custody, revoke) = (self.clone(), revoke.clone());
@@ -628,26 +647,39 @@ pub(crate) mod commit_fault {
     type Fault = Box<dyn FnOnce() -> Result<(), String> + Send>;
     static NEXT: std::sync::Mutex<Vec<(String, Fault)>> = std::sync::Mutex::new(Vec::new());
     type Hold = (oneshot::Sender<()>, oneshot::Receiver<()>);
-    static HELD: std::sync::Mutex<Vec<(String, Hold)>> = std::sync::Mutex::new(Vec::new());
+    static HELD: std::sync::Mutex<Vec<(String, &str, Hold)>> = std::sync::Mutex::new(Vec::new());
 
     /// The next committed write on `channel_id` fires the first half and then waits, its index
     /// mirror not yet made, until the second half is fired.
     pub(crate) fn hold_after_next(
         channel_id: &str,
     ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        hold_at(channel_id, "committed")
+    }
+
+    /// The next time `channel_id` reaches the pause named `at`, it fires the first half and waits
+    /// for the second.
+    pub(crate) fn hold_at(
+        channel_id: &str,
+        at: &'static str,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let ((reached, committed), (release, held)) = (oneshot::channel(), oneshot::channel());
         let mut waiting = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        waiting.push((channel_id.to_string(), (reached, held)));
+        waiting.push((channel_id.to_string(), at, (reached, held)));
         (committed, release)
     }
 
     pub(super) async fn committed(channel_id: &str) {
+        pause(channel_id, "committed").await;
+    }
+
+    pub(super) async fn pause(channel_id: &str, at: &str) {
         let hold = {
             let mut waiting = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let index = waiting
                 .iter()
-                .position(|(channel, _)| channel == channel_id);
-            index.map(|index| waiting.remove(index).1)
+                .position(|(channel, point, _)| channel == channel_id && *point == at);
+            index.map(|index| waiting.remove(index).2)
         };
         if let Some((reached, held)) = hold {
             let _ = reached.send(());

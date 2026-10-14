@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use self::entry::Slot;
 use super::recovery_custody::CustodyStore;
-use super::recovery_custody::denial_index::{DenialIndex, IndexState};
+use super::recovery_custody::denial_index::IndexState;
 use super::recovery_custody::model::{Inspection, Phase};
 
 /// Initial policy constants, not measurements: slots keeping install responsibility, and
@@ -41,16 +41,20 @@ pub(crate) enum RegistryRefusal {
     NotClosed,
     /// The slot was reclaimed; the channel resolves a new one.
     Retired,
+    /// A successor's reservation holds the slot until its commit is decided.
+    Succeeding,
 }
 
 /// What a request finds for a channel. Asked again on every request: a channel nothing answers
 /// for now is attached once its row is rehydrated or its attempt begins.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Binding {
-    /// No recovery slot and no custody entry: the legacy path runs as before.
+    /// No slot, no index entry, and a PG read found no custody row: the legacy path runs as before.
     Unmanaged,
-    /// A slot or a custody entry exists; `Unknown` when a slot has nothing decided yet.
+    /// A slot, an index entry or a row exists; `Unknown` until the index has decided it.
     Attached(IndexState),
+    /// The PG read failed: nothing is known, so nothing may run as unmanaged.
+    Unread,
 }
 
 /// What a core's slots share: the process identity, the identities issued so far and the install
@@ -154,12 +158,20 @@ impl RecoveryRegistry {
         self.slots().get(&channel).cloned()
     }
 
-    /// The channel's binding, without creating a slot or an index entry.
-    pub(crate) fn binding(&self, index: &DenialIndex, channel: u64) -> Binding {
-        match index.entry(&channel.to_string()) {
-            Some(state) => Binding::Attached(state),
-            None if self.peek(channel).is_some() => Binding::Attached(IndexState::Unknown),
-            None => Binding::Unmanaged,
+    /// The channel's binding, without creating a slot or an index entry. Only a PG read that
+    /// found no row answers unmanaged; a row not rehydrated yet is attached and unknown.
+    pub(crate) async fn binding(&self, custody: &CustodyStore, channel: u64) -> Binding {
+        let channel_id = channel.to_string();
+        if let Some(state) = custody.mirrored(&channel_id) {
+            return Binding::Attached(state);
+        }
+        if self.peek(channel).is_some() {
+            return Binding::Attached(IndexState::Unknown);
+        }
+        match custody.inspect(&channel_id).await {
+            Ok(Inspection::Absent) => Binding::Unmanaged,
+            Ok(_) => Binding::Attached(IndexState::Unknown),
+            Err(_) => Binding::Unread,
         }
     }
 

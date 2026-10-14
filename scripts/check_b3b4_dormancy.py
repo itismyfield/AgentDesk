@@ -5,8 +5,9 @@ Checked together: module declarations, re-exports and aliases, references from o
 field, a constructor call, a wiring point), the test-only seams the bodies use, gate shape
 (`cfg(any(test, ..))`, `cfg_attr`, a feature), the 0140 migration staying additive, and files that
 must not change. `--diff-base REF` adds the changed-file check under `--policy NAME` (or the
-default list); `--forbid GLOB` extends it. In CI (`--ci` or CI=true) a run without both a base and
-a policy fails as unverified instead of passing.
+default list); `--forbid GLOB` extends it. General CI runs `dormant`, which freezes no file; a slice
+names its own freeze list. In CI (`--ci` or CI=true) a run without both a base and a policy fails
+as unverified instead of passing.
 """
 import argparse
 import fnmatch
@@ -55,6 +56,8 @@ FORBIDDEN = (
 )
 # policy -> (globs that must not change, files that may change only in their DECLARATIONS lines).
 POLICIES = {
+    # Every PR: the structural checks above only, so unrelated DB or migration work still passes.
+    "dormant": ((), ()),
     # The feature PR against its base branch: what no B3b-4 slice changes.
     "b3b4": (FORBIDDEN + ("src/services/discord/runtime_bootstrap*", "migrations/*", "src/db/*"),
              (PURGE,)),

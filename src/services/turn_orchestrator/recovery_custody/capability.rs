@@ -17,12 +17,18 @@ pub(crate) enum CapabilityRefusal {
     WrongTarget,
 }
 
-/// The registry attempt an arm was issued to: its process and its never-reused attempt id.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AttemptKey {
-    pub(crate) process_incarnation: String,
-    pub(crate) attempt: u64,
+/// The registry attempt an arm was issued to. Keys are equal only when cloned from the same one,
+/// and only a live worker of the attempt hands its key out.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AttemptKey(Arc<()>);
+
+impl PartialEq for AttemptKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
+
+impl Eq for AttemptKey {}
 
 /// One arm's lifetime: closed to new applies, applies entered and still running, carriers sent
 /// and not yet admitted, and whether its capability is still held outside a carrier.

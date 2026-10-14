@@ -118,6 +118,23 @@ class DormancyGate(unittest.TestCase):
                 subprocess.run([*git, "reset", "-q", "--hard", "HEAD~1"], check=True)
         self.assertIn("`fn reap() {}` changed; only its gated declarations may", done.stdout)
 
+    def test_ci_freezes_no_file_but_a_slice_policy_does_and_both_refuse_a_link(self):
+        ci = ("--ci", "--diff-base", "HEAD~1", "--policy")
+        unrelated = {"src/db/agents.rs": "fn renamed() {}\n",
+                     "migrations/postgres/0200_agents_note.sql": "ALTER TABLE agents ADD COLUMN note TEXT;\n"}
+        self.assertEqual(changed(unrelated, *ci, "dormant"), (0, "B3b-4 dormancy: PASS\n"))
+        code, out = changed(unrelated, *ci, "4a2b-0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("src/db/agents.rs: changed against HEAD~1 but must stay as it is", out)
+        self.assertIn("0200_agents_note.sql: changed against HEAD~1", out)
+        mailbox = "src/services/turn_orchestrator.rs"
+        link = {mailbox: "fn boot() { registry_purge::recovery_custody::CustodyStore::new(); }\n"
+                + TREE[mailbox]}
+        for policy in ("dormant", "4a2b-0"):
+            code, out = changed(link, *ci, policy)
+            self.assertEqual(code, 1, (policy, out))
+            self.assertIn("reference to a dormant module outside it", out)
+
     def test_ci_without_a_base_or_a_policy_is_unverified_not_pass(self):
         for args, env in (((), {**ENV, "CI": "true"}), (("--ci",), ENV),
                           (("--ci", "--diff-base", ""), ENV), (("--ci", "--diff-base", "HEAD"), ENV)):

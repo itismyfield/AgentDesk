@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::capability::{ApplyCapability, ApplyGuard, Carrier, Unapplied, Unsent};
+use super::capability::{ApplyCapability, ApplyGuard, Carrier, RevokeHandle, Unapplied, Unsent};
 use super::operation::Stage;
 #[cfg(test)]
 use super::seam::{self, Point};
@@ -35,10 +35,12 @@ pub(super) struct CommittedArm<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Denial(pub(crate) IndexState);
 
-/// Each entry carries the row revision whose commit set it.
+/// Each entry carries the row revision whose commit set it. `arms` keeps every arm this process
+/// issued per channel until it ends, so a closed row is reserved again only after them.
 #[derive(Default)]
 pub(crate) struct DenialIndex {
     states: Mutex<HashMap<String, (i64, IndexState)>>,
+    arms: Mutex<HashMap<String, Vec<RevokeHandle>>>,
 }
 
 impl DenialIndex {
@@ -59,6 +61,31 @@ impl DenialIndex {
         states
             .get(channel_id)
             .map_or(IndexState::Unknown, |(_, state)| state.clone())
+    }
+
+    pub(super) fn track(&self, channel_id: &str, arm: RevokeHandle) {
+        let mut arms = self
+            .arms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        arms.entry(channel_id.to_string()).or_default().push(arm);
+    }
+
+    /// Whether every arm issued on the channel ended; ended ones are forgotten.
+    pub(super) fn arms_ended(&self, channel_id: &str) -> bool {
+        let mut arms = self
+            .arms
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(live) = arms.get_mut(channel_id) else {
+            return true;
+        };
+        live.retain(|arm| arm.end_proof().is_none());
+        let ended = live.is_empty();
+        if ended {
+            arms.remove(channel_id);
+        }
+        ended
     }
 
     /// The channel's entry without creating one; `None` means nothing here has attached it.

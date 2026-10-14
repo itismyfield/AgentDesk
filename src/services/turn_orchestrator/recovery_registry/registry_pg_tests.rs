@@ -1,11 +1,13 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use super::super::recovery_custody::capability::{
     AttemptKey, CapabilityRefusal, Load, RevokeHandle, Unsent,
 };
+use super::super::recovery_custody::commit_fault;
 use super::super::recovery_custody::custody_pg_tests::{
     Fx, NODE, channel, evidence, legacy, namespace, scoped, seal,
 };
@@ -699,7 +701,7 @@ async fn s3act_b3b4a2b0_a_a_lookup_creates_nothing_and_never_settles_unmanaged_p
     fx.home(&earlier, NODE, EPOCH).await;
     fx.reserve(scoped(&earlier, seal("q1", None, None), EPOCH))
         .await;
-    let found = registry.binding(&index, id(&earlier));
+    let found = registry.binding(&custody, id(&earlier)).await;
     assert!(
         registry.peek(id(&earlier)).is_none(),
         "the lookup created a slot"
@@ -709,7 +711,12 @@ async fn s3act_b3b4a2b0_a_a_lookup_creates_nothing_and_never_settles_unmanaged_p
         None,
         "the lookup made an index entry"
     );
+    assert_eq!(found, Binding::Attached(IndexState::Unknown));
+    // Only a read that found no row answers unmanaged.
+    let absent = channel(863);
+    let found = registry.binding(&custody, id(&absent)).await;
     assert_eq!(found, Binding::Unmanaged);
+    assert!(registry.peek(id(&absent)).is_none() && index.entry(&absent).is_none());
     // The same request after the row is rehydrated finds it attached and undecided.
     let rehydrated = rehydrate(
         &registry,
@@ -723,16 +730,16 @@ async fn s3act_b3b4a2b0_a_a_lookup_creates_nothing_and_never_settles_unmanaged_p
         matches!(rehydrated, Rehydrated::Row { .. }),
         "{rehydrated:?}"
     );
-    let found = registry.binding(&index, id(&earlier));
+    let found = registry.binding(&custody, id(&earlier)).await;
     assert_eq!(found, Binding::Attached(IndexState::Blocked));
     // An attempt with nothing decided is attached but unknown, then follows the index.
     let ch = channel(862);
     let (_slot, attempt) = started(&fx, &registry, &ch).await;
     assert_eq!(index.entry(&ch), None);
-    let found = registry.binding(&index, id(&ch));
+    let found = registry.binding(&custody, id(&ch)).await;
     assert_eq!(found, Binding::Attached(IndexState::Unknown));
     let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
-    let found = registry.binding(&index, id(&ch));
+    let found = registry.binding(&custody, id(&ch)).await;
     assert_eq!(found, Binding::Attached(IndexState::Blocked));
     let worker = attempt.worker().expect("a worker place");
     let step = arm_step(
@@ -749,9 +756,14 @@ async fn s3act_b3b4a2b0_a_a_lookup_creates_nothing_and_never_settles_unmanaged_p
         stage: Stage::QueueCommit,
         arm_id: armed.revoke.arm_id().into(),
     };
-    assert_eq!(registry.binding(&index, id(&ch)), Binding::Attached(exact));
+    let found = registry.binding(&custody, id(&ch)).await;
+    assert_eq!(found, Binding::Attached(exact));
     armed.report.send(StepOutcome::NotApplied);
     armed.collector.await.unwrap().expect("recorded");
+    // A failed read is not unmanaged either.
+    fx.pool.close().await;
+    let found = registry.binding(&custody, id(&absent)).await;
+    assert_eq!(found, Binding::Unread);
     fx.close().await;
 }
 
@@ -877,6 +889,7 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
     let (_slot, attempt) = started(&fx, &registry, &ch).await;
     let (other_slot, other_attempt) = started(&fx, &registry, &other).await;
     let worker = attempt.worker().expect("a worker place");
+    let other_worker = other_attempt.worker().expect("a worker place");
     let (revision, op) = fx.reserve(scoped(&ch, seal("q1", None, None), EPOCH)).await;
     let exited = seal("q0", None, None);
     // A custody refusal comes back as such and keeps nothing.
@@ -898,14 +911,12 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
     );
     let step = arm_step(&ch, revision, &op, Stage::QueueCommit, exited.clone(), None);
     let first = worker.arm(&fx.custody, step).await.expect("armed and kept");
-    let own = AttemptKey {
-        process_incarnation: registry.process_incarnation().into(),
-        attempt: attempt.identity().attempt,
-    };
-    assert_eq!(first.revoke.attempt(), Some(&own));
+    assert_eq!(first.revoke.attempt(), Some(&worker.key()));
+    assert_ne!(first.revoke.attempt(), Some(&other_worker.key()));
+    assert_ne!(first.revoke.attempt(), Some(&AttemptKey::default()));
     assert_eq!(first.revoke.namespace(), &namespace());
     // Another attempt does not take the arm, and leaves it to its own.
-    let kept = other_attempt.keep_arm(&first);
+    let kept = other_worker.keep(&first);
     assert_eq!(
         kept,
         Err(RegistryRefusal::Foreign),
@@ -914,6 +925,7 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
     let live = first.capability.check(&ch, &op, Stage::QueueCommit);
     assert_eq!(live, Ok(()));
     other_slot.close_admission();
+    drop(other_worker);
     assert!(
         other_slot.quiesce().is_ok(),
         "the refused arm counted there"
@@ -942,7 +954,7 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
     );
     let plain = plain.await;
     assert_eq!(plain.revoke.attempt(), None);
-    assert_eq!(attempt.keep_arm(&plain), Err(RegistryRefusal::Foreign));
+    assert_eq!(worker.keep(&plain), Err(RegistryRefusal::Foreign));
     plain.report.send(StepOutcome::NotApplied);
     let revision = plain.collector.await.unwrap().expect("recorded");
     // The row now names another namespace: an arm there, though issued to this attempt, is not.
@@ -952,16 +964,11 @@ async fn s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_p
         .await
         .unwrap();
     let step = arm_step(&ch, revision, &op, Stage::ActorInstall, installed, None);
-    let moved = fx.custody.arm_for(step, own).await.expect("armed");
-    assert_eq!(moved.revoke.namespace().token_hash, "token-b");
-    let kept = attempt.keep_arm(&moved);
-    assert_eq!(
-        kept,
-        Err(RegistryRefusal::Foreign),
-        "an arm in another namespace was kept"
+    let moved = fx.custody.arm_for(&worker, step).await.map(drop);
+    assert!(
+        matches!(moved, Err(ArmRefusal::Registry(RegistryRefusal::Foreign))),
+        "an arm in another namespace was kept: {moved:?}"
     );
-    moved.report.send(StepOutcome::NotApplied);
-    moved.collector.await.unwrap().expect("recorded");
     drop(worker);
     fx.close().await;
 }
@@ -1086,5 +1093,227 @@ async fn s3act_b3b4a2b0_f_an_owner_change_waits_for_the_registry_quiescence_perm
     let row = fx.record(&ch).await;
     assert_ne!(row.owner, closed.owner);
     assert_eq!(row.phase, Phase::ScopedReserved);
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b0_r1b_a_worker_covers_its_arm_until_the_attempt_keeps_it_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, _index) = process(&fx);
+    let ch = channel(895);
+    let (slot, attempt) = started(&fx, &registry, &ch).await;
+    let worker = attempt.worker().expect("a worker place");
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    let (committed, release) = commit_fault::hold_after_next(&ch);
+    let arming = tokio::spawn({
+        let (custody, ch) = (custody.clone(), ch.clone());
+        async move {
+            let exited = seal("q0", None, None);
+            let step = arm_step(&ch, revision, &op, Stage::QueueCommit, exited, None);
+            let armed = worker.arm(&custody, step).await.map(drop);
+            (worker, armed)
+        }
+    });
+    // The arm committed and is not kept yet: its worker keeps the attempt from quiescing.
+    committed.await.expect("the arm committed");
+    slot.close_admission();
+    let busy = RegistryRefusal::NotQuiescent {
+        open: false,
+        workers: 1,
+        arms: 0,
+    };
+    assert_eq!(slot.quiesce().map(drop), Err(busy));
+    release.send(()).expect("released");
+    let (worker, armed) = arming.await.expect("ended");
+    assert!(
+        matches!(
+            armed,
+            Err(ArmRefusal::Registry(RegistryRefusal::AdmissionClosed))
+        ),
+        "{armed:?}"
+    );
+    // The closed attempt counted the arm and revoked it; given up, it drained with the worker.
+    drop(worker);
+    assert!(slot.quiesce().is_ok(), "the refused arm stayed live");
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b0_r1b_an_arm_the_registry_did_not_keep_never_lets_the_owner_change_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, _index) = process(&fx);
+    let ch = channel(896);
+    let (slot, attempt) = started(&fx, &registry, &ch).await;
+    let worker = attempt.worker().expect("a worker place");
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    let exited = seal("q0", None, None);
+    let step = arm_step(&ch, revision, &op, Stage::QueueCommit, exited, None);
+    let Armed {
+        capability,
+        report,
+        collector,
+        ..
+    } = worker.arm(&custody, step).await.expect("armed and kept");
+    drop(worker);
+    report.send(StepOutcome::NotApplied);
+    collector.await.unwrap().expect("recorded");
+    slot.close_admission();
+    let (owner, raw) = (fx.record(&ch).await.owner, fx.raw(&ch).await);
+    // Another process takes the row over as far as this registry lets it, while A's capability
+    // lives: the owner and the row stay as they are.
+    let (permit, refused) = match slot.quiesce() {
+        Ok(permit) => (Some(permit), None),
+        Err(refusal) => (None, Some(refusal)),
+    };
+    if let Some(permit) = permit {
+        let successor = scoped(&ch, seal("q9", None, None), EPOCH);
+        let admission = fx.admit(&ch).await;
+        let taken = fx.custody.reserve_successor(admission, successor, permit);
+        let _ = taken.await;
+    }
+    assert_eq!(
+        fx.record(&ch).await.owner,
+        owner,
+        "the owner changed while A's capability lived"
+    );
+    assert_eq!(fx.raw(&ch).await, raw, "a refused succession wrote the row");
+    let busy = RegistryRefusal::NotQuiescent {
+        open: false,
+        workers: 0,
+        arms: 1,
+    };
+    assert_eq!(refused, Some(busy));
+    drop(capability);
+    assert!(
+        slot.quiesce().is_ok(),
+        "the given-up capability stayed live"
+    );
+    fx.close().await;
+}
+
+type Pause = (oneshot::Receiver<()>, oneshot::Sender<()>);
+
+/// Another process's reservation of `ch` with the slot's permit, spawned and paused at `at`.
+async fn succession(
+    fx: &Fx,
+    slot: &Arc<Slot>,
+    ch: &str,
+    at: &'static str,
+) -> (Pause, JoinHandle<Result<Reservation, CustodyError>>) {
+    let pause = commit_fault::hold_at(ch, at);
+    let permit = slot.quiesce().expect("closed and drained");
+    let (admission, custody) = (fx.admit(ch).await, fx.custody.clone());
+    let request = scoped(ch, seal("q9", None, None), EPOCH);
+    let task = async move { custody.reserve_successor(admission, request, permit).await };
+    (pause, tokio::spawn(task))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b0_r1b_a_succession_holds_the_slot_until_its_commit_is_decided_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, _index) = process(&fx);
+    let ch = channel(897);
+    let (slot, _attempt) = started(&fx, &registry, &ch).await;
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    custody
+        .settle_busy(&ch, revision, &op)
+        .await
+        .expect("closed");
+    slot.close_admission();
+    let (owner, raw) = (fx.record(&ch).await.owner, fx.raw(&ch).await);
+    // An attempt started after the first check voids the permit: the write rolls back.
+    let ((checked, release), task) = succession(&fx, &slot, &ch, "reserve-checked").await;
+    checked.await.expect("passed its first check");
+    let next = slot.retry(&fx.custody, scope(id(&ch), EPOCH), 2).await;
+    let next = next.expect("nothing holds the slot yet");
+    release.send(()).expect("released");
+    let voided = task.await.expect("ended");
+    assert_eq!(fx.raw(&ch).await, raw, "a voided permit's write committed");
+    assert!(
+        matches!(voided, Err(CustodyError::Refused(Refusal::NotQuiescent))),
+        "{voided:?}"
+    );
+    // A permit taken at the last check holds the slot: no attempt starts and no reclaim retires
+    // it until the commit is decided.
+    let earlier = next.identity().attempt;
+    slot.close_admission();
+    let ((held, release), task) = succession(&fx, &slot, &ch, "reserve-held").await;
+    held.await.expect("took the slot");
+    let during = slot.retry(&fx.custody, scope(id(&ch), EPOCH), 3).await;
+    assert_eq!(
+        slot.drained(),
+        Ok(Some(earlier)),
+        "an attempt started during the succession"
+    );
+    assert_eq!(during.map(drop), Err(RegistryRefusal::Succeeding));
+    let reclaimed = registry.reclaim(&fx.custody, id(&ch)).await;
+    assert_eq!(reclaimed, Err(RegistryRefusal::Succeeding));
+    assert_eq!(
+        next.worker().map(drop),
+        Err(RegistryRefusal::AdmissionClosed)
+    );
+    release.send(()).expect("released");
+    let taken = task.await.expect("ended");
+    assert!(
+        matches!(taken, Ok(Reservation::Reserved { .. })),
+        "{taken:?}"
+    );
+    assert_ne!(fx.record(&ch).await.owner, owner);
+    // The decided commit lets the slot go.
+    let reclaimed = registry.reclaim(&fx.custody, id(&ch)).await;
+    assert_eq!(reclaimed, Err(RegistryRefusal::NotClosed));
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a2b0_r1b_the_same_owner_reserves_a_closed_row_again_only_once_drained_pg() {
+    let fx = Fx::create().await;
+    let (registry, custody, index) = process(&fx);
+    let ch = channel(898);
+    let (_slot, attempt) = started(&fx, &registry, &ch).await;
+    let worker = attempt.worker().expect("a worker place");
+    let (revision, op) = reserve(&fx, &custody, scoped(&ch, seal("q1", None, None), EPOCH)).await;
+    let exited = seal("q0", None, None);
+    let step = arm_step(&ch, revision, &op, Stage::QueueCommit, exited, None);
+    let Armed {
+        capability,
+        report,
+        collector,
+        ..
+    } = worker.arm(&custody, step).await.expect("armed and kept");
+    let entered = index.admit_write(&ch, Some(&capability));
+    let entered = entered.expect("entered while armed");
+    report.send(StepOutcome::NotApplied);
+    collector.await.unwrap().expect("recorded");
+    let closed = fx.record(&ch).await;
+    let raw = fx.raw(&ch).await;
+    // The same store reserves again while A's guard, capability and worker live, then without
+    // the guard and the worker: no new operation and no write.
+    let again = || legacy(&ch, seal("q9", None, None));
+    let early = custody.reserve(fx.admit(&ch).await, again()).await;
+    drop((worker, entered));
+    let late = custody.reserve(fx.admit(&ch).await, again()).await;
+    let row = fx.record(&ch).await;
+    assert_eq!(
+        (row.revision, row.active_operation),
+        (closed.revision, None),
+        "a new operation was reserved while A still applied"
+    );
+    assert_eq!(
+        fx.raw(&ch).await,
+        raw,
+        "a refused reservation wrote the row"
+    );
+    for refused in [early, late] {
+        assert!(
+            matches!(refused, Err(CustodyError::Refused(Refusal::NotQuiescent))),
+            "{refused:?}"
+        );
+    }
+    // Once the capability is given up the arm has ended, and the row is reserved again.
+    drop(capability);
+    let (revision, next) = reserve(&fx, &custody, again()).await;
+    assert_eq!(revision, closed.revision + 1);
+    assert_ne!(next, op);
     fx.close().await;
 }
