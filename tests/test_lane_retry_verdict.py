@@ -158,6 +158,9 @@ class FlakyRetryVerdictTests(unittest.TestCase):
         forced = judge.judge_retries(late, [rerun(FAILS)])
         self.assertEqual(forced.status, judge.UNRETRYABLE)
         self.assertReason("1 retry run(s) were made although", forced.errors)
+        hung = judge.judge_retries(assess(ONE_FAILED), [rerun(FAILS, timed_out=True)])
+        self.assertEqual(hung.status, judge.UNRETRYABLE)
+        self.assertReason(f"retry of {FAILS}: hit its deadline", hung.errors)
 
     def test_zero_executed_is_red_on_either_run(self) -> None:
         nothing = assess([], stdout=NO_TEST, log=b"", rc=0)
@@ -206,6 +209,13 @@ class FlakyRetryVerdictTests(unittest.TestCase):
                 f"logged [{FAILS}, {FLAPS}] instead of exactly this test"),
             "reports itself ignored": (
                 rerun(FAILS, "ignored", rc=0), "was reported ignored"),
+            "stdout lost its result line": (
+                rerun(FAILS, stdout="\n".join(["", "running 1 test", "", summary(1, 0, 0, 4), ""])),
+                "stdout never reported its result"),
+            "summary counts a second test": (
+                rerun(FAILS, stdout=libtest_stdout([(FAILS, "ok")], 4).replace(
+                    " 1 passed;", " 2 passed;")),
+                "its own summary says 2 passed, 0 failed, 0 ignored"),
         }
         for label, (run, reason) in cases.items():
             with self.subTest(label):
@@ -238,6 +248,19 @@ class FlakyRetryVerdictTests(unittest.TestCase):
         rogue = judge.judge_retries(original, [rerun(SPAWNS, stdout=child_fails_unlisted)])
         self.assertEqual(rogue.status, judge.UNRETRYABLE)
         self.assertReason("stdout reported ignored or other tests: alpha::rogue", rogue.errors)
+        child_passes_unlisted = libtest_stdout([(SPAWNS, "ok")], 4, SPAWNS).replace(
+            f"test {ENTRY} ... ok", "test alpha::rogue ... ok")
+        undeclared = judge.judge_retries(original, [rerun(SPAWNS, stdout=child_passes_unlisted)])
+        self.assertEqual(undeclared.status, judge.UNRETRYABLE)
+        self.assertReason("stdout reported ignored or other tests: alpha::rogue", undeclared.errors)
+        child_fails_itself = "\n".join([
+            "", "running 1 test", f"test {SPAWNS} ... ", "running 1 test", f"test {SPAWNS} ... FAILED",
+            "", "failures:", f"    {SPAWNS}", "", summary(0, 1, 0, 4), "", "ok", "",
+            summary(1, 0, 0, 4), ""])
+        itself = judge.judge_retries(original, [rerun(SPAWNS, stdout=child_fails_itself)])
+        self.assertEqual(itself.status, judge.UNRETRYABLE)
+        self.assertReason(f"stdout failures [{SPAWNS}] disagree with the logfile verdict ok",
+                          itself.errors)
         capped = judge.judge_retries(assess(SPAWNS_FAILED, max_summaries=1),
                                      [rerun(SPAWNS, nested=True)])
         self.assertEqual(capped.status, judge.UNRETRYABLE)
@@ -294,6 +317,12 @@ class FlakyRetryVerdictTests(unittest.TestCase):
                 original = assess(ONE_FAILED, **kwargs)
                 self.assertEqual((original.status, original.retry_ids), (judge.UNRETRYABLE, ()))
         self.assertReason("not libtest's test-failure code 101", assess(ONE_FAILED, rc=-6).errors)
+        nonzero_clean = assess(ALL_PASSED, rc=101)
+        self.assertEqual(nonzero_clean.status, judge.UNRETRYABLE)
+        self.assertReason("exited 101 without a failing test", nonzero_clean.errors)
+        aborted = judge.judge_retries(assess(ONE_FAILED), [rerun(FAILS, rc=-6)])
+        self.assertEqual(aborted.status, judge.UNRETRYABLE)
+        self.assertReason(f"retry of {FAILS}: exited -6 although its logfile says ok", aborted.errors)
 
     def test_normal_nested_output_parses_on_both_runs(self) -> None:
         clean = assess(ALL_PASSED, nested=SPAWNS)
