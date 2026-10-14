@@ -495,7 +495,7 @@ if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 # Mutation tests retain the static/compiled and artifact fallback contracts.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing
+"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
 AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
