@@ -105,6 +105,14 @@ def manifest_path(
     return temporary, path
 
 
+def isolate_from_runner_artifact(case: unittest.TestCase) -> None:
+    # An inherited ADK_LIB_TEST_ARTIFACT makes run_lane read the runner's binary, not the fixture.
+    environment = mock.patch.dict(os.environ)
+    environment.start()
+    case.addCleanup(environment.stop)
+    os.environ.pop("ADK_LIB_TEST_ARTIFACT", None)
+
+
 class ManifestContract(unittest.TestCase):
     def test_execution_graph_cannot_skip_contract_lanes(self) -> None:
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
@@ -541,6 +549,9 @@ class AuthoritySurfaceContract(unittest.TestCase):
 
 
 class SelectionContract(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_from_runner_artifact(self)
+
     def test_list_count_uses_test_ids_not_cargo_summary(self) -> None:
         output = "a::one: test\na::two: test\n2 tests, 0 benchmarks\n"
         self.assertEqual(contract.count_test_ids(output), 2)
@@ -580,6 +591,9 @@ class FloorGateEndToEnd(unittest.TestCase):
     """`failures_for` is graded in isolation above. This drives the whole gate --
     real `run_lane`, real cargo process, real `main` -- so a future refactor that
     stops feeding the listing into the floor is caught here, not in review."""
+
+    def setUp(self) -> None:
+        isolate_from_runner_artifact(self)
 
     def _run_against_listing(self, *, listed: int, minimum: int) -> tuple[int, str, str]:
         temporary, manifest = manifest_path([active_lane(minimum=minimum)])

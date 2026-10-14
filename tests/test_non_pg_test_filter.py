@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -30,6 +31,14 @@ def load_membership_module():
 
 
 class NonPgTestFilter(unittest.TestCase):
+    def setUp(self) -> None:
+        # A runner's artifact input would send run_prepared_lib_test past the shell cargo stubs;
+        # the shared-harness cases set it explicitly.
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("ADK_LIB_TEST_ARTIFACT", None)
+
     def test_pg_matrix_comes_from_the_partition_count(self) -> None:
         import json
         result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
