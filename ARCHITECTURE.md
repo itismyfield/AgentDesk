@@ -1261,6 +1261,7 @@ src/
 │   │   │   │   ├── completed_kind.rs
 │   │   │   │   └── derived_status.rs
 │   │   │   ├── background_task_events.rs
+│   │   │   ├── channel_visibility.rs
 │   │   │   ├── clock_tests.rs
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
@@ -1370,6 +1371,7 @@ src/
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
+│   │   │   ├── recovery_completion_outcome_tests.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
 │   │   │   ├── routing_orphan.rs
@@ -2298,6 +2300,7 @@ src/
 │   │   ├── shared_state.rs
 │   │   ├── sidecar_interaction.rs
 │   │   ├── single_message_panel.rs
+│   │   ├── single_message_panel_tests.rs
 │   │   ├── skills_scan.rs
 │   │   ├── stall_recovery.rs
 │   │   ├── standby_relay.rs

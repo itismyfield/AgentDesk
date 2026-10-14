@@ -473,10 +473,10 @@ async fn handle_text_message_admitted(
     if !is_voice_announcement && live::try_text_reply(shared, http, channel_id, user_text).await? {
         return Ok(IntakeExecution::Executed);
     }
-    let is_dm_channel = matches!(
-        channel_id.to_channel(http).await.ok(),
-        Some(serenity::Channel::Private(_))
-    );
+    let channel_lookup = channel_id.to_channel(http).await.ok();
+    let live_events = &shared.ui.placeholder_live_events;
+    live_events.observe_panel_channel_kind(channel_id, dm_hint, channel_lookup.as_ref());
+    let is_dm_channel = matches!(channel_lookup, Some(serenity::Channel::Private(_)));
     let is_dm_channel = super::super::super::resolve_is_dm_channel(dm_hint, is_dm_channel);
     shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm_channel);
     let (settings_provider, allowed_tools) = {
