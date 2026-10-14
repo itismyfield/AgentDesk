@@ -427,25 +427,115 @@ fn attach_resize_and_person_changes_at_each_effect_boundary_never_enter() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn held_head_new_input_and_duplicate_wakes_deliver_fifo_once() {
-    held_fifo(false).await;
+    held_fifo(false, false).await;
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn capped_held_head_new_input_and_duplicate_wakes_deliver_fifo_once() {
-    held_fifo(true).await;
+    held_fifo(true, false).await;
 }
 
-async fn held_fifo(capped: bool) {
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn capped_held_capture_failure_preserves_fifo_until_reobservation() {
+    held_fifo(true, true).await;
+}
+
+#[test]
+fn wake_observation_separates_failed_reads_and_confirmed_unsupported_geometry() {
+    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::wake_hint_observed;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let name = "act-wake-observation";
+    let pane = renderer(&f, name, "normal");
+    let path = pane.join("transcript");
+    let (_, _cap) = managed(6_899_912, name, &path);
+    crate::services::claude_tui::composer_lock::guard_draft(
+        name,
+        crate::services::claude_tui::composer_lock::DraftGuard::DraftRestored,
+    );
+    assert!(wake_hint_observed(name).unwrap().is_some());
+    let target = format!("={name}:");
+    f.tmux(&["resize-window", "-t", &target, "-x", "159", "-y", "40"]);
+    assert_eq!(wake_hint_observed(name), Ok(None));
+    f.tmux(&["resize-window", "-t", &target, "-x", "160", "-y", "40"]);
+    f.tmux(&["set-window-option", "-t", &target, "window-size", "latest"]);
+    assert_eq!(wake_hint_observed(name), Ok(None));
+    f.tmux(&["set-window-option", "-t", &target, "window-size", "manual"]);
+    f.tmux(&["resize-window", "-t", &target, "-x", "160", "-y", "40"]);
+    let shim = f.root.path().join("tmux");
+    let original = std::fs::read_to_string(&shim).unwrap();
+    let tail = format!(
+        "exec '{}' -L {} -f /dev/null \"$@\"",
+        f.real.display(),
+        f.socket
+    );
+    let mode = f.root.path().join("observation-mode");
+    let displaced = pane.join("transcript-displaced");
+    let hook = format!(
+        r#"mode=$(cat '{}')
+case "$mode" in
+  pin_exit) exit 1;;
+  pin_stderr) printf warning >&2; exit 0;;
+  pin_malformed) printf unavailable; exit 0;;
+esac
+for arg in "$@"; do
+  if [ "$arg" = capture-pane ]; then
+    case "$mode" in
+      capture_exit) exit 1;;
+      capture_loses_transcript)
+        '{}' -L {} -f /dev/null "$@"
+        mv '{}' '{}'
+        exit 0;;
+    esac
+  fi
+done
+"#,
+        mode.display(),
+        f.real.display(),
+        f.socket,
+        path.display(),
+        displaced.display()
+    );
+    assert!(original.contains(&tail));
+    std::fs::write(&shim, original.replace(&tail, &(hook + &tail))).unwrap();
+    for failure in [
+        "pin_exit",
+        "pin_stderr",
+        "pin_malformed",
+        "capture_exit",
+        "capture_loses_transcript",
+    ] {
+        std::fs::write(&mode, failure).unwrap();
+        assert_eq!(wake_hint_observed(name), Err(()), "{failure}");
+        if displaced.exists() {
+            std::fs::rename(&displaced, &path).unwrap();
+        }
+        assert!(events(&pane).is_empty(), "{failure}");
+    }
+    std::fs::write(shim, original).unwrap();
+    assert!(wake_hint_observed(name).unwrap().is_some());
+    assert!(events(&pane).is_empty());
+}
+
+async fn held_fifo(capped: bool, capture_failure: bool) {
     use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
     use crate::services::discord::turn_bridge::followup_requeue::rewatch_draft_holds;
     use crate::services::discord::{Intervention, mailbox_enqueue_intervention};
     use serenity::all::{MessageId, UserId};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::after_shared_test_env_lock();
-    let id = if capped { 6_899_991 } else { 6_899_990 };
+    let id = if capture_failure {
+        6_899_992
+    } else if capped {
+        6_899_991
+    } else {
+        6_899_990
+    };
     let channel = ChannelId::new(id);
     let _listed = StashChannelGuard::new(id);
-    let name = if capped {
+    let name = if capture_failure {
+        "act-capped-capture-fifo"
+    } else if capped {
         "act-capped-fifo"
     } else {
         "act-fifo"
@@ -527,13 +617,33 @@ async fn held_fifo(capped: bool) {
             .await
             .enqueued
     );
+    let failed_capture = f.root.path().join("failed-capture");
+    if capture_failure {
+        let shim = f.root.path().join("tmux");
+        let original = std::fs::read_to_string(&shim).unwrap();
+        let tail = format!(
+            "exec '{}' -L {} -f /dev/null \"$@\"",
+            f.real.display(),
+            f.socket
+        );
+        let hook = format!(
+            "for arg in \"$@\"; do\n  if [ \"$arg\" = capture-pane ] && [ ! -f '{}' ]; then\n    printf x > '{}'\n    exit 1\n  fi\ndone\n",
+            failed_capture.display(),
+            failed_capture.display(),
+        );
+        assert!(original.contains(&tail));
+        std::fs::write(shim, original.replace(&tail, &(hook + &tail))).unwrap();
+    }
     let dir = pane.clone();
     let idle = path.clone();
     let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = delivered.clone();
+    let failed_pass = Arc::new(std::sync::Mutex::new(None));
+    let first_pass = failed_pass.clone();
     let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
         move |shared, provider, ch, _| {
-            let (dir, idle, seen) = (dir.clone(), idle.clone(), seen.clone());
+            let (dir, idle, seen, first_pass) =
+                (dir.clone(), idle.clone(), seen.clone(), first_pass.clone());
             Box::pin(async move {
                 if ch != channel {
                     return None;
@@ -542,6 +652,15 @@ async fn held_fifo(capped: bool) {
                     &shared, &provider, ch,
                 )
                 .await;
+                if capture_failure {
+                    let mut pass = first_pass.lock().unwrap();
+                    if pass.is_none() {
+                        *pass = Some((
+                            taken.intervention.as_ref().map(|input| input.message_id),
+                            events(&dir),
+                        ));
+                    }
+                }
                 let started = taken.intervention.is_some();
                 if let Some(input) = taken.intervention {
                     std::fs::write(dir.join("own"), view(&input.text, true)).unwrap();
@@ -657,6 +776,14 @@ async fn held_fifo(capped: bool) {
         events(&pane),
         ["C-s", "paste", "Enter", "C-s", "paste", "Enter"]
     );
+    if capture_failure {
+        assert_eq!(std::fs::read_to_string(failed_capture).unwrap(), "x");
+        assert_eq!(
+            *failed_pass.lock().unwrap(),
+            Some((None, Vec::new())),
+            "failed observation must dequeue neither input and cause no effects"
+        );
+    }
 }
 #[test]
 fn warm_host_recovery_and_busy_wait_reach_managed_idle_submission() {

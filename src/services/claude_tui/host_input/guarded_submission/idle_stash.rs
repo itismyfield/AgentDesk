@@ -449,8 +449,7 @@ pub(crate) fn wake_hint(session: &str) -> Option<String> {
     wake_hint_observed(session).ok().flatten()
 }
 
-/// A contended composer on a known idle runtime is unresolved, rather than evidence that a
-/// capped head may be skipped. A busy or unbound runtime keeps its existing selection meaning.
+/// Failed observation cannot authorize skipping a capped head; confirmed non-targets can.
 pub(crate) fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
     let Some(binding) =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
@@ -458,34 +457,47 @@ pub(crate) fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
         return Ok(None);
     };
     let path = std::path::PathBuf::from(binding.output_path);
-    if binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-        || observe_claude_jsonl_turn_state(&path) != TuiTurnState::Idle
-    {
+    if binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui {
         return Ok(None);
     }
-    composer_lock::try_with_composer_permit(session, |_| {
-        let pane = SubmissionTmux.pin_guarded(session).ok()?;
-        let capture = pane.capture_draft()?;
+    match observe_claude_jsonl_turn_state(&path) {
+        TuiTurnState::Idle => {}
+        TuiTurnState::Unknown => return Err(()),
+        _ => return Ok(None),
+    }
+    composer_lock::try_with_composer_permit(session, |_| -> Result<Option<String>, ()> {
+        let pane = match SubmissionTmux.pin_guarded(session) {
+            Ok(pane) => pane,
+            Err(InputRefusal::Composer(
+                crate::services::tui_input::submission::Refusal::UnpredictableRender,
+            )) => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        let capture = pane.capture_draft().ok_or(())?;
         if composer_lock::composer_admission(session, || Some(capture.clone()))
             != composer_lock::ComposerAdmission::StashOnly
         {
-            return None;
+            return Ok(None);
         }
-        if observe_claude_jsonl_turn_state(&path) != TuiTurnState::Idle {
-            return None;
+        match observe_claude_jsonl_turn_state(&path) {
+            TuiTurnState::Idle => {}
+            TuiTurnState::Unknown => return Err(()),
+            _ => return Ok(None),
         }
-        let draft = screen::stashable(&capture, "wake", Some(pane.dimensions()))?;
+        let Some(draft) = screen::stashable(&capture, "wake", Some(pane.dimensions())) else {
+            return Ok(None);
+        };
         use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::metadata(path).ok()?;
-        Some(format!(
+        let metadata = std::fs::metadata(path).map_err(|_| ())?;
+        Ok(Some(format!(
             "{:?}/{draft:?}/{}/{}/{}",
             pane.identity(),
             metadata.dev(),
             metadata.ino(),
             metadata.len()
-        ))
+        )))
     })
-    .ok_or(())
+    .ok_or(())?
 }
 
 #[cfg(test)]

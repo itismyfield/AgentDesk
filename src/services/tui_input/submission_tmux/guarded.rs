@@ -169,6 +169,24 @@ impl SubmissionTmux {
         let output = self
             .run(&["display-message", "-p", "-t", &target, SNAPSHOT])
             .map_err(|_| InputRefusal::Composer(Refusal::CaptureUnavailable))?;
+        // A complete snapshot can prove unsupported geometry; a failed read cannot.
+        let unavailable = || InputRefusal::Composer(Refusal::CaptureUnavailable);
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Err(unavailable());
+        }
+        let raw = std::str::from_utf8(&output.stdout).map_err(|_| unavailable())?;
+        let fields: Vec<_> = raw.split_ascii_whitespace().collect();
+        if fields.len() != 14
+            || identity(fields[0], '$').is_none()
+            || identity(fields[1], '@').is_none()
+            || identity(fields[2], '%').is_none()
+            || !matches!(fields[5], "manual" | "latest" | "smallest" | "largest")
+            || [3, 4, 6, 7, 8, 9, 10, 11, 12, 13]
+                .iter()
+                .any(|&index| fields[index].parse::<u32>().is_err())
+        {
+            return Err(unavailable());
+        }
         let geometry = Geometry::read(output).ok_or_else(held)?;
         Ok(GuardedPane {
             session: session.to_owned(),
