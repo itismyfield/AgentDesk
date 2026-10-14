@@ -10,7 +10,9 @@ REAL_FAILURE_PREDICATE="$SCRIPT_DIR/real-failure-predicate.sh"
 source "$REAL_FAILURE_PREDICATE"
 TMP_DIR="$(mktemp -d)"
 SUMMARY_ROWS="$TMP_DIR/summary-rows.md"
-PG_JOB_NAME="PostgreSQL tests (ubuntu-postgres)"
+PG_JOB_NAMES_TEXT="$(python3 "$REPO_ROOT/scripts/check_pg_test_lane_membership.py" --pg-job-names)"
+mapfile -t PG_JOB_NAMES <<< "$PG_JOB_NAMES_TEXT"
+PG_JOB_NAME="${PG_JOB_NAMES[0]}"
 WINDOWS_ADVISORY_JOB_NAME="Fast check + non-PG tests (windows-latest)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -40,7 +42,7 @@ a gate actually ran.
 Environment:
   GITHUB_REPOSITORY  owner/repository (required for a workflow run)
   RUN_ID             CI PR workflow run id
-  RUN_ATTEMPT        attempt to classify (must be less than 3)
+  RUN_ATTEMPT        initial attempt to classify (only attempt 1 may retry)
   RERUN_DRY_RUN      set to 1 to classify historical attempts without rerunning
 EOF
 }
@@ -470,6 +472,14 @@ classify_job() {
   fi
 }
 
+is_pg_job() {
+  local candidate
+  for candidate in "${PG_JOB_NAMES[@]}"; do
+    [[ "$1" != "$candidate" ]] || return 0
+  done
+  return 1
+}
+
 decide_retry() {
   local pg_failed_count="$1"
   local pg_classified_count="$2"
@@ -482,9 +492,7 @@ decide_retry() {
     printf 'no-op:regression'
   elif (( pg_failed_count == 0 )); then
     printf 'no-op:no-pg-failure'
-  elif (( pg_failed_count != 1 )); then
-    printf 'no-op:ambiguous-pg-jobs'
-  elif (( pg_classified_count != pg_failed_count )); then
+  elif (( pg_classified_count == 0 )); then
     printf 'no-op:unclassified-pg-failure'
   else
     printf 'would-rerun:infra'
@@ -555,7 +563,8 @@ run_classifier() {
     return 0
   fi
 
-  if (( run_attempt >= 3 )); then
+  # Only the initial failed attempt may request one retry per shard.
+  if (( run_attempt >= 2 )); then
     decision="no-op:attempt-cap"
     write_summary "$run_id" "$run_attempt" "$decision"
     echo "decision=$decision"
@@ -598,7 +607,8 @@ run_classifier() {
   local pg_classified_count=0
   local regression_count=0
   local unknown_count=0
-  local pg_job_id=""
+  local -a pg_job_ids=()
+  local -A seen_pg_names=()
   local job_id job_name log_path job_class executed_steps
 
   while IFS=$'\t' read -r job_id executed_steps job_name; do
@@ -618,11 +628,15 @@ run_classifier() {
       regression_count=$((regression_count + 1))
     fi
 
-    if [[ "$job_name" == "$PG_JOB_NAME" ]]; then
+    if is_pg_job "$job_name"; then
+      if [[ -n "${seen_pg_names[$job_name]-}" ]]; then
+        unknown_count=$((unknown_count + 1))
+      fi
+      seen_pg_names[$job_name]=1
       pg_failed_count=$((pg_failed_count + 1))
-      pg_job_id="$job_id"
       if job_is_infra_failure "$log_path" "$executed_steps"; then
         pg_classified_count=$((pg_classified_count + 1))
+        pg_job_ids+=("$job_id")
         if [[ "$job_class" != "regression" ]]; then
           if grep -a -E -i -q -- "$INFRA_ACTION_TIMEOUT_REGEX" "$log_path"; then
             job_class="infra-timeout"
@@ -655,7 +669,7 @@ run_classifier() {
 
   if [[ "$dry_run" == "1" ]]; then
     write_summary "$run_id" "$run_attempt" "$decision"
-    echo "decision=$decision pg_job_id=$pg_job_id"
+    echo "decision=$decision pg_job_ids=${pg_job_ids[*]}"
     return 0
   fi
 
@@ -666,15 +680,17 @@ run_classifier() {
     return 0
   fi
 
-  if ! gh run rerun "$run_id" --repo "$repo" --job "$pg_job_id"; then
-    decision="no-op:rerun-request-failed"
-    write_summary "$run_id" "$run_attempt" "$decision"
-    echo "decision=$decision pg_job_id=$pg_job_id" >&2
-    return 1
-  fi
+  for job_id in "${pg_job_ids[@]}"; do
+    if ! gh run rerun "$run_id" --repo "$repo" --job "$job_id"; then
+      decision="no-op:rerun-request-failed"
+      write_summary "$run_id" "$run_attempt" "$decision"
+      echo "decision=$decision pg_job_id=$job_id" >&2
+      return 1
+    fi
+  done
   decision="rerun-requested:infra"
   write_summary "$run_id" "$run_attempt" "$decision"
-  echo "decision=$decision pg_job_id=$pg_job_id"
+  echo "decision=$decision pg_job_ids=${pg_job_ids[*]}"
 }
 
 assert_equal() {
@@ -726,7 +742,8 @@ run_self_test() {
   assert_equal "no-op:regression" "$(decide_retry 1 1 1 0)" "mixed regression guard"
   assert_equal "no-op:unknown" "$(decide_retry 1 1 0 1)" "unknown log guard"
   assert_equal "no-op:no-pg-failure" "$(decide_retry 0 0 0 0)" "vacuous truth guard"
-  assert_equal "no-op:ambiguous-pg-jobs" "$(decide_retry 2 2 0 0)" "ambiguous target guard"
+  assert_equal "would-rerun:infra" "$(decide_retry 2 2 0 0)" "two independent infra shards"
+  assert_equal "would-rerun:infra" "$(decide_retry 2 1 0 0)" "only the infra shard is retried"
   assert_equal "no-op:unclassified-pg-failure" "$(decide_retry 1 0 0 0)" "unclassified guard"
 
   local historical_regression_count=0
