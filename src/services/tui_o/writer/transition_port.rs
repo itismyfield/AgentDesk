@@ -137,6 +137,15 @@ pub(crate) struct Diagnostics {
     pub nonce: String,
     pub history: Result<HistoryView, String>,
     pub overlaps: Vec<Overlap>,
+    pub candidates: Vec<Candidate>,
+}
+
+/// An old source of the judgment by its spool key, with the pane its hop resolves to, if any.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Candidate {
+    pub key: String,
+    pub source: SourceId,
+    pub pane: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

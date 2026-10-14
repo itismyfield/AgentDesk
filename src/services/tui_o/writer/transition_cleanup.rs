@@ -237,7 +237,11 @@ pub(crate) fn judge(snapshot: &Snapshot, request: &Request) -> Judgment {
 
 /// The hop's seq and pane; a hop stored without them takes both from one validated history match.
 /// The approved scope places each hop with this same resolution.
-fn hop(snapshot: &Snapshot, key: &str, next: &Successor) -> Result<(u64, Option<String>), Unclear> {
+pub(super) fn hop(
+    snapshot: &Snapshot,
+    key: &str,
+    next: &Successor,
+) -> Result<(u64, Option<String>), Unclear> {
     if let Some(seq) = next.seq {
         return Ok((seq, next.tmux_session.clone()));
     }

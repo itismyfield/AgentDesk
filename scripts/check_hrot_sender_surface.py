@@ -20,6 +20,8 @@ CFG_TEST = re.compile(r"#\[cfg\((?:test|all\(test[^\]]*)\)\]")
 ATTR = re.compile(r"\s*#\[[^\]]*\]")
 BUILT = re.compile(r"Operation::(Inspect|Apply)\s*\(")
 READINESS = re.compile(r"tui_o::writer::host\b[^;]*\b(?:Readiness|process_readiness)\b")
+# A port send in either call form: a method call, or a path to the method however it is named.
+SEND = re.compile(r"\.\s*request(?P<method_as>_as)?\s*\(|::\s*request(?P<path_as>_as)?\b")
 
 
 def paren_end(code, start):
@@ -55,8 +57,11 @@ def file_errors(path, code):
         errors.append("names the transition port outside the writer and its route")
     if names_port and re.search(r"\bOperation\s+as\b", code):
         errors.append("renames the transition operation")
-    if ".request_as(" in code and path != PORT:
+    sends = list(SEND.finditer(code))
+    if any(send["method_as"] or send["path_as"] for send in sends) and path != PORT:
         errors.append("calls request_as outside the port")
+    if (path.startswith(WRITER) or names_port) and path not in (ROUTE, PORT) and sends:
+        errors.append("sends on a transition port outside the route")
     if re.search(r"(?<!fn )\bwith_transition_reply\s*\(", code) and path != ROUTE:
         errors.append("consumes a transition reply outside the route")
     if re.search(r"\bTransitionPort::new\s*\(", code) and path != HOST:
@@ -70,7 +75,7 @@ def file_errors(path, code):
             continue
         if path != ROUTE:
             errors.append(f"builds Operation::{built.group(1)} outside the route")
-    if path == ROUTE and len(re.findall(r"\.request\s*\(", code)) != 1:
+    if path == ROUTE and len(sends) != 1:
         errors.append("the route must send exactly once")
     return [f"{path}: {error}" for error in errors]
 

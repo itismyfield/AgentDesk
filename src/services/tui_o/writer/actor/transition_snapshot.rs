@@ -13,9 +13,11 @@ use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::Cursor;
 use crate::services::tui_o::writer::transition_cleanup::observe::Observation;
 use crate::services::tui_o::writer::transition_cleanup::{
-    Home, Obligations, ReaderView, Snapshot, SourceFacts,
+    Home, Obligations, ReaderView, Snapshot, SourceFacts, hop,
 };
-use crate::services::tui_o::writer::transition_port::{Context, Diagnostics, HistoryView, Overlap};
+use crate::services::tui_o::writer::transition_port::{
+    Candidate, Context, Diagnostics, HistoryView, Overlap,
+};
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
 };
@@ -61,8 +63,21 @@ impl Common {
             nonce: nonce.to_owned(),
             history: history.map_err(Clone::clone),
             overlaps,
+            candidates: candidates(snapshot),
         }
     }
+}
+
+/// Every old source of `snapshot` with the pane its hop resolves to, for the operator to find.
+fn candidates(snapshot: &Snapshot) -> Vec<Candidate> {
+    let candidate = |cursor: &Cursor| {
+        let key = source_key(&cursor.source);
+        let next = snapshot.rotation.successors.get(&key)?;
+        let pane = hop(snapshot, &key, next).ok().and_then(|(_, pane)| pane);
+        let source = cursor.source.clone();
+        Some(Candidate { key, source, pane })
+    };
+    snapshot.cursors.iter().filter_map(candidate).collect()
 }
 
 fn sessions(history: &SourceHistory) -> Vec<(&'static str, String, Option<SourceId>)> {

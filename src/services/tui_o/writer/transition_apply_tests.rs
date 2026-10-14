@@ -172,7 +172,7 @@ async fn transition_scope_keeps_every_hop_past_the_candidate_limit_across_a_part
 }
 
 // An Inspect's scope and verdicts come from one final snapshot, a hop bound during its probes in
-// both; an unreadable final snapshot or an unverified execution issues no scope.
+// both; an unreadable final snapshot, an unverified execution or its unsettled history issues none.
 #[tokio::test(start_paused = true)]
 async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
     let chain = chain(2);
@@ -204,8 +204,36 @@ async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
     polls(3).await;
     let _unread =
         force_execution_for_tests(Err("the pane's spawn nonce is not the request's".into()));
-    let reply = ask(&actor, Operation::Inspect(request), chain.context()).await;
+    let reply = ask(&actor, Operation::Inspect(request.clone()), chain.context()).await;
     assert!(matches!(reply.scope, Some(Err(_))), "[T9:unverified]");
+    drop(_unread);
+    let old = chain.sources[0].session_id.clone();
+    let holes: [(&str, fn(&mut SourceHistory, String)); 2] = [
+        ("incomplete", |history, _| history.complete = false),
+        ("pinless", |history, session| {
+            let seen = Utc::now();
+            let (pin, since) = (None, None);
+            history.awaiting = Some(Visit {
+                session,
+                pin,
+                since,
+                seen,
+            });
+        }),
+    ];
+    for (case, hole) in holes {
+        let (pin, mut history) = execution(chain.sources.last().unwrap(), Utc::now());
+        hole(&mut history, old.clone());
+        let _held = force_execution_for_tests(Ok((pin, history)));
+        let reply = ask(&actor, Operation::Inspect(request.clone()), chain.context()).await;
+        let judged = reply.summary.is_some() && matches!(reply.execution, Some(Err(_)));
+        assert!(judged, "[T9:{case}:snapshot] {:?}", reply.execution);
+        assert!(
+            matches!(reply.scope, Some(Err(_))),
+            "[T9:{case}] {:?}",
+            reply.scope
+        );
+    }
     halt(actor.stop, actor.task).await;
 }
 

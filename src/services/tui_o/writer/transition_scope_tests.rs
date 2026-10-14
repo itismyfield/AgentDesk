@@ -85,7 +85,7 @@ fn transition_scope_digest_follows_the_request_execution_and_hops_only() {
         change(&mut fixture, &mut context);
         assert_ne!(digest(&fixture, &context), base, "[T4:{case}] moved");
     }
-    let kept: [Change; 10] = [
+    let kept: [Change; 9] = [
         ("at", |f, _| f.request.at += chrono::TimeDelta::hours(1)),
         ("retired", |f, _| f.cursor(5).retired = true),
         ("audited", |f, _| {
@@ -99,9 +99,6 @@ fn transition_scope_digest_follows_the_request_execution_and_hops_only() {
         ("grown", |f, _| f.cursor(5).captured_through += 10),
         ("obligations", |f, _| {
             f.snapshot.obligations = Err("unread".into())
-        }),
-        ("execution", |f, _| {
-            f.snapshot.execution = Err("unread".into())
         }),
         ("proven", |f, _| next(f, 5).proof = Some(9)),
         ("seq_stored", |f, _| {
@@ -146,11 +143,11 @@ fn transition_scope_holds_every_hop_up_to_the_cutoff_in_seq_order() {
     assert_eq!(scope.map(|scope| scope.hops.len()), Ok(0), "[T9:empty]");
 }
 
-// A hop that cannot be placed in or out of the scope, an execution or home not verified, or a
-// request without a checked end issues no scope rather than a smaller one.
+// A hop that cannot be placed in or out of the scope, an execution, its history or home not
+// verified, or a request without a checked end issues no scope rather than a smaller one.
 #[test]
 fn transition_scope_is_refused_rather_than_narrowed_when_a_hop_cannot_be_placed() {
-    let refused: [Change; 10] = [
+    let refused: [Change; 11] = [
         ("history_unread", |f, _| {
             f.snapshot.legacy_hops = Err("unread".into())
         }),
@@ -172,6 +169,9 @@ fn transition_scope_is_refused_rather_than_narrowed_when_a_hop_cannot_be_placed(
             f.snapshot.cursors.retain(|c| c.source != source(5))
         }),
         ("unverified", |f, _| f.snapshot.pinned = Err("nonce".into())),
+        ("execution", |f, _| {
+            f.snapshot.execution = Err("unread".into())
+        }),
         ("home_moving", |f, _| f.snapshot.home = Home::Moving),
         ("home_unread", |f, _| {
             f.snapshot.home = Home::Unread("unread".into())

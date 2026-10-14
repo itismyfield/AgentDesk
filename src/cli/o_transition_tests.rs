@@ -157,8 +157,8 @@ fn transition_cli_has_no_token_argument() {
     );
 }
 
-// Busy, InProgress, a lost reply and no answer at all keep their own notice and are never shown as
-// a request the actor did not get.
+// Busy, InProgress, a lost or stale reply and no answer at all keep their own notice and are
+// never shown as a request the actor did not get.
 #[test]
 fn transition_cli_never_shows_an_unproven_answer_as_unsent() {
     let refused = |refused: &str| json!({"result": "actor_refused", "reply": {"refused": refused}});
@@ -167,6 +167,10 @@ fn transition_cli_never_shows_an_unproven_answer_as_unsent() {
         (Ok((409, refused("InProgress"))), "완료 영수증이 아닙니다"),
         (
             Ok((502, json!({"result": "reply_lost"}))),
+            "쓰기가 없었다고 보지 마세요",
+        ),
+        (
+            Ok((409, json!({"result": "stale_actor_reply"}))),
             "쓰기가 없었다고 보지 마세요",
         ),
         (

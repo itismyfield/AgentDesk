@@ -187,9 +187,10 @@ fn render(answer: &Result<(u16, Value), http::PostError>) -> String {
     match body["result"].as_str() {
         Some("reply_lost") => lines.push(NO_ANSWER.into()),
         Some("inspected" | "applied" | "actor_refused") => reply(&body["reply"], &mut lines),
-        Some("stale_actor_reply") => {
-            lines.push("응답한 run이 현재 run이 아니라 읽지 않았습니다.".into())
-        }
+        Some("stale_actor_reply") => lines.push(
+            "보낸 요청에 응답한 run이 더 이상 현재·준비 상태가 아니라 읽지 않았습니다. 쓰기가 없었다고 보지 마세요."
+                .into(),
+        ),
         _ => lines.push(format!(
             "actor에 보내지 않았습니다: {}",
             tag(&body["detail"])
@@ -216,6 +217,18 @@ fn reply(reply: &Value, lines: &mut Vec<String>) {
         lines.push(format!(
             "overlap {}: held by {}, unpinned {}",
             overlap["key"], overlap["held_by"], overlap["unpinned"]
+        ));
+    }
+    for candidate in diagnostics["candidates"].as_array().into_iter().flatten() {
+        let source = &candidate["source"];
+        lines.push(format!(
+            "candidate {}: session {} path {} dev {} ino {} pane {}",
+            candidate["key"],
+            source["session_id"],
+            source["path"],
+            source["dev"],
+            source["ino"],
+            candidate["pane"]
         ));
     }
     if unpinned > 0 {

@@ -167,12 +167,13 @@ pub(crate) async fn send(
         };
         (status, json!({"ok": ok, "result": result, "reply": reply}))
     });
+    // Sent already, so a run no longer current or ready is a stale reply, never an unsent one.
     match consumed {
         Ok((status, answer)) => (status, Json(answer)),
-        Err(result) => refused(
+        Err(_) => refused(
             StatusCode::CONFLICT,
-            result,
-            "the run that replied is not current",
+            "stale_actor_reply",
+            "the run that replied is no longer current and ready",
         ),
     }
 }

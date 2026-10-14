@@ -73,6 +73,7 @@ pub(crate) fn approve(
     }
     let unverified = |detail: &String| format!("the execution is not verified: {detail}");
     snapshot.pinned.as_ref().map_err(unverified)?;
+    snapshot.execution.as_ref().map_err(unverified)?;
     if snapshot.home != Home::Settled {
         return Err("the request's home is not verified".into());
     }

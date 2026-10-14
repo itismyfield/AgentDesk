@@ -92,7 +92,8 @@ fn moved_from(current: &SourceId, left: &[&SourceId]) -> impl Drop + use<> {
 }
 
 // Inspect through the route reaches the actor once, writes no store file though both old hops
-// judge eligible, and reports the execution the judgment read with the request's nonce.
+// judge eligible, and reports the execution the judgment read with the request's nonce and the
+// identity and pane of each old source.
 #[tokio::test(start_paused = true)]
 async fn transition_route_inspect_writes_nothing_and_reports_the_execution_it_judged() {
     let chain = chain(2);
@@ -124,6 +125,15 @@ async fn transition_route_inspect_writes_nothing_and_reports_the_execution_it_ju
         diagnostics["history"]["Ok"]["sessions"], sessions,
         "[R1:history]"
     );
+    let named = |n: usize| {
+        let source = &chain.sources[n];
+        json!({"key": chain.key(n), "source": pinned(source), "pane": chain.pane})
+    };
+    let mut candidates = diagnostics["candidates"].as_array().unwrap().clone();
+    candidates.sort_by_key(|candidate| candidate["key"].to_string());
+    let mut expected = vec![named(0), named(1)];
+    expected.sort_by_key(|candidate| candidate["key"].to_string());
+    assert_eq!(candidates, expected, "[R1:candidates]");
     halt(actor.stop, actor.task).await;
 }
 
@@ -194,8 +204,8 @@ async fn transition_route_inspect_reports_the_history_of_the_judgment_not_a_late
     halt(actor.stop, actor.task).await;
 }
 
-// A reply that comes back after the channel's run was replaced is answered as stale and never
-// reported, whatever it says.
+// A reply that comes back after the channel's run was replaced, or stopped taking work, is
+// answered as stale and never reported or shown as unsent, whatever it says.
 #[tokio::test(start_paused = true)]
 async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
     let chain = chain(1);
@@ -226,6 +236,17 @@ async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
     assert_eq!(status, StatusCode::CONFLICT, "[R4:stale] {answer}");
     assert_eq!(answer["result"], "stale_actor_reply", "[R4:stale]");
     assert!(answer.get("reply").is_none(), "[R4:not_reported] {answer}");
+    let (ready, watches) = (
+        Arc::new(Readiness::default()),
+        Rc::new(Watches::new(true, false)),
+    );
+    let _hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
+    let stopping = Rc::clone(&watches);
+    route::on_reply(move || drop(stopping.stopping.send_replace(true)));
+    let (status, answer) = routed(route(&ready, chain.context(), chain.request(JOB))).await;
+    let stale = (status, &answer["result"]);
+    let expected = (StatusCode::CONFLICT, &json!("stale_actor_reply"));
+    assert_eq!(stale, expected, "[R4:stopped_after_send] {answer}");
     halt(actor.stop, actor.task).await;
 }
 

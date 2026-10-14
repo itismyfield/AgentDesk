@@ -37,6 +37,9 @@ class SenderSurfaceTests(unittest.TestCase):
             (OTHER, "fn f(r: R) { r.with_transition_reply(1, &p, reply, |_| ()); }\n"),
             (ACTOR, "\nfn f() { let (p, r) = TransitionPort::new(1, g, w); }\n"),
             (ACTOR, "\nuse super::transition_port::Operation as Op;\n"),
+            (ACTOR, "\nasync fn f(p: P, o: O, c: C) { p.request(o, c).await; }\n"),
+            (ACTOR, "\nasync fn f(p: P) { TransitionPort::request_as(&p, &p, o, c).await; }\n"),
+            (OTHER, "async fn f(p: P) { <Port>::request_as(&p, &p, o, c).await; }\n"),
         ):
             with self.subTest(text=text[-60:]):
                 self.assertTrue(self.with_source(path, text))
