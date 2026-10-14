@@ -144,6 +144,36 @@ impl Fixture {
     fn time(&self, n: i64) -> DateTime<Utc> {
         self.context.created_at + Duration::seconds(n)
     }
+    fn log_bytes(&self) -> Vec<u8> {
+        fs::read(
+            self.root
+                .path()
+                .join(binding_events::BINDING_EVENTS_DIR)
+                .join(format!("{}.log", self.context.channel_id.unwrap())),
+        )
+        .unwrap()
+    }
+    fn next_fresh(&mut self, created_at: DateTime<Utc>) -> BindingContext {
+        let previous = self.context.clone();
+        let log = self.log_bytes();
+        self.context.created_at = created_at;
+        self.context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+        PreparedIncarnation::create(self.context.clone()).unwrap();
+        fs::write(
+            tc::session_temp_path(&self.context.tmux_session, "spawn_nonce"),
+            &self.context.execution_nonce,
+        )
+        .unwrap();
+        dedupe::reset_state_for_tests();
+        dedupe::register_tmux_channel(&self.context.tmux_session, self.context.channel_id.unwrap());
+        assert_eq!(
+            self.log_bytes(),
+            log,
+            "new execution must retain durable history"
+        );
+        assert!(self.fold().verified.is_none());
+        previous
+    }
     fn fold(&self) -> binding_events::codex::Fold {
         binding_events::codex::read_ownership(&self.context).unwrap()
     }
@@ -231,8 +261,15 @@ async fn polls() {
     tokio::time::sleep(actor::POLL_INTERVAL * 3).await;
 }
 
-async fn resume_older_native_header(delayed_descriptor: bool) {
-    let f = Fixture::new(true);
+async fn resume_older_native_header(delayed_descriptor: bool, prior_execution: bool) {
+    let mut f = Fixture::new(true);
+    let prior_context = prior_execution.then(|| {
+        f.header(B);
+        f.send(B, "session-start", "startup", Some(f.time(2)), None);
+        assert_eq!(f.fold().verified.unwrap().source.session_id, B);
+        assert_eq!(f.current().session_id.as_deref(), Some(B));
+        f.next_fresh(f.time(1) + Duration::days(1))
+    });
     f.header(A);
     f.send(A, "session-start", "startup", Some(f.time(2)), None);
     assert_eq!(f.fold().verified.unwrap().source.session_id, A);
@@ -263,14 +300,56 @@ async fn resume_older_native_header(delayed_descriptor: bool) {
     assert_eq!(posted(&f.reopened(&store)), 1);
 
     let old_header = f.context.created_at - Duration::days(1);
-    if !delayed_descriptor {
+    let retained = f.path(B).with_extension("prior");
+    if prior_execution && delayed_descriptor {
+        fs::rename(f.path(B), &retained).unwrap();
+    } else if !prior_execution && !delayed_descriptor {
         f.header_at(B, old_header);
+    }
+    if let Some(previous) = prior_context {
+        let log = f.log_bytes();
+        f.send(
+            B,
+            "session-start",
+            "resume",
+            Some(f.time(3)),
+            Some(previous),
+        );
+        for time in [None, Some(f.time(2)), Some(f.time(1))] {
+            f.send(B, "session-start", "resume", time, None);
+        }
+        assert_eq!(
+            f.log_bytes(),
+            log,
+            "wrong nonce and unordered switches cannot append"
+        );
+        assert_eq!(f.current().session_id.as_deref(), Some(A));
     }
     f.send(B, "session-start", "resume", Some(f.time(3)), None);
     if delayed_descriptor {
         assert_eq!(f.fold().pending.len(), 1);
         assert!(dedupe::runtime_binding_for_tmux_session(&f.context.tmux_session).is_none());
-        f.header_at(B, old_header);
+        if prior_execution {
+            fs::rename(&retained, f.path(B)).unwrap();
+        } else {
+            f.header_at(B, old_header);
+        }
+        dedupe::codex_verified::resolve_registered_claims();
+    }
+    if prior_execution {
+        let log = f.log_bytes();
+        binding_events::forget_channel_for_tests(f.context.channel_id.unwrap());
+        dedupe::reset_state_for_tests();
+        let replay = binding_events::codex::read_ownership(&f.context)
+            .expect("durable B proof must replay after clearing only memory caches");
+        assert_eq!(
+            replay.verified.unwrap().source.session_id,
+            B,
+            "N1 must explicitly resume N0 B"
+        );
+        assert!(replay.pending.is_empty());
+        assert_eq!(f.log_bytes(), log, "replay cannot rewrite durable history");
+        dedupe::register_tmux_channel(&f.context.tmux_session, f.context.channel_id.unwrap());
         dedupe::codex_verified::resolve_registered_claims();
     }
     assert!(f.fold().pending.is_empty(), "older resume must resolve");
@@ -298,12 +377,40 @@ async fn resume_older_native_header(delayed_descriptor: bool) {
 
 #[tokio::test(start_paused = true)]
 async fn source_read_resume_older_native_header_posts_and_returns_to_a() {
-    resume_older_native_header(false).await;
+    resume_older_native_header(false, false).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn source_read_resume_older_native_header_pending_resolves_and_posts() {
-    resume_older_native_header(true).await;
+    resume_older_native_header(true, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn source_read_prior_execution_resume_posts_and_replays() {
+    resume_older_native_header(false, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn source_read_prior_execution_resume_pending_resolves_posts_and_replays() {
+    resume_older_native_header(true, true).await;
+}
+
+#[test]
+fn source_read_prior_execution_is_not_inherited_by_initial_fresh_proof() {
+    let mut f = Fixture::new(true);
+    f.header(B);
+    f.send(B, "session-start", "startup", Some(f.time(2)), None);
+    assert_eq!(f.fold().verified.unwrap().source.session_id, B);
+    f.next_fresh(f.time(1) + Duration::days(1));
+    // A renewed descriptor passes the creation-time floor but cannot inherit past ownership.
+    f.header(B);
+    f.send(B, "session-start", "startup", Some(f.time(2)), None);
+    for _ in 0..2 {
+        assert!(f.fold().verified.is_none());
+        assert_eq!(f.fold().pending.len(), 1);
+        assert!(dedupe::runtime_binding_for_tmux_session(&f.context.tmux_session).is_none());
+        dedupe::codex_verified::resolve_registered_claims();
+    }
 }
 
 #[test]

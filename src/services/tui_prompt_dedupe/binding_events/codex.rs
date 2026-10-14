@@ -520,9 +520,16 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
                             || (!p.ownership.claim.same_candidate(&ownership.claim)
                                 && ownership.reused_proof_seq != Some(p.seq)))
                 }) || !fold.pending.is_empty()
-                    || !neutral_legacy(context, records, source, event.seq, |seq, observed| {
-                        recorded_native(seq, observed, source, &ownership.canonical_witnesses)
-                    })
+                    || !neutral_legacy(
+                        context,
+                        records,
+                        source,
+                        fold.verified.is_none(),
+                        event.seq,
+                        |seq, observed| {
+                            recorded_native(seq, observed, source, &ownership.canonical_witnesses)
+                        },
+                    )
                 {
                     return Err(invalid("conflicting Codex ownership proofs"));
                 }
@@ -699,6 +706,7 @@ fn neutral_legacy(
     context: &BindingContext,
     records: &[Logged],
     source: &SourceId,
+    initial_proof: bool,
     through_seq: u64,
     mut same_native: impl FnMut(u64, &SourceId) -> bool,
 ) -> bool {
@@ -711,6 +719,7 @@ fn neutral_legacy(
         let event = &logged.event;
         if event.execution_nonce.as_deref() != Some(&context.execution_nonce) {
             if context.launch_mode == "fresh"
+                && initial_proof
                 && named_before(std::slice::from_ref(event), event.seq, |id, _| {
                     id == source.session_id
                 })
@@ -853,6 +862,7 @@ pub(crate) fn commit_claim_published(
                             context,
                             &records,
                             source,
+                            fold.verified.is_none(),
                             writer.last_seq,
                             |seq, observed| {
                                 let prior = fold

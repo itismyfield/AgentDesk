@@ -12738,6 +12738,9 @@ services::tui_o::writer::rotation::fork_lineage::tests::warm_scanner_rechecks_id
 services::tui_o::writer::source_read_tests::source_read_initial_fresh_older_native_header_stays_pending
 services::tui_o::writer::source_read_tests::source_read_late_missing_descriptor_hook_preserves_marker_proof_cursor
 services::tui_o::writer::source_read_tests::source_read_legacy_selector_keeps_latest_mtime_and_resume_boundary
+services::tui_o::writer::source_read_tests::source_read_prior_execution_is_not_inherited_by_initial_fresh_proof
+services::tui_o::writer::source_read_tests::source_read_prior_execution_resume_pending_resolves_posts_and_replays
+services::tui_o::writer::source_read_tests::source_read_prior_execution_resume_posts_and_replays
 services::tui_o::writer::source_read_tests::source_read_resume_older_native_header_pending_resolves_and_posts
 services::tui_o::writer::source_read_tests::source_read_resume_older_native_header_posts_and_returns_to_a
 services::tui_o::writer::source_read_tests::source_read_transition_missing_equal_and_regressing_time_is_fail_closed
