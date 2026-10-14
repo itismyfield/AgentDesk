@@ -24,6 +24,13 @@ use crate::services::turn_orchestrator::{
 pub(super) static OFFERED_HEADS: std::sync::Mutex<Vec<MessageId>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Every attempt row the queued-head kickoff emitted, in order.
+pub(super) static ATTEMPT_ROWS: std::sync::Mutex<Vec<super::AttemptRow>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[path = "queued_head_auto_tests.rs"]
+mod auto;
+
 struct Fixture {
     _db: TestPostgresDb,
     app: Router,
@@ -46,6 +53,44 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(channel: u64, mode: &str) -> Self {
+        let fixture = Self::build(channel, mode).await;
+        let channel = fixture.channel;
+        // The real route must enqueue H, rather than inject it on arrival, and schedule nothing.
+        let transition = fixture
+            .shared
+            .session_transition_lock(channel)
+            .lock_owned()
+            .await;
+        queue_io::with_post_enqueue_idle_queue_kick_suppressed(async {
+            fixture.enqueue("status?").await;
+            fixture.enqueue("distinct tail B").await;
+        })
+        .await;
+        drop(transition);
+        let queue = fixture.queue().await;
+        assert_eq!(queue.len(), 2);
+        assert_ne!(queue[0].message_id, queue[1].message_id);
+        assert_eq!(queue[0].source_message_ids, [queue[0].message_id]);
+        assert_eq!(
+            queue[0].source_text_segments.len(),
+            1,
+            "the live route's canonical singleton is not an empty-segment restore fixture"
+        );
+        assert_eq!(
+            queue[0].source_text_segments[0].message_id,
+            queue[0].message_id
+        );
+        assert_eq!(queue[0].source_text_segments[0].text, "status?");
+        assert_eq!(
+            fixture.pane.tmux_calls(),
+            0,
+            "setup must not call the executor"
+        );
+        fixture
+    }
+
+    /// A busy Claude channel behind the real route, with nothing queued yet.
+    async fn build(channel: u64, mode: &str) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         crate::db::agents::insert_agent_channels_for_tests(
@@ -131,7 +176,7 @@ impl Fixture {
             Some(registry),
             Some(pool),
         );
-        let fixture = Self {
+        Self {
             _db: db,
             app,
             shared,
@@ -143,39 +188,7 @@ impl Fixture {
             channel_gets,
             server,
             _rest: rest,
-        };
-        // The real route must enqueue H, rather than inject it on arrival. Scheduling is S3.
-        let transition = fixture
-            .shared
-            .session_transition_lock(channel)
-            .lock_owned()
-            .await;
-        queue_io::with_post_enqueue_idle_queue_kick_suppressed(async {
-            fixture.enqueue("status?").await;
-            fixture.enqueue("distinct tail B").await;
-        })
-        .await;
-        drop(transition);
-        let queue = fixture.queue().await;
-        assert_eq!(queue.len(), 2);
-        assert_ne!(queue[0].message_id, queue[1].message_id);
-        assert_eq!(queue[0].source_message_ids, [queue[0].message_id]);
-        assert_eq!(
-            queue[0].source_text_segments.len(),
-            1,
-            "the live route's canonical singleton is not an empty-segment restore fixture"
-        );
-        assert_eq!(
-            queue[0].source_text_segments[0].message_id,
-            queue[0].message_id
-        );
-        assert_eq!(queue[0].source_text_segments[0].text, "status?");
-        assert_eq!(
-            fixture.pane.tmux_calls(),
-            0,
-            "setup must not call the executor"
-        );
-        fixture
+        }
     }
 
     async fn enqueue(&self, text: &str) {
@@ -1121,7 +1134,9 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let queue = fixture.queue().await;
     let head = queue[0].clone();
-    fixture.park(&[head.message_id]);
+    let ids: Vec<MessageId> = queue.iter().map(|i| i.message_id).collect();
+    // Every input is parked: a ready one behind the parked head would be typed in its place.
+    fixture.park(&ids);
     let before = fixture.bytes();
     fixture.kick().await;
     assert!(!OFFERED_HEADS.lock().unwrap().contains(&head.message_id));
@@ -1153,7 +1168,6 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     else {
         panic!("a ready head is reserved");
     };
-    let ids: Vec<MessageId> = queue.iter().map(|i| i.message_id).collect();
     fixture.park(&ids);
     let body = fixture.deliver("C behind a reserved head").await;
     assert_eq!(body["delivery"], "queued", "{body}");

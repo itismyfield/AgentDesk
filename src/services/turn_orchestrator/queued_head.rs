@@ -463,6 +463,8 @@ pub(super) fn blocks_claims(
     state.queued_head.meta.head_injection.is_some()
 }
 
+pub(crate) mod prefix;
+
 pub(super) use claim::step;
 pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
 #[cfg(test)]
@@ -471,9 +473,6 @@ pub(crate) use claim::{HeadTicket, downgrade_channel_snapshot};
 /// The claim and settlement driven by the busy-TUI executor.
 mod claim {
     use super::*;
-
-    /// Input a typed paste must not carry: commands, mentions and dispatch prefixes.
-    const NOT_TYPED_LEAD: [&str; 4] = ["!", "/", "<@", "DISPATCH:"];
 
     pub(crate) struct HeadTicket {
         lease: Arc<HeadLease>,
@@ -552,36 +551,6 @@ mod claim {
         }
     }
 
-    /// A lone human source whose single segment is the whole plain-text body: the shape a live
-    /// enqueue normalizes to and a disk round trip restores.
-    pub(super) fn eligible(item: &Intervention) -> bool {
-        let id = item.message_id;
-        let [source] = item.source_message_queued_generations.as_slice() else {
-            return false;
-        };
-        let raw_segments = match item.source_text_segments.as_slice() {
-            [] => true,
-            [segment] => segment.message_id == id && segment.text == item.text,
-            _ => false,
-        };
-        let segments = item.source_text_segments();
-        let lead = item.text.trim_start();
-        item.mode == InterventionMode::Soft
-            && !item.author_is_bot
-            && source.message_id == id
-            && source.queued_generation == item.queued_generation
-            && source.preserve_on_cancel
-            && item.source_message_ids == [id]
-            && raw_segments
-            && matches!(segments.as_slice(), [s] if s.message_id == id && s.text == item.text)
-            && !lead.is_empty()
-            && !NOT_TYPED_LEAD.iter().any(|prefix| lead.starts_with(prefix))
-            && item.pending_uploads.is_empty()
-            && item.voice_announcement.is_none()
-            && item.reply_context.is_none()
-            && !item.has_reply_boundary
-    }
-
     pub(in crate::services::turn_orchestrator) fn step(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
@@ -623,8 +592,9 @@ mod claim {
         }
     }
 
-    /// Reserves the queue head when it is still `expected`, eligible and owned by nobody else; the
-    /// reservation is durable before a ticket exists.
+    /// Reserves the first ready input when it is still `expected`, eligible and owned by nobody
+    /// else. Parked inputs ahead of it move behind it in the same write that records the
+    /// reservation, which is durable before a ticket exists.
     fn claim(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
@@ -661,24 +631,34 @@ mod claim {
         let owned = marker_held
             || state.pending_user_dispatch.is_some()
             || super::super::injected_inputs::holds_order(state);
-        let Some(head) = state.intervention_queue.first() else {
+        if state.intervention_queue.is_empty() {
             return QueuedHeadClaim::NotEligible;
-        };
-        let identity = QueueIdentity::of(head);
-        if identity != *expected || owned {
+        }
+        // Ownership outranks retry state: an owned queue is contended whatever is parked in it.
+        if owned {
             return QueuedHeadClaim::Contended;
         }
-        if !eligible(head) {
+        // Read again under the actor: what the caller saw as parked or ready may have changed.
+        use crate::services::discord::busy_followup_retry_store::input_class;
+        let class = |item: &Intervention| input_class(provider, channel_id, item);
+        let prefix::Prefix::Ready { at } = prefix::select(&state.intervention_queue, class) else {
             return QueuedHeadClaim::NotEligible;
+        };
+        let head = &state.intervention_queue[at];
+        let identity = QueueIdentity::of(head);
+        if identity != *expected {
+            return QueuedHeadClaim::Contended;
         }
-        // Read again under the actor: a head parked or unreadable since the front check stays.
-        use crate::services::discord::busy_followup_retry_store::{RetryClass, input_class};
-        if input_class(provider, channel_id, head) != RetryClass::Ready {
+        // The first ready input decides alone; a later one never stands in for it.
+        if !prefix::eligible(head) {
             return QueuedHeadClaim::NotEligible;
         }
         let item = Box::new(head.clone());
         let original = canonical_item(head, channel_id);
         let lease = Arc::new(HeadLease);
+        let previous_queue = state.intervention_queue.clone();
+        let previous_meta = state.queued_head.meta.clone();
+        state.intervention_queue[..=at].rotate_right(1);
         let ledger = &mut state.queued_head;
         let phase = HeadPhase::Reserved;
         ledger.meta.head_injection = Some(PersistedHeadInjection {
@@ -688,7 +668,8 @@ mod claim {
         });
         ledger.lease = Some(lease.clone());
         if let Err(error) = persist_queue(state, channel_id, persistence) {
-            state.queued_head.meta.head_injection = None;
+            state.intervention_queue = previous_queue;
+            state.queued_head.meta = previous_meta;
             state.queued_head.lease = None;
             return QueuedHeadClaim::PersistenceFailed(error);
         }

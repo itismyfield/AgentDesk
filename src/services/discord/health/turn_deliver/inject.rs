@@ -3,6 +3,7 @@
 //! once enabled, `codex_tui::busy_inject`.
 
 mod names;
+mod queued_support;
 
 use futures::FutureExt;
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ use crate::services::turn_orchestrator::{
     HeadSettle, InjectionSettlement, Intervention, QueueIdentity, QueuedHeadClaim, ReserveOutcome,
 };
 use names::{codex_unconfirmed_name, codex_veto_name, unconfirmed_name, veto_name};
+use queued_support::{HEAD_UNKNOWN, queued_target_matches};
 use tokio::sync::OwnedMutexGuard;
 
 /// `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read
@@ -471,36 +473,6 @@ fn busy_episode(request: &HumanInputRequest, target: &Target) -> Option<String> 
     episode::busy(&request.provider, request.channel_id.get(), &holder)
 }
 
-async fn queued_target_matches(
-    shared: &SharedData,
-    request: &HumanInputRequest,
-    target: &Target,
-    before_effect: bool,
-) -> bool {
-    let named = channel_name(shared, request.channel_id).await;
-    let (snapshot, row) = observe(shared, request).await;
-    let claim = match (&snapshot.cancel_token, &target.claim) {
-        (None, None) => true,
-        (Some(token), Some((expected, kind, message))) => {
-            Arc::ptr_eq(token, expected)
-                && snapshot.active_turn_kind == *kind
-                && snapshot.active_user_message_id == *message
-        }
-        _ => false,
-    };
-    claim
-        && row.as_ref().map(row_key) == target.row
-        && binding_key(&target.session) == target.binding
-        && live_tui_session(
-            shared,
-            request,
-            RuntimeHandoffKind::ClaudeTui,
-            row.as_ref(),
-            named,
-        ) == Some((target.session.clone(), target.transcript.clone()))
-        && (!before_effect || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
-}
-
 async fn queued_attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
@@ -544,6 +516,7 @@ async fn queued_attempt(
             QueuedHeadClaim::Reserved(ticket) => ticket,
             QueuedHeadClaim::NotEligible => return InjectAttempt::NotSent("queued_not_eligible"),
             QueuedHeadClaim::PersistenceFailed(error) => return persistence_failed(error),
+            QueuedHeadClaim::BlockedUnknown => return InjectAttempt::HandbackFailed(HEAD_UNKNOWN),
             _ => return InjectAttempt::HandbackFailed("queued_head_blocked"),
         };
         let item = held.item();
