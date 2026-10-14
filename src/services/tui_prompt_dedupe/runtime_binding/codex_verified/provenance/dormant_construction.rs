@@ -354,3 +354,68 @@ pub(crate) fn submit_warm(
         context: context.clone(),
     })
 }
+
+impl ActualCodexSubmission {
+    pub(in super::super) fn into_token(self) -> Arc<CancelToken> {
+        self.token
+    }
+
+    pub(crate) fn issue_live(
+        self,
+        ready: &crate::services::tui_o::writer::host::Readiness,
+        request: LiveGrantRequest<'_>,
+    ) -> Result<super::super::live_grant::LiveGrant, super::super::decisions::LiveReadReason> {
+        use super::super::decisions::{EvidenceReason as E, LiveReadReason};
+        use crate::services::codex_tui::rollout_tail::provenance::scan_anchor;
+        use crate::services::tui_o::store::codex_provenance::projection::floor_names;
+        let LiveGrantRequest {
+            evidence,
+            submitted,
+            prepared,
+            source,
+            through,
+        } = request;
+        if !evidence.matches(&self.token)
+            || self.context != submitted.context
+            || self.context != *source.context()
+            || evidence.episode != submitted.episode
+        {
+            return Err(E::IdentityMismatch.into());
+        }
+        let floor = prepared.floor();
+        if floor.execution() != source.execution() {
+            return Err(E::IdentityMismatch.into());
+        }
+        let (native, start, _) = floor.checkpoint();
+        let anchor = scan_anchor(native, start, through)
+            .map_err(|_| LiveReadReason::from(E::ForeignTurn))?
+            .ok_or(LiveReadReason::from(E::MissingEvidence))?;
+        let span = bind_episode_span(submitted, floor.execution(), anchor, floor.generation())
+            .map_err(|_| LiveReadReason::from(E::IdentityMismatch))?;
+        if !floor_names(floor, &span) {
+            return Err(E::IdentityMismatch.into());
+        }
+        let channel = span.episode.channel_id;
+        let grant =
+            super::super::live_grant::LiveGrant::from_receipt(self, span, floor.clone(), through)?;
+        crate::services::tmux_common::with_tmux_source_authority(
+            &source.context().tmux_session,
+            |authority| {
+                source
+                    .recheck(authority)
+                    .map_err(|_| LiveReadReason::from(E::SourceChanged))?;
+                ready
+                    .with_verified_prepared(channel, prepared, || grant)
+                    .map_err(LiveReadReason::Persistence)
+            },
+        )
+    }
+}
+
+pub(crate) struct LiveGrantRequest<'a> {
+    pub evidence: &'a EpisodeEvidenceSnapshot,
+    pub submitted: &'a SubmittedEpisode,
+    pub prepared: &'a crate::services::tui_o::writer::actor::codex_submission::Prepared,
+    pub source: &'a crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot,
+    pub through: u64,
+}

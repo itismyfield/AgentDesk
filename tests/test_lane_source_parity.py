@@ -99,6 +99,8 @@ class Repo:
         self.id_exceptions: list[str] = []
         self.extra_ids: set[str] = set()
         self.removed: list[str] = []
+        self.pg_tests = ["pgmod::uses_pg_db"]
+        self.filter_tail = ""
 
     def write(self, root: Path) -> None:
         for rel in ("src", "scripts/ci", ".github/workflows"):
@@ -120,10 +122,13 @@ class Repo:
                 ids | self.extra_ids if self.manifest is None else self.manifest
             ), "utf-8"
         )
-        (root / coverage.PG_MANIFEST_REL).write_text("[tests]\npgmod::uses_pg_db\n", "utf-8")
+        (root / coverage.PG_MANIFEST_REL).write_text(
+            "[tests]\n" + "".join(f"{test}\n" for test in self.pg_tests), "utf-8"
+        )
         (root / coverage.NON_PG_FILTER_REL).write_text(
             FILTER_SKIPS + "NON_PG_FILTER_REPLAY=(\n"
-            + "".join(f"  {entry}\n" for entry in sorted(self.replay)) + ")\n", "utf-8"
+            + "".join(f"  {entry}\n" for entry in sorted(self.replay)) + ")\n"
+            + self.filter_tail, "utf-8"
         )
         (root / "justfile").write_text(
             "test-non-pg:\n" + "".join(f"    {line}\n" for line in self.just), "utf-8"
@@ -456,6 +461,43 @@ def add_required(repo: Repo, command: str = "cargo test --lib delta") -> None:
     repo.baselines = ([], [])
 
 
+SHARD_PLAN = (
+    "  pg_shards:\n    needs: changes\n    if: needs.changes.outputs.pg_db == 'true'\n"
+    "    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.plan.outputs.matrix }}\n"
+    "    steps:\n      - uses: actions/checkout@v4\n      - id: plan\n        shell: bash\n"
+    "        run: |\n"
+    "          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\n"
+    '          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"\n'
+)
+SHARD_KEYS = (
+    "    name: PostgreSQL tests (shard ${{ matrix.shard }})\n"
+    "    needs: [changes, pg_shards]\n    if: needs.changes.outputs.pg_db == 'true'\n"
+    "    strategy:\n      fail-fast: false\n"
+    "      matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}\n"
+    "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n"
+)
+
+
+def sharded_repo(name: str = "test_fast", keys: str = SHARD_KEYS) -> Repo:
+    """main's PG lane: one required job fans out over the pg_shards plan's matrix."""
+    pgm = coverage._parity_module()._sibling("check_pg_test_lane_membership.py")
+    repo = Repo()
+    repo.pr["targeted"].remove(PG_LANE)
+    repo.pr[name], repo.mirrors[name], repo.keys[name] = [PG_LANE], None, keys
+    repo.filters = {"pg_db": ["src/**"], "docs": ["docs/**"]}
+    repo.trailer = SHARD_PLAN
+    repo.filter_tail = "\n".join((pgm.NON_PG_SELECTION_END, *pgm.PG_INCLUDE_DERIVATION, ""))
+    # The shard contract reads the coverage parser from the checkout it judges.
+    rel = "scripts/check_test_lane_coverage.py"
+    repo.files[rel] = (REPO_ROOT / rel).read_text("utf-8")
+    return repo
+
+
+def add_pg_test(repo: Repo) -> None:
+    repo.modules["pgmod"] = (*repo.modules["pgmod"], "uses_pg_pool")
+    repo.pg_tests.append("pgmod::uses_pg_pool")
+
+
 class NewRequiredIdTests(unittest.TestCase):
     """Each lib id a change adds must run in a required PR job, judged against the
     committed reference the way the contracts shard runs the coverage CLI."""
@@ -659,6 +701,49 @@ class NewRequiredIdTests(unittest.TestCase):
         path = new_findings(output, "new-id-path-unproven")
         self.assertEqual(len(path), 1, output)
         self.assertIn("targeted: it needs the gated job docs_only", path[0])
+        self.assertEqual(result, 1)
+
+    def test_new_pg_id_maps_through_the_proven_pg_shard_matrix(self) -> None:
+        result, output = sharded_repo().delta(add_pg_test)
+        self.assertIn("added=1 mapped=1 excepted=0", output)
+        self.assertRegex(
+            output, r"  pgmod::uses_pg_pool -> test_fast \(\.github/workflows/ci-pr\.yml:\d+\) / "
+            r"mirror test_fast_required_context / .* / path src/lib\.rs",
+        )
+        self.assertEqual(result, 0, output)
+
+    def test_pg_shard_matrix_left_unproven_keeps_the_new_id_unmodeled(self) -> None:
+        def plan(old: str, new: str) -> Repo:
+            repo = sharded_repo()
+            repo.trailer = SHARD_PLAN.replace(old, new)
+            return repo
+
+        cases = {
+            "fail-fast": sharded_repo(keys=SHARD_KEYS.replace("false", "true")),
+            "matrix source": sharded_repo(keys=SHARD_KEYS.replace(
+                "needs.pg_shards.outputs.matrix", "vars.PG_MATRIX")),
+            "plan step": plan("$(python3 scripts/check_pg_test_lane_membership.py "
+                              "--pg-shard-matrix)", "'{\"shard\":[0]}'"),
+            "plan output": plan("steps.plan.outputs.matrix", "steps.other.outputs.matrix"),
+            "partition": sharded_repo(keys=SHARD_KEYS.replace("${{ matrix.shard }}\n", "'0'\n")),
+            "undeclared job": sharded_repo("pg_matrix", SHARD_KEYS.replace(
+                "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n", "")),
+        }
+        for case, repo in cases.items():
+            with self.subTest(case=case):
+                result, output = repo.delta(add_pg_test)
+                runmode = new_findings(output, "new-id-runmode-unproven")
+                self.assertEqual(len(runmode), 1, output)
+                self.assertIn("a matrix job runs shards this gate does not model", runmode[0])
+                self.assertEqual(result, 1)
+
+    def test_pg_shard_job_whose_plan_wakes_on_other_paths_is_path_unproven(self) -> None:
+        repo = sharded_repo()
+        repo.trailer = SHARD_PLAN.replace("outputs.pg_db", "outputs.docs")
+        result, output = repo.delta(add_pg_test)
+        path = new_findings(output, "new-id-path-unproven")
+        self.assertEqual(len(path), 1, output)
+        self.assertIn("test_fast: it needs the gated job pg_shards", path[0])
         self.assertEqual(result, 1)
 
     def test_listing_or_ignored_only_commands_prove_no_run(self) -> None:
