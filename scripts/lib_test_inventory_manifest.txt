@@ -3534,6 +3534,9 @@ services::discord::commands::text_commands::command_dispatch_contract_tests::pro
 services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
 services::discord::commands::text_commands::home_command_tests::command_text_and_alias_dispatch_refuse_before_stop_publication
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
+services::discord::commands::tui_passthrough::input_fence_tests::g2e_legacy_open_and_off_keep_native_send
+services::discord::commands::tui_passthrough::input_fence_tests::g2e_native_worker_keeps_permit_until_exit
+services::discord::commands::tui_passthrough::input_fence_tests::g2e_protected_native_commands_never_send
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
@@ -9679,6 +9682,8 @@ services::discord::turn_bridge::output_lifecycle::tests::bridge_output_owner_pre
 services::discord::turn_bridge::recall_feedback::recall_feedback_reminder_tests::covered_recall_leaves_no_pending_and_no_reminder
 services::discord::turn_bridge::recall_feedback::recall_feedback_reminder_tests::pending_feedback_presence_drives_reminder_truth_table
 services::discord::turn_bridge::recall_feedback::recall_feedback_reminder_tests::uncovered_recall_yields_pending_and_requires_reminder
+services::discord::turn_bridge::recovery_text::input_fence_tests::g2e_legacy_open_and_off_keep_history_retry
+services::discord::turn_bridge::recovery_text::input_fence_tests::g2e_protected_retry_has_zero_claim_or_context
 services::discord::turn_bridge::recovery_text::retry_pending_tests::release_retry_pending_is_idempotent
 services::discord::turn_bridge::recovery_text::retry_pending_tests::release_retry_pending_removes_dedup_entry
 services::discord::turn_bridge::recovery_text::tests::direct_runtime_context_unavailable_matches_api_and_pg_errors

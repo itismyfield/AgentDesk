@@ -912,6 +912,7 @@ src/
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tmux_recreate.rs
 │   │   │   ├── tui_passthrough.rs
+│   │   │   ├── tui_passthrough_input_fence_tests.rs
 │   │   │   └── voice.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
@@ -2055,6 +2056,7 @@ src/
 │   │   │   ├── post_loop_finalize.rs
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
+│   │   │   ├── recovery_text_input_fence_tests.rs
 │   │   │   ├── replay_policy.rs
 │   │   │   ├── response_delivery.rs
 │   │   │   ├── resume_pin_tests.rs

@@ -151,7 +151,8 @@ async fn g2e_legacy_open_and_off_keep_history_retry() {
                 auto_retry_with_history(&http, &shared, &provider, channel, user, "g2e").await
             })
         };
-        discord.reached.notified().await;
+        let reached = tokio::time::timeout(Duration::from_secs(10), discord.reached.notified());
+        reached.await.expect("the retry reads the history");
         assert!(
             retry_pending_contains(channel),
             "{protected}: dedup claim as in main"
