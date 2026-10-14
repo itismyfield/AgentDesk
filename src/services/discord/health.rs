@@ -24,6 +24,7 @@ mod headless_turn;
 pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
+pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
 // task. Unix-gated because its transcript coordinate is the `(dev, ino)`
@@ -60,6 +61,8 @@ mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
+pub(in crate::services::discord) mod tail_evidence;
+pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
 // Dormant until the input supervisor publishes views for channels it retires.

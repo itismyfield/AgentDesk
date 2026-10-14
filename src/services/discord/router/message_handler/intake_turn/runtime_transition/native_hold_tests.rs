@@ -222,6 +222,7 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
 
         let handled = crate::services::discord::router::message_handler::handle_text_command(

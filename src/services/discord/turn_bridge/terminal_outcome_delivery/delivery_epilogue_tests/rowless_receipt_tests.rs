@@ -1344,14 +1344,15 @@ async fn only_a_foreign_custody_that_posts_ends_a_pending_adoption() {
     }
 }
 
-/// The real postlude, after its two-message completion edit on O's channel, moves the completed
-/// panel below a body O posts once the turn has closed.
-#[tokio::test]
-async fn the_postlude_moves_a_completed_o_panel_below_a_later_o_post() {
+/// The panel a two-message turn opens before O posts its body.
+const KEPT_PANEL: u64 = 4_000_000;
+
+/// A two-message turn through the real postlude, then a body O posts once the turn has closed:
+/// the panel the channel keeps and the gateway calls from the postlude on.
+async fn complete_then_late_o_body(o_channel: bool) -> (Option<u64>, Vec<DriverCall>) {
     use crate::services::discord::status_panel_singleton_store as singleton;
     use crate::services::tui_o::{cutover::test_override, writer::deliver};
     use RuntimeHandoffKind::ClaudeTui;
-    const PANEL: u64 = 4_000_000;
     const LATE_BODY: u64 = 4_500_000;
     struct SeparatePanel;
     impl Drop for SeparatePanel {
@@ -1369,18 +1370,20 @@ async fn the_postlude_moves_a_completed_o_panel_below_a_later_o_post() {
     (
         driver.inflight.runtime_kind,
         driver.inflight.status_message_id,
-    ) = (Some(ClaudeTui), Some(PANEL));
+    ) = (Some(ClaudeTui), Some(KEPT_PANEL));
     inflight::save_inflight_state(&driver.inflight).expect("seed the two-message row");
     let token = driver.shared.token_hash.clone();
     let channel = DRIVER_CHANNEL_ID;
-    singleton::bind_if_owned(&ProviderKind::Claude, &token, channel, PANEL, None).unwrap();
+    singleton::bind_if_owned(&ProviderKind::Claude, &token, channel, KEPT_PANEL, None).unwrap();
     let _mailbox = driver.shared.mailbox(ChannelId::new(channel));
-    let _o = test_override::force_channels(&[(channel, ClaudeTui)]);
+    let owned = [(channel, ClaudeTui)];
+    let _o = test_override::force_channels(&owned[..usize::from(o_channel)]);
     let _posted = deliver::forget_posted_for_tests(channel);
 
     let (ctx, state) = driver.parts();
     let output = run(ctx, state).await;
     assert!(output.terminal_delivery_committed);
+    let from = driver.observations().len();
     run_postlude(&driver, output, false, false).await;
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let _ = std::fs::remove_file(inflight::inflight_state_path(
@@ -1389,18 +1392,29 @@ async fn the_postlude_moves_a_completed_o_panel_below_a_later_o_post() {
         channel,
     ));
     deliver::note_posted_for_tests(channel, LATE_BODY);
+    // Well past the quiet time and polls a panel re-post below that body would take.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let calls = driver.observations()[from..]
+        .iter()
+        .map(|o| o.call)
+        .collect();
+    let panel = singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
+    (panel, calls)
+}
 
-    let panel =
-        || singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while panel() == Some(PANEL) && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    let moved = panel().expect("a singleton panel");
-    assert!(
-        moved > LATE_BODY,
-        "panel {moved} stays above O's body {LATE_BODY}"
-    );
-    // Let the follow's window end while this test still holds the runtime root.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+/// The real postlude completes an O channel's two-message panel with one edit under its own id;
+/// a body O posts after the turn closed gets no second panel POST and no DELETE.
+#[tokio::test]
+async fn the_postlude_completes_an_o_panel_in_place_below_which_o_posts_later() {
+    let (panel, calls) = complete_then_late_o_body(true).await;
+    assert_eq!(panel, Some(KEPT_PANEL));
+    assert_eq!(calls, [DriverCall::Edit]);
+}
+
+/// A Legacy channel's completed panel is edited in place the same way.
+#[tokio::test]
+async fn the_postlude_completes_a_legacy_panel_in_place_whatever_o_posts_later() {
+    let (panel, calls) = complete_then_late_o_body(false).await;
+    assert_eq!(panel, Some(KEPT_PANEL));
+    assert_eq!(calls, [DriverCall::Edit]);
 }

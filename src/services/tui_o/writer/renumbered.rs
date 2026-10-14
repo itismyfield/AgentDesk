@@ -320,6 +320,7 @@ mod tests {
             captured_through,
             prefix_hash,
             retired,
+            transition_cleanup: None,
         }
     }
 

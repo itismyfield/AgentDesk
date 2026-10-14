@@ -354,3 +354,136 @@ fn crossing_both_rungs_at_once_reports_only_the_error() {
         "both rungs are spent"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
+    use crate::services::cluster::stream_relay::source_read_proof::{ReadVersion, SourceReadProof};
+    use crate::services::tmux_common as tc;
+    let _host = crate::config::pin_runtime_host_for_test();
+    let session = "s2a1-rotation-gap";
+    let channel = ChannelId::new(59_960_501);
+    let path = std::path::PathBuf::from(tc::session_temp_path(session, "jsonl"));
+    let bytes = b"{\"type\":\"assistant\"}\n".repeat(40);
+    std::fs::write(&path, &bytes).expect("owned source");
+    crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(session)
+        .expect("generation");
+    let generation =
+        crate::services::discord::tmux::tmux_session_files::read_generation_file_mtime_ns(session);
+    let pin = tc::with_tmux_source_authority(session, |authority| authority.pin()).expect("pin");
+    let fd = Arc::new(std::fs::File::open(&path).expect("original fd"));
+    let proof = SourceReadProof::capture(
+        fd.clone(),
+        path.clone(),
+        pin.clone(),
+        0..bytes.len() as u64,
+        &bytes,
+        ReadVersion::from_fd(&fd).expect("version"),
+        (generation, 0),
+    )
+    .expect("proof");
+    let seal = proof.seal_prefix().expect("prefix");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let coord = shared.tmux_relay_coord(channel);
+    assert_eq!(
+        format!(
+            "{:?}",
+            coord.publish_confirmed_for_tests(bytes.len() as u64, generation, 0, Some(&seal))
+        ),
+        "Published"
+    );
+    let mut context = RotationIdleContext {
+        shared: shared.clone(),
+        provider: ProviderKind::Claude,
+        channel_id: channel,
+        current_offset: bytes.len() as u64,
+        all_data_is_empty: false,
+    };
+    assert!(matches!(
+        rotate_owned_jsonl(path.to_str().unwrap(), session, channel, 200, 100, &context)
+            .expect("refusal"),
+        RotationOutcome::Refused(_)
+    ));
+    assert_eq!(std::fs::read(&path).expect("unchanged"), bytes);
+    assert!(
+        pin.is_current(),
+        "refused rotation does not mutate the source"
+    );
+    context.all_data_is_empty = true;
+    let watched = coord.clone();
+    let previous = pin.clone();
+    let reached = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = reached.clone();
+    tc::ROTATION_AFTER_RENAME.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(move || {
+            observed.set(true);
+            assert!(
+                !previous.is_current(),
+                "revision changes before rename publishes"
+            );
+            assert_eq!(
+                watched.frontier_tuple_for_tests().0,
+                bytes.len() as u64,
+                "reset has not run"
+            );
+            assert!(
+                watched.reset_state.try_lock().is_ok(),
+                "coherence guard does not cover file IO"
+            );
+        }))
+    });
+    let RotationOutcome::Rotated(new_size) =
+        rotate_owned_jsonl(path.to_str().unwrap(), session, channel, 200, 100, &context)
+            .expect("rotation")
+    else {
+        panic!("idle owned rotation must run")
+    };
+    assert!(reached.get());
+    assert!(!pin.is_current());
+    assert!(
+        !seal.is_current(),
+        "a retained old fd cannot certify the replacement"
+    );
+    let current =
+        tc::with_tmux_source_authority(session, |authority| authority.pin()).expect("new pin");
+    let admission = shared
+        .acquire_relay_frontier_mutation(channel, shared.relay_frontier_token(channel))
+        .expect("admission");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                realign_frontier_after_rotation(&shared, channel, session, new_size)
+            )
+            .await
+            .is_err(),
+            "cancel a refused reset retry"
+        );
+        assert!(!pin.is_current());
+        assert!(current.is_current());
+        realign_frontier_after_rotation(&shared, channel, session, new_size).await;
+        assert!(
+            sticky_is_armed(channel),
+            "admission refusal exhausts retry budget"
+        );
+    });
+    retry_sticky_frontier_realign(&shared, channel, session);
+    assert!(sticky_is_armed(channel));
+    assert!(!pin.is_current());
+    drop(admission);
+    retry_sticky_frontier_realign(&shared, channel, session);
+    assert!(!sticky_is_armed(channel));
+    assert!(coord.frontier_tuple_for_tests().0 <= new_size);
+    assert_eq!(coord.frontier_tuple_for_tests().2, 1);
+    assert!(!coord.frontier_tuple_for_tests().3);
+    assert!(!pin.is_current());
+    assert!(
+        current.is_current(),
+        "reset cannot restore or replace the source revision"
+    );
+    tc::cleanup_session_temp_files(session);
+}
