@@ -10,8 +10,10 @@ from collections import Counter
 from pathlib import Path
 try:
     from scripts import check_durable_frontier_writer_call_sites as classifier
+    from scripts import skip_pin_registry as registry
 except ModuleNotFoundError:
     import check_durable_frontier_writer_call_sites as classifier
+    import skip_pin_registry as registry
 
 D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
@@ -111,40 +113,17 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root, promoted_paths=()):
+def sync_skips(root, promoted_paths=(), fragment=None):
+    """Measure test-only files and hand new pins and promotions to the fragment writer;
+    the legacy pin file is never rewritten. Returns `(manual steps, written fragments)`."""
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
-    path = root / "scripts/test_only_module_skip_pin.py"
-    source = path.read_text()
-    actual = {p.relative_to(root).as_posix() for p in basename | resolved}
+    measured = {p.relative_to(root).as_posix(): "resolver" for p in resolved}
+    measured.update({p.relative_to(root).as_posix(): "basename" for p in basename})
     existing = {p.relative_to(root).as_posix() for p in files}
-    promoted = set(promoted_paths)
-    for rel in sorted(promoted):
-        if rel not in existing:
-            raise RuntimeError("promotion path missing: " + rel)
-        if rel in actual:
-            raise RuntimeError("promotion remains test-only: " + rel)
-        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
-            raise RuntimeError("promotion is not pinned: " + rel)
-    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted:
-        raise RuntimeError("refusing pin removal")
-    for rel in sorted(promoted):
-        pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
-        source, count = re.subn(pattern, '', source)
-        if count != 1:
-            raise RuntimeError("promotion pin is ambiguous: " + rel)
-    for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
-        measured = {p.relative_to(root).as_posix() for p in paths}
-        for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
-            start = source.index(name + " =")
-            end = source.index("\n    }\n)", start)
-            directory = re.escape(Path(rel).parent.as_posix() + '/')
-            sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
-            at = start + sibling.start() if sibling else end
-            source = source[:at] + '\n        "' + rel + '",' + source[at:]
-    path.write_text(source)
+    return registry.sync(root, measured, existing, promoted_paths, fragment)
 
 
 if __name__ == "__main__":
@@ -152,9 +131,13 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
         parser.add_argument('--promote', action='append', default=[], metavar='PATH',
                             help='explicitly remove this existing production module from the skip pin')
+        parser.add_argument('--fragment', metavar='NODE-ISSUE-SLICE',
+                            help='skip-pin fragment for new pins (default: one auto fragment per new path)')
         args = parser.parse_args(sys.argv[2:])
-        sync_skips(Path.cwd(), args.promote)
-        sys.exit(0)
+        manual, written = sync_skips(Path.cwd(), args.promote, args.fragment)
+        for line in (*(f"skip pin fragment written: {path}" for path in written), *manual):
+            print(line, file=sys.stderr if manual else sys.stdout)
+        sys.exit(1 if manual else 0)
     ok, report = check(Path.cwd())
     print(report)
     sys.exit(0 if ok else 1)

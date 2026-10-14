@@ -38,11 +38,13 @@ class SkipPromotionTests(unittest.TestCase):
             return str(error)
         return None
 
-    def test_explicit_promotion_removes_only_its_pin(self):
-        self.assertIsNone(self.outcome(('src/promoted.rs',)))
-        self.assertNotIn('"src/promoted.rs"', self.path.read_text())
-        self.assertIn('"src/still_test.rs"', self.path.read_text())
-        self.assertIn('"src/fixture_tests.rs"', self.path.read_text())
+    def test_explicit_legacy_promotion_returns_a_manual_step_without_writing(self):
+        manual, written = guard.sync_skips(self.root, ('src/promoted.rs',))
+        self.assertEqual(written, [])
+        self.assertEqual(manual, ['scripts/test_only_module_skip_pin.py:8: delete the legacy pin '
+                                  '`src/promoted.rs` by hand; --sync-skips never rewrites '
+                                  'scripts/test_only_module_skip_pin.py'])
+        self.assertEqual(self.path.read_text(), self.original)
 
     def test_omitted_promotion_refuses_removal_without_writing(self):
         self.assertEqual(self.outcome(), 'refusing pin removal')
@@ -64,12 +66,16 @@ class SkipPromotionTests(unittest.TestCase):
                          'promotion remains test-only: src/still_test.rs')
         self.assertEqual(self.path.read_text(), self.original)
 
-    def test_addition_stays_next_to_its_directory_without_removing_existing_pins(self):
+    def test_addition_goes_to_a_fragment_and_never_rewrites_the_legacy_pins(self):
         (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
-        self.assertIsNone(self.outcome(('src/promoted.rs',)))
-        source = self.path.read_text()
-        self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
-        self.assertIn('"src/still_test.rs"', source)
+        self.assertEqual(len(guard.sync_skips(self.root, ('src/promoted.rs',))[0]), 1)
+        self.assertFalse((self.root / 'scripts/test_only_module_skip_pin.d').exists())
+        manual = self.original.replace('        "src/promoted.rs",\n', '')
+        self.path.write_text(manual)
+        self.assertEqual(guard.sync_skips(self.root), ([], [
+            'scripts/test_only_module_skip_pin.d/' + guard.registry.auto_fragment('src/new_tests.rs')]))
+        self.assertEqual(self.path.read_text(), manual)
+        self.assertIn('src/new_tests.rs', guard.registry.load(self.root).rows)
 
 
 class N4DInstallerDormancyTests(unittest.TestCase):

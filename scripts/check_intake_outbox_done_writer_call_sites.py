@@ -36,8 +36,8 @@ It also does not prove a call is reachable, successful, or the right lifecycle
 action. Conversely, a same-spelled free function in a file importing this
 writer could be over-counted. Comments, strings, pinned whole-file test modules,
 and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
-target evaluation. Whole-file skips use the single lexical pin in
-`scripts/test_only_module_skip_pin.py`; non-`.rs` regular files are rejected
+target evaluation. Whole-file skips use the lexical pin in
+`scripts/test_only_module_skip_pin.py` + `.d/`; non-`.rs` regular files are rejected
 before classification, `src/` symlinks are rejected, and the skipped census
 must equal the pin count. Symlink rejection is lexical rather than atomic
 against a post-enumeration replacement; CI assumes a static checkout while

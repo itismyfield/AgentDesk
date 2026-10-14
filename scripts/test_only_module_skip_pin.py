@@ -799,6 +799,25 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     }
 )
 
+def _load_sibling(name):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parent / f"{name}.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load scripts/{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# New pins are rows in test_only_module_skip_pin.d/; the literals above stay for older lanes.
+PINNED_BASENAME_TEST_FILES, PINNED_RESOLVER_TEST_ONLY_FILES = _load_sibling(
+    "skip_pin_registry"
+).load(Path(__file__).resolve().parents[1]).frozensets()
+
 if PINNED_BASENAME_TEST_FILES & PINNED_RESOLVER_TEST_ONLY_FILES:
     raise RuntimeError("writer-gate basename and resolver pins must be disjoint")
 
@@ -807,9 +826,10 @@ PINNED_TEST_ONLY_MODULE_FILES = (
 )
 
 _UPDATE_HINT = (
-    "Review basename and resolver classification, then update only "
-    "scripts/test_only_module_skip_pin.py; both gates and tests derive their "
-    "path/count expectation from that single file."
+    "Review basename and resolver classification, then add `kind | path` rows to a "
+    "scripts/test_only_module_skip_pin.d/<node>-<issue>-<slice>.txt fragment "
+    "(check_legacy_supervision_census.py --sync-skips --fragment ...); both gates read "
+    "those fragments plus the legacy sets in scripts/test_only_module_skip_pin.py."
 )
 
 _SYMLINK_HINT = (
@@ -818,22 +838,7 @@ _SYMLINK_HINT = (
 )
 
 
-def _load_inventory_generator():
-    name = "generate_inventory_docs"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(
-        name, Path(__file__).resolve().parent / "generate_inventory_docs.py"
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load scripts/generate_inventory_docs.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_INVENTORY = _load_inventory_generator()
+_INVENTORY = _load_sibling("generate_inventory_docs")
 
 
 def skip_pin_drift(

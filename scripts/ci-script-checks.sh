@@ -374,6 +374,7 @@ fi
 if run_check guards "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census
+"$PYTHON" -m unittest tests.test_registration_fragments tests.test_skip_pin_fragments
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then

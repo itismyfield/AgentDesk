@@ -118,7 +118,7 @@ no anchor to escape and no boolean to saturate.
 
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
 inventory resolver classifies as test-only are skipped whole. Every such path
-must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
+must pass the lexical pin (`scripts/test_only_module_skip_pin.py` + `.d/`);
 `src/` file/directory symlinks are rejected and the skipped census must equal
 the pin count. The symlink check is lexical rather than atomic against a
 post-enumeration replacement; CI assumes a static checkout while the gate
