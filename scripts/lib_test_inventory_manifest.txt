@@ -12467,6 +12467,10 @@ services::tui_o::store::cleanup_witness::tests::readers_s1a_malformed_witness_is
 services::tui_o::store::cleanup_witness::tests::readers_s1a_stale_offset_or_hash_witness_is_ignored
 services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_init_only_and_old_directory_recover
 services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_write_failure_latches_and_keeps_prior_copy
+services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_failure_keeps_original_evidence
+services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_readback_mismatch_and_foreign_identity_are_typed
+services::tui_o::store::codex_provenance::p5a2_tests::p5a2_native_cursor_floor_are_authority_not_marker
+services::tui_o::store::codex_provenance::p5a2_tests::p5a2_schema1_readback_is_owned_and_read_only
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_existing_read_caller_really_reads_missing_schema1_corrupt_and_future_without_writes
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_first_explicit_prepare_preserves_schema1_order_identity_ranges_and_denies
 services::tui_o::store::codex_provenance::submit_floor::tests::s2a_prepare_and_close_never_ack_before_parent_sync_and_validated_readback
@@ -12536,6 +12540,10 @@ services::tui_o::turn_mode::tests::b1_native_admission_does_not_confirm_turn_mod
 services::tui_o::turn_mode::tests::n1a_configuration_cannot_confirm_a_channel
 services::tui_o::turn_mode::tests::n1a_only_confirmation_enables_turn_mode
 services::tui_o::turn_mode::tests::n1a_output_adoption_and_readiness_do_not_confirm_turn_mode
+services::tui_o::writer::actor::p5a2_tests::p5a2_actor_deny_records_exact_evidence_without_post_or_closed_permission
+services::tui_o::writer::actor::p5a2_tests::p5a2_dormant_actor_entrypoint_keeps_legacy_trace
+services::tui_o::writer::actor::p5a2_tests::p5a2_source_snapshot_is_rechecked_after_actor_await
+services::tui_o::writer::actor::p5a2_tests::p5a2_stale_actor_reply_never_issues_effect
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_cursor_requires_eof_frontier_and_remains_positive_when_delivered
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_lagging_frontier_quiet_tail_and_owed_range_retry
 services::tui_o::writer::adoption::late_pin_tests::late_pin_bound_recheck_rejects_cursor_or_frontier_change
@@ -13197,6 +13205,12 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dorman
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::t0bc_boot_completes_missing_span_from_unique_opener_and_named_terminal
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::t0d_two_openers_and_row_native_conflict_are_unknown
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::dormant::construction::tests::t4_boot_closes_saved_open_span_at_own_terminal_and_t5_keeps_tail_unknown
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_actual_submit_receipt_opens_one_finite_grant
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_closed_buffered_tail_survives_unavailable_and_restore
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_decisions_preserve_purpose_and_reason
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_deny_blocks_buffered_emission_and_incomplete_records_hold
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_receipt_cannot_bind_another_prepared_episode
+services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::live_grant::tests::p5a2_two_warm_episodes_never_share_a_reader_grant
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::permission::tests::historical_identity_preserves_proof_dev_and_unique_canonical_cursor_after_renumber
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::permission::tests::historical_identity_requires_one_cursor_and_its_original_prefix
 services::tui_prompt_dedupe::runtime_binding::codex_verified::provenance::permission::tests::native_floor_keeps_submit_eof_after_row_prompt_end_and_later_append
