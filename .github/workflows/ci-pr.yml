@@ -511,6 +511,8 @@ jobs:
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'
+              - 'src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths

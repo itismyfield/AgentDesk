@@ -199,6 +199,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_recovery_custody.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -2921,6 +2922,15 @@ src/
 │   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
+│   │   ├── recovery_custody/
+│   │   │   ├── capability.rs
+│   │   │   ├── custody_pg_tests.rs
+│   │   │   ├── denial_index.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── model.rs
+│   │   │   ├── operation.rs
+│   │   │   ├── reconcile.rs
+│   │   │   └── reconcile_pg_tests.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
