@@ -492,6 +492,20 @@ pub(crate) fn codex_restore_source_current(tmux: &str, path: &Path) -> bool {
         .is_none_or(|scope| scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
 }
 
+#[cfg(unix)]
+pub(crate) fn record_codex_unknown_span(
+    tmux: &str,
+    start: u64,
+    end: u64,
+    stats: crate::services::codex_tui::session::checkpoint::ScanStats,
+    kind: crate::services::codex_tui::session::checkpoint::ObservationKind,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) {
+        scope.record_unknown(tmux, start, end, stats, kind);
+    }
+}
+
 #[cfg(all(test, unix))]
 pub(crate) fn codex_restore_observation_for_tests(
     tmux: &str,
@@ -510,10 +524,74 @@ pub(crate) fn codex_restore_observation_for_tests(
             (
                 scope.source.complete_end,
                 scope.input_start,
-                scope.held.as_ref().map(|_| scope.input_start),
+                scope.replay_from,
                 scope.unknown,
             )
         })
+}
+
+/// Links one restored parked record to the existing captured bridge episode.
+#[cfg(unix)]
+pub(crate) fn link_codex_parked_owner(
+    tmux: &str,
+    turn: &str,
+    prompt: &str,
+    owner: crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let generation = state
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .map(|entry| entry.value.generation);
+    let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) else {
+        return;
+    };
+    let Some(held) = &scope.held else {
+        return;
+    };
+    if generation.is_some_and(|generation| generation != held.generation) {
+        return;
+    }
+    let Ok(json) = scope.source.record(tmux, owner.5) else {
+        return;
+    };
+    let Some((text, entry, evidence)) = extract_codex_rollout_user_prompt_with_evidence(&json)
+    else {
+        return;
+    };
+    if evidence
+        .turn_id
+        .as_deref()
+        .is_some_and(|native| native != turn)
+        || !prompts_match(&text, prompt)
+        || !evidence.created_since(held.reserved_wall)
+        || !held.parked.iter().any(|input| {
+            prompts_match(&input.prompt, prompt)
+                && input
+                    .native_turn
+                    .as_deref()
+                    .is_none_or(|native| native == turn)
+                && (input.entry_ids.is_empty()
+                    || entry
+                        .as_deref()
+                        .is_none_or(|id| input.entry_ids.iter().any(|own| own == id)))
+        })
+    {
+        return;
+    }
+    scope.owners.entry(turn.to_owned()).or_insert(owner);
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_parked_owner_source(
+    tmux: &str,
+    turn: &str,
+    owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+) -> Option<crate::services::codex_tui::session::checkpoint::Source> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let scope = state.codex_restore_by_tmux.get(tmux)?;
+    (scope.owners.get(turn) == Some(owner) && scope.source.check(tmux).is_ok())
+        .then(|| scope.source.clone())
 }
 
 #[cfg(unix)]
@@ -523,10 +601,9 @@ pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
     current: &super::super::handoff::CodexRestore,
     source: &crate::services::codex_tui::session::checkpoint::Source,
 ) -> bool {
-    !state
-        .external_input_relay_lease_by_tmux
-        .contains_key(&PromptKey::new("codex", tmux))
-        && !current.source.matches_path(&source.path)
+    current.held.as_ref().is_none_or(|held| {
+        (0..held.parked.len()).all(|index| current.settled_inputs.contains(&index))
+    }) && !current.source.matches_path(&source.path)
         && source.session_id.is_some()
         && state
             .handoff_by_tmux
@@ -537,6 +614,187 @@ pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
                 source.matches_path(&marker.rollout_path) && marker.session_id == source.session_id
             },
         )
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_parked_owners(
+    tmux: &str,
+) -> Vec<(
+    String,
+    crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    crate::services::codex_tui::session::checkpoint::Source,
+)> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state
+        .codex_restore_by_tmux
+        .get(tmux)
+        .filter(|scope| scope.source.check(tmux).is_ok())
+        .map(|scope| {
+            scope
+                .owners
+                .iter()
+                .map(|(turn, owner)| (turn.clone(), owner.clone(), scope.source.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+pub(crate) fn complete_codex_parked_owner(
+    tmux: &str,
+    turn: &str,
+    owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    source: &crate::services::codex_tui::session::checkpoint::Source,
+    terminal_end: u64,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let active_generation = state
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .map(|entry| entry.value.generation);
+    let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) else {
+        return;
+    };
+    if active_generation
+        .zip(scope.held.as_ref().map(|held| held.generation))
+        .is_some_and(|(a, b)| a != b)
+    {
+        return;
+    }
+    if &scope.source != source
+        || scope.owners.get(turn) != Some(owner)
+        || source.check(tmux).is_err()
+    {
+        return;
+    }
+    let Ok(json) = source.record(tmux, owner.5) else {
+        return;
+    };
+    let Some((prompt, entry, evidence)) = extract_codex_rollout_user_prompt_with_evidence(&json)
+    else {
+        return;
+    };
+    let indices = restored_input_indices(scope, &prompt, entry.as_deref(), Some(turn), &evidence);
+    scope.settled_inputs.extend(indices);
+    scope.settled_inputs.extend(
+        scope
+            .joined_inputs
+            .iter()
+            .filter_map(|(index, (joined, end))| {
+                (joined == turn && owner.5 <= *end && *end <= terminal_end).then_some(*index)
+            }),
+    );
+}
+
+#[cfg(unix)]
+fn restored_input_indices(
+    scope: &super::super::handoff::CodexRestore,
+    prompt: &str,
+    entry: Option<&str>,
+    turn: Option<&str>,
+    record: &super::super::handoff::RecordEvidence,
+) -> Vec<usize> {
+    let Some(held) = &scope.held else {
+        return Vec::new();
+    };
+    if !record.created_since(held.reserved_wall) {
+        return Vec::new();
+    }
+    held.parked
+        .iter()
+        .enumerate()
+        .filter_map(|(index, input)| {
+            (prompts_match(&input.prompt, prompt)
+                && input
+                    .native_turn
+                    .as_deref()
+                    .zip(turn)
+                    .is_none_or(|(a, b)| a == b)
+                && (input.entry_ids.is_empty()
+                    || entry.is_none_or(|id| input.entry_ids.iter().any(|own| own == id))))
+            .then_some(index)
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+pub(in crate::services::tui_prompt_dedupe) fn settle_codex_restored_join(
+    tmux: &str,
+    path: &Path,
+    prompt: &str,
+    entry: Option<&str>,
+    turn: Option<&str>,
+    record: &super::super::handoff::RecordEvidence,
+    record_end: u64,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let active_generation = state
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .map(|entry| entry.value.generation);
+    let answer_owned = state
+        .native_turn_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .is_some_and(|slot| {
+            Some(slot.value.turn.as_str()) == turn && slot.value.owner == NativeTurnOwner::Answer
+        });
+    if let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux)
+        && !active_generation
+            .zip(scope.held.as_ref().map(|held| held.generation))
+            .is_some_and(|(a, b)| a != b)
+        && scope.source.matches_path(path)
+        && scope.source.check(tmux).is_ok()
+    {
+        let indices = restored_input_indices(scope, prompt, entry, turn, record);
+        if answer_owned
+            && scope
+                .held
+                .as_ref()
+                .is_some_and(|held| held.bound.as_deref() == turn && turn.is_some())
+        {
+            scope.settled_inputs.extend(indices);
+        } else if let Some(turn) = turn {
+            for index in indices {
+                scope
+                    .joined_inputs
+                    .insert(index, (turn.to_owned(), record_end));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(in crate::services::tui_prompt_dedupe) fn remember_codex_restored_origin(
+    tmux: &str,
+    path: &Path,
+    prompt: &str,
+    turn: Option<&str>,
+    record: &super::super::handoff::RecordEvidence,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let bound = state
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .filter(|entry| entry.value.bound.as_deref() == turn && turn.is_some())
+        .map(|entry| (entry.value.generation, entry.value.bound.clone()));
+    let answer_owned = state
+        .native_turn_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .is_some_and(|slot| {
+            Some(slot.value.turn.as_str()) == turn && slot.value.owner == NativeTurnOwner::Answer
+        });
+    if let Some((generation, bound)) = bound
+        && answer_owned
+        && let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux)
+        && scope.source.matches_path(path)
+        && scope.source.check(tmux).is_ok()
+        && let Some(held) = scope.held.as_mut()
+        && held.generation == generation
+        && prompts_match(&held.origin, prompt)
+        && record.created_since(held.reserved_wall)
+    {
+        held.bound = bound;
+    }
 }
 
 /// Keeps bootstrap observation, input custody and output checkpoints in separate namespaces.
@@ -575,19 +833,19 @@ pub(crate) fn prepare_codex_restore(
             state
                 .handoff_by_tmux
                 .get(&PromptKey::new("codex", tmux))
-                .map(|entry| (entry.value.generation, entry.value.reserved_wall))
+                .map(|entry| entry.value.clone())
         })
         .flatten();
     drop(state);
-    if let Some((_, reserved_wall)) = &held {
-        input_start = first_user_record_created_since(&source.path, *reserved_wall)
+    if let Some(held) = &held {
+        input_start = first_user_record_created_since(&source.path, held.reserved_wall)
             .unwrap_or(source.complete_end)
             .min(source.complete_end);
     }
     Ok(super::super::handoff::CodexRestore::new(
         source,
         input_start,
-        held.map(|(generation, _)| generation),
+        held,
         Default::default(),
     ))
 }
@@ -615,7 +873,7 @@ pub(crate) fn finish_codex_restore(
         && scope
             .held
             .as_ref()
-            .is_some_and(|held| current.value.generation != *held)
+            .is_some_and(|held| current.value.generation != held.generation)
     {
         return Err(std::io::Error::other(
             "Codex restore handoff generation changed",
@@ -627,15 +885,18 @@ pub(crate) fn finish_codex_restore(
         && scope
             .held
             .as_ref()
-            .is_some_and(|held| current.value.generation == *held)
+            .is_some_and(|held| current.value.generation == held.generation)
     {
         current.value.replay_from = Some(scope.input_start);
     }
     let input_start = scope.input_start;
     scope.unknown = stats;
-    scope
-        .unknown
-        .report(&scope.source, 0, scope.source.complete_end);
+    stats.report(
+        &scope.source,
+        0,
+        scope.source.complete_end,
+        crate::services::codex_tui::session::checkpoint::ObservationKind::Unknown,
+    );
     state.codex_restore_by_tmux.insert(tmux.to_string(), scope);
     Ok(input_start)
 }

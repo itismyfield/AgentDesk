@@ -104,6 +104,7 @@ pub(super) fn bootstrap(
         let linked = linked && observed_session.is_some() && observed_session == source.session_id;
         #[cfg(test)]
         super::idempotency_tests::bootstrap_pause(tmux);
+        finish_confirmed_parked_owners(tmux);
         let plan = dedupe::prepare_codex_restore(tmux, source.clone(), linked).ok()?;
         let mut offset = 0;
         let mut total = ScanStats::default();
@@ -333,4 +334,81 @@ fn source_bound(shared: &Arc<SharedData>, tmux: &str, channel: u64) -> bool {
                     && Path::new(&binding.output_path).exists()
             },
         )
+}
+
+/// Only an exact native receipt can classify an already delivered span.
+pub(in crate::services::discord::tui_prompt_relay) fn span_delivery_kind(
+    channel: u64,
+    path: &Path,
+    span: (u64, u64),
+) -> crate::services::codex_tui::session::checkpoint::ObservationKind {
+    use crate::services::codex_tui::session::checkpoint::ObservationKind::{Delegated, Unknown};
+    use crate::services::discord::{inflight, outbound::delivery_record as dr};
+    let Some(row) = inflight::load_inflight_state_read_only(&ProviderKind::Codex, channel) else {
+        return Unknown;
+    };
+    let Some(captured) = inflight::CodexRange::from_retained_tui_terminal(&row) else {
+        return Unknown;
+    };
+    if captured.source.range != span
+        || captured.receipt_source_path() != std::fs::canonicalize(path).ok()
+    {
+        return Unknown;
+    }
+    if dr::read_record(
+        &ProviderKind::Codex,
+        captured.source.offset_authority_channel_id,
+    )
+    .is_some_and(|record| {
+        record.confirmed_deliveries.iter().any(|receipt| {
+            receipt.source == captured.source
+                && captured.confirmed_receipt_for_captured_row(&row, receipt.message_id)
+        })
+    }) {
+        Delegated
+    } else {
+        Unknown
+    }
+}
+
+fn finish_confirmed_parked_owners(tmux: &str) {
+    use crate::services::{discord::outbound::delivery_record as dr, tui_prompt_dedupe as dedupe};
+    for (turn, owner, source) in dedupe::codex_restore_parked_owners(tmux) {
+        let authority = dr::watcher_owner_channel_for_delivery_channel(
+            &ProviderKind::Codex,
+            ChannelId::new(owner.0),
+            tmux,
+        )
+        .map_or(owner.0, |channel| channel.get());
+        let Some(record) = dr::read_record(&ProviderKind::Codex, authority) else {
+            continue;
+        };
+        let delivered = record.confirmed_deliveries.iter().find(|receipt| {
+            let exact = &receipt.source;
+            exact.is_authoritative()
+                && receipt.message_id != 0
+                && receipt.delivery_channel_id == owner.0
+                && exact.provider == ProviderKind::Codex.as_str()
+                && exact.tmux_session_name == tmux
+                && exact.turn_nonce == owner.1
+                && exact.offset_authority_channel_id == authority
+                && exact.delivery_channel_id == owner.0
+                && exact.generation_mtime_ns == dr::current_generation_mtime_ns(tmux)
+                && exact.range.0 == owner.5
+                && source.record(tmux, exact.range.1).is_ok_and(|terminal| {
+                    terminal["type"] == "event_msg"
+                        && terminal["payload"]["type"] == "task_complete"
+                        && terminal["payload"]["turn_id"].as_str() == Some(turn.as_str())
+                })
+        });
+        if let Some(receipt) = delivered {
+            dedupe::complete_codex_parked_owner(
+                tmux,
+                &turn,
+                &owner,
+                &source,
+                receipt.source.range.1,
+            );
+        }
+    }
 }

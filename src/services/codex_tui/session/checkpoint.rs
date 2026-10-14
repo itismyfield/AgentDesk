@@ -1,5 +1,6 @@
 //! Physical record boundaries are read checkpoints, never delivery receipts.
 use crate::services::cluster::stream_relay::SourceFileIdentity;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,18 @@ impl Source {
         };
         source.check(tmux)?;
         Ok((source, file))
+    }
+
+    pub(crate) fn record(&self, tmux: &str, end: u64) -> io::Result<serde_json::Value> {
+        let mut file = self.reader(tmux)?;
+        if end == 0 || boundary(&mut file, end)? != end {
+            return Err(io::Error::other("Codex record is not sealed"));
+        }
+        let start = boundary(&mut file, end - 1)?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(end - start).read_to_end(&mut bytes)?;
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
     pub(crate) fn check(&self, tmux: &str) -> io::Result<()> {
@@ -122,6 +135,12 @@ pub(crate) struct ScanStats {
     pub malformed: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObservationKind {
+    Unknown,
+    Delegated,
+}
+
 impl ScanStats {
     pub(crate) fn add(&mut self, stats: Self) {
         self.assistant_records += stats.assistant_records;
@@ -131,9 +150,9 @@ impl ScanStats {
         self.malformed += stats.malformed;
     }
 
-    pub(crate) fn report(self, source: &Source, start: u64, end: u64) {
+    pub(crate) fn report(self, source: &Source, start: u64, end: u64, kind: ObservationKind) {
         tracing::info!(
-            status = "unknown",
+            status = match kind { ObservationKind::Unknown => "unknown", ObservationKind::Delegated => "delegated" },
             source = ?source.identity, start, end,
             assistant_records = self.assistant_records,
             records = self.records,
@@ -172,13 +191,20 @@ impl ScanStats {
     }
 }
 
+pub(crate) type ParkedOwnerKey = (u64, String, String, String, u64, u64);
+
 #[derive(Clone, Debug)]
 pub(crate) struct RestorePlan<C> {
     pub source: Source,
     pub input_start: u64,
     pub held: Option<C>,
+    pub replay_from: Option<u64>,
     pub observed_end: u64,
     pub unknown: ScanStats,
+    pub delegated: ScanStats,
+    pub owners: HashMap<String, ParkedOwnerKey>,
+    pub settled_inputs: HashSet<usize>,
+    pub joined_inputs: HashMap<usize, (String, u64)>,
 }
 
 impl<C> RestorePlan<C> {
@@ -187,8 +213,34 @@ impl<C> RestorePlan<C> {
             observed_end: source.complete_end,
             source,
             input_start,
+            replay_from: held.as_ref().map(|_| input_start),
             held,
             unknown: stats,
+            delegated: ScanStats::default(),
+            owners: HashMap::new(),
+            settled_inputs: HashSet::new(),
+            joined_inputs: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn record_unknown(
+        &mut self,
+        tmux: &str,
+        start: u64,
+        end: u64,
+        stats: ScanStats,
+        kind: ObservationKind,
+    ) {
+        if self.source.check(tmux).is_ok()
+            && end > self.observed_end
+            && stats.source_bytes == end.saturating_sub(start.max(self.observed_end))
+        {
+            self.observed_end = end;
+            match kind {
+                ObservationKind::Unknown => self.unknown.add(stats),
+                ObservationKind::Delegated => self.delegated.add(stats),
+            }
+            stats.report(&self.source, start, end, kind);
         }
     }
 }

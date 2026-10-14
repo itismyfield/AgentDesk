@@ -242,6 +242,114 @@ fn codex_6903_bootstrap_measures_complete_utf8_records_and_not_partial_bytes() {
 }
 
 #[test]
+fn codex_6903_unknown_span_counts_only_an_actual_checkpoint_advance() {
+    fixture(|root| {
+        use crate::services::codex_tui::session::{
+            advance_codex_tui_checkpoint, checkpoint::Advance,
+        };
+        let path = rollout(root, "advance");
+        let binding = rehydrate(|| {}).unwrap();
+        let body = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"unknown\"}]}}\n";
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        let (scan, stats) = super::super::idle_transcript_scan::scan_codex_records(
+            std::fs::File::open(&path).unwrap(),
+            binding.last_offset,
+            None,
+            true,
+            binding.last_offset,
+        )
+        .unwrap();
+        let CodexIdleRolloutScan::NoPrompt { offset } = scan else {
+            panic!("no input expected");
+        };
+        let result =
+            advance_codex_tui_checkpoint(SESSION, &path, Some(binding.last_offset), offset);
+        let Advance::Advanced { start, end, .. } = result else {
+            panic!("actual span: {result:?}");
+        };
+        dedupe::record_codex_unknown_span(
+            SESSION,
+            start,
+            end,
+            stats,
+            crate::services::codex_tui::session::checkpoint::ObservationKind::Unknown,
+        );
+        dedupe::record_codex_unknown_span(
+            SESSION,
+            start,
+            end,
+            stats,
+            crate::services::codex_tui::session::checkpoint::ObservationKind::Unknown,
+        );
+        assert_eq!(
+            advance_codex_tui_checkpoint(SESSION, &path, Some(start), end),
+            Advance::StartMismatch
+        );
+        let totals = dedupe::codex_restore_observation_for_tests(SESSION)
+            .unwrap()
+            .3;
+        assert_eq!(totals.assistant_bytes, "unknown".len() as u64);
+        assert_eq!(totals.records, 2);
+        let more = "{\"type\":\"padding\"}\n";
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(more.as_bytes())
+            .unwrap();
+        let marker = crate::services::tmux_common::session_temp_path(
+            SESSION,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        );
+        std::fs::rename(&marker, format!("{marker}.saved")).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert_eq!(
+            advance_codex_tui_checkpoint(SESSION, &path, Some(end), end + more.len() as u64),
+            Advance::PersistFailed
+        );
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(SESSION)
+                .unwrap()
+                .last_offset,
+            end
+        );
+        assert_eq!(
+            dedupe::codex_restore_observation_for_tests(SESSION)
+                .unwrap()
+                .3,
+            totals
+        );
+        std::fs::remove_dir(&marker).unwrap();
+        std::fs::rename(format!("{marker}.saved"), &marker).unwrap();
+        let old = path.with_extension("old");
+        std::fs::rename(&path, &old).unwrap();
+        std::fs::copy(&old, &path).unwrap();
+        assert_eq!(
+            advance_codex_tui_checkpoint(SESSION, &path, Some(end), end + more.len() as u64),
+            Advance::SourceChanged
+        );
+        assert_eq!(
+            dedupe::runtime_binding_for_tmux_session(SESSION)
+                .unwrap()
+                .last_offset,
+            end
+        );
+        assert_eq!(
+            dedupe::codex_restore_observation_for_tests(SESSION)
+                .unwrap()
+                .3,
+            totals
+        );
+    });
+}
+
+#[test]
 fn live_marker_rotation_replaces_even_when_old_rollout_still_exists() {
     fixture(|root| {
         let old = rollout(root, "old");
@@ -535,5 +643,144 @@ fn periodic_entry_pass_reports_one_recovery_then_settles() {
             dedupe::runtime_binding_for_tmux_session(session),
             Some(progressed)
         );
+    });
+}
+
+#[test]
+fn codex_6903_restore_without_a_floor_preserves_the_complete_boundary_and_ttl() {
+    fixture(|root| {
+        let path = rollout(root, "floor-pending");
+        let b = std::fs::metadata(&path).unwrap().len();
+        std::mem::forget(dedupe::reserve_discord_handoff("codex", SESSION, "origin"));
+        assert_eq!(
+            dedupe::observe_codex_prompt_in_turn_at(
+                SESSION,
+                "parked",
+                None,
+                Some("turn-p"),
+                chrono::Utc::now()
+            ),
+            crate::services::tui_prompt_dedupe::PromptObservation::ParkedForHandoff
+        );
+        let held = root
+            .join("runtime/codex_handoff_held")
+            .join(format!("codex-{SESSION}.json"));
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&held).unwrap()).unwrap();
+        dedupe::reset_state_for_tests();
+        let binding = rehydrate(|| {}).unwrap();
+        assert_eq!(binding.last_offset, b);
+        assert_eq!(
+            dedupe::codex_restore_observation_for_tests(SESSION)
+                .unwrap()
+                .2,
+            Some(b)
+        );
+        assert_eq!(
+            dedupe::held_handoff_inputs_for_tests("codex", SESSION),
+            Some(1)
+        );
+        dedupe::drain_expired_handoffs();
+        assert_eq!(
+            dedupe::held_handoff_inputs_for_tests("codex", SESSION),
+            Some(1)
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(held).unwrap()).unwrap();
+        assert_eq!(
+            after["expires_at"], before["expires_at"],
+            "restore must not renew remaining TTL"
+        );
+    });
+}
+
+#[test]
+fn codex_6903_floor_appended_after_bootstrap_starts_at_the_fixed_boundary() {
+    fixture(|root| {
+        let path = rollout(root, "future-floor");
+        let b = std::fs::metadata(&path).unwrap().len();
+        std::mem::forget(dedupe::reserve_discord_handoff("codex", SESSION, "origin"));
+        assert_eq!(
+            dedupe::observe_codex_prompt_in_turn_at(
+                SESSION,
+                "parked",
+                None,
+                Some("turn-p"),
+                chrono::Utc::now()
+            ),
+            crate::services::tui_prompt_dedupe::PromptObservation::ParkedForHandoff
+        );
+        dedupe::reset_state_for_tests();
+        let append = path.clone();
+        BOOTSTRAP_PAUSE.with(|pause| *pause.borrow_mut() = Some(Box::new(move || {
+            use std::io::Write;
+            let pad = serde_json::json!({"type":"padding"}).to_string() + "\n";
+            let user = serde_json::json!({"timestamp":chrono::Utc::now().to_rfc3339(),"type":"response_item",
+                "payload":{"type":"message","role":"user","turn_id":"origin-turn","content":[{"type":"input_text","text":"origin"}]}}).to_string() + "\n";
+            std::fs::OpenOptions::new().append(true).open(append).unwrap().write_all((pad + &user).as_bytes()).unwrap();
+        })));
+        let binding = rehydrate(|| {}).unwrap();
+        assert_eq!(
+            binding.last_offset, b,
+            "future floor must not skip the newly appended prefix"
+        );
+        let seen = dedupe::codex_restore_observation_for_tests(SESSION).unwrap();
+        assert_eq!(seen.0, b);
+        assert_eq!(seen.2, Some(b));
+        assert_eq!(seen.3.source_bytes, b);
+    });
+}
+
+#[test]
+fn codex_6903_truncate_and_conflicting_custody_source_stay_pending() {
+    fixture(|root| {
+        let path = rollout(root, "source-pending");
+        let replace = path.clone();
+        BOOTSTRAP_PAUSE.with(|pause| {
+            *pause.borrow_mut() = Some(Box::new(move || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(replace)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+            }))
+        });
+        assert!(rehydrate(|| {}).is_none());
+        assert!(dedupe::runtime_binding_for_tmux_session(SESSION).is_none());
+    });
+    fixture(|root| {
+        let path = rollout(root, "source-conflict");
+        std::mem::forget(dedupe::reserve_discord_handoff("codex", SESSION, "origin"));
+        dedupe::observe_codex_prompt_in_turn_at(
+            SESSION,
+            "parked",
+            None,
+            Some("turn-p"),
+            chrono::Utc::now(),
+        );
+        let other = root.join("other.jsonl");
+        std::fs::copy(&path, &other).unwrap();
+        let row = crate::services::discord::inflight::InflightTurnState::new(
+            ProviderKind::Codex,
+            CHANNEL,
+            None,
+            123,
+            456,
+            789,
+            "origin".into(),
+            Some("source-conflict".into()),
+            Some(SESSION.into()),
+            Some(other.display().to_string()),
+            None,
+            0,
+        );
+        save_inflight_state(&row).unwrap();
+        assert!(
+            rehydrate(|| {}).is_none(),
+            "another known custody source cannot bind this rollout"
+        );
+        assert!(dedupe::runtime_binding_for_tmux_session(SESSION).is_none());
+        assert!(dedupe::durable_handoff_present_for_tests("codex", SESSION));
     });
 }

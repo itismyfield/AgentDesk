@@ -11,9 +11,13 @@ mod codex_cursor;
 pub(crate) use codex_cursor::codex_restore_observation_for_tests;
 #[cfg(unix)]
 pub(crate) use codex_cursor::{
-    codex_restore_checkpoint, codex_restore_observed_end, codex_restore_scan_floor,
-    codex_restore_source_current, finish_codex_restore, prepare_codex_restore,
+    codex_parked_owner_source, codex_restore_checkpoint, codex_restore_observed_end,
+    codex_restore_parked_owners, codex_restore_scan_floor, codex_restore_source_current,
+    complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
+    prepare_codex_restore, record_codex_unknown_span,
 };
+#[cfg(unix)]
+pub(super) use codex_cursor::{remember_codex_restored_origin, settle_codex_restored_join};
 mod codex_policy;
 pub(crate) use codex_cursor::{
     advance_checked as advance_codex_offset_checked,

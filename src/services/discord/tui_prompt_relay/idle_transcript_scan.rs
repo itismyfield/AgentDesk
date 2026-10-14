@@ -326,6 +326,7 @@ pub(super) fn scan_claude_idle_transcript_for_last_prompt(
     }
 }
 
+#[cfg(test)]
 pub(super) fn scan_codex_idle_rollout_for_prompt(
     rollout_path: &Path,
     start_offset: u64,
