@@ -19,7 +19,9 @@ pub(in crate::services::discord) fn spawn_observed<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::spawn(async move {
+    // Boxed before the hand-off: unoptimized builds otherwise copy the whole future through
+    // tokio::spawn's own frame, which overflowed 2 MiB test threads on the turn-start path.
+    tokio::spawn(Box::pin(async move {
         match AssertUnwindSafe(future).catch_unwind().await {
             Ok(()) => {}
             Err(payload) => {
@@ -30,7 +32,7 @@ where
                 );
             }
         }
-    })
+    }))
 }
 
 pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
