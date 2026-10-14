@@ -44,6 +44,24 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertIn('"src/still_test.rs"', self.path.read_text())
         self.assertIn('"src/fixture_tests.rs"', self.path.read_text())
 
+    def test_explicit_deletion_removes_only_missing_pin(self):
+        (self.root / 'src/fixture_tests.rs').unlink()
+        with patch.object(guard.classifier._SKIP_PIN, 'PINNED_TEST_ONLY_MODULE_FILES',
+                          frozenset(('src/fixture_tests.rs', 'src/still_test.rs'))):
+            guard.sync_skips(self.root, deleted_paths=('src/fixture_tests.rs',))
+        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertIn('"src/still_test.rs"', self.path.read_text())
+
+    def test_existing_deletion_path_refuses_without_writing(self):
+        with self.assertRaisesRegex(RuntimeError, 'deletion path still exists: src/still_test.rs'):
+            guard.sync_skips(self.root, deleted_paths=('src/still_test.rs',))
+        self.assertEqual(self.path.read_text(), self.original)
+
+    def test_unpinned_deletion_refuses_without_writing(self):
+        with self.assertRaisesRegex(RuntimeError, 'deletion is not pinned: src/missing.rs'):
+            guard.sync_skips(self.root, deleted_paths=('src/missing.rs',))
+        self.assertEqual(self.path.read_text(), self.original)
+
     def test_omitted_promotion_refuses_removal_without_writing(self):
         self.assertEqual(self.outcome(), 'refusing pin removal')
         self.assertEqual(self.path.read_text(), self.original)
