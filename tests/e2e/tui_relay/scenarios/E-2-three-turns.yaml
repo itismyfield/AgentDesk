@@ -5,16 +5,16 @@ coverage_class: live
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui, claude-herdr, codex-herdr]
 isolation: required
 steps:
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:{run_id}:TURN-1] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E2:{run_id}:TURN-1]"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:TURN-1] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E2:TURN-1]"
     timeout_s: 240
   - wait_idle_s: 3
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:{run_id}:TURN-2] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E2:{run_id}:TURN-2]"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:TURN-2] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E2:TURN-2]"
     timeout_s: 240
   - wait_idle_s: 3
-  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:{run_id}:TURN-3] 만 출력해줘."
-  - wait_for_discord_text: "[E2E:E2:{run_id}:TURN-3]"
+  - send_prompt: "응답에 정확히 한 줄로 [E2E:E2:TURN-3] 만 출력해줘."
+  - wait_for_discord_text: "[E2E:E2:TURN-3]"
     timeout_s: 240
 assertions:
   - raw_message_count_between_markers:
@@ -23,18 +23,18 @@ assertions:
   - relay_latency_within:
       max_seconds: 240
   - no_duplicate_content: true
-  - text_present: "[E2E:E2:{run_id}:TURN-1]"
-  - text_present: "[E2E:E2:{run_id}:TURN-2]"
-  - text_present: "[E2E:E2:{run_id}:TURN-3]"
+  - text_present: "[E2E:E2:TURN-1]"
+  - text_present: "[E2E:E2:TURN-2]"
+  - text_present: "[E2E:E2:TURN-3]"
   - no_resume_prompt_chrome: true
   # #2838 (P0-2): the three turns must arrive in order (turn separation), and
   # no single turn's answer may be re-relayed. Per-marker uniqueness catches a
   # turn being re-emitted with a different header (which no_duplicate_content
   # misses); ordering catches a stale earlier-turn answer surfacing late.
   - ordered_text_present:
-      - "[E2E:E2:{run_id}:TURN-1]"
-      - "[E2E:E2:{run_id}:TURN-2]"
-      - "[E2E:E2:{run_id}:TURN-3]"
-  - no_duplicate_marker: "[E2E:E2:{run_id}:TURN-1]"
-  - no_duplicate_marker: "[E2E:E2:{run_id}:TURN-2]"
-  - no_duplicate_marker: "[E2E:E2:{run_id}:TURN-3]"
+      - "[E2E:E2:TURN-1]"
+      - "[E2E:E2:TURN-2]"
+      - "[E2E:E2:TURN-3]"
+  - no_duplicate_marker: "[E2E:E2:TURN-1]"
+  - no_duplicate_marker: "[E2E:E2:TURN-2]"
+  - no_duplicate_marker: "[E2E:E2:TURN-3]"

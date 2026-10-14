@@ -3836,7 +3836,7 @@ def run_one_cell(
         elif "send_prompt" in step:
             _prepare_first_prompt_window()
             window.mark_prompt_sent()
-            last_sent_prompt = str(step["send_prompt"]).replace("{run_id}", run_id)
+            last_sent_prompt = str(step["send_prompt"])
             response = client.send_prompt(
                 channel_id,
                 last_sent_prompt,
