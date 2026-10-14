@@ -43,6 +43,61 @@ pub(crate) fn tui_preflight(
     if policy != "verified" {
         return Ok(policy);
     }
+    verified_eligibility(options, resume_root)?;
+    Ok(policy)
+}
+
+/// A warm incarnation keeps its verified policy when the next launch mode changes.
+#[cfg(unix)]
+pub(crate) fn verified_warm_preflight<'a>(
+    options: &CodexLaunchOptions,
+    context: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+) -> Result<VerifiedWarmEligibility<'a>, CodexTuiLaunchRefused> {
+    let resume_root = (context.launch_mode == "resume"
+        && context.expected_native_session_id.as_deref() == options.resume_session_id.as_deref())
+    .then_some(context.provider_root.as_deref())
+    .flatten();
+    let eligibility = VerifiedWarmEligibility {
+        resume_root,
+        hooks: verified_eligibility(options, resume_root)?,
+    };
+    eligibility.recheck()?;
+    Ok(eligibility)
+}
+
+#[cfg(unix)]
+pub(crate) struct VerifiedWarmEligibility<'a> {
+    resume_root: Option<&'a std::path::Path>,
+    hooks: bool,
+}
+
+#[cfg(unix)]
+impl VerifiedWarmEligibility<'_> {
+    /// Cheap live reads follow the external probe and the other effect guards.
+    pub(crate) fn recheck(&self) -> Result<(), CodexTuiLaunchRefused> {
+        if verified_hook_eligibility(self.resume_root)? != self.hooks {
+            return Err(CodexTuiLaunchRefused::HooksUnavailable);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn verified_hook_eligibility(
+    resume_root: Option<&std::path::Path>,
+) -> Result<bool, CodexTuiLaunchRefused> {
+    let hooks = codex_direct_tui_hook_overrides_enabled();
+    if (!hooks && resume_root.is_none()) || (hooks && current_hook_endpoint().is_none()) {
+        return Err(CodexTuiLaunchRefused::HooksUnavailable);
+    }
+    Ok(hooks)
+}
+
+#[cfg(unix)]
+fn verified_eligibility(
+    options: &CodexLaunchOptions,
+    resume_root: Option<&std::path::Path>,
+) -> Result<bool, CodexTuiLaunchRefused> {
     if direct_tui_material_fallback_reason(options).is_some() {
         return Err(CodexTuiLaunchRefused::UnsupportedOptions);
     }
@@ -65,10 +120,7 @@ pub(crate) fn tui_preflight(
         )
         .map_err(|_| CodexTuiLaunchRefused::ResumeUnavailable)?;
     }
-    let hooks = codex_direct_tui_hook_overrides_enabled();
-    if (!hooks && resume_root.is_none()) || (hooks && current_hook_endpoint().is_none()) {
-        return Err(CodexTuiLaunchRefused::HooksUnavailable);
-    }
+    let hooks = verified_hook_eligibility(resume_root)?;
     let resolution = resolve_codex_binary();
     let binary = resolution
         .resolved_path
@@ -77,7 +129,7 @@ pub(crate) fn tui_preflight(
     if hooks && !codex_resume_supports_hook_trust_bypass(binary, &resolution) {
         return Err(CodexTuiLaunchRefused::HooksUnavailable);
     }
-    Ok(policy)
+    Ok(hooks)
 }
 
 #[cfg(unix)]
@@ -723,6 +775,22 @@ mod tests {
             Some(id.as_str())
         );
         assert_eq!(prepared.context.launch_mode, "resume");
+        verified_warm_preflight(&options, &prepared.context)
+            .unwrap()
+            .recheck()
+            .unwrap();
+        let mut fresh = prepared.context.clone();
+        fresh.launch_mode = "fresh".into();
+        assert!(matches!(
+            verified_warm_preflight(&options, &fresh),
+            Err(CodexTuiLaunchRefused::HooksUnavailable)
+        ));
+        fresh.launch_mode = "resume".into();
+        fresh.expected_native_session_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(matches!(
+            verified_warm_preflight(&options, &fresh),
+            Err(CodexTuiLaunchRefused::HooksUnavailable)
+        ));
         assert!(
             binding_context::codex_context_candidate(&prepared.context, &prepared.context, None)
                 .is_err(),

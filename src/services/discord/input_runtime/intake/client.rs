@@ -10,7 +10,7 @@ use crate::services::discord::input_runtime::supervisor::{
     Ports, Refused, Registry, Supervisor, command, external, ordering, receipt, source,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+use crate::services::tui_input::rows::receipt_identity::ReceiptIdentity;
 
 pub(in crate::services::discord) enum Access {
     Legacy,
@@ -113,7 +113,7 @@ impl Client {
     pub(in crate::services::discord) async fn lookup_responsibility(
         &self,
         identity: ReceiptIdentity,
-    ) -> Result<Responsibility, receipt::Deferred> {
+    ) -> Result<receipt::ResponsibilityLookup, receipt::Deferred> {
         self.call(|reply| command::SupervisorCmd::LookupResponsibility { identity, reply })
             .await
     }
