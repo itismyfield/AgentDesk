@@ -12752,6 +12752,8 @@ services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
 services::tui_o::writer::tests::actor::host_start::reclaim::transition_execution::transition_execution_is_the_request_nonces_history_and_never_an_empty_set
 services::tui_o::writer::tests::actor::host_start::reclaim::transition_execution::transition_execution_refuses_a_left_session_without_its_pinned_source
+services::tui_o::writer::tests::actor::host_start::reclaim::transition_host::transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_replies
+services::tui_o::writer::tests::actor::host_start::reclaim::transition_host::transition_port_without_requests_leaves_the_hosted_actor_as_it_was
 services::tui_o::writer::tests::actor::host_start::renumber::a_file_logged_before_and_after_a_renumber_is_adopted_as_one_source
 services::tui_o::writer::tests::actor::host_start::renumber::a_new_empty_channel_whose_transcript_was_renumbered_is_activated
 services::tui_o::writer::tests::actor::host_start::renumber::a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stall
@@ -12778,8 +12780,6 @@ services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_deli
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_failures_cancel_and_stale_evidence_issue_nothing
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_two_warm_turns_share_execution_and_post_once_each
-services::tui_o::writer::tests::actor::host_start::transition_host::transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_replies
-services::tui_o::writer::tests::actor::host_start::transition_host::transition_port_without_requests_leaves_the_hosted_actor_as_it_was
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_empty_spool_is_owed_before_wait_observation_at_300_seconds
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_lease_wait_preserves_readiness_and_drain_owing

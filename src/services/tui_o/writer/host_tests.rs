@@ -1275,5 +1275,3 @@ mod readers_host;
 #[cfg(unix)]
 #[path = "s2a_actor_tests.rs"]
 mod s2a;
-#[path = "transition_host_tests.rs"]
-mod transition_host;

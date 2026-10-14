@@ -68,6 +68,9 @@ fn legacy(a: &SourceId, b: &SourceId) -> Rotation {
     rotation
 }
 
+/// A named history and the candidates expected from it.
+type Case = (&'static str, Vec<BindingEvent>, Vec<(u64, String)>);
+
 // Every applied hop of a legacy successor stays a candidate, so a history naming it more than
 // once never reads as one unique hop.
 #[test]
@@ -87,7 +90,7 @@ fn transition_legacy_hop_candidates_keep_every_applied_match() {
         resolves_seq: 2,
         source: c.clone(),
     };
-    let cases: [(&str, Vec<BindingEvent>, Vec<(u64, String)>); 6] = [
+    let cases: [Case; 6] = [
         (
             "one",
             vec![startup(1, &a), moved(2, "p", &a, &b)],

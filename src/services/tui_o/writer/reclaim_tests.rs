@@ -419,3 +419,5 @@ async fn an_adopted_resume_holds_its_rows_until_an_operator_resolves() {
 
 #[path = "transition_execution_tests.rs"]
 mod transition_execution;
+#[path = "transition_host_tests.rs"]
+mod transition_host;

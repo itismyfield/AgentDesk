@@ -333,7 +333,7 @@ async fn transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_h
         (origin.captured_through, &origin.prefix_hash),
         "[T8:origin]"
     );
-    let seen = seen.borrow();
+    let seen = seen.borrow().clone();
     assert_eq!(seen.len(), 2, "[T1:writes]");
     assert_eq!(seen[0].1, before, "[T1:nothing_written_while_probing]");
     let closed = seen
@@ -879,7 +879,8 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     halt(actor.stop, actor.task).await;
     let actor = run(&chain);
     polls(3).await;
-    let changes: [(&str, fn(&mut Request)); 4] = [
+    type Change = (&'static str, fn(&mut Request));
+    let changes: [Change; 4] = [
         ("operator", |r| r.operator = "another".into()),
         ("reason", |r| r.reason = "another".into()),
         ("cutoff", |r| r.cutoff += 1),
