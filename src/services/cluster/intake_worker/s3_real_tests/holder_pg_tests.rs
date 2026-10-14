@@ -592,6 +592,10 @@ async fn th6_releasing_holder_restart_retries_reset_pg() {
         false
     };
     until_reset_entered(&scene.pool, dir, (&tag, 1), &releasing, alive).await;
+    // The call's entry alone is not the child's verdict; it signals once its own checks passed.
+    first
+        .wait_signal(&format!("checked.{tag}"), Duration::from_secs(180))
+        .await;
     quiet_at_reset(&scene.pool, &samples).await;
     first.kill();
     assert_eq!(reset_returned(dir, &tag, 1), None, "killed inside the call");
@@ -639,8 +643,8 @@ fn holding(node: &Booted, epoch: i64) -> bool {
     node.home_epoch() == Some(epoch) && node.accepts()
 }
 
-/// First generation: its drain's reset holds inside call 1, where the parent kills it; until then
-/// it fails if it stays holding without a break and tries no reset.
+/// First generation: it holds the channel, then its reset holds inside call 1 until the parent
+/// kills it; it fails if it stays holding without a break and tries no reset.
 pub(super) async fn release_first_node(env: &Env) {
     let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
     let reset = ScriptedReset::in_child(env, vec![ResetAnswer::Apply]);
@@ -651,8 +655,13 @@ pub(super) async fn release_first_node(env: &Env) {
         (releasing.state, releasing.epoch),
         (HomeState::Releasing, epoch)
     );
+    until("the holder takes the channel", WITHIN, || {
+        holding(&node, epoch)
+    })
+    .await;
     let held = || holding(&node, epoch);
     until_reset_entered(&node.pool, dir, (tag, 1), &releasing, held).await;
+    signal(dir, &format!("checked.{tag}"));
     std::future::pending::<()>().await;
 }
 
@@ -671,6 +680,10 @@ pub(super) async fn release_second_node(env: &Env) {
         (HomeState::Releasing, epoch)
     );
     let samples = outbox_samples(pool).await;
+    until("the holder takes the channel", WITHIN, || {
+        holding(&node, epoch)
+    })
+    .await;
     until_reset_entered(pool, dir, (tag, 1), &releasing, || holding(&node, epoch)).await;
     let gate = node.gate().expect("registered");
     assert!(
