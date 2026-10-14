@@ -12908,6 +12908,7 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_recent_missing_halts_without_retirement
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_resume_publishes_after_init_only_eof_pending_flush
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_configless_actor_keeps_the_legacy_off_path
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_consumes_no_reply_of_a_run_replaced_meanwhile
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::transition_route_inspect_lists_every_unpinned_session_a_source_may_be
