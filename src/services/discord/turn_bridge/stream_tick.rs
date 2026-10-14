@@ -498,23 +498,16 @@ pub(super) async fn run_bridge_stream_tick(
             status_panel_started_at,
             indicator,
         );
-        let save = StreamTickCandidateSaveContext {
-            gateway: gateway.as_ref(),
-            provider: &provider,
-            token_hash: &shared_owned.token_hash,
+        let panel = (
             channel_id,
-            persisted_baseline: persisted_inflight_baseline,
-            inflight_state: &mut *inflight_state,
-            expected_identity: stream_tick_expected,
-            expected_current_message,
-            current_msg_id: &mut current_msg_id,
-            pending_current_message_candidate,
-            bridge_created_response_placeholder_msg_id,
-        };
+            current_msg_id,
+            pending_current_message_candidate.is_some(),
+        );
         let due = last_status_edit.elapsed() >= status_interval;
         let text = &mut last_edit_text;
         let timing = (due, done);
-        if o_panel::refresh_o_status_panel(&shared_owned, &gateway, save, frame, timing, text).await
+        let row = &mut *inflight_state;
+        if o_panel::refresh_o_status_panel(gateway.as_ref(), panel, row, frame, timing, text).await
         {
             last_status_edit = tokio::time::Instant::now();
             state_dirty = true;
