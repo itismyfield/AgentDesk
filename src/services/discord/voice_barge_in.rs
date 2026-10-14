@@ -3274,6 +3274,215 @@ mod tests {
         runtime.cleanup_utterance_artifacts(&utterance).await;
     }
 
+    impl VoiceBargeInRuntime {
+        /// Routes `source` to `target`, queues one foreground Speak decision and one background
+        /// summary under default config, and returns the effective foreground provider.
+        pub(in crate::services::discord) async fn prepare_foreground_for_tests(
+            &self,
+            source: ChannelId,
+            target: ChannelId,
+        ) -> ProviderKind {
+            let config = Arc::new(crate::config::Config::default());
+            self.config_cache.seed(Instant::now(), config);
+            let route = ActiveVoiceRoute {
+                agent_id: "project-agentdesk".to_string(),
+                channel_id: target,
+                updated_at: Instant::now(),
+            };
+            self.channels
+                .active_voice_routes
+                .insert(source.get(), route);
+            let state = &self.test_state;
+            state.force_synth_success.store(true, Ordering::Relaxed);
+            let speak = VoiceForegroundDecision::Speak("상태 확인했어요.".to_string());
+            state.foreground_decisions.lock().unwrap().push_back(speak);
+            let summary = Some("작업이 끝났어요.".to_string());
+            state
+                .background_result_summaries
+                .lock()
+                .unwrap()
+                .push_back(summary);
+            let foreground = self
+                .resolve_effective_foreground_config(source, target)
+                .await;
+            ProviderKind::from_str_or_unsupported(&foreground.provider)
+        }
+
+        /// `(model decisions left, summaries left, synths, plays, background or turn starts)`.
+        pub(in crate::services::discord) fn foreground_effects_for_tests(
+            &self,
+        ) -> (usize, usize, usize, usize, usize) {
+            let state = &self.test_state;
+            let starts = state.background_starts.lock().unwrap().len()
+                + state.turn_starts.lock().unwrap().len();
+            (
+                state.foreground_decisions.lock().unwrap().len(),
+                state.background_result_summaries.lock().unwrap().len(),
+                state.synth_requests.lock().unwrap().len(),
+                state.play_requests.lock().unwrap().len(),
+                starts,
+            )
+        }
+    }
+
+    /// In the claim winner a retired foreground gets one notice, handled, and no model, ack, TTS or
+    /// handoff; the same fixture otherwise speaks its answer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_transcript_refuses_a_retired_foreground_inside_the_claim_winner() {
+        use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
+        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let (source, target) = (ChannelId::new(6_570_681), ChannelId::new(6_570_682));
+        let foreground = runtime.prepare_foreground_for_tests(source, target).await;
+        let discord = MockDiscord::start().await;
+        let _rest =
+            crate::services::discord::shared_state::test_rest::install(discord.http.clone());
+        let announcement =
+            voice_transcript_announcement_for_tests("지금 상태 알려줘", "utt-retired-6570681");
+
+        {
+            let _retired = retired_runtime_for_tests::retire(&foreground, None);
+            let handled = runtime
+                .try_handle_voice_transcript_announcement(&shared, source, &announcement)
+                .await;
+            assert!(
+                handled,
+                "a refused announcement is still the foreground's to consume"
+            );
+        }
+        let notices = discord.requests_for(source.get());
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(RetiredRuntimeError::CODE),
+            "{notices:?}"
+        );
+        assert_eq!(runtime.foreground_effects_for_tests(), (1, 1, 0, 0, 0));
+
+        let next = voice_transcript_announcement_for_tests("지금 상태 알려줘", "utt-live-6570681");
+        assert!(
+            runtime
+                .try_handle_voice_transcript_announcement(&shared, source, &next)
+                .await
+        );
+        assert_eq!(runtime.foreground_effects_for_tests(), (0, 1, 1, 1, 0));
+        assert_eq!(discord.requests_for(source.get()).len(), 1);
+    }
+
+    /// A retired foreground runtime turns a background completion into one notice: no summary
+    /// model call and no fallback speech. The same fixture otherwise speaks the summary.
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_summary_refuses_a_retired_foreground_without_fallback_speech() {
+        use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
+        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let (voice, background) = (ChannelId::new(6_570_685), ChannelId::new(6_570_686));
+        let foreground = runtime
+            .prepare_foreground_for_tests(voice, background)
+            .await;
+        let discord = MockDiscord::start().await;
+        let _rest =
+            crate::services::discord::shared_state::test_rest::install(discord.http.clone());
+        let summarize = || {
+            runtime.speak_voice_background_completion_summary(
+                &shared,
+                voice,
+                background,
+                "작업 완료. 상세 로그는 채널에 남겼습니다.",
+                false,
+            )
+        };
+
+        {
+            let _retired = retired_runtime_for_tests::retire(&foreground, None);
+            summarize().await;
+        }
+        let notices = discord.requests_for(voice.get());
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(RetiredRuntimeError::CODE),
+            "{notices:?}"
+        );
+        assert_eq!(runtime.foreground_effects_for_tests(), (1, 1, 0, 0, 0));
+
+        summarize().await;
+        assert_eq!(runtime.foreground_effects_for_tests(), (1, 0, 1, 1, 0));
+        assert_eq!(discord.requests_for(voice.get()).len(), 1);
+    }
+
+    /// A retired background target keeps a follow-up out of the deferred buffer and the held prompt
+    /// undrained, with one notice; an explicit stop still cancels the turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn voice_defer_and_drain_hold_a_retired_background_target() {
+        use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
+        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
+        let runtime = Arc::new(enabled_runtime());
+        let shared = voice_handoff_shared_for_tests();
+        let (source, target) = (ChannelId::new(6_570_691), ChannelId::new(6_570_692));
+        install_active_voice_route(&runtime, source, target);
+        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let user = serenity::UserId::new(7);
+        let mailbox = shared.mailbox(target);
+        assert!(
+            mailbox
+                .try_start_turn(token.clone(), user, MessageId::new(6_570_693))
+                .await
+        );
+        let discord = MockDiscord::start().await;
+        let _rest =
+            crate::services::discord::shared_state::test_rest::install(discord.http.clone());
+        let provider = ProviderKind::Claude;
+        let transcript = |text: &'static str| {
+            let (runtime, shared, provider) = (&runtime, &shared, &provider);
+            async move {
+                runtime
+                    .handle_processing_transcript(shared, provider, source, text)
+                    .await
+            }
+        };
+
+        let first = transcript("이 내용도 반영해줘").await;
+        assert!(
+            matches!(first, VoiceBargeInTranscriptOutcome::Deferred(_)),
+            "{first:?}"
+        );
+        {
+            let _target = retired_runtime_for_tests::retire(&provider, Some(target.get()));
+            let _source = retired_runtime_for_tests::retire(&provider, Some(source.get()));
+            let refused = transcript("이것도 추가해줘").await;
+            let code = RetiredRuntimeError::CODE.to_string();
+            assert_eq!(
+                refused,
+                VoiceBargeInTranscriptOutcome::VoiceTurnStartFailed(code)
+            );
+            let drained = runtime
+                .drain_deferred_after_turn(&shared, &provider, source)
+                .await;
+            assert!(!drained, "a retired target drains nothing");
+            let stop = transcript("멈춰").await;
+            let cancelled = matches!(stop, VoiceBargeInTranscriptOutcome::ExplicitStop { .. });
+            assert!(
+                cancelled && token.cancelled.load(Ordering::Relaxed),
+                "{stop:?}"
+            );
+        }
+        let notices = discord.requests_for(source.get());
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(RetiredRuntimeError::CODE),
+            "{notices:?}"
+        );
+        let held = runtime
+            .take_deferred_prompt(source)
+            .await
+            .expect("held prompt");
+        assert_eq!(held.prompt, "이 내용도 반영해줘");
+    }
+
     #[path = "pcm_harness_tests.rs"]
     mod pcm_harness_tests;
+
+    #[path = "retired_text_reply_tests.rs"]
+    mod retired_text_reply_tests;
 }
