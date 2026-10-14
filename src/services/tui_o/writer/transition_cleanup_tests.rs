@@ -1054,3 +1054,6 @@ mod operations_shape {
         );
     }
 }
+
+#[path = "transition_scope_tests.rs"]
+mod scope_tests;

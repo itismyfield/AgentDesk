@@ -41477,6 +41477,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/tui_o/writer/transition_route_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:23fd982cccd17acbdfc1408206f6370bb417fa7f626328c2f5e7a56dcbc7fddf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/turn_host_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",

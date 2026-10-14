@@ -248,6 +248,11 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
+if run_check guards "hrot transition sender surface"; then
+"$PYTHON" scripts/check_hrot_sender_surface.py
+"$PYTHON" -m unittest tests.test_hrot_sender_surface
+fi
+
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
