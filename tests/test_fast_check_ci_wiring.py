@@ -3215,7 +3215,7 @@ jobs:
         calls = [
             "scripts/check_test_lane_coverage.py --baseline-ref base-sha",
             "-m unittest tests.test_test_lane_coverage",
-            "-m unittest tests.test_lane_source_parity",
+            "-m unittest tests.test_lane_source_parity tests.test_lane_activation",
         ]
         with tempfile.TemporaryDirectory() as tmp:
             probe, journal = Path(tmp) / "python-probe", Path(tmp) / "argv"
