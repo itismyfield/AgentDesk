@@ -1,5 +1,225 @@
 use super::*;
 
+pub(super) struct WriterInput {
+    initial_composed_response: String,
+    suppression: String,
+    replay_events: Vec<serde_json::Value>,
+    prepared_output: Option<std::fs::File>,
+}
+
+impl WriterInput {
+    pub(super) fn ordinary(seed: String, replay_events: Vec<serde_json::Value>) -> Self {
+        Self {
+            initial_composed_response: seed.clone(),
+            suppression: seed,
+            replay_events,
+            prepared_output: None,
+        }
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        String,
+        String,
+        Vec<serde_json::Value>,
+        Option<std::fs::File>,
+    ) {
+        (
+            self.suppression,
+            self.initial_composed_response,
+            self.replay_events,
+            self.prepared_output,
+        )
+    }
+}
+
+pub(super) fn open_writer_output(
+    path: &std::path::Path,
+    prepared: Option<std::fs::File>,
+) -> Result<std::fs::File, String> {
+    match prepared {
+        Some(output) => Ok(output),
+        None => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|error| format!("open {}: {error}", path.display())),
+    }
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Default)]
+pub(in crate::services::discord::recovery_engine) struct StartGate(
+    std::sync::Arc<(std::sync::Mutex<Option<bool>>, std::sync::Condvar)>,
+);
+
+#[cfg(all(test, unix))]
+impl StartGate {
+    pub(in crate::services::discord::recovery_engine) fn wait(&self) -> bool {
+        let (lock, changed) = &*self.0;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while state.is_none() {
+            state = changed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        *state == Some(true)
+    }
+    fn is_open(&self) -> bool {
+        self.0.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&true)
+    }
+    pub(in crate::services::discord::recovery_engine) fn finish(&self, open: bool) {
+        let (lock, changed) = &*self.0;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = Some(open);
+        changed.notify_all();
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) struct PreparedWriter {
+    pub(in crate::services::discord::recovery_engine) gate: StartGate,
+    pub(in crate::services::discord::recovery_engine) cancel:
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+#[cfg(all(test, unix))]
+impl PreparedWriter {
+    pub(in crate::services::discord::recovery_engine) fn join(mut self) -> Result<(), String> {
+        self.thread
+            .take()
+            .ok_or("writer handle missing")?
+            .join()
+            .map_err(|_| "writer panicked")?
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for PreparedWriter {
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.gate.finish(false);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+static VERIFIED_READER_STACK_SIZE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) struct ReaderThreadFault(usize);
+
+#[cfg(all(test, unix))]
+impl Drop for ReaderThreadFault {
+    fn drop(&mut self) {
+        VERIFIED_READER_STACK_SIZE.store(self.0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) fn fail_reader_thread_for_test()
+-> ReaderThreadFault {
+    ReaderThreadFault(
+        VERIFIED_READER_STACK_SIZE.swap(usize::MAX / 2, std::sync::atomic::Ordering::AcqRel),
+    )
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) fn prepare_verified_writer(
+    path: std::path::PathBuf,
+    mut reader: super::super::legacy_restart_replay::reader::VerifiedReader,
+    seed: String,
+    generation: (CodexRebindRelayGenerationGate, u64),
+) -> Result<PreparedWriter, String> {
+    let output = open_writer_output(&path, None)?;
+    let input = WriterInput {
+        initial_composed_response: seed,
+        suppression: String::new(),
+        replay_events: Vec::new(),
+        prepared_output: Some(output),
+    };
+    let gate = StartGate::default();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let thread_gate = gate.clone();
+    let thread_cancel = cancel.clone();
+    let thread = std::thread::Builder::new()
+        .name("codex_verified_replay_writer".into())
+        .spawn(move || {
+            if input.initial_composed_response != reader.composed_prefix()
+                || !input.suppression.is_empty()
+                || !input.replay_events.is_empty()
+            {
+                let error = "verified writer input does not match proof".to_string();
+                let _ = ready_tx.send(Err(error.clone()));
+                return Err(error);
+            }
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let feed_gate = thread_gate.clone();
+            let feed_cancel = thread_cancel.clone();
+            let builder = std::thread::Builder::new().name("codex_verified_replay_reader".into());
+            let stack = VERIFIED_READER_STACK_SIZE.load(std::sync::atomic::Ordering::Acquire);
+            let builder = if stack == 0 {
+                builder
+            } else {
+                builder.stack_size(stack)
+            };
+            let feeder = builder
+                .spawn(move || {
+                    if !feed_gate.wait() {
+                        return Ok(());
+                    }
+                    while feed_gate.is_open()
+                        && !feed_cancel.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        for message in reader.poll().map_err(|hold| format!("{hold:?}"))? {
+                            sender
+                                .send(message)
+                                .map_err(|_| "writer disconnected".to_string())?;
+                        }
+                        if reader.finished() {
+                            return Ok(());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err("reader cancelled".to_string())
+                })
+                .map_err(|e| e.to_string());
+            let ready = feeder.as_ref().map(|_| ()).map_err(Clone::clone);
+            let _ = ready_tx.send(ready);
+            let feeder = feeder?;
+            if !thread_gate.wait() {
+                return feeder.join().map_err(|_| "reader panicked")?;
+            }
+            let result = write_codex_rebind_normalized_stream_for_generation(
+                &path,
+                receiver,
+                input,
+                &generation.0,
+                generation.1,
+                None,
+            );
+            if result.is_err() {
+                thread_gate.finish(false);
+            }
+            let feed_result = feeder.join().map_err(|_| "reader panicked")?;
+            result.and(feed_result)
+        })
+        .map_err(|e| e.to_string())?;
+    let prepared = PreparedWriter {
+        gate,
+        cancel,
+        thread: Some(thread),
+    };
+    ready_rx
+        .recv()
+        .map_err(|_| "writer preparation disconnected".to_string())??;
+    Ok(prepared)
+}
+
 pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_relay_output(
     tmux_session_name: &str,
     rollout_path: &str,
@@ -121,8 +341,7 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
             let writer_result = write_codex_rebind_normalized_stream_for_generation(
                 &relay_path,
                 receiver,
-                already_relayed_response,
-                already_normalized_replay_events,
+                WriterInput::ordinary(already_relayed_response, already_normalized_replay_events),
                 &relay_generation_gate,
                 relay_generation,
                 Some((&tmux_session_name, &rollout_path, session_id.as_deref())),

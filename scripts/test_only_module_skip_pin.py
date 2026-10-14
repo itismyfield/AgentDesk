@@ -702,7 +702,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
         "src/services/discord/inflight/p5925b_s1_watcher_tests.rs",
+        "src/services/discord/session_relay_sink/p5925b_s1_source_tests.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/install_tests.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/reader_tests.rs",
         "src/services/tui_prompt_dedupe/handoff_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/handoff_binding_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
@@ -801,6 +804,8 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/install.rs",
+        "src/services/discord/recovery_engine/legacy_restart_replay/reader.rs",
     }
 )
 

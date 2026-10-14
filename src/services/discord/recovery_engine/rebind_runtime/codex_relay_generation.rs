@@ -87,3 +87,86 @@ pub(super) fn write_message(
         .map_err(|error| format!("write {}: {error}", relay_path.display()))?;
     Ok(true)
 }
+
+#[cfg(all(test, unix))]
+fn publish_generation(session: &str, previous: i64) -> Result<i64, String> {
+    use crate::services::discord::outbound::delivery_record;
+    use std::io::Write;
+    if delivery_record::current_generation_mtime_ns(session) != previous {
+        return Err("generation changed before publication".into());
+    }
+    let path = crate::services::tmux_common::session_temp_path(session, "generation");
+    let temporary = format!("{path}.replay.{}", uuid::Uuid::new_v4());
+    let publish = || -> std::io::Result<i64> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(
+            crate::services::discord::runtime_store::process_generation()
+                .to_string()
+                .as_bytes(),
+        )?;
+        // A new inode must publish a distinct key even on a coarse timestamp filesystem.
+        if previous > 0 {
+            let time = std::time::UNIX_EPOCH
+                + std::time::Duration::from_nanos(previous as u64 + 1_000_000_000);
+            file.set_times(std::fs::FileTimes::new().set_modified(time))?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        let observed = delivery_record::current_generation_mtime_ns(session);
+        if observed == 0 || observed == previous {
+            return Err(std::io::Error::other("new generation readback failed"));
+        }
+        Ok(observed)
+    };
+    let result = publish().map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(temporary);
+    result
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) fn publish_reconstruction(
+    session: &str,
+    temporary: &std::path::Path,
+    output: &str,
+    previous: i64,
+    checkpoint: &mut impl FnMut(
+        super::super::legacy_restart_replay::install::InstallCheckpoint,
+    ) -> Result<(), String>,
+    replacement_authority: impl FnOnce() -> Result<
+        crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistryGuard,
+        String,
+    >,
+) -> Result<(CodexRebindRelayGenerationGate, u64, (u64, u64), i64), String> {
+    use super::super::legacy_restart_replay::install::InstallCheckpoint;
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    use crate::services::discord::outbound::delivery_record;
+    crate::services::tmux_common::with_tmux_source_authority(session, |_| {
+        let _writer_authority = replacement_authority()?;
+        if delivery_record::current_generation_mtime_ns(session) != previous {
+            return Err("generation changed during proof".to_string());
+        }
+        let generation = prepare(output, false).map_err(|e| format!("{e:?}"))?;
+        let posted = publish_generation(session, previous)?;
+        checkpoint(InstallCheckpoint::GenerationPublished)?;
+        if delivery_record::current_generation_mtime_ns(session) != posted {
+            return Err("generation changed before file install".to_string());
+        }
+        std::fs::rename(temporary, output).map_err(|e| e.to_string())?;
+        checkpoint(InstallCheckpoint::FileInstalled)?;
+        let file = std::fs::File::open(output).map_err(|e| e.to_string())?;
+        let file_identity = match SourceFileIdentity::from_open_file(&file) {
+            #[cfg(unix)]
+            SourceFileIdentity::Unix { dev, ino } => (dev, ino),
+            SourceFileIdentity::Unavailable => {
+                return Err("installed source identity unavailable".to_string());
+            }
+        };
+        if delivery_record::current_generation_mtime_ns(session) != posted {
+            return Err("generation changed after file install".to_string());
+        }
+        Ok((generation.0, generation.1, file_identity, posted))
+    })
+}

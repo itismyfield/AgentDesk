@@ -191,6 +191,32 @@ impl super::loop_poll_prologue::WatcherSourceAuthority {
                 })
                 .flatten()
                 .ok_or(())?;
+            if let Some(marker) = row.legacy_replay_coordinate.as_ref() {
+                let installed = marker.installed.as_ref().ok_or(())?;
+                let captured = match self.source_file {
+                    #[cfg(unix)]
+                    SourceFileIdentity::Unix { dev, ino } => Some((dev, ino)),
+                    SourceFileIdentity::Unavailable => None,
+                };
+                let current = std::fs::File::open(&ctx.output_path).map_err(|_| ())?;
+                if marker.version != 1
+                    || serde_json::to_value(marker.phase).map_err(|_| ())?
+                        != serde_json::json!("installed")
+                    || installed.output_path != ctx.output_path
+                    || captured != Some(installed.file_identity)
+                    || SourceFileIdentity::from_open_file(&current) != self.source_file
+                    || self.generation_mtime_ns == 0
+                    || installed.generation_mtime_ns != self.generation_mtime_ns
+                    || crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+                        &ctx.tmux_session_name,
+                    ) != self.generation_mtime_ns
+                    || !current.metadata().is_ok_and(|m| m.is_file() && m.len() >= cursor)
+                {
+                    return Err(());
+                }
+                // The installed file contains normalized events; the restored seed owns its prefix.
+                return Ok(None);
+            }
             return read_native_codex_state(
                 &ctx.output_path, start, cursor, self.source_file,
                 &ctx.tmux_session_name, self.generation_mtime_ns, self.source_stamp,

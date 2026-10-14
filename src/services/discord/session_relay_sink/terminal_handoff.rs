@@ -5,6 +5,10 @@ use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };
 
+#[cfg(test)]
+#[path = "p5925b_s1_source_tests.rs"]
+pub(in crate::services::discord) mod p5925b_s1_source_tests;
+
 fn recover_native_frame_response(frame: &StreamFrame) -> Result<Option<String>, RelaySinkError> {
     use crate::services::discord::tmux::tmux_output_stream::{
         is_native_codex_payload, read_native_codex_state,
@@ -66,6 +70,143 @@ impl SessionRelayDeliveryOutcome {
 }
 
 impl SessionBoundDiscordRelaySink {
+    fn coordinate_source_allowed(
+        &self,
+        provider: &crate::services::provider::ProviderKind,
+        channel: u64,
+        session: &str,
+        generation: Option<i64>,
+        stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+        end: Option<u64>,
+    ) -> Result<bool, RelaySinkError> {
+        use crate::services::cluster::stream_relay::SourceFileIdentity;
+        use crate::services::discord::{inflight, outbound::delivery_record};
+        if inflight::inflight_runtime_root().is_none() {
+            return Ok(true);
+        }
+        let state = inflight::load_inflight_state_read_only_result(provider, channel)
+            .map_err(RelaySinkError::Transient)?;
+        let Some(state) = state else {
+            return Ok(true);
+        };
+        let Some(marker) = state.legacy_replay_coordinate.as_ref() else {
+            return Ok(true);
+        };
+        if marker.version != 1
+            || state.provider_kind().as_ref() != Some(provider)
+            || state.channel_id != channel
+        {
+            return Ok(false);
+        }
+        let Some(installed) = marker.installed.as_ref() else {
+            return Ok(false);
+        };
+        if serde_json::to_value(marker.phase)
+            .map_err(|e| RelaySinkError::Transient(e.to_string()))?
+            != serde_json::json!("installed")
+            || state.tmux_session_name.as_deref() != Some(session)
+            || state.output_path.as_deref() != Some(installed.output_path.as_str())
+            || generation != Some(installed.generation_mtime_ns)
+            || installed.generation_mtime_ns == 0
+            || delivery_record::current_generation_mtime_ns(session)
+                != installed.generation_mtime_ns
+        {
+            return Ok(false);
+        }
+        let Some(stamp) = stamp else {
+            return Ok(false);
+        };
+        let stamped_generation = match stamp.witness.generation {
+            #[cfg(unix)]
+            Some(crate::services::cluster::stream_relay::GenerationSourceIdentity::Unix {
+                mtime_ns,
+                ..
+            }) => Some(mtime_ns),
+            Some(
+                crate::services::cluster::stream_relay::GenerationSourceIdentity::Unsupported {
+                    mtime_ns,
+                },
+            ) => Some(mtime_ns),
+            None => None,
+        };
+        if stamped_generation != generation {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        if let Some(crate::services::cluster::stream_relay::GenerationSourceIdentity::Unix {
+            dev,
+            ino,
+            ..
+        }) = stamp.witness.generation
+        {
+            let marker_path =
+                crate::services::tmux_common::resolve_session_temp_path(session, "generation")
+                    .ok_or_else(|| {
+                        RelaySinkError::Transient("generation marker disappeared".into())
+                    })?;
+            let marker_file = std::fs::File::open(marker_path)
+                .map_err(|e| RelaySinkError::Transient(e.to_string()))?;
+            if SourceFileIdentity::from_open_file(&marker_file)
+                != (SourceFileIdentity::Unix { dev, ino })
+            {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        let expected = SourceFileIdentity::Unix {
+            dev: installed.file_identity.0,
+            ino: installed.file_identity.1,
+        };
+        #[cfg(not(unix))]
+        let expected = SourceFileIdentity::Unavailable;
+        let file = std::fs::File::open(&installed.output_path)
+            .map_err(|e| RelaySinkError::Transient(e.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| RelaySinkError::Transient(e.to_string()))?;
+        if !metadata.is_file() || end.is_some_and(|end| end > metadata.len()) {
+            return Ok(false);
+        }
+        Ok(expected != SourceFileIdentity::Unavailable
+            && stamp.file == expected
+            && SourceFileIdentity::from_open_file(&file) == expected)
+    }
+
+    pub(super) fn source_allowed_before_transport(
+        &self,
+        delivery: &SessionRelayDelivery,
+    ) -> Result<bool, RelaySinkError> {
+        if !self.coordinate_source_allowed(
+            &delivery.provider,
+            delivery.channel_id,
+            &delivery.session_name,
+            delivery.relay_generation_mtime_ns,
+            delivery.relay_source_stamp,
+            delivery
+                .terminal_consumed_end
+                .into_iter()
+                .chain(delivery.relay_range.map(|(_, end)| end))
+                .max(),
+        )? {
+            return Ok(false);
+        }
+        if delivery.relay_range.is_some() {
+            let generation = delivery.relay_generation_mtime_ns.unwrap_or(0);
+            if generation == 0
+                || crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+                    &delivery.session_name,
+                ) != generation
+                || super::idle_jsonl_current_eof(&delivery.provider, &delivery.session_name)
+                    .is_none_or(|eof| delivery.relay_range.is_some_and(|(_, end)| end > eof))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn ingest_frame(
         &self,
         frame: &StreamFrame,
@@ -87,6 +228,26 @@ impl SessionBoundDiscordRelaySink {
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+        let channel = frame
+            .binding
+            .channel_id
+            .parse::<u64>()
+            .map_err(|e| RelaySinkError::Transient(e.to_string()))?;
+        if !self.coordinate_source_allowed(
+            &frame.binding.provider,
+            channel,
+            &frame.session_name,
+            frame.relay_generation_mtime_ns,
+            frame.relay_source_stamp,
+            frame
+                .terminal_consumed_end
+                .into_iter()
+                .chain(frame.relay_range.map(|(_, end)| end))
+                .chain(frame.source_span.map(|(_, end)| end))
+                .max(),
+        )? {
+            return Ok(RelaySinkOutcome::TerminalNotDelivered);
+        }
         if frame.relay_range.is_some()
             && (super::super::tmux::tmux_output_stream::is_native_codex_payload(
                 &frame.binding.provider,

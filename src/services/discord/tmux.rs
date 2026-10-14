@@ -201,7 +201,7 @@ pub(super) struct RestoredWatcherTurn {
     /// Same-process retry seed produced by watcher send-failure rewind. Unlike a
     /// restart-restored seed, this is the current turn and must not be discarded by
     /// idle direct-prompt stale-seed cleanup.
-    same_turn_rewind: bool,
+    pub(super) same_turn_rewind: bool,
     /// Immutable source identity captured with the restored clone at watcher
     /// handoff. The clone can predate the bridge's terminal commit, so this is
     /// only a lookup key: seed consumption must re-read the durable receipt.

@@ -4,8 +4,18 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::inflight::{InflightEpisodePin, InflightTurnState};
 
+#[cfg(unix)]
+#[path = "legacy_restart_replay/install.rs"]
+pub(super) mod install;
 #[path = "legacy_restart_replay/proof.rs"]
 pub(super) mod proof;
+#[cfg(unix)]
+#[path = "legacy_restart_replay/reader.rs"]
+pub(super) mod reader;
+
+#[cfg(all(test, unix))]
+#[path = "legacy_restart_replay/reader_tests.rs"]
+mod reader_tests;
 
 /// The pinned source policy of the row's tmux source authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

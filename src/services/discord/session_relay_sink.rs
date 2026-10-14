@@ -818,6 +818,9 @@ impl SessionBoundDiscordRelaySink {
             Some(guard)
         };
 
+        if !self.source_allowed_before_transport(&delivery)? {
+            return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+        }
         if delivery.relay_range.is_some() {
             if self.idle_range_already_committed_before_transport(
                 &shared,
@@ -830,15 +833,6 @@ impl SessionBoundDiscordRelaySink {
                     guard.commit(super::LeaseOutcome::Delivered);
                 }
                 return Ok(SessionRelayDeliveryOutcome::Delivered);
-            }
-            let frame_generation = delivery.relay_generation_mtime_ns.unwrap_or(0);
-            let current_generation = dr::current_generation_mtime_ns(&delivery.session_name);
-            let current_eof = idle_jsonl_current_eof(&provider, &delivery.session_name);
-            if frame_generation == 0
-                || current_generation != frame_generation
-                || current_eof.is_none_or(|eof| lease_range.1 > eof)
-            {
-                return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }
         }
 
@@ -854,6 +848,9 @@ impl SessionBoundDiscordRelaySink {
         };
         let (route, task_card_message_id, task_response_claim_outcome) =
             ensure_card_and_route(&self.health_registry, &shared, &delivery, route).await?;
+        if !self.source_allowed_before_transport(&delivery)? {
+            return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+        }
         let (task_response_claim, task_response_already_delivered): (
             Option<ResponseDeliveryClaim>,
             bool,

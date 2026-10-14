@@ -1,6 +1,30 @@
 use super::*;
 use crate::services::discord::input_runtime::fence;
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) fn verified_restore(
+    locked: &super::inflight::LockedInflightEpisode,
+    finish_mailbox: bool,
+) -> Result<super::tmux::RestoredWatcherTurn, RebindError> {
+    let state = locked.state();
+    if !state
+        .legacy_replay_coordinate
+        .as_ref()
+        .is_some_and(|m| m.is_installed())
+    {
+        return Err(RebindError::InflightEpisodeChanged);
+    }
+    let session = state
+        .tmux_session_name
+        .as_deref()
+        .ok_or(RebindError::InflightEpisodeChanged)?;
+    let mut restored =
+        super::tmux::restored_watcher_turn_from_inflight(state, session, finish_mailbox)
+            .ok_or(RebindError::InflightEpisodeChanged)?;
+    restored.same_turn_rewind = true;
+    Ok(restored)
+}
+
 /// Normalized runtime coordinates the rebind adopts onto the existing turn.
 pub(super) struct AdoptionCoordinates<'a> {
     pub(super) tmux_session_name: &'a str,

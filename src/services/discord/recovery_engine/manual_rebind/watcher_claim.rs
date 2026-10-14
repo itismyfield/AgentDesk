@@ -1,5 +1,129 @@
 use super::*;
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) struct PreparedClaim<'a> {
+    registry: &'a TmuxWatcherRegistry,
+    session: String,
+    channel: ChannelId,
+    output: String,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    gate: super::super::rebind_runtime::codex_spawn::StartGate,
+    actor: Option<std::thread::JoinHandle<Result<(), String>>>,
+    committed: bool,
+}
+
+#[cfg(all(test, unix))]
+impl PreparedClaim<'_> {
+    pub(in crate::services::discord::recovery_engine) fn is_current(&self) -> bool {
+        self.registry.get(&self.channel).is_some_and(|h| {
+            h.tmux_session_name == self.session
+                && h.output_path == self.output
+                && Arc::ptr_eq(&h.cancel, &self.cancel)
+        })
+    }
+    pub(in crate::services::discord::recovery_engine) fn open(&mut self) -> Result<(), String> {
+        let _lock = crate::services::discord::tmux_watcher_registry::lock_tmux_watcher_registry();
+        if !self.is_current() {
+            return Err("prepared watcher was superseded".into());
+        }
+        self.committed = true;
+        self.gate.finish(true);
+        Ok(())
+    }
+    pub(in crate::services::discord::recovery_engine) fn stop(&self) {
+        self.registry.cancel_and_remove_channel_if_current(
+            &self.channel,
+            &self.session,
+            &self.output,
+            &self.cancel,
+        );
+    }
+    pub(in crate::services::discord::recovery_engine) fn join(mut self) -> Result<(), String> {
+        self.actor
+            .take()
+            .ok_or("watcher handle missing")?
+            .join()
+            .map_err(|_| "watcher panicked")?
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for PreparedClaim<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.gate.finish(false);
+            self.registry.cancel_and_remove_channel_if_current(
+                &self.channel,
+                &self.session,
+                &self.output,
+                &self.cancel,
+            );
+            if let Some(actor) = self.actor.take() {
+                let _ = actor.join();
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) fn claim_verified<'a>(
+    registry: &'a TmuxWatcherRegistry,
+    channel: ChannelId,
+    handle: TmuxWatcherHandle,
+    expected: Option<(&str, &str, &Arc<std::sync::atomic::AtomicBool>)>,
+    gate: super::super::rebind_runtime::codex_spawn::StartGate,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<PreparedClaim<'a>, String> {
+    let session = handle.tmux_session_name.clone();
+    let output = handle.output_path.clone();
+    let cancel = handle.cancel.clone();
+    let actor_gate = gate.clone();
+    let permit = crate::services::discord::input_runtime::fence::effect::current();
+    let actor = std::thread::Builder::new()
+        .name("verified_replay_watcher".into())
+        .spawn(move || {
+            if actor_gate.wait() {
+                crate::services::discord::input_runtime::fence::effect::synchronous(permit, work)
+            } else {
+                Ok(())
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    let prepared = PreparedClaim {
+        registry,
+        session: session.clone(),
+        channel,
+        output,
+        cancel,
+        gate,
+        actor: Some(actor),
+        committed: false,
+    };
+    if let Some((expected_session, expected_output, expected_cancel)) = expected {
+        if expected_session != session
+            || !registry.cancel_and_remove_channel_if_current(
+                &channel,
+                expected_session,
+                expected_output,
+                expected_cancel,
+            )
+        {
+            return Err("watcher changed during proof".into());
+        }
+    }
+    let lock = crate::services::discord::tmux_watcher_registry::lock_tmux_watcher_registry();
+    if registry
+        .owner_channel_for_tmux_session(&session)
+        .is_some_and(|owner| owner != channel)
+        || registry.get(&channel).is_some()
+    {
+        return Err("watcher slot was claimed by another actor".into());
+    }
+    registry.insert_locked(&lock, channel, handle);
+    drop(lock);
+    Ok(prepared)
+}
+
 /// Claim under the single-watcher policy. Normal recovery reuses a live
 /// same-session watcher; a proven crossed Codex turn forces a fresh generation.
 /// `Err` is a withheld Herdr pane: nothing spawned, replaced or reused.

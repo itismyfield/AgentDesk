@@ -2,6 +2,39 @@
 
 use super::*;
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord::recovery_engine) async fn readopt_prepared(
+    shared: &Arc<SharedData>,
+    locked: super::inflight::LockedInflightEpisode,
+) -> Result<(super::inflight::LockedInflightEpisode, bool), RebindError> {
+    let state = locked.state().clone();
+    let channel = ChannelId::new(state.channel_id);
+    let (held, finish) = commit_episode_side_effects(
+        shared,
+        &ProviderKind::Codex,
+        state.channel_id,
+        channel,
+        &state,
+        Some(locked),
+        true,
+        &state.session_id,
+        &state.channel_name,
+        &state.session_id,
+        state.runtime_kind,
+        state
+            .output_path
+            .as_deref()
+            .ok_or(RebindError::InflightEpisodeChanged)?,
+        state
+            .tmux_session_name
+            .as_deref()
+            .ok_or(RebindError::InflightEpisodeChanged)?,
+        0,
+    )
+    .await?;
+    Ok((held.ok_or(RebindError::InflightEpisodeChanged)?, finish))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_episode_side_effects(
     shared: &Arc<SharedData>,

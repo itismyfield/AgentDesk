@@ -19,6 +19,7 @@ pub(in crate::services::discord) struct SessionRelayParser {
     frames_observed: u64,
     last_sequence: u64,
     source_generation_mtime_ns: Option<i64>,
+    observed_source: Option<Option<SourceStamp>>,
     buffer_source_segments: VecDeque<(usize, Option<SourceStamp>)>,
     relay_source_stamp: Option<Option<SourceStamp>>,
     /// #5948 (I18): the exclusive end of the source byte range already folded
@@ -50,6 +51,7 @@ impl Default for SessionRelayParser {
             frames_observed: 0,
             last_sequence: 0,
             source_generation_mtime_ns: None,
+            observed_source: None,
             buffer_source_segments: VecDeque::new(),
             relay_source_stamp: None,
             turn_source_end: None,
@@ -85,16 +87,27 @@ impl SessionRelayParser {
     ) -> Vec<SessionRelayDelivery> {
         self.frames_observed = self.frames_observed.saturating_add(1);
         self.last_sequence = frame.sequence;
-        if let Some(generation) = frame.relay_generation_mtime_ns {
-            if self
-                .source_generation_mtime_ns
-                .is_some_and(|current| current != generation)
-            {
-                self.buffer.clear();
-                self.reset_turn();
-            }
-            self.source_generation_mtime_ns = Some(generation);
+        // Unlocated legacy stamps still mix into an uncommittable fence; only
+        // file or generation coordinates identify a source that can reset bytes.
+        let source_key = |stamp: Option<SourceStamp>| {
+            stamp
+                .filter(|stamp| {
+                    stamp.file
+                        != crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable
+                        || stamp.witness.generation.is_some()
+                })
+                .map(|stamp| (stamp.file, stamp.witness))
+        };
+        if self.observed_source.is_some()
+            && (self.source_generation_mtime_ns != frame.relay_generation_mtime_ns
+                || source_key(self.observed_source.flatten())
+                    != source_key(frame.relay_source_stamp))
+        {
+            self.buffer.clear();
+            self.reset_turn();
         }
+        self.source_generation_mtime_ns = frame.relay_generation_mtime_ns;
+        self.observed_source = Some(frame.relay_source_stamp);
         self.fold_frame_payload(frame);
 
         let channel_id = match frame.binding.channel_id.parse::<u64>() {

@@ -1038,6 +1038,7 @@ src/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   ├── identity.rs
+│   │   │   │   ├── identity_source.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── operator_disposition.rs
 │   │   │   │   └── reconcile_gate.rs
@@ -1317,7 +1318,11 @@ src/
 │   │   │   └── cancel_park_tests.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── legacy_restart_replay/
-│   │   │   │   └── proof.rs
+│   │   │   │   ├── install.rs
+│   │   │   │   ├── install_tests.rs
+│   │   │   │   ├── proof.rs
+│   │   │   │   ├── reader.rs
+│   │   │   │   └── reader_tests.rs
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_notice_pg_tests.rs
@@ -1613,6 +1618,7 @@ src/
 │   │   │   ├── o_retired_terminal_race_tests.rs
 │   │   │   ├── o_retired_terminal_source_tests.rs
 │   │   │   ├── orphan_reclaim.rs
+│   │   │   ├── p5925b_s1_source_tests.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
 │   │   │   ├── supervision.rs

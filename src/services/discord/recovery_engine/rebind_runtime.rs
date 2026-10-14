@@ -1,12 +1,12 @@
 #[path = "rebind_runtime/codex_spawn.rs"]
-mod codex_spawn;
+pub(super) mod codex_spawn;
 pub(super) use codex_spawn::spawn_codex_tui_rebind_relay_output;
 
 use super::*;
 use crate::services::discord::host_liveness::{not_dead, observe_liveness};
 
 #[path = "rebind_runtime/codex_relay_generation.rs"]
-mod codex_relay_generation;
+pub(super) mod codex_relay_generation;
 use codex_relay_generation::{
     CodexRebindRelayGenerationGate, prepare as prepare_codex_rebind_relay_generation,
     write_message as write_codex_rebind_normalized_message,
@@ -431,7 +431,7 @@ fn persist_codex_tui_rebind_rollout_cursor(
 }
 
 #[cfg(test)]
-fn write_codex_rebind_normalized_stream(
+pub(super) fn write_codex_rebind_normalized_stream(
     relay_path: &std::path::Path,
     receiver: std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>,
     already_relayed_response: String,
@@ -444,8 +444,10 @@ fn write_codex_rebind_normalized_stream(
     write_codex_rebind_normalized_stream_for_generation(
         relay_path,
         receiver,
-        already_relayed_response,
-        already_normalized_replay_events,
+        codex_spawn::WriterInput::ordinary(
+            already_relayed_response,
+            already_normalized_replay_events,
+        ),
         &relay_generation_gate,
         relay_generation,
         None,
@@ -455,8 +457,7 @@ fn write_codex_rebind_normalized_stream(
 fn write_codex_rebind_normalized_stream_for_generation(
     relay_path: &std::path::Path,
     receiver: std::sync::mpsc::Receiver<crate::services::agent_protocol::StreamMessage>,
-    already_relayed_response: String,
-    already_normalized_replay_events: Vec<serde_json::Value>,
+    input: codex_spawn::WriterInput,
     relay_generation_gate: &CodexRebindRelayGenerationGate,
     relay_generation: u64,
     source: Option<(&str, &std::path::Path, Option<&str>)>,
@@ -473,10 +474,9 @@ fn write_codex_rebind_normalized_stream_for_generation(
     if !source_allowed() {
         return Err("Codex relay writer lacks source proof or permission".into());
     }
-    let mut already_relayed_response = already_relayed_response;
-    let mut known_response_for_done = already_relayed_response.clone();
-    let mut already_normalized_replay_events =
-        std::collections::VecDeque::from(already_normalized_replay_events);
+    let (mut already_relayed_response, mut known_response_for_done, replay_events, prepared_output) =
+        input.into_parts();
+    let mut already_normalized_replay_events = std::collections::VecDeque::from(replay_events);
     {
         let current_generation = relay_generation_gate
             .lock()
@@ -488,11 +488,7 @@ fn write_codex_rebind_normalized_stream_for_generation(
         }
         codex_rebind_ensure_jsonl_append_boundary(relay_path)?;
     }
-    let mut output = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(relay_path)
-        .map_err(|error| format!("open {}: {error}", relay_path.display()))?;
+    let mut output = codex_spawn::open_writer_output(relay_path, prepared_output)?;
     for message in receiver {
         if !source_allowed() {
             return Err("Codex relay writer source proof or permission changed".into());

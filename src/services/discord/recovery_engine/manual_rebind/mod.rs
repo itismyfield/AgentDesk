@@ -21,12 +21,12 @@ use super::*;
 
 mod adoption;
 mod codex_tui_replay;
-mod coordinate_adoption;
+pub(super) mod coordinate_adoption;
 #[cfg(test)]
 mod coordinate_adoption_tests;
-mod episode_handoff;
+pub(super) mod episode_handoff;
 mod test_barriers;
-mod watcher_claim;
+pub(super) mod watcher_claim;
 #[cfg(test)]
 use test_barriers::await_post_adoption_claim_barrier;
 #[cfg(unix)]

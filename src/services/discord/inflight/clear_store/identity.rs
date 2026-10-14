@@ -98,19 +98,9 @@ fn guarded_identity_clear_outcome(
     GuardedClearOutcome::Cleared
 }
 
-fn remove_identity_matched_state(
-    path: &std::path::Path,
-    provider: &ProviderKind,
-    channel_id: u64,
-    expected: &InflightTurnIdentity,
-    state: InflightTurnState,
-    reason: &'static str,
-) -> (GuardedClearOutcome, Option<InflightTurnState>) {
-    if receipt_protected_path(path) && !receipt_mutant("identity-clear") {
-        return (GuardedClearOutcome::IoError, None);
-    }
-    remove_identity_matched_state_unchecked(path, provider, channel_id, expected, state, reason)
-}
+#[path = "identity_source.rs"]
+mod identity_source;
+use identity_source::remove_identity_matched_state;
 
 fn remove_identity_matched_state_unchecked(
     path: &std::path::Path,
