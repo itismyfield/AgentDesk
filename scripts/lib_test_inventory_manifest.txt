@@ -12194,6 +12194,7 @@ services::tui_o::alarm::tests::first_event_raises_health_and_one_operator_messag
 services::tui_o::alarm::tests::not_found_alarms_only_at_three_within_an_hour
 services::tui_o::alarm::tests::not_found_frequency_clears_when_its_window_passes_without_new_events
 services::tui_o::alarm::tests::p2_2_reader_recovery_preserves_history_other_reasons_and_first_notification_latch
+services::tui_o::alarm::tests::regrowth_after_a_cleanup_notifies_once_per_job
 services::tui_o::alarm::tests::retry_backoff_caps_without_ending_and_attempt_timeout_has_an_exact_boundary
 services::tui_o::alarm::tests::waiting_clear_keeps_other_health_and_owned_retry_slots
 services::tui_o::alarm::tests::without_an_alert_channel_or_notifier_alarms_stay_in_health
@@ -12480,6 +12481,9 @@ services::tui_o::store::spool::tests::reopening_sweeps_crash_aliases_so_gc_frees
 services::tui_o::store::spool::tests::spool_and_cursor_round_trip_from_a_mid_line_switch_point
 services::tui_o::store::spool::transition_tests::transition_cleanup_absent_keeps_cursor_bytes_and_older_files_read_as_none
 services::tui_o::store::spool::transition_tests::transition_cleanup_round_trips_and_an_older_binary_rewrite_drops_it_but_stays_retired
+services::tui_o::store::spool::transition_tests::transition_facts_keep_each_failed_read_an_error
+services::tui_o::store::spool::transition_tests::transition_retire_whose_directory_sync_fails_is_not_done_though_the_new_file_shows
+services::tui_o::store::spool::transition_tests::transition_retire_writes_retired_and_its_audit_in_one_cursor_over_the_expected_one_only
 services::tui_o::store::tests::a_crash_before_the_era_initializes_only_channels_without_init
 services::tui_o::store::tests::a_torn_ledger_append_is_cut_so_the_channel_reopens_and_keeps_appending
 services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsync_is_a_no_op
@@ -12585,6 +12589,9 @@ services::tui_o::writer::rotation::fork_lineage::tests::all_identities_and_each_
 services::tui_o::writer::rotation::fork_lineage::tests::every_byte_split_preserves_offsets_and_never_promotes_an_incomplete_tail
 services::tui_o::writer::rotation::fork_lineage::tests::repeated_ids_use_maximum_parent_start_and_include_the_exact_boundary
 services::tui_o::writer::rotation::fork_lineage::tests::warm_scanner_rechecks_identity_length_absence_and_scan_cap_without_more_bytes
+services::tui_o::writer::rotation::transition::tests::transition_legacy_hop_candidates_keep_every_applied_match
+services::tui_o::writer::rotation::transition::tests::transition_legacy_hop_candidates_refuse_a_history_short_of_the_checkpoint
+services::tui_o::writer::rotation::transition::tests::transition_watch_closes_only_a_configured_readers_fd_and_names_an_unwatched_one
 services::tui_o::writer::tests::a_blocked_record_or_a_ledger_violation_stops_the_channel_before_any_post
 services::tui_o::writer::tests::a_created_reply_by_another_author_is_settled_from_history_rather_than_trusted
 services::tui_o::writer::tests::a_gateway_return_ends_the_pause_in_process_health
@@ -12743,6 +12750,8 @@ services::tui_o::writer::tests::actor::host_start::reclaim::a_launch_session_pro
 services::tui_o::writer::tests::actor::host_start::reclaim::an_adopted_resume_holds_its_rows_until_an_operator_resolves
 services::tui_o::writer::tests::actor::host_start::reclaim::o_keeps_waiting_on_a_pending_another_pane_did_not_overwrite
 services::tui_o::writer::tests::actor::host_start::reclaim::o_passes_a_pending_its_successor_overwrote_and_binds_the_resolved_one
+services::tui_o::writer::tests::actor::host_start::reclaim::transition_execution::transition_execution_is_the_request_nonces_history_and_never_an_empty_set
+services::tui_o::writer::tests::actor::host_start::reclaim::transition_execution::transition_execution_refuses_a_left_session_without_its_pinned_source
 services::tui_o::writer::tests::actor::host_start::renumber::a_file_logged_before_and_after_a_renumber_is_adopted_as_one_source
 services::tui_o::writer::tests::actor::host_start::renumber::a_new_empty_channel_whose_transcript_was_renumbered_is_activated
 services::tui_o::writer::tests::actor::host_start::renumber::a_renumbered_source_legacy_stays_behind_is_given_up_only_after_the_stall
@@ -12769,6 +12778,8 @@ services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_deli
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_failures_cancel_and_stale_evidence_issue_nothing
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll
 services::tui_o::writer::tests::actor::host_start::s2a::s2b1b_actual_driver_two_warm_turns_share_execution_and_post_once_each
+services::tui_o::writer::tests::actor::host_start::transition_host::transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_replies
+services::tui_o::writer::tests::actor::host_start::transition_host::transition_port_without_requests_leaves_the_hosted_actor_as_it_was
 services::tui_o::writer::tests::actor::host_start::without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_empty_spool_is_owed_before_wait_observation_at_300_seconds
 services::tui_o::writer::tests::actor::operator_resume::operator_resume_lease_wait_preserves_readiness_and_drain_owing
@@ -12890,6 +12901,19 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_recent_missing_halts_without_retirement
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_actor_on_resume_publishes_after_init_only_eof_pending_flush
 services::tui_o::writer::tests::actor::rotation::retire_tests::readers_s1b_configless_actor_keeps_the_legacy_off_path
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_holds_a_source_whose_inputs_changed_after_its_probes
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_keeps_what_it_retired_before_a_failed_write_and_resumes_the_rest
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_held
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_settles_all_fifty_nine_hops_of_both_fixtures
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_that_finds_its_file_grown_after_the_write_reports_it_read_again
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_reopens
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_cleaned_source_that_grows_reads_again_as_a_provider_retirement_does
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_is_compared_whole_and_never_applied_again_to_a_source_read_again
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_keeps_its_permit_until_it_ends_however_the_requester_left
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_probes_at_most_sixty_four_candidates
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_uncounted_posts_unknown
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_what_the_actor_still_owes_from_its_own_state
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_probes_run_on_one_worker_however_slow_it_is
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_codex_filled_rebind_keeps_its_own_source
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_rebind_onto_a_stored_source_whose_bytes_changed_halts_without_attaching
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_return_takes_its_reader_out_of_rotation_and_restarts_keep_it_out

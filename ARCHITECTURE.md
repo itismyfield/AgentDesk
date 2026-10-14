@@ -2693,6 +2693,8 @@ src/
 │   │   │   │   ├── mutation.rs
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
+│   │   │   ├── spool/
+│   │   │   │   └── transition.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
@@ -2708,6 +2710,9 @@ src/
 │   │   │   ├── spool.rs
 │   │   │   └── spool_transition_tests.rs
 │   │   ├── writer/
+│   │   │   ├── actor/
+│   │   │   │   ├── transition.rs
+│   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
 │   │   │   │   ├── fold.rs
@@ -2719,7 +2724,8 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
-│   │   │   │   └── recover.rs
+│   │   │   │   ├── recover.rs
+│   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
@@ -2727,7 +2733,9 @@ src/
 │   │   │   ├── rotation/
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
-│   │   │   │   └── readers.rs
+│   │   │   │   ├── readers.rs
+│   │   │   │   ├── transition.rs
+│   │   │   │   └── transition_tests.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── actor.rs
 │   │   │   ├── actor_tests.rs
@@ -2795,10 +2803,14 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_cleanup.rs
 │   │   │   ├── transition_cleanup_tests.rs
+│   │   │   ├── transition_execution_tests.rs
+│   │   │   ├── transition_host_tests.rs
 │   │   │   ├── transition_observe.rs
 │   │   │   ├── transition_observe_tests.rs
+│   │   │   ├── transition_port.rs
 │   │   │   ├── unpinned_past_tests.rs
 │   │   │   ├── verified_delivery_tests.rs
 │   │   │   └── writer_tests.rs

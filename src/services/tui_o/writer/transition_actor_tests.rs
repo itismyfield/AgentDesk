@@ -782,8 +782,14 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
         Operation::Apply(chain.request(JOB)),
         with(permits[1].take()),
     );
-    polls(1).await;
-    hooks::settle_workers();
+    for _ in 0..5 {
+        polls(1).await;
+        hooks::settle_workers();
+        if hooks::started() > base {
+            break;
+        }
+    }
+    assert_eq!(hooks::started() - base, 1, "[T4:taken]");
     asked.abort();
     assert_eq!(home.commands_in_flight(), 2, "[T4:requester_left]");
     for _ in 0..40 {

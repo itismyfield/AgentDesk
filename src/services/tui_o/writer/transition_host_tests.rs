@@ -68,8 +68,8 @@ async fn transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_re
     let mut b = None;
     for _ in 0..60 {
         polls(1).await;
-        if let Some(port) = ready.transition(CHANNEL)
-            && !port.same_run(&a)
+        if !a.is_open()
+            && let Some(port) = ready.transition(CHANNEL)
         {
             b = Some(port);
             break;
