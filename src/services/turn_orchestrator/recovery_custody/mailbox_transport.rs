@@ -1,6 +1,5 @@
-//! Carries one issued capability to a channel's mailbox actor inside the request it applies. The
-//! request moves whole into either branch of the actor's step, and every refusal on the way hands
-//! the same carrier back.
+//! Carries an issued capability inside its request, whole, into either branch of the mailbox
+//! actor's step; every refusal on the way hands the same carrier back.
 
 use std::sync::Arc;
 

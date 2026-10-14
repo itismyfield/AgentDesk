@@ -1698,9 +1698,8 @@ mod mailbox_contact {
         carrier
     }
 
-    /// Unread and undecided bindings never take a plain install; a carried one comes back unchanged
-    /// from the binding, a gone mailbox, a closed actor, a fence and a revoked arm of the same exact
-    /// operation, each time as the same carrier with the same payload and one queued count.
+    /// Unread and undecided bindings never take a plain install, and each refusal of a carried one
+    /// (binding, gone mailbox, closed actor, fence, revoked arm) returns the same queued carrier.
     #[tokio::test(flavor = "current_thread")]
     async fn s3act_b3b4a2b1_the_adapter_hands_every_refused_carrier_back_unchanged_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1820,9 +1819,8 @@ mod mailbox_contact {
         }
     }
 
-    /// On the actor task and on its `spawn_blocking` branch alike, the carrier moves whole into the
-    /// step: it counts as queued until the index entry turns it active, so the arm never reads idle,
-    /// and the one install result names the actor, the arm and the debts its pending record owes.
+    /// On both branches of the actor step the carrier stays counted from queued to active, and the
+    /// one install result names the actor, the arm and the debts its pending record owes.
     #[tokio::test(flavor = "current_thread")]
     async fn s3act_b3b4a2b1_a_carried_install_runs_on_either_branch_without_a_zero_count_gap_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1904,10 +1902,8 @@ mod mailbox_contact {
         fx.close().await;
     }
 
-    /// An install whose answer was lost is read back from the same actor's pending record, with the
-    /// same debts each time and no new one, and from no other actor, whose own refused claim answers
-    /// with its reason; only its own attempt records it, and another attempt's refusal hands the
-    /// result and the report back with nothing written.
+    /// A lost answer is read back from the same actor alone, with the same debts and no new one, and
+    /// only its own attempt records it; another actor's refused claim answers with its reason.
     #[tokio::test(flavor = "current_thread")]
     async fn s3act_b3b4a2b1_a_lost_install_answer_is_recovered_from_the_same_actor_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();

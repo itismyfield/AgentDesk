@@ -127,9 +127,8 @@ fn event_ids(pending: &InstalledPending) -> Vec<String> {
     exits.map(|exit| exit.debt.event_id.clone()).collect()
 }
 
-/// The actor side, inside the entered apply: the apply is lent for the request's own namespace,
-/// `scoped_claim` runs unchanged under it, and only its install with the matching pending record
-/// becomes [`Installed`].
+/// The actor side, inside the entered apply: `scoped_claim` runs unchanged under the apply lent
+/// for the request's namespace, and only an install its pending record holds becomes [`Installed`].
 pub(super) fn apply(
     state: &mut ChannelMailboxState,
     channel: ChannelId,
@@ -184,9 +183,8 @@ pub(super) fn apply(
     let _ = reply.send(answer);
 }
 
-/// After a lost answer: the same actor's pending record, when it is `proof`'s, as the install of
-/// `arm`; it reads only, so a retry inherits the install and its event ids and issues no new debt.
-/// An actor that cannot be asked is an error, never "not installed".
+/// After a lost answer: the same actor's pending record for `proof`, read only, as `arm`'s install,
+/// so a retry issues no new debt; an actor that cannot be asked is an error, never "not installed".
 pub(crate) async fn recover(
     handle: &ChannelMailboxHandle,
     proof: &Installation,
