@@ -58,7 +58,7 @@ async fn wrapper_source_case(binding: BindingSource) {
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
     writer.acquired();
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     assert_eq!(
         handle.output_path, fixture.output,
@@ -169,7 +169,7 @@ async fn t6_b_reset_between_partial_utf8_and_successor_terminal_keeps_old_proven
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
     writer.acquired();
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let first = fixture.handle();
     let first_join = watcher_completion::observe(&first.cancel).unwrap();
     until(&observed, "first wrapper EOF before reset tail", |s| {
@@ -197,7 +197,7 @@ async fn t6_b_reset_between_partial_utf8_and_successor_terminal_keeps_old_proven
     assert_eq!(carried[0].buffer.as_bytes(), &tail.as_bytes()[..scalar]);
     drop(barrier);
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let successor = fixture.handle();
     let second_join = watcher_completion::observe(&successor.cancel).unwrap();
     until(&observed, "successor adopts original UTF-8 capsule", |s| {
@@ -282,7 +282,7 @@ async fn t6_b_successor_merges_fresh_task_context_from_real_nonterminal_capsule(
     let submitted = Scope::new(&fixture.shared);
     writer.acquired();
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let first = fixture.handle();
     let first_join = watcher_completion::observe(&first.cancel).unwrap();
     until(
@@ -318,7 +318,7 @@ async fn t6_b_successor_merges_fresh_task_context_from_real_nonterminal_capsule(
     assert!(discord.requests_for(CHANNEL).is_empty());
     drop(barrier);
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let successor = fixture.handle();
     let second_join = watcher_completion::observe(&successor.cancel).unwrap();
     barrier.wait().await;

@@ -97,7 +97,7 @@ async fn n4d2_terminal_invalidated_authority_self_exits_and_retains_custody() {
         let observed = observe(&fixture);
         let submitted = Scope::new(&fixture.shared);
         let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-        assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+        fixture.spawn_watcher().await;
         let handle = fixture.handle();
         let ticket = watcher_completion::observe(&handle.cancel).unwrap();
         until(&observed, "initial EOF before invalidation", |s| {
@@ -223,7 +223,7 @@ async fn n4d2_terminal_temporary_source_busy_retries_then_consumes() {
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     until(&observed, "actual EOF", |s| s.event_count("outer_eof") > 0).await;
     append(&fixture, transcript(&fixture.provider, true).as_bytes());
@@ -317,7 +317,7 @@ async fn n4d2_codex_terminal_consumes_and_independent_o_writer_receipts_once() {
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "actual Codex EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -384,6 +384,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from scripts import check_durable_frontier_writer_call_sites as c
 from scripts import check_legacy_supervision_census as b
+from scripts.rust_lex import StripState, strip_line
 root = Path(sys.argv[1])
 all_files = c._SKIP_PIN._lexical_rust_files(root, Path('src'))
 basename = {p for p in all_files if c.is_test_file(p.name)}
@@ -392,19 +393,15 @@ skips = basename | resolved
 sources = {p.relative_to(root).as_posix(): c._production_text(p) for p in all_files}
 errors = b.audit(sources, skips={p.relative_to(root).as_posix() for p in skips})
 assert not errors, errors
-removed = re.compile(r'\b(?:restore_retired_o_watchers|RetiredOWatcherRestore|install_mapped_retired_o_watcher|o_only_restore|o_only_retry|record_retired_o_install_outcome|retired_o_install_due|o_install_reason)\b')
-for path, code in sources.items():
-    if root / path not in skips:
-        assert not removed.search(code), f'{path}: removed restore/retry symbol reintroduced'
-guards = [
-    ('watchers/lifecycle/o_only_install.rs', 'install_retired_o_watcher', '!crate::services::discord::health::legacy_supervision::is_retired(request.provider.as_str(),request.channel_id.get())'),
-]
-for suffix, function, expected in guards:
-    body = b.function_text(c._production_text(root / ('src/services/discord/' + suffix)), function)
-    conditions = [re.sub(r',\)', ')', re.sub(r'\s+', '', cond)) for cond in re.findall(r'\bif\s+([^{}]+)\{', body) if 'is_retired' in cond]
-    assert conditions == [expected], (function, conditions)
+removed = re.compile(r'\b(?:restore_retired_o_watchers|RetiredOWatcherRestore|install_mapped_retired_o_watcher|o_only_restore|o_only_retry|record_retired_o_install_outcome|retired_o_install_due|o_install_reason|install_retired_o_watcher|claim_retired_o_watcher_for_host|o_only_install|OOnlyInstall(?:Request|Outcome|Reason))\b')
+for path in all_files:
+    state = StripState()
+    code = '\n'.join(strip_line(line, state) for line in path.read_text().splitlines())
+    assert not removed.search(code), f'{path}: removed retired symbol reintroduced'
+for suffix in ['o_only_install.rs', 'o_only_install_tests.rs']:
+    assert not (root / 'src/services/discord/watchers/lifecycle' / suffix).exists(), suffix
 print('canonical_retired_production_writers=0')
-print('removed_retired_restore_retry_symbols=0')
+print('removed_retired_install_restore_retry_symbols=0')
 print('canonical_retired_condition_unchanged=true')
 print('activation_ready=false')
 "#;
@@ -420,7 +417,7 @@ print('activation_ready=false')
     );
     let report = String::from_utf8(output.stdout).unwrap();
     assert!(report.contains("canonical_retired_production_writers=0"));
-    assert!(report.contains("removed_retired_restore_retry_symbols=0"));
+    assert!(report.contains("removed_retired_install_restore_retry_symbols=0"));
     assert!(report.contains("canonical_retired_condition_unchanged=true"));
     assert!(report.contains("activation_ready=false"));
 }

@@ -73,10 +73,6 @@ pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry
 pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
-#[cfg(test)]
-pub use watcher_lifecycle::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;

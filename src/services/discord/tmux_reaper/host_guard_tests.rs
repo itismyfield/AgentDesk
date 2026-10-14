@@ -1003,6 +1003,51 @@ async fn n3bc_last_protection_release_allows_existing_orphan_cleanup_pg() {
     db.drop().await;
 }
 
+#[tokio::test]
+async fn n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg() {
+    if !n3bc_isolated("n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg") {
+        return;
+    }
+    let (db, pool) = postgres().await;
+    let (shared, _registry) = runtime(&pool).await;
+    let channel = ChannelId::new(6_325_575_950);
+    let channel_name = "n3bc-mixed-owned";
+    let owned = ProviderKind::Claude.build_tmux_session_name(channel_name);
+    let orphan = ProviderKind::Claude.build_tmux_session_name("n3bc-mixed-rowless-orphan");
+    map_channel(&shared, channel, channel_name).await;
+    for name in [&owned, &orphan] {
+        own(name);
+    }
+    crate::services::tmux_common::write_tmux_channel_binding(&orphan, channel.get() + 1).unwrap();
+    let row_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE session_key = $1)")
+            .bind(channel_key(&shared, &orphan))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!row_exists, "the orphan has no sessions row");
+    std::fs::write(
+        n3bc_root().join("tmux-sessions"),
+        format!("{owned}\n{orphan}\n"),
+    )
+    .unwrap();
+    assert!(!killed(&owned) && !killed(&orphan));
+
+    super::cleanup_orphan_tmux_sessions(&shared).await;
+
+    assert!(
+        killed(&orphan),
+        "the public mixed-list pass cleans the orphan"
+    );
+    assert!(!killed(&owned), "the mapped owner's session survives");
+    assert!(shared.core.lock().await.sessions.contains_key(&channel));
+    let kills = std::fs::read_to_string(n3bc_root().join("tmux-kills")).unwrap();
+    assert!(kills.contains(&orphan));
+    assert!(!kills.contains(&owned));
+    pool.close().await;
+    db.drop().await;
+}
+
 async fn n3bc_dispatch(pool: &sqlx::PgPool, key: &str, dispatch: &str) {
     sqlx::query("INSERT INTO task_dispatches (id, status) VALUES ($1, 'dispatched')")
         .bind(dispatch)

@@ -1948,6 +1948,7 @@ services::discord::tmux_reaper::host_guard_tests::n3bc_last_protection_release_a
 services::discord::tmux_reaper::host_guard_tests::n3bc_mapped_dead_post_await_preserves_after_install_pg
 services::discord::tmux_reaper::host_guard_tests::n3bc_orphan_dispatch_boundary_preserves_after_install_pg
 services::discord::tmux_reaper::host_guard_tests::n3bc_orphan_post_await_boundaries_preserve_after_install_pg
+services::discord::tmux_reaper::host_guard_tests::n3bc_public_cleanup_mixed_owned_and_rowless_legacy_orphan_pg
 services::discord::tmux_reaper::host_guard_tests::n3bc_public_orphan_conflicting_channel_is_unknown_pg
 services::discord::tmux_reaper::host_guard_tests::n3bc_public_periodic_fresh_hold_keeps_mapped_sibling_pg
 services::discord::tmux_reaper::host_guard_tests::orphan_cleanup_kills_only_what_the_host_guard_admits_pg

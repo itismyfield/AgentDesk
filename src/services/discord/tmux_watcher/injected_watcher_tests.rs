@@ -139,10 +139,7 @@ async fn case(
     let submissions =
         crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(&f.shared);
     let handle = if retired {
-        assert_eq!(
-            f.install().await,
-            crate::services::discord::OOnlyInstallOutcome::Spawned
-        );
+        f.spawn_watcher().await;
         f.handle()
     } else {
         seed::spawn_legacy(&f, 0, None)

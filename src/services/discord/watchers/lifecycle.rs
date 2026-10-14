@@ -94,14 +94,7 @@ pub(in crate::services::discord) use self::claims::{
 };
 
 #[cfg(test)]
-#[path = "lifecycle/o_only_install.rs"]
-mod o_only_install;
-#[cfg(test)]
-pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
-#[cfg(test)]
-pub use o_only_install::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
+pub(in crate::services::discord) use n4d2_entry_support::InstallFixture;
 
 #[cfg(all(test, unix))]
 #[path = "lifecycle/restore_legacy_tests.rs"]
