@@ -463,6 +463,7 @@ services::discord::herdr_terminate::tests
 services::discord::host_defer_gate::tests
 services::discord::host_key_derivation::tests
 services::discord::idle_cleanup_selector_tests
+services::discord::idle_recap_interaction::g2e_pg_tests
 services::discord::idle_recap_interaction::host_guard_tests
 services::discord::idle_recap_interaction::tests
 services::discord::idle_relay_drift::tests
@@ -1541,6 +1542,10 @@ services::discord::host_defer_gate::tests::the_promote_gate_releases_only_a_reti
 services::discord::host_key_derivation::tests::derive_lookup_tries_every_registered_hash_by_exact_key_pg
 services::discord::host_key_derivation::tests::merge_lets_conflicts_and_failed_reads_decide_pg
 services::discord::idle_cleanup_selector_tests::idle_cleanup_preserves_provider_selector_columns_pg
+services::discord::idle_recap_interaction::g2e_pg_tests::g2e_admitted_compact_consumes_the_card_only_after_its_send_pg
+services::discord::idle_recap_interaction::g2e_pg_tests::g2e_admitted_recap_clear_keeps_the_card_until_the_clear_succeeds_pg
+services::discord::idle_recap_interaction::g2e_pg_tests::g2e_admitted_suggest_consumes_only_an_enqueued_card_pg
+services::discord::idle_recap_interaction::g2e_pg_tests::g2e_concurrent_admitted_compacts_send_once_pg
 services::discord::idle_recap_interaction::host_guard_tests::compact_is_refused_before_the_claim_on_a_non_legacy_session_pg
 services::discord::idle_recap_interaction::host_guard_tests::recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg
 services::discord::idle_recap_interaction::tests::concurrent_recap_compact_claim_pg_consumes_exactly_once

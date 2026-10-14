@@ -1035,6 +1035,11 @@ src/
 │   │   │   ├── context_display.rs
 │   │   │   ├── relay_integrity.rs
 │   │   │   └── scrollback.rs
+│   │   ├── idle_recap_interaction/
+│   │   │   ├── compact.rs
+│   │   │   ├── g2e_tests.rs
+│   │   │   ├── relay_diag.rs
+│   │   │   └── suggest.rs
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs

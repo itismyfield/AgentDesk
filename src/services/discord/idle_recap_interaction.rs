@@ -16,6 +16,7 @@ use crate::services::discord::idle_recap::{
     IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX, IDLE_RECAP_SUGGEST_BUTTON_PREFIX, clear_recap_pointer,
     delete_previous_card,
 };
+use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,44 +30,19 @@ struct RecapClearTarget {
     recap_current: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NativeCompactRequest {
-    tmux_session_name: String,
-    prompt: &'static str,
-}
+mod compact;
+mod relay_diag;
+mod suggest;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RecapCompactOutcome {
-    Started(NativeCompactRequest),
-    AlreadyClaimed,
-    ClaimFailed(String),
-    PostClaimOwnerChanged,
-    PostClaimFenceFailed(String),
-    InvalidTarget,
-    RoutingUnavailable {
-        owner_instance_id: Option<String>,
-        reason: String,
-    },
-    TargetNotLive(NativeCompactRequest),
-    /// The session's host is not legacy tmux: no claim, probe or injection ran.
-    HostUnsupported(String),
-    InjectionFailed {
-        request: NativeCompactRequest,
-        error: String,
-    },
-}
-
-impl RecapCompactOutcome {
-    fn preserves_recap_card(&self) -> bool {
-        matches!(
-            self,
-            Self::AlreadyClaimed
-                | Self::ClaimFailed(_)
-                | Self::InvalidTarget
-                | Self::RoutingUnavailable { .. }
-                | Self::HostUnsupported(_)
-        )
-    }
+/// The input fence's verdict for a recap action on `channel`; a refusal is a health reason too.
+fn admit_recap_effect(
+    provider: &ProviderKind,
+    channel: u64,
+) -> Result<Option<fence::Permit>, String> {
+    fence::effect::admit(provider, channel).map_err(|failure| {
+        fence::record_failure(provider, channel, &[], failure);
+        format!("{failure:?}")
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,14 +83,14 @@ pub(super) async fn handle_idle_recap_interaction(
         return handle_idle_recap_clear_interaction(ctx, component, data).await;
     }
     if custom_id.starts_with(IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX) {
-        return handle_idle_recap_relay_diag_interaction(ctx, component, data).await;
+        return relay_diag::handle_idle_recap_relay_diag_interaction(ctx, component, data).await;
     }
     match recap_prompt_route(custom_id) {
         Some(RecapPromptRoute::NativeSlashCompact) => {
-            return handle_idle_recap_compact_interaction(ctx, component, data).await;
+            return compact::handle_idle_recap_compact_interaction(ctx, component, data).await;
         }
         Some(RecapPromptRoute::InternalFollowup) => {
-            return handle_idle_recap_suggest_interaction(ctx, component, data).await;
+            return suggest::handle_idle_recap_suggest_interaction(ctx, component, data).await;
         }
         None => {}
     }
@@ -182,7 +158,8 @@ pub(super) async fn handle_idle_recap_clear_interaction(
 }
 
 /// The clear click after its authorisation, answered by `acknowledge` or by the reply it
-/// returns. A session the host check refuses keeps its card and its pointer.
+/// returns. A session the host check refuses keeps its card and its pointer, as does a channel
+/// the input fence refuses; an admitted clear consumes them only after the clear succeeded.
 async fn clear_recap_card<Ack, AckFut>(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -195,6 +172,15 @@ where
     Ack: FnOnce() -> AckFut,
     AckFut: std::future::Future<Output = ()>,
 {
+    let permit = match admit_recap_effect(provider, channel.get()) {
+        Ok(permit) => permit,
+        Err(reason) => {
+            tracing::warn!(message_id, %reason, "idle_recap clear: input fence refused");
+            return Ok(Some(format!(
+                "세션 정리 거절: 이 채널의 입력이 전환 중이라 지금은 정리할 수 없습니다. ({reason})"
+            )));
+        }
+    };
     let Some(pool) = shared.pg_pool.as_ref().cloned() else {
         return Ok(Some("세션 정리 실패: DB 연결 없음.".to_string()));
     };
@@ -242,17 +228,19 @@ where
     // the card. Order matters: clear the pointer first so the
     // user-message hook (intake_gate) doesn't try to delete the same
     // message at the same time.
-    let pointer_cleared = clear_recap_pointer(&pool, &clear_target.session_key, message_id)
-        .await
-        .unwrap_or(false);
-    if !pointer_cleared {
-        delete_previous_card(http, channel.get(), message_id).await;
-        return Ok(None);
+    if permit.is_none() {
+        let pointer_cleared = clear_recap_pointer(&pool, &clear_target.session_key, message_id)
+            .await
+            .unwrap_or(false);
+        if !pointer_cleared {
+            delete_previous_card(http, channel.get(), message_id).await;
+            return Ok(None);
+        }
     }
 
     // Reuse `/clear` semantics, not just the provider-session-id drop. TUI
     // providers keep live tmux/process state that must be reset too.
-    crate::services::discord::commands::clear_channel_session_state_with_session_key(
+    let clear = crate::services::discord::commands::clear_channel_session_state_with_session_key(
         http,
         shared,
         provider,
@@ -260,475 +248,43 @@ where
         "idle_recap_clear",
         crate::services::discord::commands::SoftClearNotifyMode::Enqueue,
         Some(&clear_target.session_key),
-    )
-    .await?;
+    );
+    match permit {
+        // An admitted clear keeps its card until the clear itself has succeeded.
+        Some(permit) => {
+            fence::effect::scope(Some(permit), clear).await?;
+            let _ = clear_recap_pointer(&pool, &clear_target.session_key, message_id).await;
+        }
+        None => clear.await?,
+    }
     delete_previous_card(http, channel.get(), message_id).await;
 
     Ok(None)
 }
 
-async fn handle_idle_recap_relay_diag_interaction(
-    ctx: &serenity::Context,
-    component: &serenity::ComponentInteraction,
-    data: &Data,
-) -> Result<(), Error> {
-    if !authorize_component(ctx, component, data).await {
-        return Ok(());
-    }
-
-    let Some(message_id) = parse_message_id(
-        &component.data.custom_id,
-        IDLE_RECAP_RELAY_DIAG_BUTTON_PREFIX,
-    ) else {
-        let _ = component
-            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-            .await;
-        return Ok(());
-    };
-    let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
-        send_ephemeral(ctx, component, "릴레이 진단 실패: DB 연결 없음.").await;
-        return Ok(());
-    };
-    let Some(target) = lookup_current_recap_target(
-        &pool,
-        message_id,
-        component.channel_id.get(),
-        data.provider.as_str(),
-    )
-    .await?
-    else {
-        send_ephemeral(
-            ctx,
-            component,
-            "릴레이 진단 대상이 더 이상 유효하지 않습니다.",
-        )
-        .await;
-        return Ok(());
-    };
-    let Some(snapshot) =
-        crate::services::discord::idle_recap::load_recap_snapshot(&pool, &target.session_key)
-            .await?
-    else {
-        send_ephemeral(ctx, component, "릴레이 진단 실패: 세션을 찾을 수 없습니다.").await;
-        return Ok(());
-    };
-    let Some(provider) = ProviderKind::from_str(&snapshot.provider) else {
-        send_ephemeral(
-            ctx,
-            component,
-            "릴레이 진단 실패: provider를 확인할 수 없습니다.",
-        )
-        .await;
-        return Ok(());
-    };
-    let probe = crate::services::discord::idle_recap::probe_relay_integrity(
-        &snapshot,
-        &provider,
-        component.channel_id.get(),
-        Some(message_id),
-    );
-    let report = truncate_interaction_body(&probe.diagnostic_report());
-    send_ephemeral(ctx, component, &format!("```text\n{report}\n```")).await;
-    Ok(())
-}
-
-async fn handle_idle_recap_compact_interaction(
-    ctx: &serenity::Context,
-    component: &serenity::ComponentInteraction,
-    data: &Data,
-) -> Result<(), Error> {
-    if !authorize_component(ctx, component, data).await {
-        return Ok(());
-    }
-
-    let Some(message_id) =
-        parse_message_id(&component.data.custom_id, IDLE_RECAP_COMPACT_BUTTON_PREFIX)
-    else {
-        let _ = component
-            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-            .await;
-        return Ok(());
-    };
-    let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
-        send_ephemeral(ctx, component, "맥락 압축 요청 실패: DB 연결 없음.").await;
-        return Ok(());
-    };
-    let target = match lookup_current_recap_target(
-        &pool,
-        message_id,
-        component.channel_id.get(),
-        data.provider.as_str(),
-    )
-    .await
+/// The native `/compact` send itself, kept here with the platform split.
+fn send_native_compact(request: &compact::NativeCompactRequest) -> Result<(), String> {
+    #[cfg(unix)]
     {
-        Ok(Some(target)) => target,
-        Ok(None) => {
-            send_ephemeral(
-                ctx,
-                component,
-                "맥락 압축 대상이 더 이상 유효하지 않거나 이미 처리되었습니다.",
-            )
-            .await;
-            return Ok(());
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                message_id,
-                "idle_recap compact: target lookup failed"
-            );
-            send_ephemeral(ctx, component, "맥락 압축 요청 실패: 세션 확인 오류.").await;
-            return Ok(());
-        }
-    };
-
-    if let Err(error) = component.defer_ephemeral(ctx).await {
-        tracing::warn!(
-            error = %error,
-            message_id,
-            "idle_recap compact: failed to defer interaction response"
-        );
-        return Ok(());
-    }
-
-    let target_for_claim = target.clone();
-    let target_for_pre_inject_fence = target.clone();
-    let target_session_key_for_log = target.session_key.clone();
-    let channel_id = component.channel_id.get();
-    let pool_for_claim = pool.clone();
-    let pool_for_pre_inject_fence = pool.clone();
-    let outcome = run_native_compact_once(
-        target,
-        (
-            &crate::services::platform::hostname_short(),
-            &crate::services::cluster::node_registry::resolve_self_instance_id_without_config(),
-        ),
-        |tmux_session_name: &str| {
-            let refusal = super::admin_host_guard::session_key_refusal;
-            let (pool, name) = (pool.clone(), tmux_session_name.to_string());
-            let (provider, key) = (data.provider.clone(), target_session_key_for_log.clone());
-            async move { refusal(&pool, Some(&provider), Some(channel_id), &key, &name).await }
-        },
-        move || async move {
-            claim_recap_compact_pointer(&pool_for_claim, &target_for_claim, message_id, channel_id)
-                .await
-                .map_err(|error| error.to_string())
-        },
-        move || async move {
-            recap_compact_owner_unchanged(&pool_for_pre_inject_fence, &target_for_pre_inject_fence)
-                .await
-                .map_err(|error| error.to_string())
-        },
-        |tmux_session_name| {
-            std::future::ready(
-                crate::services::tmux_diagnostics::tmux_session_has_live_pane(tmux_session_name),
-            )
-        },
-        |request| async move { inject_native_compact(request).await },
-    )
-    .await;
-
-    let response = match &outcome {
-        RecapCompactOutcome::Started(_) => "Claude 맥락 압축을 시작했습니다.",
-        RecapCompactOutcome::AlreadyClaimed => {
-            "맥락 압축 요청이 이미 처리되었거나 대상이 더 이상 유효하지 않습니다."
-        }
-        RecapCompactOutcome::ClaimFailed(error) => {
-            tracing::warn!(
-                error = %error,
-                message_id,
-                session_key = %target_session_key_for_log,
-                "idle_recap compact: atomic claim failed"
-            );
-            "맥락 압축 요청 실패: 세션 선점 오류. /compact를 직접 실행하세요."
-        }
-        RecapCompactOutcome::PostClaimOwnerChanged => {
-            tracing::warn!(
-                message_id,
-                session_key = %target_session_key_for_log,
-                "idle_recap compact: owner changed after atomic claim"
-            );
-            "맥락 압축 요청 실패: 세션이 다른 노드로 이동했습니다. 원래 세션 노드에서 /compact를 실행하세요."
-        }
-        RecapCompactOutcome::PostClaimFenceFailed(error) => {
-            tracing::warn!(
-                error = %error,
-                message_id,
-                session_key = %target_session_key_for_log,
-                "idle_recap compact: post-claim owner fence failed"
-            );
-            "맥락 압축 요청 실패: 세션 소유권을 재확인할 수 없습니다. /compact를 직접 실행하세요."
-        }
-        RecapCompactOutcome::InvalidTarget => {
-            "맥락 압축 요청 실패: recap 세션 대상을 확인할 수 없습니다."
-        }
-        RecapCompactOutcome::RoutingUnavailable {
-            owner_instance_id,
-            reason,
-        } => {
-            tracing::warn!(
-                message_id,
-                owner_instance_id = owner_instance_id.as_deref().unwrap_or("unknown"),
-                reason,
-                "idle_recap compact: recap owner is not local"
-            );
-            "맥락 압축 요청을 현재 노드에서 처리할 수 없습니다. 원래 세션 노드에서 다시 시도하세요."
-        }
-        RecapCompactOutcome::HostUnsupported(reason) => {
-            tracing::warn!(message_id, %reason, "idle_recap compact: host unsupported");
-            "맥락 압축 요청 거절: 이 세션의 호스트에서는 맥락 압축을 지원하지 않습니다."
-        }
-        RecapCompactOutcome::TargetNotLive(request) => {
-            tracing::warn!(
-                message_id,
-                tmux_session_name = %request.tmux_session_name,
-                "idle_recap compact: claimed target has no live pane"
-            );
-            "맥락 압축 요청 실패: 원래 Claude 세션이 종료되었습니다."
-        }
-        RecapCompactOutcome::InjectionFailed { request, error } => {
-            tracing::warn!(
-                error = %error,
-                message_id,
-                tmux_session_name = %request.tmux_session_name,
-                "idle_recap compact: terminal native /compact injection failure"
-            );
-            "맥락 압축 요청을 전송하지 못했습니다. 중복 방지를 위해 요청을 종료했습니다. /compact를 직접 실행하세요."
-        }
-    };
-    edit_deferred_ephemeral(ctx, component, message_id, response).await;
-
-    if !outcome.preserves_recap_card() {
-        delete_previous_card(&ctx.http, channel_id, message_id).await;
-    }
-    Ok(())
-}
-
-async fn run_native_compact_once<
-    HostRefusal,
-    HostRefusalFut,
-    Claim,
-    ClaimFut,
-    PreInjectFence,
-    PreInjectFenceFut,
-    IsLive,
-    IsLiveFut,
-    Inject,
-    InjectFut,
->(
-    target: RecapClearTarget,
-    (local_hostname, local_instance_id): (&str, &str),
-    host_refusal: HostRefusal,
-    claim: Claim,
-    pre_inject_fence: PreInjectFence,
-    is_live: IsLive,
-    inject: Inject,
-) -> RecapCompactOutcome
-where
-    HostRefusal: FnOnce(&str) -> HostRefusalFut,
-    HostRefusalFut: std::future::Future<Output = Option<String>>,
-    Claim: FnOnce() -> ClaimFut,
-    ClaimFut: std::future::Future<Output = Result<bool, String>>,
-    PreInjectFence: FnOnce() -> PreInjectFenceFut,
-    PreInjectFenceFut: std::future::Future<Output = Result<bool, String>>,
-    IsLive: FnOnce(&str) -> IsLiveFut,
-    IsLiveFut: std::future::Future<Output = bool>,
-    Inject: FnOnce(NativeCompactRequest) -> InjectFut,
-    InjectFut: std::future::Future<Output = Result<(), String>>,
-{
-    let Some(identity) =
-        crate::services::discord::session_identity::SessionIdentity::parse(&target.session_key)
-    else {
-        return RecapCompactOutcome::InvalidTarget;
-    };
-    let routing = crate::services::cluster::session_routing::session_owner_routing_status(
-        target.owner_instance_id.as_deref(),
-        Some(local_instance_id),
-        &[],
-    );
-    if identity.host != local_hostname || routing["is_local"].as_bool() != Some(true) {
-        let reason = if identity.host != local_hostname {
-            "session_key_host_mismatch"
-        } else {
-            routing["reason"]
-                .as_str()
-                .unwrap_or("session_owner_not_local")
-        };
-        return RecapCompactOutcome::RoutingUnavailable {
-            owner_instance_id: target.owner_instance_id.clone(),
-            reason: reason.to_string(),
-        };
-    }
-
-    // Compact is unsupported on any other host: refused before the claim consumes the card.
-    if let Some(reason) = host_refusal(&identity.tmux_name).await {
-        return RecapCompactOutcome::HostUnsupported(reason);
-    }
-    match claim().await {
-        Ok(true) => {}
-        Ok(false) => return RecapCompactOutcome::AlreadyClaimed,
-        Err(error) => return RecapCompactOutcome::ClaimFailed(error),
-    }
-
-    let request = NativeCompactRequest {
-        tmux_session_name: identity.tmux_name,
-        prompt: "/compact",
-    };
-    if !is_live(&request.tmux_session_name).await {
-        return RecapCompactOutcome::TargetNotLive(request);
-    }
-    match pre_inject_fence().await {
-        Ok(true) => {}
-        Ok(false) => return RecapCompactOutcome::PostClaimOwnerChanged,
-        Err(error) => return RecapCompactOutcome::PostClaimFenceFailed(error),
-    }
-
-    match inject(request.clone()).await {
-        Ok(()) => RecapCompactOutcome::Started(request),
-        Err(error) => RecapCompactOutcome::InjectionFailed { request, error },
-    }
-}
-
-async fn inject_native_compact(request: NativeCompactRequest) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        #[cfg(unix)]
-        {
-            crate::services::claude_tui::composer_lock::with_session_turn_lock(
-                &request.tmux_session_name,
-                || {
-                    crate::services::claude_tui::input::send_followup_prompt(
-                        &request.tmux_session_name,
-                        request.prompt,
-                        None,
-                    )
-                },
-            )
-        }
-        #[cfg(not(unix))]
-        {
-            crate::services::claude_tui::input::send_followup_prompt(
-                &request.tmux_session_name,
-                request.prompt,
-                None,
-            )
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-async fn claim_recap_compact_pointer(
-    pool: &PgPool,
-    target: &RecapClearTarget,
-    message_id: u64,
-    channel_id: u64,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query(
-        "UPDATE sessions
-         SET idle_recap_message_id = NULL,
-             idle_recap_channel_id = NULL
-         WHERE session_key = $1
-           AND provider = $2
-           AND idle_recap_turn_generation = $3
-           AND idle_recap_message_id = $4
-           AND idle_recap_channel_id = $5
-           AND instance_id IS NOT DISTINCT FROM $6
-           AND COALESCE(idle_recap_posted_at >= COALESCE(last_heartbeat, created_at), false)",
-    )
-    .bind(&target.session_key)
-    .bind(&target.provider)
-    .bind(target.turn_generation)
-    .bind(message_id as i64)
-    .bind(channel_id as i64)
-    .bind(target.owner_instance_id.as_deref())
-    .execute(pool)
-    .await
-    .map(|result| result.rows_affected() == 1)
-}
-
-async fn recap_compact_owner_unchanged(
-    pool: &PgPool,
-    target: &RecapClearTarget,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-             SELECT 1
-             FROM sessions
-             WHERE session_key = $1
-               AND instance_id IS NOT DISTINCT FROM $2
-         )",
-    )
-    .bind(&target.session_key)
-    .bind(target.owner_instance_id.as_deref())
-    .fetch_one(pool)
-    .await
-}
-
-async fn handle_idle_recap_suggest_interaction(
-    ctx: &serenity::Context,
-    component: &serenity::ComponentInteraction,
-    data: &Data,
-) -> Result<(), Error> {
-    if !authorize_component(ctx, component, data).await {
-        return Ok(());
-    }
-
-    let Some(message_id) =
-        parse_message_id(&component.data.custom_id, IDLE_RECAP_SUGGEST_BUTTON_PREFIX)
-    else {
-        let _ = component
-            .create_response(ctx, serenity::CreateInteractionResponse::Acknowledge)
-            .await;
-        return Ok(());
-    };
-    let Some(suggested_reply) =
-        crate::services::discord::idle_recap::suggested_reply_from_recap_content(
-            &component.message.content,
+        crate::services::claude_tui::composer_lock::with_session_turn_lock(
+            &request.tmux_session_name,
+            || {
+                crate::services::claude_tui::input::send_followup_prompt(
+                    &request.tmux_session_name,
+                    request.prompt,
+                    None,
+                )
+            },
         )
-    else {
-        send_ephemeral(ctx, component, "추천 답변을 찾을 수 없습니다.").await;
-        return Ok(());
-    };
-    let prompt_text = suggested_reply.clone();
-    let Some(pool) = data.shared.pg_pool.as_ref().cloned() else {
-        send_ephemeral(ctx, component, "추천 답변 전송 실패: DB 연결 없음.").await;
-        return Ok(());
-    };
-    let Some(target) = lookup_current_recap_target(
-        &pool,
-        message_id,
-        component.channel_id.get(),
-        data.provider.as_str(),
-    )
-    .await?
-    else {
-        send_ephemeral(
-            ctx,
-            component,
-            "추천 답변 대상이 더 이상 유효하지 않습니다.",
-        )
-        .await;
-        return Ok(());
-    };
-
-    let enqueued = crate::services::discord::enqueue_internal_followup(
-        &data.shared,
-        &data.provider,
-        component.channel_id,
-        serenity::MessageId::new(message_id),
-        suggested_reply,
-        "idle recap suggested reply",
-    )
-    .await;
-    if !enqueued {
-        send_ephemeral(ctx, component, "추천 답변을 큐에 넣지 못했습니다.").await;
-        return Ok(());
     }
-
-    send_ephemeral(ctx, component, &prompt_sent_ephemeral(&prompt_text)).await;
-    let _ = clear_recap_pointer(&pool, &target.session_key, message_id).await;
-    delete_previous_card(&ctx.http, component.channel_id.get(), message_id).await;
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        crate::services::claude_tui::input::send_followup_prompt(
+            &request.tmux_session_name,
+            request.prompt,
+            None,
+        )
+    }
 }
 
 async fn authorize_component(
@@ -880,6 +436,7 @@ async fn lookup_current_recap_target(
 
 #[cfg(test)]
 mod tests {
+    use super::compact::*;
     use super::*;
 
     #[test]
@@ -1425,6 +982,7 @@ mod host_guard_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::compact::*;
     use super::*;
     use crate::services::discord::admin_host_guard::tests::{Recorder, api_child, process};
     use crate::services::discord::host_defer_gate::tests::{
@@ -1633,6 +1191,421 @@ mod host_guard_tests {
                 assert!(outcome.preserves_recap_card(), "{case:?}: the card stays");
                 assert_eq!(counts, (0, 0), "{case:?}: no claim or injection");
             }
+        }
+        db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod g2e_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+mod g2e_pg_tests {
+    //! Admitted recap actions against a real sessions row: the card's exact pointer survives every
+    //! action that did not happen, serializes double clicks and is consumed only after success.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use poise::serenity_prelude as serenity;
+    use sqlx::PgPool;
+
+    use super::compact::*;
+    use super::suggest::*;
+    use super::{RecapClearTarget, clear_recap_card};
+    use crate::services::discord::admin_host_guard::tests::{Recorder, api_child, process};
+    use crate::services::discord::host_defer_gate::tests::{
+        Case, ScriptedTmux, map_channel, postgres,
+    };
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, channel_key, shared_on,
+    };
+    use crate::services::discord::input_runtime::fence::{self, Gate};
+    use crate::services::provider::ProviderKind;
+
+    const LOCAL_NODE: (&str, &str) = ("mac-mini", "mac-mini-release");
+
+    fn card(channel: u64) -> (RecapClearTarget, u64, u64) {
+        let target = RecapClearTarget {
+            session_key: format!("claude/token/mac-mini:g2e-pg-{channel}"),
+            provider: "claude".to_string(),
+            owner_instance_id: Some("mac-mini-release".to_string()),
+            turn_generation: 7,
+            channel_matches: true,
+            provider_matches: true,
+            recap_current: true,
+        };
+        (target, channel + 1, channel)
+    }
+
+    /// Posts the card as the session's current recap.
+    async fn post(pool: &PgPool, (target, message_id, channel): &(RecapClearTarget, u64, u64)) {
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, instance_id, idle_recap_turn_generation,
+                                   idle_recap_message_id, idle_recap_channel_id,
+                                   idle_recap_posted_at, last_heartbeat)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+             ON CONFLICT (session_key) DO UPDATE
+                SET idle_recap_turn_generation = EXCLUDED.idle_recap_turn_generation,
+                    idle_recap_message_id = EXCLUDED.idle_recap_message_id,
+                    idle_recap_channel_id = EXCLUDED.idle_recap_channel_id,
+                    idle_recap_posted_at = NOW(), last_heartbeat = NOW()",
+        )
+        .bind(&target.session_key)
+        .bind(&target.provider)
+        .bind(target.owner_instance_id.as_deref())
+        .bind(target.turn_generation)
+        .bind(*message_id as i64)
+        .bind(*channel as i64)
+        .execute(pool)
+        .await
+        .expect("post recap card");
+    }
+
+    async fn pointer(pool: &PgPool, session_key: &str) -> Option<i64> {
+        let query = "SELECT idle_recap_message_id FROM sessions WHERE session_key = $1";
+        let row = sqlx::query_scalar(query).bind(session_key);
+        row.fetch_one(pool).await.expect("recap pointer")
+    }
+
+    fn admitting_gate(channel: u64) -> (Arc<Gate>, fence::test_health::Clear) {
+        let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+        let health = fence::test_health::Clear::new(&gate);
+        (gate, health)
+    }
+
+    type Host = Box<dyn FnOnce(&str) -> std::future::Ready<Option<String>> + Send>;
+    type Check = Box<dyn FnOnce() -> std::future::Ready<Result<bool, String>> + Send>;
+    type Live = Box<dyn FnOnce(&str) -> std::future::Ready<bool> + Send>;
+    type SendFn = Box<dyn FnOnce(&NativeCompactRequest) -> Result<(), String> + Send>;
+    type Seams = CompactSeams<Host, Check, Check, Live, SendFn>;
+
+    /// The pane checks this run passes and its send; main's destructive claim must never run.
+    fn seams(live: bool, owner: Result<bool, String>, send: SendFn) -> Seams {
+        CompactSeams {
+            host_refusal: Box::new(|_| std::future::ready(None)),
+            legacy_claim: Box::new(|| {
+                panic!("an admitted compact never runs main's destructive claim")
+            }),
+            pre_inject_fence: Box::new(move || std::future::ready(owner)),
+            is_live: Box::new(move |_| std::future::ready(live)),
+            send,
+        }
+    }
+
+    fn counted(sends: &Arc<AtomicUsize>, result: Result<(), String>) -> SendFn {
+        let sends = sends.clone();
+        Box::new(move |_| {
+            sends.fetch_add(1, Ordering::SeqCst);
+            result
+        })
+    }
+
+    /// Runs an admitted compact whose send blocks until `during` has looked at the row.
+    async fn compact_holding_send<F: std::future::Future<Output = ()>>(
+        pool: &PgPool,
+        card: (RecapClearTarget, u64, u64),
+        during: F,
+    ) -> RecapCompactRun {
+        let (entered, sending) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let send: SendFn = Box::new(move |_| {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            Ok(())
+        });
+        let pool = pool.clone();
+        let run = tokio::spawn(async move {
+            let seams = seams(true, Ok(true), send);
+            run_recap_compact(&ProviderKind::Claude, &pool, card, LOCAL_NODE, seams).await
+        });
+        sending.await.unwrap();
+        during.await;
+        release.send(()).unwrap();
+        run.await.unwrap()
+    }
+
+    // An admitted compact keeps the card's exact pointer while it sends and through every failure,
+    // including an uncertain send it never repeats; success consumes that pointer and no successor.
+    #[tokio::test]
+    async fn g2e_admitted_compact_consumes_the_card_only_after_its_send_pg() {
+        let (db, pool) = postgres().await;
+        let provider = ProviderKind::Claude;
+        let channel = 6_325_961_000_000_000;
+        let _gate = admitting_gate(channel);
+        let card = card(channel);
+        let (key, message_id) = (card.0.session_key.clone(), card.1 as i64);
+        post(&pool, &card).await;
+
+        let sends = Arc::new(AtomicUsize::new(0));
+        let lost: SendFn = Box::new(|_| panic!("the send's reply was lost"));
+        let failures: [(bool, Result<bool, String>, SendFn); 5] = [
+            (false, Ok(true), counted(&sends, Ok(()))),
+            (true, Ok(false), counted(&sends, Ok(()))),
+            (
+                true,
+                Err("owner unreadable".into()),
+                counted(&sends, Ok(())),
+            ),
+            (
+                true,
+                Ok(true),
+                counted(&sends, Err("paste sent, Enter failed".into())),
+            ),
+            (true, Ok(true), lost),
+        ];
+        for (n, (live, owner, send)) in failures.into_iter().enumerate() {
+            let before = sends.load(Ordering::SeqCst);
+            let seams = seams(live, owner, send);
+            let run = run_recap_compact(&provider, &pool, card.clone(), LOCAL_NODE, seams).await;
+            assert!(run.protected && run.keeps_card(), "{n}: {run:?}");
+            let sent = sends.load(Ordering::SeqCst) - before;
+            assert_eq!(sent, usize::from(n == 3), "{n}: sent at most once");
+            assert_eq!(
+                pointer(&pool, &key).await,
+                Some(message_id),
+                "{n}: card kept"
+            );
+            let failed = matches!(run.outcome, RecapCompactOutcome::InjectionFailed { .. });
+            assert_eq!(
+                failed,
+                n >= 3,
+                "{n}: an uncertain send is not success: {run:?}"
+            );
+        }
+
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let seen = observed.clone();
+        let during = async { *seen.lock().unwrap() = pointer(&pool, &key).await };
+        let run = compact_holding_send(&pool, card.clone(), during).await;
+        assert!(
+            matches!(run.outcome, RecapCompactOutcome::Started(_)),
+            "{run:?}"
+        );
+        assert!(!run.keeps_card(), "the sent card is dropped");
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some(message_id),
+            "kept while sending"
+        );
+        assert_eq!(pointer(&pool, &key).await, None, "consumed after the send");
+
+        // A successor card posted while the first one sends keeps its own pointer.
+        post(&pool, &card).await;
+        let successor = (card.0.clone(), card.1 + 100, card.2);
+        let run = compact_holding_send(&pool, card.clone(), post(&pool, &successor)).await;
+        assert!(
+            matches!(run.outcome, RecapCompactOutcome::Started(_)),
+            "{run:?}"
+        );
+        assert_eq!(pointer(&pool, &key).await, Some(successor.1 as i64));
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // Two admitted clicks on one card: the second finds the card reserved while the first sends,
+    // so the native /compact goes out exactly once.
+    #[tokio::test]
+    async fn g2e_concurrent_admitted_compacts_send_once_pg() {
+        let (db, pool) = postgres().await;
+        let channel = 6_325_961_000_000_100;
+        let _gate = admitting_gate(channel);
+        let card = card(channel);
+        let key = card.0.session_key.clone();
+        post(&pool, &card).await;
+
+        let sends = Arc::new(AtomicUsize::new(0));
+        let second = {
+            let (pool, card, sends) = (pool.clone(), card.clone(), sends.clone());
+            async move {
+                let seams = seams(true, Ok(true), counted(&sends, Ok(())));
+                let provider = ProviderKind::Claude;
+                run_recap_compact(&provider, &pool, card, LOCAL_NODE, seams).await
+            }
+        };
+        let second_run = Arc::new(std::sync::Mutex::new(None));
+        let held = second_run.clone();
+        let during = async move { *held.lock().unwrap() = Some(second.await) };
+        let first = compact_holding_send(&pool, card, during).await;
+        let second = second_run.lock().unwrap().take().unwrap();
+        assert!(
+            matches!(first.outcome, RecapCompactOutcome::Started(_)),
+            "{first:?}"
+        );
+        assert_eq!(second.outcome, RecapCompactOutcome::AlreadyClaimed);
+        assert!(second.keeps_card());
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            0,
+            "the second click never sent"
+        );
+        assert_eq!(pointer(&pool, &key).await, None);
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // An admitted suggest keeps the card when the legacy queue does not take the reply, consumes it
+    // once the queue persisted the reply, and a later click on the consumed card enqueues nothing.
+    #[tokio::test]
+    async fn g2e_admitted_suggest_consumes_only_an_enqueued_card_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool) = postgres().await;
+        let provider = ProviderKind::Claude;
+        let channel = 6_325_961_000_000_200;
+        let _gate = admitting_gate(channel);
+        let card = card(channel);
+        let (key, message_id) = (card.0.session_key.clone(), card.1);
+        post(&pool, &card).await;
+
+        let during = Arc::new(std::sync::Mutex::new(None));
+        let seen = during.clone();
+        let refused = || async {
+            *seen.lock().unwrap() = pointer(&pool, &key).await;
+            false
+        };
+        let outcome = run_recap_suggest(&provider, &pool, card.clone(), refused).await;
+        assert_eq!(outcome, RecapSuggestOutcome::NotEnqueued);
+        assert_eq!(*during.lock().unwrap(), Some(message_id as i64));
+        assert_eq!(pointer(&pool, &key).await, Some(message_id as i64));
+
+        let shared = shared_on(&pool).await;
+        let (channel_id, source) = (
+            serenity::ChannelId::new(channel),
+            serenity::MessageId::new(message_id),
+        );
+        let enqueue = || {
+            let reply = "g2e suggested reply";
+            let enqueue = crate::services::discord::enqueue_internal_followup;
+            enqueue(&shared, &provider, channel_id, source, reply, "g2e")
+        };
+        let outcome = run_recap_suggest(&provider, &pool, card.clone(), enqueue).await;
+        assert_eq!(outcome, RecapSuggestOutcome::Enqueued { consumed: true });
+        assert_eq!(pointer(&pool, &key).await, None);
+        let queued = shared
+            .mailbox(channel_id)
+            .snapshot()
+            .await
+            .intervention_queue;
+        let queued: Vec<_> = queued
+            .iter()
+            .map(|i| (i.message_id, i.text.as_str()))
+            .collect();
+        assert_eq!(queued, [(source, "g2e suggested reply")]);
+
+        let again = AtomicUsize::new(0);
+        let enqueue = || {
+            again.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(true)
+        };
+        let outcome = run_recap_suggest(&provider, &pool, card, enqueue).await;
+        assert_eq!(outcome, RecapSuggestOutcome::Stale);
+        assert_eq!(again.load(Ordering::SeqCst), 0);
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    // A clear click on a fenced channel changes nothing; on an admitted one a failed clear keeps the
+    // card and its pointer, and only a clear that succeeded consumes them.
+    #[tokio::test]
+    async fn g2e_admitted_recap_clear_keeps_the_card_until_the_clear_succeeds_pg() {
+        let test = "services::discord::idle_recap_interaction::g2e_pg_tests::g2e_admitted_recap_clear_keeps_the_card_until_the_clear_succeeds_pg";
+        if !api_child(test) {
+            return;
+        }
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let tmux = ScriptedTmux::install();
+        let (db, pool) = postgres().await;
+        let shared = shared_on(&pool).await;
+        let api = Recorder::start().await;
+        crate::services::discord::internal_api::init(api.port, None);
+        let provider = ProviderKind::Claude;
+        for (n, step) in ["fenced", "failed", "cleared"].into_iter().enumerate() {
+            let channel = serenity::ChannelId::new(6_325_961_000_000_300 + n as u64);
+            let channel_name = format!("g2e-recap-clear-{n}");
+            let name = provider.build_tmux_session_name(&channel_name);
+            map_channel(&shared, channel, &channel_name).await;
+            shared
+                .core
+                .lock()
+                .await
+                .sessions
+                .get_mut(&channel)
+                .unwrap()
+                .session_id = Some("sid".into());
+            let key = channel_key(&shared, &name);
+            Case::Stored(Stored::Legacy)
+                .seed(&pool, &key, &name, channel.get())
+                .await;
+            let message_id = 6_325_961_000_000_400 + n as u64;
+            sqlx::query(
+                "UPDATE sessions SET idle_recap_message_id = $2, idle_recap_channel_id = $3,
+                        idle_recap_posted_at = NOW() + INTERVAL '1 minute'
+                  WHERE session_key = $1",
+            )
+            .bind(&key)
+            .bind(message_id as i64)
+            .bind(channel.get() as i64)
+            .execute(&pool)
+            .await
+            .expect("recap card pointer");
+            let alive = process(&name, 67_000 + n as u32);
+            let gate = Gate::protect(provider.clone(), channel.get()).unwrap();
+            let _health = fence::test_health::Clear::new(&gate);
+            let _closing = (step == "fenced").then(|| gate.close().unwrap());
+            let busy = shared.session_transition_lock(channel);
+            let _busy = match step {
+                "failed" => Some(busy.lock_owned().await),
+                _ => None,
+            };
+            api.take();
+            tmux.take_calls();
+
+            let acks = AtomicUsize::new(0);
+            let acknowledge = || {
+                acks.fetch_add(1, Ordering::SeqCst);
+                async {}
+            };
+            let click = clear_recap_card(
+                &api.http,
+                &shared,
+                &provider,
+                channel,
+                message_id,
+                acknowledge,
+            );
+            let result = click.await;
+            let card_calls = api
+                .take()
+                .into_iter()
+                .filter(|call| call.contains(&message_id.to_string()))
+                .count();
+            let kept = pointer(&pool, &key).await == Some(message_id as i64);
+            let alive = alive.load(Ordering::SeqCst);
+            match step {
+                "fenced" => {
+                    let reply = result.expect("fenced click").unwrap_or_default();
+                    assert!(reply.contains("입력이 전환 중"), "{reply}");
+                    assert_eq!(acks.load(Ordering::SeqCst), 0);
+                    assert!(kept && alive && card_calls == 0, "fenced: nothing changes");
+                    assert_eq!(tmux.take_calls(), Vec::<String>::new());
+                }
+                "failed" => {
+                    assert!(result.is_err(), "the clear itself failed");
+                    assert!(
+                        kept && alive && card_calls == 0,
+                        "failed: card and pointer kept"
+                    );
+                }
+                _ => {
+                    assert_eq!(result.expect("cleared click"), None);
+                    assert!(!kept && !alive && card_calls > 0, "cleared: card consumed");
+                }
+            }
+            crate::services::session_backend::remove_process_session(&name);
         }
         db.drop().await;
     }
