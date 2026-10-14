@@ -2130,7 +2130,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   └── pcm_harness_tests.rs
+│   │   │   │   ├── pcm_harness_tests.rs
+│   │   │   │   └── retired_text_reply_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
@@ -2943,6 +2944,9 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── dispatch_reservation/
+│   │   │   └── tests/
+│   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queue_exit_debt.rs
 │   │   │   ├── queue_exit_debt_tests.rs
@@ -2957,6 +2961,12 @@ src/
 │   │   │   ├── operation.rs
 │   │   │   ├── reconcile.rs
 │   │   │   └── reconcile_pg_tests.rs
+│   │   ├── recovery_registry/
+│   │   │   ├── entry.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── registry_pg_tests.rs
+│   │   │   ├── rehydrate.rs
+│   │   │   └── witness.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs

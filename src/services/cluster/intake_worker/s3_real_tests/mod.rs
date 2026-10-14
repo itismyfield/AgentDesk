@@ -44,6 +44,8 @@ fn s3_node_child() {
             "th7_first_check" => drain_pg::first_check_node(&env).await,
             "th6_restart_first" => holder_pg::first_generation_node(&env).await,
             "th6_restart_second" => holder_pg::second_generation_node(&env).await,
+            "th6_release_first" => holder_pg::release_first_node(&env).await,
+            "th6_release_second" => holder_pg::release_second_node(&env).await,
             "th6_role_holder" => holder_pg::role_holder_node(&env).await,
             "th6_role_gateway" => holder_pg::role_gateway_node(&env).await,
             "th6_both_holder" => holder_pg::both_holder_node(&env).await,
@@ -61,6 +63,8 @@ fn s3_node_child() {
             "th6_live_target" => force_pg::live_target_node(&env).await,
             "th9_seed_prepared" => force_pg::seed_prepared_node(&env).await,
             "th9_new_target" => force_pg::new_target_node(&env).await,
+            "th9w_holder" => force_pg::h9w_holder_node(&env).await,
+            "lifecycle_writer" => harness::lifecycle_writer_node(&env).await,
             other => panic!("unknown S3 scenario {other}"),
         }
     });
