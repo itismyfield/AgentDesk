@@ -268,4 +268,5 @@ impl StashEffects for Effects<'_, '_> {
 }
 
 #[cfg(test)]
+#[path = "idle_stash/idle_stash_tests.rs"]
 mod tests;

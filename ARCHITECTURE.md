@@ -641,8 +641,8 @@ src/
 │   │   ├── host_input/
 │   │   │   ├── guarded_submission/
 │   │   │   │   ├── idle_stash/
-│   │   │   │   │   ├── receipt.rs
-│   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── idle_stash_tests.rs
+│   │   │   │   │   └── receipt.rs
 │   │   │   │   ├── executor_tests.rs
 │   │   │   │   └── idle_stash.rs
 │   │   │   └── guarded_submission.rs
