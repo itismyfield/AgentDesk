@@ -262,6 +262,7 @@ fn commit(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     claim: &Claim,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> io::Result<Fold> {
     let prior_fold = binding_events::codex::read_ownership(context)?;
     let matching_pending = prior_fold
@@ -274,7 +275,12 @@ fn commit(
             .as_ref()
             .is_some_and(|proof| proof.source.session_id == claim.session_id);
     let mut verified = None;
-    let decision = if !retry && !claim_eligible(context, claim) {
+    let decision = if !retry
+        && !claim_eligible(context, claim)
+        && !previous
+            .as_ref()
+            .is_some_and(|proof| claim.transition_from(&proof.source))
+    {
         Decision::Pending
     } else {
         match native(context, claim) {
@@ -308,17 +314,23 @@ fn commit(
         }
         _ => claim,
     };
-    binding_events::codex::commit_claim(context, persisted_claim, decision, || {
-        validate_context(authority, context)?;
-        if let Some(before) = &verified {
-            let after = native(context, claim)
-                .map_err(|_| invalid("Codex descriptor changed before commit"))?;
-            if after != *before {
-                return Err(invalid("Codex descriptor changed before commit"));
+    binding_events::codex::commit_claim_published(
+        context,
+        persisted_claim,
+        decision,
+        published_at,
+        || {
+            validate_context(authority, context)?;
+            if let Some(before) = &verified {
+                let after = native(context, claim)
+                    .map_err(|_| invalid("Codex descriptor changed before commit"))?;
+                if after != *before {
+                    return Err(invalid("Codex descriptor changed before commit"));
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn proof_for_binding(
@@ -364,9 +376,7 @@ fn publication_decision(
         super::codex_policy::SourcePolicyState::Legacy => OwnershipPublicationDecision::Permitted,
         super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => {
             let context = pin.into_context();
-            if proof_for_binding(authority, &context, binding).is_ok()
-                && permission(&context) == DeliveryPermission::Allowed
-            {
+            if proof_for_binding(authority, &context, binding).is_ok() {
                 OwnershipPublicationDecision::Permitted
             } else {
                 OwnershipPublicationDecision::Unavailable
@@ -405,9 +415,6 @@ pub(super) fn marker_metadata(
         relay_last_offset: Some(0),
     };
     let proof = proof_for_binding(authority, &context, &binding).map_err(|e| e.to_string())?;
-    if permission(&context) != DeliveryPermission::Allowed {
-        return Err("Codex delivery permission held".into());
-    }
     Ok(Some(marker_proof(&context, &proof)))
 }
 
@@ -435,9 +442,6 @@ fn source_read_decision(
     let Ok(proof) = proof_for_binding(authority, &context, binding) else {
         return SourceReadDecision::Unavailable;
     };
-    if permission(&context) != DeliveryPermission::Allowed {
-        return SourceReadDecision::Unavailable;
-    }
     let path = tc::session_temp_path(authority.session(), tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
     if std::fs::read(path)
         .ok()
@@ -466,9 +470,6 @@ pub(super) fn publish_proof(
     else {
         return Ok(false);
     };
-    if permission(context) != DeliveryPermission::Allowed {
-        return Ok(false);
-    }
     let binding = TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
         output_path: proof.source.path.display().to_string(),
@@ -564,11 +565,15 @@ pub(crate) fn observe_verified_codex_hook(
                     .is_some_and(|proof| proof.source.session_id == id)
             });
             let result = if qualified || retry {
-                commit(authority, context, &claim)
+                commit(authority, context, &claim, hook.published_at)
             } else {
-                binding_events::codex::commit_claim(context, &claim, Decision::Pending, || {
-                    validate_context(authority, context)
-                })
+                binding_events::codex::commit_claim_published(
+                    context,
+                    &claim,
+                    Decision::Pending,
+                    hook.published_at,
+                    || validate_context(authority, context),
+                )
             };
             match result {
                 Err(_) => IngressOutcome::NotDurable(NotDurableReason::Append),
@@ -593,7 +598,7 @@ pub(crate) fn resolve_under_authority(authority: &TmuxSourceAuthority<'_>) -> In
         for _ in 0..=fold.pending.len() {
             let before = fold.clone();
             for pending in before.pending.iter() {
-                fold = commit(authority, &context, &pending.claim)?;
+                fold = commit(authority, &context, &pending.claim, pending.published_at)?;
             }
             if fold == before {
                 break;
@@ -693,4 +698,49 @@ fn recover_discovered_under_authority(authority: &TmuxSourceAuthority<'_>, chann
             resolve_under_authority(authority),
             IngressOutcome::Durable(DurableKind::Adopted)
         )
+}
+
+/// O validates the exact durable source before translating its stored file name.
+pub(crate) fn historical_source_proven(
+    event: &crate::services::tui_o::writer::binding::BindingEvent,
+    source: &binding_events::SourceId,
+) -> bool {
+    tc::with_tmux_source_authority(&event.tmux_session, |authority| {
+        let Ok(Some(context)) = current_context(authority) else {
+            return false;
+        };
+        if event.provider != crate::services::tui_o::shadow::ShadowProvider::Codex
+            || event.channel_id != context.channel_id.unwrap_or(0)
+            || event.execution_nonce != context.execution_nonce
+        {
+            return false;
+        }
+        if binding_events::codex::proof_at_seq(&context, event.seq)
+            .is_ok_and(|proof| proof.is_some_and(|proof| proof.source == *source))
+        {
+            return true;
+        }
+        use crate::services::tui_o::writer::binding::{BindingRecord, BindingTarget};
+        let BindingRecord::Bound {
+            new:
+                BindingTarget::Pending {
+                    payload_session_id,
+                    payload_transcript_path,
+                },
+            ..
+        } = &event.record
+        else {
+            return false;
+        };
+        if payload_session_id != &source.session_id || payload_transcript_path != &source.path {
+            return false;
+        }
+        // A delayed descriptor binds at Pending's sequence using its exact durable resolution.
+        binding_events::binding_events_since(event.channel_id, event.seq).is_ok_and(|events| {
+            events.iter().any(|resolved| {
+                matches!(&resolved.new, binding_events::BindingTarget::Resolved { pending_seq, source: resolved_source } if *pending_seq == event.seq && resolved_source == source)
+                    && binding_events::codex::proof_at_seq(&context, resolved.seq).is_ok_and(|proof| proof.is_some_and(|proof| proof.source == *source && proof.ownership.pending_seq == Some(event.seq)))
+            })
+        })
+    })
 }

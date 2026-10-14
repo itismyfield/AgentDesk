@@ -183,7 +183,7 @@ fn pending_survives_restart_and_child_rejection_unblocks_the_parent() {
 }
 
 #[test]
-fn later_claim_preserves_current_proof_and_two_parents_never_pick_a_winner() {
+fn unordered_later_claim_preserves_current_proof_without_creating_pending() {
     for reverse in [false, true] {
         let fixture = Fixture::new();
         let (a, b) = if reverse {
@@ -196,28 +196,24 @@ fn later_claim_preserves_current_proof_and_two_parents_never_pick_a_winner() {
         let parent_claim = fixture.claim(&parent);
         let other_claim = fixture.claim(&other);
         let first = fixture.commit(&parent_claim, Decision::Verified(parent.clone()));
-        let conflict = fixture.commit(&other_claim, Decision::Verified(other));
-        assert!(conflict.conflicted);
-        assert_eq!(
-            conflict.verified, first.verified,
-            "conflict must retain the old proof as evidence"
-        );
-        assert_eq!(conflict.pending.len(), 1);
         let bytes = fixture.bytes();
-        fixture.commit(&other_claim, Decision::Pending);
-        assert_eq!(fixture.bytes(), bytes);
+        for decision in [
+            Decision::Verified(other),
+            Decision::Pending,
+            Decision::Rejected("subagent".into()),
+        ] {
+            assert_eq!(fixture.commit(&other_claim, decision), first);
+            assert_eq!(
+                fixture.bytes(),
+                bytes,
+                "unordered hooks cannot poison current ownership"
+            );
+        }
         assert_eq!(
             fixture.commit(&parent_claim, Decision::Verified(parent)),
-            conflict
+            first
         );
-        assert_eq!(
-            fixture.bytes(),
-            bytes,
-            "no matching Pending leaves the proof retry unchanged"
-        );
-        let remaining = fixture.commit(&other_claim, Decision::Rejected("subagent".into()));
-        assert!(!remaining.conflicted);
-        assert_eq!(remaining.verified, first.verified);
+        assert!(first.pending.is_empty() && !first.conflicted);
     }
 }
 
@@ -365,10 +361,13 @@ fn same_uuid_path_and_descriptor_replacement_are_not_idempotent_proofs() {
         file_identity(&fs::metadata(&source.path).unwrap()),
     );
     assert_ne!((changed.dev, changed.ino), (source.dev, source.ino));
-    assert!(
-        fixture
-            .commit(&claim, Decision::Verified(changed))
-            .conflicted
+    let held = fixture.commit(&claim, Decision::Verified(changed));
+    assert!(!held.conflicted && held.pending.is_empty());
+    assert_eq!(held.verified.unwrap().source, source);
+    assert_eq!(
+        fixture.bytes(),
+        before,
+        "replacement without publish time is unchanged"
     );
 }
 
@@ -552,7 +551,7 @@ fn same_verified_retry_resolves_a_later_matching_pending_once() {
 }
 
 #[test]
-fn same_claim_retry_cannot_resolve_replaced_descriptors_or_other_parents() {
+fn same_claim_retry_holds_unordered_replacement_and_ignores_unordered_other_parent() {
     for replace in [false, true] {
         let fixture = Fixture::new();
         let source = fixture.source(PARENT);
@@ -573,10 +572,14 @@ fn same_claim_retry_cannot_resolve_replaced_descriptors_or_other_parents() {
         }
         let bytes = fixture.bytes();
         let held = fixture.commit(&claim, Decision::Verified(candidate));
-        assert!(held.conflicted);
+        assert_eq!(held.conflicted, replace);
         assert_eq!(held.verified.as_ref().unwrap().source, source);
-        assert!(!held.pending.is_empty());
-        assert_eq!(fixture.bytes(), bytes);
+        assert_eq!(!held.pending.is_empty(), replace);
+        if replace {
+            assert_eq!(fixture.bytes(), bytes);
+        } else {
+            assert_ne!(fixture.bytes(), bytes);
+        }
         forget_channel_for_tests(584_503);
         assert_eq!(codex::read_ownership(&fixture.context).unwrap(), held);
     }
