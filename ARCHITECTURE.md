@@ -1945,9 +1945,7 @@ src/
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
-│   │   │   │   ├── contracts.rs
-│   │   │   │   ├── o_panel_below.rs
-│   │   │   │   └── o_panel_below_tests.rs
+│   │   │   │   └── contracts.rs
 │   │   │   ├── finalize_epilogue/
 │   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/

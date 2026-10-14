@@ -54,6 +54,8 @@ pub(crate) type Admission<'a> = (&'a EpisodePermissionRecord, &'a OwedOrigin);
 /// Highest message id O posted per channel in this process; Legacy keeps its live panel below it.
 static LAST_POSTED: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Mutex::default);
 
+// Tests read the position they set as a late-O-post stimulus; no production path reads it.
+#[cfg(test)]
 pub fn last_posted(channel: u64) -> Option<u64> {
     let posted = LAST_POSTED
         .lock()
