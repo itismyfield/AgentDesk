@@ -286,7 +286,9 @@ async fn settle_policy_close(
     intent: super::episode::PolicyCloseIntent,
     shared: &Arc<SharedData>,
 ) -> (PolicyCloseOutcome, Option<FinalizeOutcome>) {
-    use crate::services::turn_orchestrator::policy_close::PolicyMailboxOutcome as Mailbox;
+    use crate::services::turn_orchestrator::policy_close::{
+        Point, PolicyMailboxOutcome as Mailbox,
+    };
     let super::episode::PolicyCloseIntent {
         key,
         provider,
@@ -295,11 +297,22 @@ async fn settle_policy_close(
         snapshot,
     } = intent;
     let channel = key.channel_id;
-    let finish = match super::super::mailbox_finish::policy_close_on_captured(
-        shared, &mailbox, channel, request,
-    )
-    .await
-    {
+    let trace = request.trace.clone();
+    let captured =
+        super::super::mailbox_finish::policy_close_on_captured(shared, &mailbox, channel, request)
+            .await;
+    // The wrapper returned, so a commit's queue-exit feedback ran; nothing downstream of it.
+    trace.note(
+        Point::QueueExit,
+        u64::from(matches!(captured, Ok(Mailbox::Committed(_)))),
+    );
+    #[cfg(test)]
+    use crate::services::turn_orchestrator::policy_close::test_hooks::{Branch, Stage};
+    #[cfg(test)]
+    if !matches!(captured, Ok(Mailbox::Committed(_))) {
+        trace.not_run(Branch::NotCommitted);
+    }
+    let finish = match captured {
         Err(stage) => return (PolicyCloseOutcome::Unconfirmed(stage), None),
         Ok(Mailbox::Duplicate) => return (PolicyCloseOutcome::DuplicateConfirmed, None),
         Ok(Mailbox::Superseded) => return (PolicyCloseOutcome::Superseded, None),
@@ -310,6 +323,13 @@ async fn settle_policy_close(
         clear_inflight: false,
         ..FinalizeContext::bridge()
     };
+    // Test seam between the commit and its trailing finalize, which has not been entered yet.
+    #[cfg(test)]
+    {
+        trace.not_run(Branch::BeforeFinalize);
+        trace.fire(Stage::BeforeFinalize);
+    }
+    trace.note(Point::FinalizeEntered, 1);
     let finalized = super::finalize::do_finalize_with_release(
         key,
         provider,
@@ -321,5 +341,6 @@ async fn settle_policy_close(
         true,
     )
     .await;
+    trace.note(Point::FinalizeReturned, 1);
     (PolicyCloseOutcome::Settled, Some(finalized))
 }

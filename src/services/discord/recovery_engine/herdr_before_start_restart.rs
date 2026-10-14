@@ -128,15 +128,16 @@ impl BeforeStartRestart {
             return kept(state, "a live actor owns the channel");
         }
         let mut row = state.clone();
+        // A pending or delivered receipt without its message is never settled.
+        if row.current_msg_id == 0 {
+            return kept(state, "no message to show the stop on");
+        }
         if row
             .herdr_before_start_stop
             .as_ref()
             .is_some_and(|receipt| receipt.notice_pending())
             || inflight::receipt_mutant("delivered-resend")
         {
-            if row.current_msg_id == 0 {
-                return kept(state, "no message to show the stop on");
-            }
             let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
             let anchor = MessageId::new(row.current_msg_id);
             let sent = gateway

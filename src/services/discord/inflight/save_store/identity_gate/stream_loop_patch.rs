@@ -496,6 +496,10 @@ fn patch_restart_mode_if_matches_identity_in_root(
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
+    // A policy receipt row never takes a restart marker.
+    if crate::services::discord::inflight::receipt_protected_path(&path) {
+        return GuardedSaveOutcome::AuthorityPinned;
+    }
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
         return GuardedSaveOutcome::RowAbsent;
     };
