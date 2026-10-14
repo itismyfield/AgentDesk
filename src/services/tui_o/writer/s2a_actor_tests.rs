@@ -314,9 +314,10 @@ async fn s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll
     actual_driver_case("first_poll").await;
 }
 
-// Dedupe state stays isolated until the blocking driver and its actor have both stopped.
+// Fixture guards stay isolated until the blocking driver and its actor have both stopped.
 struct ActualDriverIsolation {
     _state: std::sync::MutexGuard<'static, ()>,
+    _endpoint: std::sync::MutexGuard<'static, ()>,
 }
 
 async fn actual_driver_case(mode: &'static str) {
@@ -345,9 +346,27 @@ async fn actual_driver_case(mode: &'static str) {
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &temp_parent);
     let _dedupe_lock = ActualDriverIsolation {
         _state: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+        _endpoint: crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
     };
-    let (_env_root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let (env_root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     dedupe::reset_state_for_tests();
+    let binary = env_root.path().join("codex");
+    let probes = env_root.path().join("probes");
+    let unsupported = env_root.path().join("unsupported");
+    std::fs::write(&binary, format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = 'resume --help' ]; then echo probe >> '{}'; if [ -f '{}' ]; then echo unsupported; else echo --dangerously-bypass-hook-trust; fi; else echo 'codex-cli 0.157.1'; fi\n",
+        probes.display(), unsupported.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _hooks = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+        std::ffi::OsStr::new("1"),
+    );
+    if mode == "s1w_support" {
+        std::fs::write(&unsupported, "unsupported").unwrap();
+    }
     let channel = crate::services::codex_tui::canary::CANARY_CHANNEL;
     let tmux = crate::services::codex_tui::canary::CANARY_TMUX;
     let native_id = "019e660d-4859-7522-9cee-8ba7c4e7c743";
@@ -388,7 +407,21 @@ async fn actual_driver_case(mode: &'static str) {
         first_prompt_digest: Some(format!("sha256:{}", hex::encode(Sha256::digest(b"first")))),
         source_policy: Some("verified".into()),
     };
-    PreparedIncarnation::create(context.clone()).unwrap();
+    let canonical = PreparedIncarnation::create(context.clone()).unwrap().path;
+    let archive_dir =
+        std::path::Path::new(&context.owner_runtime_root).join("runtime/binding_evidence/codex");
+    let archive = archive_dir.join(format!("{}.json", context.execution_nonce));
+    let identity_paths = [canonical, archive, source.path.clone()];
+    let identity_before: Vec<_> = identity_paths
+        .iter()
+        .map(|path| {
+            (
+                std::fs::read(path).unwrap(),
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+            )
+        })
+        .collect();
+    let archive_count = std::fs::read_dir(&archive_dir).unwrap().count();
     let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&nonce).parent().unwrap()).unwrap();
     std::fs::write(nonce, &context.execution_nonce).unwrap();
@@ -407,6 +440,14 @@ async fn actual_driver_case(mode: &'static str) {
         dedupe::codex_verified::DeliveryPermission::Allowed,
     );
     let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+    let _binary = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_PATH",
+        &binary,
+    );
+    assert_eq!(
+        std::env::var_os("AGENTDESK_CODEX_PATH").as_deref(),
+        Some(binary.as_os_str())
+    );
     let envelope = HookBindingEnvelope {
         context: CapturedContext::Captured(context.clone()),
         observed: ObservedHookProcess::default(),
@@ -454,6 +495,7 @@ async fn actual_driver_case(mode: &'static str) {
     } else {
         None
     };
+    let _ = fake.take_calls();
     let io = TestIo::over(&harness);
     let ready = crate::services::tui_o::writer::host::process_readiness();
     let mut handles = start_managed(
@@ -510,12 +552,23 @@ async fn actual_driver_case(mode: &'static str) {
         let row =
             crate::services::discord::save_actual_episode_for_tests(channel, tmux, 30 + i, &token);
         let row_before = std::fs::read(&row).unwrap();
+        let row_modified = std::fs::metadata(&row).unwrap().modified().unwrap();
         let worker_context = context.clone();
         let worker_token = Arc::clone(&token);
         let path = source.path.clone();
         let worker_mailbox = mailbox.clone();
         let (tx, rx) = std::sync::mpsc::channel();
+        let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
         let task = tokio::task::spawn_blocking(move || {
+            let endpoint = std::rc::Rc::new(std::cell::RefCell::new(Some(endpoint)));
+            if matches!(mode, "s1w_initial" | "s1w_rollback") {
+                endpoint.borrow_mut().take();
+            }
+            if mode == "s1w_rollback" {
+                crate::services::codex::SOURCE_MODE_TEST.with(|slot| slot.set(Some(crate::services::codex_tui::session::source_observation::CodexSourceMode::Legacy)));
+            }
             use crate::services::codex_tui::host_input::spy::{SpyGuard, SpyState};
             use std::io::Write;
             dedupe::binding_events::set_test_root(worker_context.provider_root.as_deref());
@@ -567,9 +620,20 @@ async fn actual_driver_case(mode: &'static str) {
             let stages = Arc::clone(&boundaries);
             let (hook_token, hook_context) = (Arc::clone(&worker_token), worker_context.clone());
             let mut faults = Vec::new();
+            let hook_endpoint = std::rc::Rc::clone(&endpoint);
+            let mut effects = 0;
             crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move |stage| {
                     stages.lock().unwrap().push(stage.to_owned());
+                    if mode == "s1w_prepare" && stage == "prepare_ack" { hook_endpoint.borrow_mut().take(); }
+                    if stage == "effect_ack" {
+                        effects += 1;
+                        if mode == "s1w_enter" && effects == 1 { hook_endpoint.borrow_mut().take(); }
+                    }
+                    if mode.starts_with("s1w_") && stage.starts_with("held:") {
+                        assert!(!hook_token.cancelled.load(Ordering::Acquire), "refusal must precede cleanup cancellation");
+                        hook_token.publish_cancel("eligibility refusal observed");
+                    }
                     if (mode=="cancel_before" && stage=="prepare_ack") || (mode=="cancel_submitted" && stage=="submitted")
                         || (mode=="cancel_attach" && stage=="close_ack") {hook_token.publish_cancel("boundary stop");}
                     if mode=="close_write" && stage=="before_close" {
@@ -640,6 +704,7 @@ async fn actual_driver_case(mode: &'static str) {
                 worker_token,
                 tx,
             );
+            crate::services::codex::SOURCE_MODE_TEST.with(|slot| slot.set(None));
             finished.store(true, Ordering::Release);
             watchdog.join().unwrap();
             let result_tuple = (
@@ -662,16 +727,126 @@ async fn actual_driver_case(mode: &'static str) {
             handles.pop().unwrap().stop_and_join().await.unwrap();
         }
         let (result, calls, expired, stages) = outcome.unwrap();
+        if mode.starts_with("s1w_") {
+            handles.pop().unwrap().stop_and_join().await.unwrap();
+        }
+        if matches!(mode, "two" | "delivery_off") {
+            eprintln!(
+                "S1W_PANE_TRACE {}",
+                serde_json::json!({"mode": mode, "turn": i, "calls": calls})
+            );
+        }
         assert!(result.is_ok(), "actual driver: {result:?}, calls={calls:?}");
         let expected_input = !matches!(
             mode,
-            "cancel_before" | "source_changed" | "late_prepare" | "row_swap"
+            "cancel_before"
+                | "source_changed"
+                | "late_prepare"
+                | "row_swap"
+                | "s1w_initial"
+                | "s1w_prepare"
+                | "s1w_enter"
+                | "s1w_rollback"
+                | "s1w_support"
         );
         assert_eq!(
             calls.iter().any(|c| c == "keys:Enter"),
             expected_input,
             "actual input boundary: mode={mode}, calls={calls:?}, stages={stages:?}"
         );
+        if mode.starts_with("s1w_") {
+            assert_eq!(
+                std::fs::metadata(&row).unwrap().modified().unwrap(),
+                row_modified
+            );
+            assert!(
+                !expired,
+                "guard refusal cannot be a watchdog PASS: {stages:?}"
+            );
+            assert!(
+                stages.iter().any(|s| s.contains("HooksUnavailable")),
+                "specific eligibility refusal required: {stages:?}"
+            );
+            let captured = matches!(mode, "s1w_prepare" | "s1w_enter");
+            assert_eq!(
+                stages.iter().any(|s| s == "prepare_ack"),
+                captured,
+                "Capture boundary: {stages:?}"
+            );
+            if !captured {
+                assert!(
+                    calls.is_empty(),
+                    "initial refusal precedes all pane transport: {calls:?}"
+                );
+            }
+            assert_eq!(
+                calls
+                    .iter()
+                    .any(|c| c.starts_with("literal:") || c.starts_with("paste:")),
+                mode == "s1w_enter",
+                "payload boundary: {calls:?}"
+            );
+            assert!(
+                !stages
+                    .iter()
+                    .any(|s| s == "before_close" || s == "close_ack" || s == "submitted")
+            );
+            let floor_path = harness
+                ._runtime
+                .path()
+                .join("o_store")
+                .join(channel.to_string())
+                .join("codex_provenance");
+            let floors = if floor_path.exists() {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(floor_path).unwrap()).unwrap();
+                let floors = saved["floors"].as_array().unwrap();
+                if captured {
+                    assert_eq!(
+                        floors[0]["launch"]["context"],
+                        serde_json::to_value(&context).unwrap()
+                    );
+                    assert_eq!(
+                        floors[0]["launch"]["episode"]["turn_nonce"].as_str(),
+                        token.turn_nonce()
+                    );
+                }
+                floors.len()
+            } else {
+                0
+            };
+            assert_eq!(
+                floors,
+                usize::from(captured),
+                "durable floor must survive effect refusal"
+            );
+            assert!(
+                rx.try_iter().next().is_none(),
+                "held driver emits no body/Done/Error/RuntimeReady/handback"
+            );
+            if mode == "s1w_support" {
+                assert!(std::fs::read_to_string(&probes).unwrap().contains("probe"));
+            }
+            for (path, before) in identity_paths.iter().zip(&identity_before) {
+                assert_eq!(
+                    &(
+                        std::fs::read(path).unwrap(),
+                        std::fs::metadata(path).unwrap().modified().unwrap()
+                    ),
+                    before,
+                    "identity bytes/mtime: {path:?}"
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(&archive_dir).unwrap().count(),
+                archive_count
+            );
+            let live = mailbox.try_snapshot().await.unwrap();
+            assert!(
+                Arc::ptr_eq(live.cancel_token.as_ref().unwrap(), &token),
+                "held episode keeps the same token"
+            );
+        }
         if matches!(mode, "two" | "first_poll") {
             let file = harness
                 ._runtime
@@ -722,8 +897,14 @@ async fn actual_driver_case(mode: &'static str) {
             return;
         }
         let read = harness.channel().codex_provenance();
-        let crate::services::tui_o::store::codex_provenance::Sidecar::Present(read) = read else {
-            panic!("closed sidecar absent")
+        let read = match read {
+            crate::services::tui_o::store::codex_provenance::Sidecar::Present(read) => Some(read),
+            crate::services::tui_o::store::codex_provenance::Sidecar::Missing
+                if matches!(mode, "s1w_initial" | "s1w_rollback" | "s1w_support") =>
+            {
+                None
+            }
+            _ => panic!("closed sidecar absent or invalid"),
         };
         let expected_registry = matches!(mode, "two" | "delivery_off" | "first_poll");
         assert_eq!(
@@ -736,12 +917,12 @@ async fn actual_driver_case(mode: &'static str) {
             "two" | "delivery_off" | "cancel_attach" | "late_close" | "first_poll"
         );
         assert_eq!(
-            !read.spans().is_empty(),
+            read.as_ref().is_some_and(|read| !read.spans().is_empty()),
             expected_closed,
             "closed evidence: mode={mode}, stages={stages:?}"
         );
         if expected_closed {
-            let span = read.spans().last().unwrap().clone();
+            let span = read.unwrap().spans().last().unwrap().clone();
             assert!(span.end.is_some());
             assert_eq!(span.execution.execution_nonce, context.execution_nonce);
             assert_eq!(span.episode.turn_nonce, token.turn_nonce().unwrap());
@@ -815,12 +996,19 @@ async fn actual_driver_case(mode: &'static str) {
         );
     }
     assert!(
-        fake.take_calls()
-            .iter()
-            .all(|c| !c.contains("kill-session")),
-        "new warm path has no kill authority"
+        fake.take_calls().iter().all(|c| ![
+            "kill-session",
+            "new-session",
+            "send-keys",
+            "paste-buffer"
+        ]
+        .iter()
+        .any(|effect| c.starts_with(effect))),
+        "verified driver has no cleanup/fallback/replay effect"
     );
-    handles.pop().unwrap().stop_and_join().await.unwrap();
+    if let Some(handle) = handles.pop() {
+        handle.stop_and_join().await.unwrap();
+    }
     admission::set_ready_for_tests(channel, false);
     admission::forget_channel_for_tests(channel);
     dedupe::binding_events::set_test_root(None);
@@ -834,4 +1022,30 @@ fn provenance_origin_for_actual_test(
         span: span.clone(),
         range: span.start..span.end.unwrap(),
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_missing_endpoint_refuses_before_capture() {
+    actual_driver_case("s1w_initial").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_rechecks_eligibility_after_prepare_ack() {
+    actual_driver_case("s1w_prepare").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_rechecks_before_enter_without_claiming_no_attempt() {
+    actual_driver_case("s1w_enter").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_pinned_verified_warm_cannot_skip_checks_after_launch_mode_rollback() {
+    actual_driver_case("s1w_rollback").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_support_refusal_is_not_an_empty_fixture_pass() {
+    actual_driver_case("two").await;
+    actual_driver_case("s1w_support").await;
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Decide whether a CI macOS Trusted push needs the heavy macOS steps.
+"""Decide whether a CI macOS Trusted run needs the heavy macOS steps.
 
 Prints exactly one line, `run=true` or `run=false`, for `$GITHUB_OUTPUT`.
-Changed paths are this branch's own commits: `git diff <merge-base> HEAD`
+Only `push` is path-filtered; any other event (`schedule`, `workflow_dispatch`) runs.
+A push's changed paths are this branch's own commits: `git diff <merge-base> HEAD`
 against the base ref. Anything this script cannot establish prints
 `run=true`; only a fully resolved, non-empty diff with no Rust input skips.
 """

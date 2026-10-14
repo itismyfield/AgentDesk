@@ -841,3 +841,6 @@ impl Ports for LivePorts {
 #[cfg(all(test, unix))]
 #[path = "activity_tests.rs"]
 pub(in crate::services::discord) mod tests;
+
+#[cfg(all(test, unix))]
+mod tail;

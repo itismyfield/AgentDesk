@@ -12,6 +12,25 @@ pub(crate) struct DurableReceipt {
     pub(crate) identity: ReceiptIdentity,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResponsibilityLookup {
+    pub(crate) responsibility: Responsibility,
+    pub(crate) receipt: Option<DurableReceipt>,
+}
+
+impl ResponsibilityLookup {
+    pub(super) fn unknown() -> Self {
+        Self::unproven(Responsibility::Unknown)
+    }
+
+    pub(super) fn unproven(responsibility: Responsibility) -> Self {
+        Self {
+            responsibility,
+            receipt: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Deferred {
     Closed,
@@ -37,6 +56,75 @@ fn known(rows: &Rows, key: u64, received_seq: u64) -> Option<DurableReceipt> {
         received_seq,
         identity: rows.receipt_identity(key)?,
     })
+}
+
+pub(super) fn lookup(rows: &Rows, identity: &ReceiptIdentity) -> ResponsibilityLookup {
+    #[cfg(test)]
+    let identity = lookup_query(rows, identity);
+    #[cfg(test)]
+    let identity = &identity;
+    let responsibility = rows.responsibility(identity);
+    #[cfg(test)]
+    let responsibility = match responsibility {
+        Responsibility::Unknown if super::mutant("c2c1_lookup_unknown_to_absent") => {
+            Responsibility::Absent
+        }
+        Responsibility::Legacy { key, received_seq }
+            if super::mutant("c2c1_lookup_legacy_to_known") =>
+        {
+            Responsibility::Known { key, received_seq }
+        }
+        responsibility => responsibility,
+    };
+    let receipt = match responsibility {
+        Responsibility::Known { key, received_seq }
+        | Responsibility::Legacy { key, received_seq } => known(rows, key, received_seq),
+        _ => None,
+    };
+    let responsibility = match responsibility {
+        Responsibility::Known { .. } | Responsibility::Legacy { .. } if receipt.is_none() => {
+            Responsibility::Unknown
+        }
+        responsibility => responsibility,
+    };
+    #[cfg(test)]
+    let receipt = receipt.map(|mut receipt| {
+        if super::mutant("c2c1_lookup_query_identity") {
+            receipt.identity = identity.clone();
+        }
+        receipt
+    });
+    ResponsibilityLookup {
+        responsibility,
+        receipt,
+    }
+}
+
+#[cfg(test)]
+fn lookup_query(rows: &Rows, identity: &ReceiptIdentity) -> ReceiptIdentity {
+    let mut query = identity.clone();
+    if super::mutant("c2c1_lookup_primary_only") {
+        query.source_ids.truncate(1);
+    }
+    if let Some(canonical) = rows.open_rows().find_map(|(key, _)| {
+        rows.receipt_identity(key).filter(|canonical| {
+            canonical
+                .source_ids
+                .iter()
+                .any(|id| query.source_ids.contains(id))
+        })
+    }) {
+        if super::mutant("c2c1_lookup_ignores_author") {
+            query.author_id = canonical.author_id;
+        }
+        if super::mutant("c2c1_lookup_ignores_original_channel") {
+            query.original_channel_id = canonical.original_channel_id;
+        }
+        if super::mutant("c2c1_lookup_ignores_execution_channel") {
+            query.execution_channel_id = canonical.execution_channel_id;
+        }
+    }
+    query
 }
 
 pub(super) fn commit(lease: &mut LedgerLease, source: Source, permits_new: bool) -> Receipt {

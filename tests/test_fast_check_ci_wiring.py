@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "4c8a89bfc9f48fac3e8d32cdf6327317a865ffee77cef5923230040a14578e52"
+    "3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 # Job-level condition of every required-context mirror and its source line.
@@ -2775,6 +2775,25 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
                     PR_WORKFLOW.read_text(encoding="utf-8"), {"runner-probe.yaml": workflow}
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hardening_keeps_trusted_macos_scheduled_and_uncancelled(self) -> None:
+        pr_workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        trusted = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")
+        mutations = {
+            "push": ("  workflow_dispatch:\n", "  push:\n    branches: [main]\n  workflow_dispatch:\n"),
+            "no-cron": ("    - cron: ", "    - not-cron: "),
+            "cancel": ("  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
+            "shared-group": ("${{ github.event_name }}-", ""),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(mutation=name):
+                mutated = trusted.replace(old, new, 1)
+                self.assertNotEqual(mutated, trusted)
+                result = self.run_hardening_fixture(
+                    pr_workflow, extra_workflows={"ci-macos-trusted.yml": mutated}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("no run may cancel another", result.stderr)
 
     def test_hardening_distinguishes_retired_variable_reads_from_prose(self) -> None:
         variants = {

@@ -1,25 +1,14 @@
-"""Check: production giants may not grow beyond their frozen baseline (#3028).
+"""Block production giant growth against the comparison SHA, without slack.
 
-``giant_files`` requires every >= 1000 prod-LoC file to be documented in the
-change-surfaces map, but it puts no ceiling on growth — so decomposed modules
-silently re-inflated (``tmux_watcher.rs`` regrew 7160 -> 9608 production LoC).
-
-This ratchet freezes each listed giant at a baseline production LoC
-(``scripts/audit_maintainability_giant_baseline.toml``) and fails ``--check``
-when a file exceeds it by more than ``WIRING_SLACK_LINES`` (shared with the
-hot-file ratchet). The slack is measured from the frozen baseline, so it admits
-a few wiring lines once, never cumulative growth. Lower a baseline as a file
-shrinks; raising one is a deliberate, reviewable admission that a giant grew
-(prefer splitting instead).
-
-Production LoC (test code excluded) is shared with ``giant_files`` via
-``giant_production_loc()`` so every giant surface agrees on the split (#3036).
+Git exports enforce frozen caps; a Git candidate may retain inherited overage
+only while keeping or reducing the comparison tree's measured production LoC.
 """
 
 from __future__ import annotations
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -69,10 +58,9 @@ def load_giant_baseline(path: Path | None = None) -> dict[str, int]:
 
 def _run(allowlist: set[str]) -> Iterable[Finding]:
     baseline = load_giant_baseline()
-    if not baseline:
-        return []
-
     current = giant_production_loc()
+    if not baseline and not current:
+        return []
     findings: list[Finding] = []
     admission_audit = audit_repository_admissions(
         repo_root=common.REPO_ROOT,
@@ -93,31 +81,40 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
                 extra={"history": "scripts/ratchet_admission_history.toml"},
             )
         )
-    for rel, frozen in baseline.items():
+    prior: dict[str, int] = {}
+    if admission_audit.base_sha is not None:
+        import giant_file_progress as progress
+        from .giant_files import _INVENTORY
+
+        with tempfile.TemporaryDirectory(prefix="giant-audit-base-") as tmp:
+            old_root = progress.ROOT
+            try:
+                progress.ROOT = common.REPO_ROOT
+                progress.archive(admission_audit.base_sha, Path(tmp))
+            finally:
+                progress.ROOT = old_root
+            prior = _INVENTORY.giant_file_snapshot(Path(tmp))["modules"]
+    for rel, loc in current.items():
         if common.is_allowlisted(allowlist, rel):
             continue
-        loc = current.get(rel)
-        # `loc is None` means the file dropped below the giant threshold, was
-        # split, or was removed — all wins, never a regression.
-        if loc is None or loc <= frozen + WIRING_SLACK_LINES:
+        frozen = baseline.get(rel)
+        ceiling = prior.get(rel) if admission_audit.base_sha is not None else frozen
+        if ceiling is not None and ceiling >= 1000 and loc <= ceiling:
             continue
         findings.append(
             Finding(
                 rule="giant_file_ratchet",
-                severity="warn",
+                severity="error",
                 file=rel,
                 line=None,
                 message=(
-                    f"grew to {loc} production LoC > baseline {frozen} + slack "
-                    f"{WIRING_SLACK_LINES} (re-inflation); split the file or "
-                    f"shrink it back. Baseline: {CONFIG_REL_PATH}"
+                    f"new giant at {loc} production LoC; split below 1000"
+                    if ceiling is None or ceiling < 1000 else
+                    f"grew to {loc} production LoC > baseline {ceiling} + slack "
+                    f"{WIRING_SLACK_LINES} (re-inflation); split or shrink it back"
                 ),
-                extra={
-                    "loc": str(loc),
-                    "baseline": str(frozen),
-                    "slack": str(WIRING_SLACK_LINES),
-                    "config": CONFIG_REL_PATH,
-                },
+                extra={"loc": str(loc), "baseline": str(ceiling),
+                       "slack": str(WIRING_SLACK_LINES), "config": CONFIG_REL_PATH},
             )
         )
     findings.sort(key=lambda f: -(int(f.extra.get("loc", "0"))))
@@ -130,7 +127,7 @@ CHECK = CheckSpec(
     description=(
         "Production giants listed in "
         f"{CONFIG_REL_PATH} must not exceed their frozen production-LoC "
-        f"baseline plus a {WIRING_SLACK_LINES}-line wiring slack."
+        "baseline SHA measurement; Git exports enforce the frozen cap."
     ),
     hard_gate=True,
     runner=_run,

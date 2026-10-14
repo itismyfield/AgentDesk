@@ -586,6 +586,12 @@ fn warm_followup_on(
             .and_then(|marker| marker.rollout_start_offset)
             .unwrap_or(0),
     );
+    // Held until this handoff's tail returns; an input seen first waits for its turn.
+    let _handoff = crate::services::tui_prompt_dedupe::reserve_discord_handoff(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        prompt,
+    );
     crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
         ProviderKind::Codex.as_str(),
         tmux_session_name,
@@ -1298,6 +1304,8 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     {
         return Err("verified warm incarnation mismatch".into());
     }
+    crate::services::codex::verified_warm_preflight(request.options, source.context())
+        .map_err(|reason| format!("verified warm ineligible: {reason:?}"))?;
     let ready = host::process_readiness();
     let port = ready
         .submission(request.channel)
@@ -1324,10 +1332,27 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     )?;
     let guard = |send: &mut dyn FnMut() -> host_input::InputRun| {
         let refused = || host_input::InputRun::Refused(host_input::InputRefusal::Conflict);
+        // Probe outside source/Live locks; both payload and Enter use this callback.
+        let eligibility = match crate::services::codex::verified_warm_preflight(
+            request.options,
+            source.context(),
+        ) {
+            Ok(eligibility) => eligibility,
+            Err(reason) => {
+                tracing::warn!(
+                    tmux = request.tmux,
+                    ?reason,
+                    "verified warm eligibility refused"
+                );
+                #[cfg(test)]
+                actual_boundary(&format!("eligibility_refused:{reason:?}"));
+                return refused();
+            }
+        };
         if await_verified(&runtime, request.token.as_ref(), row.recheck()).is_err() {
             return refused();
         }
-        tc::with_tmux_source_authority(request.tmux, |authority| {
+        let run = tc::with_tmux_source_authority(request.tmux, |authority| {
             if source.recheck(authority).is_err()
                 || prepared.floor().verify_before_prepare().is_err()
                 || cancel_requested(Some(request.token.as_ref()))
@@ -1335,9 +1360,19 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
                 return refused();
             }
             ready
-                .with_current_prepared(request.channel, &prepared, send)
+                .with_current_prepared(request.channel, &prepared, || {
+                    if eligibility.recheck().is_err() {
+                        return refused();
+                    }
+                    send()
+                })
                 .unwrap_or_else(|_| refused())
-        })
+        });
+        #[cfg(test)]
+        if matches!(run, host_input::InputRun::Applied) {
+            actual_boundary("effect_ack");
+        }
+        run
     };
     let receipt = submit_warm(&evidence, &request.token, source.context(), || {
         super::host_input::submit_verified_followup(

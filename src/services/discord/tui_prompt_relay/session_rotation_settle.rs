@@ -62,8 +62,8 @@ pub(in crate::services::discord) enum ClaudeRotationPlan {
     /// with a tail that has provably stopped). It can never receive a terminal,
     /// so settle it and release the channel.
     SettleStaleInflight,
-    /// Nothing is pinned to the frozen transcript; the rotation is already fully
-    /// propagated and the record can be retired.
+    /// No inflight is pinned to the frozen transcript, so the record is retired. This
+    /// checks neither that a feeder moved to the new transcript nor any delivery.
     RebindOnly,
 }
 
@@ -326,8 +326,8 @@ async fn settle_one_claude_session_rotation(
                 new_session_id = %rotation.new_session_id,
                 old_transcript_path = %rotation.old_output_path,
                 new_transcript_path = %rotation.new_output_path,
-                "#5188: Claude session rotation fully propagated; delivery now reads the new \
-                 transcript and no inflight is pinned to the frozen one"
+                "#5188: retired Claude session rotation record; no inflight is pinned to the \
+                 frozen transcript (feeder switch and delivery not verified here)"
             );
             crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                 &rotation.tmux_session_name,
@@ -451,10 +451,8 @@ mod tests {
         }
     }
 
-    // Direction (a): a rotation with no inflight pinned to the frozen transcript
-    // is already fully propagated — delivery follows the new session and the
-    // record retires. Before #5188 the binding was reverted to the frozen file by
-    // the launch-script rehydration pass and nothing ever retired.
+    // Direction (a): with no inflight pinned to the frozen transcript the record retires
+    // at once; this plan checks neither the feeder switch nor delivery.
     #[test]
     fn rotation_without_a_pinned_inflight_rebinds_immediately() {
         assert_eq!(
@@ -472,6 +470,27 @@ mod tests {
     // Direction (b) — THE REGRESSION THIS FIX MUST NOT CAUSE. A live turn's answer
     // was written to the transcript that `/clear` then froze. Chasing the rotation
     // now would discard it, so the plan must be to drain first.
+    /// The retire log claims only what the plan checked: no inflight pinned to the frozen file.
+    #[cfg(unix)]
+    #[test]
+    fn the_rebind_only_log_does_not_claim_a_feeder_switch_or_delivery() {
+        let arm = include_str!("session_rotation_settle.rs")
+            .split_once("ClaudeRotationPlan::RebindOnly => {")
+            .expect("the RebindOnly arm")
+            .1
+            .split_once("clear_claude_session_rotation(")
+            .expect("the arm retires the record")
+            .0;
+        assert!(
+            arm.contains("feeder switch and delivery not verified here"),
+            "{arm}"
+        );
+        assert!(
+            !arm.contains("fully propagated") && !arm.contains("delivery now reads"),
+            "{arm}"
+        );
+    }
+
     #[test]
     fn undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles() {
         assert_eq!(

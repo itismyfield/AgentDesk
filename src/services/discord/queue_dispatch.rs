@@ -1,3 +1,4 @@
+use super::busy_followup_retry_store::{RetryClass, auto_pick, input_class};
 use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
@@ -109,23 +110,17 @@ pub(in crate::services::discord) struct MailboxEnqueueOutcome {
 pub(super) enum AutomaticQueueProgression {
     Empty,
     BlockedByCappedRetries,
+    /// A retry record that cannot be read: its input is neither run nor passed over.
+    BlockedByUnreadableRetryState,
     Eligible(MessageId),
 }
 
-fn busy_retry_is_capped(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    intervention: &Intervention,
-) -> bool {
-    super::busy_followup_retry_store::state_is_capped(
-        super::busy_followup_retry_store::resolve_identity(
-            provider,
-            channel_id.get(),
-            intervention.message_id.get(),
-            &intervention.source_message_ids,
-        )
-        .state,
-    )
+fn progression_of(class: RetryClass, message_id: MessageId) -> AutomaticQueueProgression {
+    match class {
+        RetryClass::Ready => AutomaticQueueProgression::Eligible(message_id),
+        RetryClass::Parked => AutomaticQueueProgression::BlockedByCappedRetries,
+        RetryClass::Unavailable(_) => AutomaticQueueProgression::BlockedByUnreadableRetryState,
+    }
 }
 
 pub(super) fn automatic_progression(
@@ -140,11 +135,23 @@ pub(super) fn automatic_progression(
     ) {
         return AutomaticQueueProgression::Empty;
     }
-    if let Some(intervention) = snapshot.intervention_queue.iter().find(|intervention| {
-        intervention.mode == InterventionMode::Soft
-            && !busy_retry_is_capped(provider, channel_id, intervention)
-    }) {
-        return AutomaticQueueProgression::Eligible(intervention.message_id);
+    let soft: Vec<&Intervention> = snapshot
+        .intervention_queue
+        .iter()
+        .filter(|intervention| intervention.mode == InterventionMode::Soft)
+        .collect();
+    let classes: Vec<RetryClass> = soft
+        .iter()
+        .map(|intervention| input_class(provider, channel_id, intervention))
+        .collect();
+    if let Some(index) = auto_pick(&classes) {
+        return AutomaticQueueProgression::Eligible(soft[index].message_id);
+    }
+    if classes
+        .iter()
+        .any(|class| matches!(class, RetryClass::Unavailable(_)))
+    {
+        return AutomaticQueueProgression::BlockedByUnreadableRetryState;
     }
     if let Some((marker, _)) =
         crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
@@ -153,11 +160,8 @@ pub(super) fn automatic_progression(
             channel_id,
         )
     {
-        return if busy_retry_is_capped(provider, channel_id, &marker) {
-            AutomaticQueueProgression::BlockedByCappedRetries
-        } else {
-            AutomaticQueueProgression::Eligible(marker.message_id)
-        };
+        let class = input_class(provider, channel_id, &marker);
+        return progression_of(class, marker.message_id);
     }
     if snapshot.intervention_queue.is_empty() {
         AutomaticQueueProgression::Empty
@@ -166,12 +170,13 @@ pub(super) fn automatic_progression(
     }
 }
 
+/// Whether a just-taken input stopped being runnable between selection and take.
 pub(super) fn intervention_became_capped(
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: &Intervention,
 ) -> bool {
-    busy_retry_is_capped(provider, channel_id, intervention)
+    input_class(provider, channel_id, intervention) != RetryClass::Ready
 }
 
 #[derive(Debug, Default)]
@@ -290,11 +295,12 @@ async fn mailbox_take_admitted_automatic_intervention(
                     mailbox_take_soft_intervention(shared, provider, channel_id, None, condition)
                         .await,
                 ),
-                AutomaticQueueProgression::BlockedByCappedRetries => {
+                AutomaticQueueProgression::BlockedByCappedRetries
+                | AutomaticQueueProgression::BlockedByUnreadableRetryState => {
                     tracing::info!(
                         provider = provider.as_str(),
                         channel_id = channel_id.get(),
-                        "AUTOMATIC-QUEUE-GUARD: preserving capped busy-retry entries"
+                        "AUTOMATIC-QUEUE-GUARD: preserving capped or unreadable busy-retry entries"
                     );
                     return MailboxTakeNextSoftOutcome::default();
                 }

@@ -544,6 +544,15 @@ impl<W> crate::services::tui_o::repost::runner::RepostHook<W> for CountTurns {
     > {
         Box::pin(async { crate::services::tui_o::repost::admission::OriginalGate::Send })
     }
+
+    fn receipts(
+        &mut self,
+    ) -> crate::services::tui_o::repost::runner::Turned<
+        '_,
+        crate::services::tui_o::repost::projection::ReceiptOverlay,
+    > {
+        Box::pin(async { crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled })
+    }
 }
 
 /// Re-post holds no exact permit, so a verified channel's actor never runs its turn; the same

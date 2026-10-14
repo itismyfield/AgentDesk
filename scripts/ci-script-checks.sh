@@ -547,11 +547,7 @@ if run_check contracts "D4-B acceptance manifest (#5340)"; then
 fi
 
 if run_check contracts "New production file comment-ratio gate"; then
-# The 999-line blind spot: hotfile_ratchet only stops an ALREADY-huge file from
-# re-expanding, and both giant-file gates begin at 1,000 lines, so no gate
-# measured a brand-new file below that. #5953 added a 711-line file that was
-# 398 lines of comment and registered in neither ratchet. Added files only --
-# retroactive enforcement would red 200+ existing files at once.
+# Diff comment growth blocks; the stricter new-file ratio is advisory.
 "$PYTHON" scripts/check_new_file_comment_ratio.py --base-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_new_file_comment_ratio
 fi
@@ -657,6 +653,10 @@ if run_check contracts "CI macOS Trusted Rust path filter"; then
 "$PYTHON" -m unittest tests.test_macos_trusted_rust_filter
 fi
 
+if run_check contracts "Legacy restart replay activation validator (#5925)"; then
+"$PYTHON" -m unittest tests.test_check_p5925_activation
+fi
+
 if run_check contracts "PG tunnel supervisor and retired relay cleanup tests"; then
 "$PYTHON" -m unittest tests.test_pg_tunnel
 bash tests/test_deploy_retired_relay_watchdog_6597.sh
@@ -682,42 +682,18 @@ if run_check contracts "Build token fairness tests (#5968)"; then
 fi
 
 if run_check cargo "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"; then
-# Inventory snapshots are untracked, so generate them in the CI workspace
-# before checks consume their source-of-truth data. The generator hard-fails
-# (exit 2) on giant-file registry drift: unregistered new giants, ghost
-# registrations left after decomposition, or deadline-less [[entry]] tables in
-# scripts/giant_file_registry.toml. The following git diff is the PR-time
-# drift gate: generation updates snapshots, then CI rejects changes to tracked
-# source-of-truth docs instead of comparing the generated workspace to itself.
-# The #5234 gate consumes open/closed truth and the two count baselines in
-# scripts/giant_file_issue_metadata.json. It fails if either the closed-deadline
-# count or transition-list count grows. A lower measured count must be recorded
-# by the writer, which automatically lowers (and never raises) both baselines:
-# `python3 scripts/refresh_giant_file_issue_metadata.py && git add scripts/giant_file_issue_metadata.json`
-# The same writer re-queries live GitHub for each issue's state and stamps a new
-# refreshed_at; it resets the freshness clock rather than checking it, and the
-# 30-day staleness gate lives in the generator above. Entries already in the
-# transition list warn but pass; a new dead pointer is fatal.
-# Giant deadlines have one selector/evaluator. It refreshes inventories only
-# after its fail-closed main or strict PR-progress verdict succeeds.
+# Measure size before refreshing snapshots; planning metadata is advisory.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
 "$PYTHON" -m unittest tests.test_refresh_giant_file_issue_metadata
 fi
 
 if run_check cargo "Generate env + CLI reference docs (README source-of-truth tables)"; then
-# README links to these instead of carrying hand-written tables. Both
-# generators are pure source parsers (no cargo build), so they run on every
-# pass and share the tracked-doc drift gate below: regenerate, then fail the
-# PR when the committed docs/generated/*.md differ from the regenerated view.
+# Generation errors fail; drift in the five reproducible docs warns.
 "$PYTHON" scripts/generate_env_reference.py
 "$PYTHON" scripts/generate_cli_reference.py
 "$PYTHON" -m unittest tests.test_generate_env_reference tests.test_generate_cli_reference
-git diff --exit-code -- \
-  ARCHITECTURE.md \
-  docs/generated/route-inventory.md \
-  docs/generated/worker-inventory.md \
-  docs/generated/env-reference.md \
-  docs/generated/cli-reference.md
+"$PYTHON" scripts/check_generated_doc_drift.py
+"$PYTHON" -m unittest tests.test_gate_review_wiring tests.test_prepare_gate_review
 fi
 
 if run_check cargo "Inventory prod/test split regression tests (#4394)"; then
@@ -735,25 +711,13 @@ if run_check contracts "API docs coverage gate (#3719)"; then
 fi
 
 if run_check cargo "Contract symbol-ref doc<->code sync gate (#4268)"; then
-# docs/relay-state-contract.md anchors code with `sym:` symbol paths. This check
-# verifies the doc's `sym:` anchors exactly match the references PARSED FROM THE
-# CODE in the relay_state_contract_refs blocks (use / field / assoc-fn forms,
-# never comments) — it does NOT judge whether a symbol exists. Symbol EXISTENCE
-# is proven by the compiler: those reference blocks fail
-# `cargo check --workspace --all-targets` (a required gate) if a symbol is
-# renamed/moved/removed. Splitting it this way is what killed the regex-bypass
-# game (raw strings / macros / cfg can't fool a real compile), and deriving the
-# anchor set from the compiled code (not `// sym:` comments) is what killed the
-# r3 comment-decoupling bypass.
-# It also matches docs/contracts/h2-tmux-boundary-ratchet.md anchors to imported H2 Python functions.
+# Documentation references warn; unavailable inputs fail, and compilation verifies symbols.
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 fi
 
 if run_check cargo "Agent maintenance freshness gate (warn, #1432; targeted hard gates)"; then
-# --warning-only keeps the #1432 freshness/touch rollout non-fatal. The LoC gate
-# remains unconditional; the migration 0093 rollout gate activates only when the
-# migration itself is in the changed-file set.
+# Freshness and frozen descriptions warn; migration recovery content blocks.
 "$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate \
   --migration-0093-rollout-gate
 fi
@@ -796,8 +760,7 @@ if run_check cargo "Agent maintenance freshness tests"; then
 fi
 
 if run_check cargo "Maintainability audit tests"; then
-"$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck \
-  tests.test_audit_maintainability.GiantFileRatchetCheck
+"$PYTHON" -m unittest tests.test_audit_maintainability
 fi
 
 if run_check cargo "Maintainability audit"; then

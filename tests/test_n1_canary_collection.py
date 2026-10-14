@@ -138,6 +138,19 @@ class DiscordContracts(unittest.TestCase):
 
 
 class PGContracts(unittest.TestCase):
+    def test_collected_channel_text_is_strictly_normalized(self):
+        scope = json.loads(CONTRACT.read_text())["scope"]
+        for channel in ("123", "0123", "+123", "124", None, True, 123):
+            value = {"intake_outbox": [{"channel_id": channel}], "turn_lifecycle_events": []}
+            with self.subTest(channel=channel), patch.dict(os.environ, {"N1_FIXTURE_DSN": "fixture"}), patch(
+                    "n1_canary.evidence.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, json.dumps(value), "")):
+                if channel == "123":
+                    self.assertEqual(pg_select("N1_FIXTURE_DSN", scope)["intake_outbox"][0]["channel_id"], 123)
+                else:
+                    with self.assertRaises(Unknown):
+                        pg_select("N1_FIXTURE_DSN", scope)
+
     def test_uri_uses_explicit_dbname_and_pins_connection_options(self):
         from urllib.parse import parse_qs, urlsplit
         scope = json.loads(CONTRACT.read_text())["scope"]

@@ -679,9 +679,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     fn project_operator_resumes(&mut self) {
         let pieces: Vec<_> = self
             .writer
-            .store()
-            .ledger()
             .resume_pieces()
+            .into_iter()
             .map(|(rejected, piece)| {
                 (
                     rejected,
