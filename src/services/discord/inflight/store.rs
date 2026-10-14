@@ -142,24 +142,7 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 /// network-filesystem behavior and non-cooperating writers are outside the
 /// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
-    #[cfg(test)]
-    boot_observation::attempt(path, boot_observation::Attempt::Lock);
-    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| format!("input fence: {failure:?}"))?
-    {
-        return Ok(InflightStateFileLock {
-            file: None,
-            _population: Some(population),
-            state_path: path.to_owned(),
-        });
-    }
-    let file = open_inflight_lock_file(path)?;
-    file.lock().map_err(|e| e.to_string())?;
-    Ok(InflightStateFileLock {
-        file: Some(file),
-        _population: None,
-        state_path: path.to_path_buf(),
-    })
+    lock_inflight_state_path_observed(path, false).map_err(|(legacy, _)| legacy.detail())
 }
 
 // Contention is retryable; scheduler callers must not wait for another open handle.
@@ -176,7 +159,7 @@ pub(crate) enum TryLockRefusal {
 }
 
 impl TryLockRefusal {
-    fn detail(self) -> String {
+    pub(super) fn detail(self) -> String {
         match self {
             Self::Contended => fs::TryLockError::WouldBlock.to_string(),
             Self::Fenced => "input fence: Busy".to_owned(),
@@ -189,8 +172,37 @@ impl TryLockRefusal {
 pub(crate) fn try_lock_inflight_state_path_typed(
     path: &Path,
 ) -> Result<InflightStateFileLock, TryLockRefusal> {
+    lock_inflight_state_path_observed(path, true).map_err(|(legacy, _)| legacy)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::services::discord) enum LockCause {
+    Contended,
+    InputFence(crate::services::discord::input_runtime::fence::Failure),
+    Io(String),
+}
+
+pub(super) fn lock_inflight_state_path_observed(
+    path: &Path,
+    nonblocking: bool,
+) -> Result<InflightStateFileLock, (TryLockRefusal, LockCause)> {
+    #[cfg(test)]
+    if !nonblocking {
+        boot_observation::attempt(path, boot_observation::Attempt::Lock);
+    }
+    let io = |detail: String| {
+        (
+            TryLockRefusal::Failed(detail.clone()),
+            LockCause::Io(detail),
+        )
+    };
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
+        .map_err(|failure| {
+            (
+                TryLockRefusal::Failed(format!("input fence: {failure:?}")),
+                LockCause::InputFence(failure),
+            )
+        })?
     {
         return Ok(InflightStateFileLock {
             file: None,
@@ -198,11 +210,17 @@ pub(crate) fn try_lock_inflight_state_path_typed(
             state_path: path.to_owned(),
         });
     }
-    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return Err(TryLockRefusal::Contended),
-        Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
+    let file = open_inflight_lock_file(path).map_err(io)?;
+    if nonblocking {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err((TryLockRefusal::Contended, LockCause::Contended));
+            }
+            Err(error) => return Err(io(error.to_string())),
+        }
+    } else {
+        file.lock().map_err(|error| io(error.to_string()))?;
     }
     Ok(InflightStateFileLock {
         file: Some(file),

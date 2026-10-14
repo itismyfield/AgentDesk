@@ -1,7 +1,7 @@
 //! Boot evidence for Codex adoption. A witness exists only once a finished discovery pass read
 //! its listings and bound every live source of the scope, and the role's recovery completed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,19 +35,117 @@ pub(in crate::services::discord) struct LiveSource {
 /// A finished pass: the live sources it read, or why a listing or the pass itself failed.
 pub(in crate::services::discord) type DiscoveryPass = Result<Vec<LiveSource>, String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::services::discord) enum RecoveryStage {
+    Queue,
+    DispatchMarkers,
+    Placeholders,
+    Inflight,
+    Watchers,
+    Orphans,
+    Kickoff,
+    Followups,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum StageOutcome {
+    Pending,
+    Complete,
+    Incomplete,
+    Deferred,
+    Failed,
+    DisabledByPolicy,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct RecoveryReport {
+    runtime: u64,
+    provider: ProviderKind,
+    bot: String,
+    role: BootRole,
+    stages: BTreeMap<RecoveryStage, StageOutcome>,
+    disabled_by_policy: BTreeSet<RecoveryStage>,
+}
+
+impl BootRole {
+    fn required_stages(self) -> &'static [RecoveryStage] {
+        use RecoveryStage::*;
+        match self {
+            Self::Gateway => &[
+                Queue,
+                DispatchMarkers,
+                Placeholders,
+                Inflight,
+                Watchers,
+                Orphans,
+                Kickoff,
+                Followups,
+            ],
+            Self::RestWorker => &[Queue, DispatchMarkers, Placeholders, Inflight, Followups],
+            Self::Standby => &[],
+        }
+    }
+}
+
+impl RecoveryReport {
+    fn outcome(&self, runtime: &AdoptionRuntime, role: BootRole) -> StageOutcome {
+        #[cfg(all(test, unix))]
+        if tests::mutant("boot-complete") {
+            return StageOutcome::Complete;
+        }
+        let identity_ok = self.runtime == runtime.id
+            && self.provider == runtime.provider
+            && self.bot == runtime.bot
+            && self.role == role
+            && role != BootRole::Standby;
+        #[cfg(all(test, unix))]
+        let identity_ok = identity_ok || tests::mutant("boot-identity");
+        if !identity_ok {
+            return StageOutcome::Failed;
+        }
+        let blocking = [
+            StageOutcome::Pending,
+            StageOutcome::Incomplete,
+            StageOutcome::Deferred,
+            StageOutcome::Failed,
+        ];
+        for stage in role.required_stages() {
+            let outcome = self
+                .stages
+                .get(stage)
+                .copied()
+                .unwrap_or(StageOutcome::Pending);
+            if blocking.contains(&outcome) {
+                return outcome;
+            }
+            let complete = outcome == StageOutcome::Complete
+                || (outcome == StageOutcome::DisabledByPolicy
+                    && self.disabled_by_policy.contains(stage));
+            if !complete {
+                return StageOutcome::Incomplete;
+            }
+        }
+        StageOutcome::Complete
+    }
+}
+
 #[derive(Default)]
 struct Progress {
     role: Option<BootRole>,
     /// The latest finished pass, numbered within this runtime.
     discovery: Option<(u64, DiscoveryPass)>,
-    /// Set only by recovery producers, none of which records yet; until then no witness is made.
-    recovered: bool,
+    /// No production recorder installs recovery evidence yet.
+    recovery: Option<RecoveryReport>,
 }
 
 impl Progress {
     /// The latest pass's number when it read its listings and bound every source in `channels`;
     /// an unplaced unbound source blocks every scope.
     fn discovered(&self, channels: &BTreeSet<u64>) -> Option<u64> {
+        #[cfg(all(test, unix))]
+        if tests::mutant("boot-discovery") {
+            return self.discovery.as_ref().map(|(number, _)| *number);
+        }
         let (pass, Ok(sources)) = self.discovery.as_ref()? else {
             return None;
         };
@@ -58,10 +156,15 @@ impl Progress {
             .then_some(*pass)
     }
 
-    fn ready(&self, channels: &BTreeSet<u64>) -> bool {
+    fn ready(&self, channels: &BTreeSet<u64>, runtime: &AdoptionRuntime) -> bool {
         match self.role {
             Some(BootRole::Standby) => true,
-            Some(_) => self.recovered && self.discovered(channels).is_some(),
+            Some(role) => {
+                self.recovery
+                    .as_ref()
+                    .is_some_and(|report| report.outcome(runtime, role) == StageOutcome::Complete)
+                    && self.discovered(channels).is_some()
+            }
             None => false,
         }
     }
@@ -129,7 +232,7 @@ impl AdoptionRuntime {
         let read = tokio::select! {
             biased;
             () = stop => return Err(BootReadError::Cancelled),
-            read = tokio::time::timeout(BOOT_WAIT, progress.wait_for(|p| p.ready(&channels))) => read,
+            read = tokio::time::timeout(BOOT_WAIT, progress.wait_for(|p| p.ready(&channels, self))) => read,
         };
         let gone = self.shared.strong_count() == 0;
         let progress = match read {
@@ -159,9 +262,21 @@ impl AdoptionRuntime {
 impl AdoptionRuntime {
     /// Stands in for the recovery producers.
     pub(in crate::services::discord) fn record_recovery_for_tests(&self) {
-        self.boot
-            .progress
-            .send_modify(|progress| progress.recovered = true);
+        self.boot.progress.send_modify(|progress| {
+            let role = progress.role.unwrap_or(BootRole::Gateway);
+            progress.recovery = Some(RecoveryReport {
+                runtime: self.id,
+                provider: self.provider.clone(),
+                bot: self.bot.clone(),
+                role,
+                stages: role
+                    .required_stages()
+                    .iter()
+                    .map(|stage| (*stage, StageOutcome::Complete))
+                    .collect(),
+                disabled_by_policy: BTreeSet::new(),
+            });
+        });
     }
 }
 

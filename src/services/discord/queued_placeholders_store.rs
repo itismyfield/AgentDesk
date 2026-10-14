@@ -220,17 +220,20 @@ fn save_channel_queue_exit_placeholder_clears_unfenced(
     );
 }
 
-/// Load every persisted mapping under this bot's namespace and return them as
-/// a `(channel_id, user_msg_id) -> placeholder_msg_id` map ready for direct
-/// import into `SharedData::queued_placeholders`.
-///
-/// On read error or stale file, the file is removed so a future write starts
-/// from a clean slate.
+/// Load this bot's persisted placeholder map, retaining read failures in its report.
+/// Malformed rows follow the existing fenced cleanup; unreadable rows stay in place.
 pub(super) fn load_queued_placeholders(
     provider: &ProviderKind,
     token_hash: &str,
 ) -> HashMap<(ChannelId, MessageId), MessageId> {
-    load_entries(store_root(), provider, token_hash)
+    load_queued_placeholders_report(provider, token_hash).entries
+}
+
+pub(super) fn load_queued_placeholders_report(
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> PlaceholderLoad {
+    load_entries_report(store_root(), provider, token_hash)
 }
 
 #[cfg(test)]
@@ -308,16 +311,69 @@ fn load_entries(
     provider: &ProviderKind,
     token_hash: &str,
 ) -> HashMap<(ChannelId, MessageId), MessageId> {
-    let mut result: HashMap<(ChannelId, MessageId), MessageId> = HashMap::new();
+    load_entries_report(root, provider, token_hash).entries
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PlaceholderIssue {
+    RootUnavailable,
+    ReadDir(String),
+    Entry(String),
+    Read(u64, String),
+    Parse(u64, String),
+    Protected(u64),
+    Cleanup(String),
+}
+
+pub(super) struct PlaceholderLoad {
+    pub(super) entries: HashMap<(ChannelId, MessageId), MessageId>,
+    pub(super) issues: Vec<PlaceholderIssue>,
+    pub(super) cleanup_attempts: usize,
+}
+
+fn load_entries_report(
+    root: Option<PathBuf>,
+    provider: &ProviderKind,
+    token_hash: &str,
+) -> PlaceholderLoad {
+    let mut report = PlaceholderLoad {
+        entries: HashMap::new(),
+        issues: Vec::new(),
+        cleanup_attempts: 0,
+    };
     let Some(root) = root else {
-        return result;
+        report.issues.push(PlaceholderIssue::RootUnavailable);
+        #[cfg(test)]
+        if report_tests::mutant("placeholder-empty") {
+            report.issues.clear();
+        }
+        return report;
     };
     let dir = root.join(provider.as_str()).join(token_hash);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return result;
+    #[cfg(test)]
+    report_tests::SCANS.set(report_tests::SCANS.get() + 1);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(error) => {
+            report
+                .issues
+                .push(PlaceholderIssue::ReadDir(error.to_string()));
+            return report;
+        }
     };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
+    for entry in entries {
+        #[cfg(test)]
+        let entry = report_tests::entry(entry);
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                report
+                    .issues
+                    .push(PlaceholderIssue::Entry(error.to_string()));
+                continue;
+            }
+        };
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
@@ -329,34 +385,62 @@ fn load_entries(
         else {
             continue;
         };
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(items) = serde_json::from_str::<Vec<QueuedPlaceholderEntry>>(&content) else {
-            // Malformed file — drop it so future writes succeed cleanly.
-            if fence::lookup(provider, channel_id.get()).is_none() {
-                let _ = fs::remove_file(&path);
-            } else {
-                let _ = fence::write(provider, channel_id.get(), || {
-                    let latest = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-                    if latest == content {
-                        fs::remove_file(&path).map_err(|error| error.to_string())?;
-                        runtime_store::fsync_parent_dir(&path)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Ok(())
-                });
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                report
+                    .issues
+                    .push(PlaceholderIssue::Read(channel_id.get(), error.to_string()));
+                continue;
             }
-            continue;
+        };
+        let items = match serde_json::from_str::<Vec<QueuedPlaceholderEntry>>(&content) {
+            Ok(items) => items,
+            Err(error) => {
+                report
+                    .issues
+                    .push(PlaceholderIssue::Parse(channel_id.get(), error.to_string()));
+                report.cleanup_attempts += 1;
+                let unprotected = fence::lookup(provider, channel_id.get()).is_none();
+                #[cfg(test)]
+                let unprotected = unprotected || report_tests::mutant("placeholder-fence");
+                let cleanup = if unprotected {
+                    fs::remove_file(&path).map_err(|error| error.to_string())
+                } else {
+                    report
+                        .issues
+                        .push(PlaceholderIssue::Protected(channel_id.get()));
+                    fence::write(provider, channel_id.get(), || {
+                        let latest =
+                            fs::read_to_string(&path).map_err(|error| error.to_string())?;
+                        if latest == content {
+                            fs::remove_file(&path).map_err(|error| error.to_string())?;
+                            runtime_store::fsync_parent_dir(&path)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Ok(())
+                    })
+                };
+                if let Err(error) = cleanup {
+                    report.issues.push(PlaceholderIssue::Cleanup(error));
+                }
+                continue;
+            }
         };
         for item in items {
-            result.insert(
+            report.entries.insert(
                 (channel_id, MessageId::new(item.user_message_id)),
                 MessageId::new(item.placeholder_message_id),
             );
         }
     }
-    result
+    #[cfg(test)]
+    if report_tests::mutant("placeholder-second-load") && !report_tests::SECOND.replace(true) {
+        let _ = load_entries_report(Some(root), provider, token_hash);
+        report_tests::SECOND.set(false);
+    }
+    tracing::debug!(issues = ?report.issues, cleanup_attempts = report.cleanup_attempts, "placeholder bulk observation");
+    report
 }
 
 /// Snapshot every in-memory mapping for `channel_id` from a `DashMap` and
@@ -617,3 +701,7 @@ mod tests {
         drop(closing);
     }
 }
+
+#[cfg(test)]
+#[path = "queued_placeholders_report_tests.rs"]
+mod report_tests;

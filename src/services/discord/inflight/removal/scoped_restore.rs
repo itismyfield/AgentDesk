@@ -91,15 +91,53 @@ pub(super) fn backfill_scoped_restore(
     path: &Path,
     provider: &ProviderKind,
 ) -> Result<InflightTurnState, RestoreFailure> {
-    let _guard = try_lock_inflight_state_path(path).map_err(RestoreFailure::retryable)?;
-    let bytes = fs::read_to_string(path).map_err(RestoreFailure::retryable)?;
+    let lock = try_lock_inflight_state_path(path).map_err(RestoreFailure::retryable);
+    let mut outcome = super::super::finalizer_identity::BackfillOutcome::Unneeded;
+    backfill_scoped_restore_after_lock(root, path, provider, lock, &mut outcome)
+}
+
+pub(super) fn backfill_scoped_restore_observed(
+    root: &Path,
+    path: &Path,
+    provider: &ProviderKind,
+) -> (
+    Result<InflightTurnState, RestoreFailure>,
+    super::super::finalizer_identity::BackfillOutcome,
+) {
+    use super::super::finalizer_identity::BackfillOutcome as Outcome;
+    let mut observed = Outcome::Unneeded;
+    let lock = store::lock_inflight_state_path_observed(path, true).map_err(|(legacy, cause)| {
+        observed = Outcome::Lock(cause);
+        RestoreFailure::retryable(legacy.detail())
+    });
+    let result = backfill_scoped_restore_after_lock(root, path, provider, lock, &mut observed);
+    (result, observed)
+}
+
+fn backfill_scoped_restore_after_lock(
+    root: &Path,
+    path: &Path,
+    provider: &ProviderKind,
+    lock: Result<InflightStateFileLock, RestoreFailure>,
+    observed: &mut super::super::finalizer_identity::BackfillOutcome,
+) -> Result<InflightTurnState, RestoreFailure> {
+    use super::super::finalizer_identity::BackfillOutcome as Outcome;
+    let _guard = lock?;
+    let bytes = fs::read_to_string(path).map_err(|error| {
+        *observed = Outcome::Read(error.to_string());
+        RestoreFailure::retryable(error)
+    })?;
     let (state, needs_backfill) = parse_inflight_state_content_with_finalizer_backfill(&bytes)
-        .map_err(|error| RestoreFailure::Rejected(error.to_string()))?;
+        .map_err(|error| {
+            *observed = Outcome::Parse(error.to_string());
+            RestoreFailure::Rejected(error.to_string())
+        })?;
     if state.provider_kind().as_ref() != Some(provider)
         || state.channel_id != channel_id_from_path(path)
         || state.runtime_kind_unknown_on_disk
         || state.version > inflight_state_version()
     {
+        *observed = Outcome::Refused;
         return Err(RestoreFailure::Rejected(
             "scoped backfill format/binding refused".into(),
         ));
@@ -115,15 +153,27 @@ pub(super) fn backfill_scoped_restore(
         if scoped_restore_mutant("backfill-ack") && outcome.is_err() {
             return Ok(state);
         }
-        let saved = outcome.map_err(RestoreFailure::retryable)?.ok_or_else(|| {
-            RestoreFailure::Rejected("scoped backfill persistence refused".into())
-        })?;
+        let saved = outcome
+            .map_err(|error| {
+                *observed = Outcome::Persist(error.clone());
+                RestoreFailure::retryable(error)
+            })?
+            .ok_or_else(|| {
+                *observed = Outcome::Refused;
+                RestoreFailure::Rejected("scoped backfill persistence refused".into())
+            })?;
+        *observed = Outcome::Persisted;
         #[cfg(test)]
         if scoped_restore_mutant("fsync-failure") {
+            *observed = Outcome::Sync("parent fsync failed".into());
             return Err(RestoreFailure::retryable("parent fsync failed"));
         }
-        crate::services::discord::runtime_store::fsync_parent_dir(path)
-            .map_err(RestoreFailure::retryable)?;
+        #[cfg(test)]
+        super::probe_report::report_tests::before_sync(path);
+        crate::services::discord::runtime_store::fsync_parent_dir(path).map_err(|error| {
+            *observed = Outcome::Sync(error.to_string());
+            RestoreFailure::retryable(error)
+        })?;
         Ok(saved)
     } else {
         Ok(state)

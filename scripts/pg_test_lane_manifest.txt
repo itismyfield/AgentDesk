@@ -199,6 +199,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
+src/services/discord/runtime_bootstrap/orphan_recovery_report_tests.rs
 src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
 src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
@@ -522,6 +523,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+services::discord::runtime_bootstrap::orphan_recovery::report_tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests
 services::discord::session_idle_cleanup::tests
@@ -1821,6 +1823,8 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act_hos
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_host_has_zero_pg_statements_with_on_positive_control_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_empty_query_decode_and_hygiene_failures_pg
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_requeue_success_refusal_failure_and_protection_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_admitted_kinds_resume_only_after_installation_and_output_admission_pg
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_fresh_receipt_precedes_admitted_settlement_pg

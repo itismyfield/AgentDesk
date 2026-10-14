@@ -1058,6 +1058,8 @@ src/
 │   │   │   │   ├── custody_notice.rs
 │   │   │   │   ├── custody_notice_tests.rs
 │   │   │   │   ├── input_fence_reaper_tests.rs
+│   │   │   │   ├── probe_report.rs
+│   │   │   │   ├── probe_report_tests.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
@@ -1096,6 +1098,7 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── finalizer_report_tests.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
@@ -1567,6 +1570,7 @@ src/
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
+│   │   │   ├── orphan_recovery_report_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
@@ -2233,6 +2237,7 @@ src/
 │   │   ├── queue_overflow_dlq.rs
 │   │   ├── queue_park_ledger.rs
 │   │   ├── queue_reactions.rs
+│   │   ├── queued_placeholders_report_tests.rs
 │   │   ├── queued_placeholders_store.rs
 │   │   ├── reaction_cleanup.rs
 │   │   ├── reaction_lifecycle.rs

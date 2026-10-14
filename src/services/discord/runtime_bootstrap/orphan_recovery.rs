@@ -50,53 +50,158 @@ pub(super) fn purge_legacy_durable_handoffs() {
     }
 }
 
-/// #164: Re-deliver orphan pending dispatches after dcserver restart.
-///
-/// After a restart, dispatches in `pending` status may have been Discord-notified
-/// but the in-memory intervention_queue was lost. Or the notification was interrupted
-/// mid-flight. This function identifies truly orphan dispatches and re-delivers them.
-///
-/// **Safety**:
-/// - Process-global once guard via `std::sync::Once` — safe across multiple provider instances
-/// - Startup boot timestamp from dcserver.pid mtime — not wall clock
-/// - Newer-dispatch check uses rowid (monotonic) instead of created_at (second-granularity)
-/// - Five AND conditions must ALL be met before re-delivery (see issue #164)
-pub(super) async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
-    // Process-global once guard: prevents duplicate execution when multiple
-    // provider instances (Claude + Codex) call this from their own setup paths.
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    let mut should_run = false;
-    ONCE.call_once(|| should_run = true);
-    if !should_run {
-        return;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrphanStep {
+    Pid,
+    Postgres,
+    Query,
+    Decode,
+    Protection,
+    Marker,
+    Requeue,
+    HygieneScan,
+    HygieneDecode,
+    HygieneTerminal,
+    HygieneMissing,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PassOutcome {
+    Empty,
+    Acknowledged,
+    Done(u64),
+    Missing,
+    Unavailable,
+    Deferred,
+    Refused,
+    Failed(String),
+}
+#[derive(Debug, Default)]
+struct OrphanPass {
+    events: Vec<(OrphanStep, String, PassOutcome)>,
+}
+impl OrphanPass {
+    fn note(&mut self, step: OrphanStep, subject: &str, outcome: PassOutcome) {
+        #[cfg(test)]
+        let outcome = if (report_tests::mutant("orphan-error-success")
+            && matches!(outcome, PassOutcome::Failed(_)))
+            || (report_tests::mutant("orphan-refusal-success") && outcome == PassOutcome::Refused)
+            || (report_tests::mutant("orphan-protection-success")
+                && step == OrphanStep::Protection
+                && outcome == PassOutcome::Deferred)
+        {
+            PassOutcome::Done(0)
+        } else {
+            outcome
+        };
+        self.events.push((step, subject.to_owned(), outcome));
     }
-    recover_orphan_pending_dispatches_once(shared.pg_pool.as_ref()).await;
+}
+#[derive(Debug, Clone)]
+enum OrphanOnceState {
+    NotStarted,
+    Started,
+    Completed(Arc<OrphanPass>),
+    Failed(&'static str),
+}
+struct OrphanOnce {
+    once: std::sync::Once,
+    state: tokio::sync::watch::Sender<OrphanOnceState>,
+}
+impl Default for OrphanOnce {
+    fn default() -> Self {
+        Self {
+            once: std::sync::Once::new(),
+            state: tokio::sync::watch::Sender::new(OrphanOnceState::NotStarted),
+        }
+    }
+}
+struct OrphanSettlement<'a>(Option<&'a OrphanOnce>);
+impl Drop for OrphanSettlement<'_> {
+    fn drop(&mut self) {
+        if let Some(once) = self.0.take() {
+            #[cfg(test)]
+            if report_tests::mutant("orphan-drop") {
+                return;
+            }
+            once.state
+                .send_replace(OrphanOnceState::Failed(if std::thread::panicking() {
+                    "panicked"
+                } else {
+                    "cancelled"
+                }));
+        }
+    }
+}
+impl OrphanOnce {
+    async fn run(&self, pass: impl std::future::Future<Output = OrphanPass>) -> OrphanOnceState {
+        let mut winner = false;
+        self.once.call_once(|| {
+            self.state.send_replace(OrphanOnceState::Started);
+            winner = true;
+        });
+        if !winner {
+            #[cfg(test)]
+            if report_tests::mutant("orphan-follow-await") {
+                let mut receiver = self.state.subscribe();
+                let _ = receiver.changed().await;
+            }
+            return self.state.borrow().clone();
+        }
+        let mut settlement = OrphanSettlement(Some(self));
+        let report = Arc::new(pass.await);
+        self.state.send_replace(OrphanOnceState::Completed(report));
+        settlement.0 = None;
+        self.state.borrow().clone()
+    }
 }
 
-async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) {
-    clear_stale_session_dispatch_links(pg_pool).await;
+/// Re-deliver orphan pending dispatches once, retaining the finished pass or interruption.
+/// Later callers return immediately without starting another pass.
+pub(super) async fn recover_orphan_pending_dispatches(shared: &Arc<SharedData>) {
+    static ONCE: std::sync::LazyLock<OrphanOnce> = std::sync::LazyLock::new(OrphanOnce::default);
+    match ONCE
+        .run(recover_orphan_pending_dispatches_once(
+            shared.pg_pool.as_ref(),
+        ))
+        .await
+    {
+        OrphanOnceState::Completed(report) => {
+            tracing::debug!(events = ?report.events, "orphan recovery pass settled")
+        }
+        OrphanOnceState::Failed(reason) => tracing::debug!(reason, "orphan recovery pass failed"),
+        OrphanOnceState::NotStarted | OrphanOnceState::Started => {}
+    }
+}
+
+async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) -> OrphanPass {
+    let mut report = clear_stale_session_dispatch_links(pg_pool).await;
 
     // Boot timestamp from dcserver.pid mtime — represents actual process start,
     // not a wall-clock offset that could mis-classify old pending dispatches.
     let boot_time: String = {
         let pid_path =
             crate::cli::agentdesk_runtime_root().map(|r| r.join("runtime").join("dcserver.pid"));
-        let mtime = pid_path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        let mtime = match pid_path {
+            None => {
+                report.note(OrphanStep::Pid, "root", PassOutcome::Unavailable);
+                return report;
+            }
+            Some(path) => std::fs::metadata(path).and_then(|metadata| metadata.modified()),
+        };
         match mtime {
-            Some(t) => {
+            Ok(t) => {
                 let dt: chrono::DateTime<chrono::Utc> = t.into();
                 dt.format("%Y-%m-%d %H:%M:%S").to_string()
             }
-            None => {
-                // No pid file — cannot determine boot time safely, skip recovery
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚠ #164: No dcserver.pid — skipping orphan dispatch recovery"
-                );
-                return;
+            Err(error) => {
+                let outcome = if error.kind() == std::io::ErrorKind::NotFound {
+                    PassOutcome::Missing
+                } else {
+                    PassOutcome::Failed(error.to_string())
+                };
+                report.note(OrphanStep::Pid, "dcserver.pid", outcome);
+                tracing::info!("orphan recovery could not observe dcserver.pid boot time");
+                return report;
             }
         }
     };
@@ -135,28 +240,54 @@ async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) 
             Ok(rows) => rows
                 .into_iter()
                 .filter_map(|row| {
-                    Some((
-                        row.try_get::<String, _>("id").ok()?,
-                        row.try_get::<String, _>("to_agent_id").ok()?,
-                        row.try_get::<String, _>("kanban_card_id").ok()?,
-                        row.try_get::<String, _>("title").ok()?,
-                        row.try_get::<String, _>("dispatch_type").ok()?,
-                    ))
+                    let decoded = (|| -> Result<_, sqlx::Error> {
+                        Ok((
+                            row.try_get::<String, _>("id")?,
+                            row.try_get::<String, _>("to_agent_id")?,
+                            row.try_get::<String, _>("kanban_card_id")?,
+                            row.try_get::<String, _>("title")?,
+                            row.try_get::<String, _>("dispatch_type")?,
+                        ))
+                    })();
+                    match decoded {
+                        Ok(row) => Some(row),
+                        Err(error) => {
+                            report.note(
+                                OrphanStep::Decode,
+                                "orphan",
+                                PassOutcome::Failed(error.to_string()),
+                            );
+                            None
+                        }
+                    }
                 })
                 .collect(),
             Err(error) => {
                 tracing::warn!(
                     "[dispatch-recovery] failed to query postgres orphan dispatches: {error}"
                 );
-                return;
+                report.note(
+                    OrphanStep::Query,
+                    "orphans",
+                    PassOutcome::Failed(error.to_string()),
+                );
+                return report;
             }
         }
     } else {
-        return;
+        report.note(OrphanStep::Postgres, "orphans", PassOutcome::Unavailable);
+        return report;
     };
 
     if orphans.is_empty() {
-        return;
+        if !report
+            .events
+            .iter()
+            .any(|(step, _, _)| *step == OrphanStep::Decode)
+        {
+            report.note(OrphanStep::Query, "orphans", PassOutcome::Empty);
+        }
+        return report;
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -167,26 +298,52 @@ async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) 
 
     let mut delivered = 0usize;
     for (dispatch_id, agent_id, card_id, _title, dtype) in &orphans {
-        if dispatch_target_held(pg_pool, dispatch_id, agent_id, card_id, dtype).await {
+        if dispatch_target_held(pg_pool, dispatch_id, agent_id, card_id, dtype, &mut report).await {
             tracing::info!(
                 dispatch_id = %dispatch_id,
                 "orphan dispatch recovery left a protected channel's dispatch in place"
             );
+            report.note(OrphanStep::Protection, dispatch_id, PassOutcome::Deferred);
             continue;
         }
         // Clear any existing dispatch_notified marker — the 5-condition query already
         // validated this dispatch is truly orphan, so the marker (if any) is stale.
         {
             let dispatch_notified_key = format!("dispatch_notified:{dispatch_id}");
-            if crate::services::discord::internal_api::delete_kv_value(&dispatch_notified_key)
-                .is_err()
-            {
-                if let Some(pool) = pg_pool {
-                    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                        .bind(&dispatch_notified_key)
-                        .execute(pool)
-                        .await
-                        .ok();
+            let deleted =
+                crate::services::discord::internal_api::delete_kv_value(&dispatch_notified_key);
+            #[cfg(test)]
+            let deleted = if report_tests::force_primary_failure() {
+                Err("injected primary marker acknowledgement failure".to_owned())
+            } else {
+                deleted
+            };
+            match deleted {
+                Ok(()) => report.note(OrphanStep::Marker, dispatch_id, PassOutcome::Acknowledged),
+                Err(error) => {
+                    report.note(
+                        OrphanStep::Marker,
+                        &dispatch_notified_key,
+                        PassOutcome::Failed(error.to_string()),
+                    );
+                    if let Some(pool) = pg_pool {
+                        match sqlx::query("DELETE FROM kv_meta WHERE key = $1")
+                            .bind(&dispatch_notified_key)
+                            .execute(pool)
+                            .await
+                        {
+                            Ok(result) => report.note(
+                                OrphanStep::Marker,
+                                dispatch_id,
+                                PassOutcome::Done(result.rows_affected()),
+                            ),
+                            Err(error) => report.note(
+                                OrphanStep::Marker,
+                                dispatch_id,
+                                PassOutcome::Failed(error.to_string()),
+                            ),
+                        }
+                    }
                 }
             }
         }
@@ -200,6 +357,8 @@ async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) 
         );
 
         let recovery_result = if let Some(pool) = pg_pool {
+            #[cfg(test)]
+            report_tests::before_requeue(pool, dispatch_id).await;
             crate::db::dispatches::outbox::requeue_dispatch_notify_pg(pool, dispatch_id)
                 .await
                 .map(|queued| {
@@ -218,9 +377,15 @@ async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) 
         match recovery_result {
             Ok(true) => {
                 delivered += 1;
+                report.note(OrphanStep::Requeue, dispatch_id, PassOutcome::Done(1));
             }
-            Ok(false) => {}
+            Ok(false) => report.note(OrphanStep::Requeue, dispatch_id, PassOutcome::Refused),
             Err(e) => {
+                report.note(
+                    OrphanStep::Requeue,
+                    dispatch_id,
+                    PassOutcome::Failed(e.to_string()),
+                );
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::info!(
                     "  [{ts}]   ⚠ Recovery delivery failed for {id}: {e}",
@@ -235,6 +400,7 @@ async fn recover_orphan_pending_dispatches_once(pg_pool: Option<&sqlx::PgPool>) 
         "  [{ts}] ✓ #164: Re-delivered {delivered}/{} orphan dispatch(es)",
         orphans.len()
     );
+    report
 }
 
 /// Whether the dispatch's delivery channel, resolved as its notify would, is protected,
@@ -245,6 +411,7 @@ async fn dispatch_target_held(
     agent_id: &str,
     card_id: &str,
     dispatch_type: &str,
+    report: &mut OrphanPass,
 ) -> bool {
     use crate::services::discord::input_runtime::fence::{self, BootTarget};
     let Some(pool) = pg_pool.filter(|_| fence::any_protected()) else {
@@ -265,17 +432,43 @@ async fn dispatch_target_held(
             context.as_deref(),
         )
         .await
+        .map_err(|error| {
+            report.note(
+                OrphanStep::Protection,
+                dispatch_id,
+                PassOutcome::Failed(error.to_string()),
+            )
+        })
         .ok()
         .flatten()
-        .and_then(|channel| channel.parse::<u64>().ok()),
-        _ => None,
+        .and_then(|channel| {
+            channel
+                .parse::<u64>()
+                .map_err(|error| {
+                    report.note(
+                        OrphanStep::Protection,
+                        dispatch_id,
+                        PassOutcome::Failed(error.to_string()),
+                    );
+                })
+                .ok()
+        }),
+        Err(error) => {
+            report.note(
+                OrphanStep::Protection,
+                dispatch_id,
+                PassOutcome::Failed(error.to_string()),
+            );
+            None
+        }
+        Ok(None) => None,
     };
     fence::boot_skip(channel.map_or(BootTarget::Unknown, BootTarget::AnyProvider))
 }
 
 /// Session ids the hygiene pass leaves linked: a protected channel's, and any that no
 /// channel column places while a channel is protected. `None` holds the whole pass.
-async fn hygiene_kept_sessions(pool: &sqlx::PgPool) -> Option<Vec<i64>> {
+async fn hygiene_kept_sessions(pool: &sqlx::PgPool, report: &mut OrphanPass) -> Option<Vec<i64>> {
     use crate::services::discord::input_runtime::fence::{self, BootTarget};
     if !fence::any_protected() {
         return Some(Vec::new());
@@ -286,13 +479,42 @@ async fn hygiene_kept_sessions(pool: &sqlx::PgPool) -> Option<Vec<i64>> {
     )
     .fetch_all(pool)
     .await;
-    let Ok(rows) = rows else {
-        return (!fence::boot_skip(BootTarget::Unknown)).then(Vec::new);
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            report.note(
+                OrphanStep::HygieneScan,
+                "sessions",
+                PassOutcome::Failed(error.to_string()),
+            );
+            return (!fence::boot_skip(BootTarget::Unknown)).then(Vec::new);
+        }
     };
-    let held = |row: &sqlx::postgres::PgRow| {
-        let channel = |column| {
-            let value = row.try_get::<Option<String>, _>(column).ok().flatten();
-            value.and_then(|value| value.parse::<u64>().ok())
+    let mut held = |row: &sqlx::postgres::PgRow| {
+        let mut channel = |column| {
+            let value = row
+                .try_get::<Option<String>, _>(column)
+                .map_err(|error| {
+                    report.note(
+                        OrphanStep::HygieneDecode,
+                        column,
+                        PassOutcome::Failed(error.to_string()),
+                    );
+                })
+                .ok()
+                .flatten();
+            value.and_then(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|error| {
+                        report.note(
+                            OrphanStep::HygieneDecode,
+                            column,
+                            PassOutcome::Failed(error.to_string()),
+                        );
+                    })
+                    .ok()
+            })
         };
         let channels = [channel("thread_channel_id"), channel("channel_id")];
         if channels.iter().all(Option::is_none) {
@@ -302,19 +524,53 @@ async fn hygiene_kept_sessions(pool: &sqlx::PgPool) -> Option<Vec<i64>> {
         channels.any(|channel| fence::boot_skip(BootTarget::AnyProvider(channel)))
     };
     let kept = rows.iter().filter(|row| held(row));
-    Some(
-        kept.filter_map(|row| row.try_get::<i64, _>("id").ok())
-            .collect(),
-    )
+    let mut decode_errors = Vec::new();
+    let kept = kept
+        .filter_map(|row| {
+            row.try_get::<i64, _>("id")
+                .map_err(|error| decode_errors.push(error.to_string()))
+                .ok()
+        })
+        .collect();
+    for error in decode_errors {
+        report.note(OrphanStep::HygieneDecode, "id", PassOutcome::Failed(error));
+    }
+    Some(kept)
 }
 
-async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
+fn hygiene_text(
+    row: &sqlx::postgres::PgRow,
+    column: &str,
+    report: &mut OrphanPass,
+) -> Option<String> {
+    row.try_get::<String, _>(column)
+        .map_err(|error| {
+            report.note(
+                OrphanStep::HygieneDecode,
+                column,
+                PassOutcome::Failed(error.to_string()),
+            );
+        })
+        .ok()
+}
+
+async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) -> OrphanPass {
+    let mut report = OrphanPass::default();
     let Some(pool) = pg_pool else {
-        return;
+        report.note(OrphanStep::Postgres, "hygiene", PassOutcome::Unavailable);
+        return report;
     };
-    let Some(kept) = hygiene_kept_sessions(pool).await else {
-        return;
+    let Some(kept) = hygiene_kept_sessions(pool, &mut report).await else {
+        report.note(OrphanStep::HygieneScan, "sessions", PassOutcome::Deferred);
+        return report;
     };
+    if !kept.is_empty() {
+        report.note(
+            OrphanStep::HygieneScan,
+            "protected sessions",
+            PassOutcome::Deferred,
+        );
+    }
     // With nothing kept both statements run exactly as before.
     let keep = if kept.is_empty() {
         ""
@@ -345,14 +601,19 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
     };
     match query.fetch_all(pool).await {
         Ok(rows) => {
+            report.note(
+                OrphanStep::HygieneTerminal,
+                "sessions",
+                PassOutcome::Done(rows.len() as u64),
+            );
             if !rows.is_empty() {
                 let sample = rows
                     .iter()
                     .take(5)
                     .filter_map(|row| {
-                        let session_key = row.try_get::<String, _>("session_key").ok()?;
-                        let dispatch_id = row.try_get::<String, _>("dispatch_id").ok()?;
-                        let dispatch_status = row.try_get::<String, _>("dispatch_status").ok()?;
+                        let session_key = hygiene_text(row, "session_key", &mut report)?;
+                        let dispatch_id = hygiene_text(row, "dispatch_id", &mut report)?;
+                        let dispatch_status = hygiene_text(row, "dispatch_status", &mut report)?;
                         Some(format!("{session_key}:{dispatch_id}:{dispatch_status}"))
                     })
                     .collect::<Vec<_>>()
@@ -365,6 +626,11 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
             }
         }
         Err(error) => {
+            report.note(
+                OrphanStep::HygieneTerminal,
+                "sessions",
+                PassOutcome::Failed(error.to_string()),
+            );
             tracing::warn!(
                 error = %error,
                 "failed to clear stale terminal active_dispatch_id links during startup recovery"
@@ -402,11 +668,16 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
     };
     match query.fetch_all(pool).await {
         Ok(rows) => {
+            report.note(
+                OrphanStep::HygieneMissing,
+                "sessions",
+                PassOutcome::Done(rows.len() as u64),
+            );
             if !rows.is_empty() {
                 let sample = rows
                     .iter()
                     .take(5)
-                    .filter_map(|row| row.try_get::<String, _>("session_key").ok())
+                    .filter_map(|row| hygiene_text(row, "session_key", &mut report))
                     .collect::<Vec<_>>()
                     .join(", ");
                 tracing::info!(
@@ -417,12 +688,18 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
             }
         }
         Err(error) => {
+            report.note(
+                OrphanStep::HygieneMissing,
+                "sessions",
+                PassOutcome::Failed(error.to_string()),
+            );
             tracing::warn!(
                 error = %error,
                 "failed to clear missing active_dispatch_id links during startup recovery"
             );
         }
     }
+    report
 }
 
 #[cfg(test)]
@@ -437,3 +714,7 @@ pub(super) fn should_skip_agent_runtime_launch(token: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "orphan_recovery_report_tests.rs"]
+mod report_tests;

@@ -342,3 +342,97 @@ fn u3_2a1_is_dormant_in_production() {
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn r0l_every_required_stage_and_explicit_policy_are_checked() {
+    let shared = make_shared_data_for_tests();
+    for role in [BootRole::Gateway, BootRole::RestWorker] {
+        let runtime = runtime(&shared);
+        runtime.boot.progress.send_modify(|p| p.role = Some(role));
+        runtime.record_recovery_for_tests();
+        runtime.record_discovery(Ok(Vec::new()));
+        let full = runtime.boot.progress.borrow().recovery.clone().unwrap();
+        assert!(read(&runtime, &[]).await.is_ok());
+        for stage in role.required_stages() {
+            for outcome in [
+                None,
+                Some(StageOutcome::Pending),
+                Some(StageOutcome::Incomplete),
+                Some(StageOutcome::Deferred),
+                Some(StageOutcome::Failed),
+                Some(StageOutcome::DisabledByPolicy),
+            ] {
+                let mut report = full.clone();
+                report.stages.remove(stage);
+                if let Some(outcome) = outcome {
+                    report.stages.insert(*stage, outcome);
+                }
+                runtime
+                    .boot
+                    .progress
+                    .send_modify(|p| p.recovery = Some(report));
+                assert_eq!(
+                    read(&runtime, &[]).await.unwrap_err(),
+                    BootReadError::TimedOut,
+                    "{role:?}/{stage:?}/{outcome:?}"
+                );
+            }
+            let mut report = full.clone();
+            report.stages.insert(*stage, StageOutcome::DisabledByPolicy);
+            report.disabled_by_policy.insert(*stage);
+            runtime
+                .boot
+                .progress
+                .send_modify(|p| p.recovery = Some(report));
+            assert!(
+                read(&runtime, &[]).await.is_ok(),
+                "explicit policy for {stage:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn r0l_report_identity_and_latest_discovery_cannot_be_reused() {
+    let shared = make_shared_data_for_tests();
+    let runtime = recovered_gateway(&shared);
+    runtime.record_discovery(Ok(Vec::new()));
+    let full = runtime.boot.progress.borrow().recovery.clone().unwrap();
+    for mismatch in 0..4 {
+        let mut report = full.clone();
+        match mismatch {
+            0 => report.runtime += 1,
+            1 => report.provider = ProviderKind::Claude,
+            2 => report.bot.push_str("-other"),
+            _ => report.role = BootRole::RestWorker,
+        }
+        runtime
+            .boot
+            .progress
+            .send_modify(|p| p.recovery = Some(report));
+        assert_eq!(
+            read(&runtime, &[]).await.unwrap_err(),
+            BootReadError::TimedOut,
+            "identity {mismatch}"
+        );
+    }
+    runtime
+        .boot
+        .progress
+        .send_modify(|p| p.recovery = Some(full));
+    assert!(read(&runtime, &[]).await.is_ok());
+    runtime.record_discovery(Err("new listing failed".into()));
+    assert_eq!(
+        read(&runtime, &[]).await.unwrap_err(),
+        BootReadError::TimedOut
+    );
+    runtime.record_discovery(Ok(vec![source("unbound", None, false)]));
+    assert_eq!(
+        read(&runtime, &[]).await.unwrap_err(),
+        BootReadError::TimedOut
+    );
+}
+
+pub(super) fn mutant(name: &str) -> bool {
+    std::env::var("ADK_R0L_MUTANT").ok().as_deref() == Some(name)
+}

@@ -126,10 +126,7 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
-use self::removal::{
-    load_inflight_probe_from_root_excluding, load_inflight_states_from_root,
-    load_inflight_states_from_root_excluding,
-};
+use self::removal::{load_inflight_probe_from_root_excluding, load_inflight_states_from_root};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
@@ -887,15 +884,7 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
     load_inflight_states_from_root(&root, provider)
 }
 
-pub(super) fn load_inflight_states_excluding(
-    provider: &ProviderKind,
-    exclude_channel: impl Fn(u64) -> bool,
-) -> Vec<InflightTurnState> {
-    let Some(root) = inflight_runtime_root() else {
-        return Vec::new();
-    };
-    load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
-}
+pub(super) use removal::{load_inflight_states_excluding, load_inflight_states_excluding_checked};
 
 #[cfg(test)]
 thread_local! {

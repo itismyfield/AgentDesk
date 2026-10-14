@@ -3417,6 +3417,8 @@ services::discord::codex_adoption_runtime::boot::tests::every_live_source_of_the
 services::discord::codex_adoption_runtime::boot::tests::evidence_never_crosses_runtimes
 services::discord::codex_adoption_runtime::boot::tests::failed_listing_is_not_an_empty_success
 services::discord::codex_adoption_runtime::boot::tests::off_or_non_codex_boot_installs_nothing
+services::discord::codex_adoption_runtime::boot::tests::r0l_every_required_stage_and_explicit_policy_are_checked
+services::discord::codex_adoption_runtime::boot::tests::r0l_report_identity_and_latest_discovery_cannot_be_reused
 services::discord::codex_adoption_runtime::boot::tests::u3_2a1_is_dormant_in_production
 services::discord::codex_adoption_runtime::boot::tests::unsupported_role_never_publishes_success
 services::discord::codex_adoption_runtime::boot::tests::witness_needs_role_discovery_and_recovery
@@ -4419,6 +4421,8 @@ services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_started_at
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_turn_nonce
 services::discord::inflight::episode_guard::tests::is_same_episode_as_refuses_a_foreign_user_msg_id
+services::discord::inflight::finalizer_identity::report_tests::r0l_backfill_preserves_legacy_state_and_reports_actual_persist_outcomes
+services::discord::inflight::finalizer_identity::report_tests::r0l_backfill_receipt_foreign_read_parse_and_lock_outcomes_are_distinct
 services::discord::inflight::host_locator::tests::known_locator_survives_save_and_load
 services::discord::inflight::host_locator::tests::rows_without_a_locator_keep_their_exact_bytes_for_every_runtime_kind
 services::discord::inflight::host_locator::tests::unknown_or_truncated_locator_keeps_the_row_and_its_raw_json_across_resave
@@ -4594,6 +4598,9 @@ services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_w
 services::discord::inflight::removal::nondestructive_loader_tests::loader_backfills_only_rows_it_keeps_on_the_unlocked_verdict
 services::discord::inflight::removal::nondestructive_loader_tests::production_readers_hide_but_never_unlink_retirable_rows
 services::discord::inflight::removal::nondestructive_loader_tests::restart_marking_leaves_hidden_rows_to_the_next_boot_reaper
+services::discord::inflight::removal::probe_report::report_tests::r0l_inflight_checked_root_scan_errors_and_hidden_rows_preserve_payload_and_bytes
+services::discord::inflight::removal::probe_report::report_tests::r0l_inflight_excluded_and_receipt_rows_never_lock_or_backfill
+services::discord::inflight::removal::probe_report::report_tests::r0l_scoped_backfill_distinguishes_contention_fence_and_sync_failure
 services::discord::inflight::restart_mark::tests::c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unseen_rows
 services::discord::inflight::restart_mark::tests::c2b_failed_protected_marker_write_records_gate_health_until_a_complete_pass
 services::discord::inflight::restart_mark::tests::receipt_rows_are_skipped_byte_identical_and_never_counted_as_failed
@@ -6054,6 +6061,8 @@ services::discord::queued_placeholder_cluster_characterization_tests::insert_rem
 services::discord::queued_placeholder_cluster_characterization_tests::queue_exit_placeholder_clears_round_trip_with_sidecar
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholder_still_owned_branches
 services::discord::queued_placeholder_cluster_characterization_tests::queued_placeholders_persist_lock_identity
+services::discord::queued_placeholders_store::report_tests::r0l_placeholder_bulk_distinguishes_root_empty_partial_and_cleanup
+services::discord::queued_placeholders_store::report_tests::r0l_placeholder_malformed_cleanup_respects_fence_and_pending_clear_store
 services::discord::queued_placeholders_store::tests::b2_placeholder_off_delta_zero_and_protected_failures_are_observable
 services::discord::queued_placeholders_store::tests::c1_shared_async_accessory_writes_existing_effect_after_closing
 services::discord::reaction_cleanup::tests::recovered_catch_up_message_removes_stale_hourglass
@@ -7199,6 +7208,11 @@ services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::o_writer_host::repost_tests::f6_gateway_and_delegated_hosts_build_a_repost_turn_only_with_a_pool
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_empty_query_decode_and_hygiene_failures_pg
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_missing_pid_observation_failure_and_missing_pg_are_distinct
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_once_drop_abort_and_panic_settle_without_rerun
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_once_followers_return_immediately_and_share_one_terminal_result
+services::discord::runtime_bootstrap::orphan_recovery::report_tests::r0l_orphan_requeue_success_refusal_failure_and_protection_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
@@ -13613,6 +13627,8 @@ services::turn_orchestrator::pending_queue_persistence::queue_exit_debt::tests::
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::a_missing_namespace_is_empty_without_a_scan_error
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::an_entry_error_is_returned_while_other_channels_still_restore
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::permission_denied_is_returned_and_logged_without_changing_the_queue
+services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::r0l_marker_bulk_preserves_valid_rows_and_channel_errors
+services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::r0l_queue_root_empty_partial_and_cleanup_are_distinct
 services::turn_orchestrator::pending_queue_persistence::tests::backward_clock_restore_lands_outside_dedup_window
 services::turn_orchestrator::pending_queue_persistence::tests::legacy_payload_without_created_at_wall_time_falls_back_to_reload_now
 services::turn_orchestrator::pending_queue_persistence::tests::own_file_count_includes_dangling_links_the_purge_would_unlink

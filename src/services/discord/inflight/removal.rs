@@ -554,40 +554,6 @@ enum RowVerdict {
     Skip(bool),
 }
 
-/// Takes the row's lock and re-reads it; anything but a parsed row is already
-/// the verdict.
-fn relock(
-    path: &Path,
-    content: &str,
-) -> Result<(InflightTurnState, InflightStateFileLock), Box<RowVerdict>> {
-    #[cfg(test)]
-    BEFORE_ROW_LOCK.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook(path);
-        }
-    });
-    let lock = lock_inflight_state_path(path).map_err(|_| Box::new(RowVerdict::Skip(true)))?;
-    match fs::read_to_string(path) {
-        Ok(locked) => match parse_inflight_state_content(&locked) {
-            Ok(state) if state.herdr_before_start_stop.is_some() && !receipt_mutant("loader") => {
-                Err(Box::new(RowVerdict::Keep(state, false)))
-            }
-            Ok(state) => Ok((state, lock)),
-            Err(_) if raw_before_start_receipt(&locked) && !receipt_mutant("malformed") => {
-                Err(Box::new(RowVerdict::Skip(true)))
-            }
-            Err(_) => Err(Box::new(RowVerdict::HideMalformed(
-                content.to_string(),
-                locked,
-                lock,
-            ))),
-        },
-        Err(error) => Err(Box::new(RowVerdict::Skip(
-            error.kind() != std::io::ErrorKind::NotFound,
-        ))),
-    }
-}
-
 /// One channel's row as the probe scan shows it, without the finalizer backfill a scan writes
 /// into every row it reads; `Err` when the root or the row cannot be read or parsed.
 pub(in crate::services::discord) fn load_channel_inflight_for_probe(
@@ -619,72 +585,17 @@ fn classify_inflight_row(
     provider: &ProviderKind,
     allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
 ) -> RowVerdict {
-    classify_inflight_row_for_restore(path, provider, allocation, false)
-}
-
-fn classify_inflight_row_for_restore(
-    path: &Path,
-    provider: &ProviderKind,
-    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
-    retain_for_restore: bool,
-) -> RowVerdict {
-    let generation = allocation.generation;
-    let verdict = || -> Result<RowVerdict, Box<RowVerdict>> {
-        let Ok(content) = fs::read_to_string(path) else {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] ⚠ failed to read inflight state file: {}",
-                path.display()
-            );
-            return Ok(RowVerdict::Skip(true));
-        };
-        let (mut state, mut backfill) =
-            match parse_inflight_state_content_with_finalizer_backfill(&content) {
-                Ok(parsed) => parsed,
-                Err(_) => (relock(path, &content)?.0, false),
-            };
-        if raw_before_start_receipt(&content) && !receipt_mutant("loader") {
-            return Ok(RowVerdict::Keep(state, false));
-        }
-        let foreign = |row: &InflightTurnState| row.provider_kind().as_ref() != Some(provider);
-        if foreign(&state) {
-            let (locked, lock) = relock(path, &content)?;
-            if foreign(&locked) {
-                let label = "load_inflight_states_from_root_provider_mismatch";
-                return Ok(RowVerdict::HideForeign(label, state, locked, lock));
-            }
-            (state, backfill) = (locked, false);
-        }
-        let retain = retain_for_restore && state.restart_mode.is_none();
-        #[cfg(test)]
-        let retain = retain || (retain_for_restore && scoped_restore_mutant("stale-planned"));
-        if retain || stale_removal_reason_for_path(path, &state, generation).is_none() {
-            return Ok(RowVerdict::Keep(state, backfill));
-        }
-        let (locked, lock) = relock(path, &content)?;
-        if foreign(&locked) {
-            let label = "load_inflight_states_from_root_stale_provider_mismatch";
-            return Ok(RowVerdict::HideForeign(label, state, locked, lock));
-        }
-        Ok(
-            match stale_removal_reason_for_path(path, &locked, generation) {
-                Some(_)
-                    if !retain_for_restore
-                        && loader_gate_refuses_with_allocation(&locked, allocation) =>
-                {
-                    RowVerdict::KeepGateRefused(locked, lock)
-                }
-                Some(reason) => RowVerdict::HideStale(reason, state, locked, lock),
-                None => RowVerdict::Keep(locked, false),
-            },
-        )
-    };
-    verdict().unwrap_or_else(|verdict| *verdict)
+    let mut observations = Vec::new();
+    let verdict =
+        probe_report::classify_observed(path, provider, allocation, false, &mut observations);
+    probe_report::log_observations(&observations);
+    verdict
 }
 
 pub(in crate::services::discord) struct InflightProbeLoad {
     pub(in crate::services::discord) states: Vec<InflightTurnState>,
     pub(in crate::services::discord) complete: bool,
+    pub(in crate::services::discord) observations: Vec<probe_report::ProbeObservation>,
     #[cfg(test)]
     pub(in crate::services::discord) failure: Option<RestoreFailure>,
 }
@@ -699,10 +610,28 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
     provider: &ProviderKind,
     channel: u64,
 ) -> InflightProbeLoad {
+    load_inflight_probe_scoped_mode(provider, channel, false)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn load_inflight_probe_scoped_checked(
+    provider: &ProviderKind,
+    channel: u64,
+) -> InflightProbeLoad {
+    load_inflight_probe_scoped_mode(provider, channel, true)
+}
+
+#[cfg(test)]
+fn load_inflight_probe_scoped_mode(
+    provider: &ProviderKind,
+    channel: u64,
+    observed: bool,
+) -> InflightProbeLoad {
     let Some(root) = inflight_runtime_root() else {
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
+            observations: vec![probe_report::ProbeObservation::root()],
             failure: Some(RestoreFailure::retryable("restore root/scope unavailable")),
         };
     };
@@ -712,15 +641,16 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
+            observations: vec![probe_report::ProbeObservation::protected(channel)],
             failure: Some(RestoreFailure::Rejected(
                 "restore scope/input unavailable".into(),
             )),
         };
     }
     let mut loaded = if scoped_restore_mutant("scope") {
-        load_inflight_probe_with_scope(&root, provider, |_| false, None)
+        load_inflight_probe_with_scope(&root, provider, |_| false, None, observed)
     } else {
-        load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel))
+        load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel), observed)
     };
     if scoped_restore_mutant("complete") {
         loaded.complete = true;
@@ -775,132 +705,16 @@ fn load_inflight_states_for_probe_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
-    load_inflight_probe_with_scope(root, provider, exclude_channel, None)
+    load_inflight_probe_with_scope(root, provider, exclude_channel, None, true)
 }
 
 use scoped_restore::backfill_scoped_restore;
 
-fn load_inflight_probe_with_scope(
-    root: &Path,
-    provider: &ProviderKind,
-    exclude_channel: impl Fn(u64) -> bool,
-    scope: Option<u64>,
-) -> InflightProbeLoad {
-    let dir = inflight_provider_dir(root, provider);
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) => {
-            return InflightProbeLoad {
-                states: Vec::new(),
-                complete: error.kind() == std::io::ErrorKind::NotFound,
-                #[cfg(test)]
-                failure: (error.kind() != std::io::ErrorKind::NotFound)
-                    .then(|| RestoreFailure::retryable(error)),
-            };
-        }
-    };
-    let mut states = Vec::new();
-    let mut complete = true;
-    #[cfg(test)]
-    let mut failure = None;
-    let mut tmux_owners: HashMap<String, u64> = HashMap::new();
-    let allocation = crate::services::discord::runtime_store::process_generation_binding();
-    for entry in entries {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(_) => {
-                complete = false;
-                continue;
-            }
-        };
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if scope.is_some_and(|channel| channel_id_from_path(&path) != channel) {
-            continue;
-        }
-        // Exclude by canonical filename before classification can lock or backfill an old row.
-        if let Some(channel) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse::<u64>().ok())
-            && exclude_channel(channel)
-        {
-            continue;
-        }
-        let verdict = if scope.is_some() {
-            classify_inflight_row_for_restore(&path, provider, allocation, true)
-        } else {
-            classify_inflight_row(&path, provider, allocation)
-        };
-        let state = match verdict {
-            RowVerdict::Keep(state, true) => {
-                let backfilled = if scope.is_some() {
-                    backfill_scoped_restore(root, &path, provider)
-                } else {
-                    backfill_finalizer_turn_id_under_lock(root, &path, provider).ok_or_else(|| {
-                        RestoreFailure::Rejected("legacy backfill incomplete".into())
-                    })
-                };
-                complete &= backfilled.is_ok();
-                #[cfg(test)]
-                if scope.is_some() {
-                    failure = backfilled.as_ref().err().cloned();
-                }
-                backfilled.unwrap_or(state)
-            }
-            RowVerdict::Keep(state, false) | RowVerdict::KeepGateRefused(state, _) => state,
-            RowVerdict::Skip(incomplete) => {
-                complete &= !incomplete;
-                #[cfg(test)]
-                if incomplete && scope.is_some() {
-                    failure = Some(RestoreFailure::retryable("scoped row read/lock incomplete"));
-                }
-                continue;
-            }
-            RowVerdict::HideStale(..)
-            | RowVerdict::HideForeign(..)
-            | RowVerdict::HideMalformed(..) => {
-                complete &= scope.is_none();
-                continue;
-            }
-        };
-        if scope.is_some_and(|channel| state.channel_id != channel) {
-            complete = false;
-            continue;
-        }
-        if let Some(tmux_session_name) = state
-            .tmux_session_name
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            if let Some(previous_channel_id) =
-                tmux_owners.insert(tmux_session_name.to_string(), state.channel_id)
-            {
-                record_inflight_invariant(
-                    false,
-                    &state,
-                    "inflight_tmux_one_to_one",
-                    "src/services/discord/inflight.rs:load_inflight_states_from_root",
-                    "one tmux session must not be owned by multiple inflight channel files",
-                    serde_json::json!({
-                        "tmux_session_name": tmux_session_name,
-                        "previous_channel_id": previous_channel_id,
-                        "current_channel_id": state.channel_id,
-                        "path": path.display().to_string(),
-                    }),
-                );
-            }
-        }
-        states.push(state);
-    }
-    InflightProbeLoad {
-        states,
-        complete,
-        #[cfg(test)]
-        failure,
-    }
-}
+mod probe_report;
+use probe_report::load_inflight_probe_with_scope;
+pub(in crate::services::discord) use probe_report::{
+    load_inflight_states_excluding, load_inflight_states_excluding_checked,
+};
 
 mod boot_custody;
 mod boot_reaper;
@@ -1269,7 +1083,7 @@ mod loader_gate_observation_tests {
             .unwrap()
             .0;
         let scoped = include_str!("removal/scoped_restore.rs");
-        // Exclude only the two named items; extra items before the next item or EOF are refused.
+        // Only invalidation and the lock-held write body may mutate; wrappers remain scanned.
         let item = |text: &str, name: &str, sentinel: &str| {
             assert_eq!(text.matches(name).count(), 1, "unique item {name}");
             let name_at = text.find(name).expect(name);
@@ -1289,15 +1103,26 @@ mod loader_gate_observation_tests {
                 "async fn invalidate_stale_generation_scoped(",
                 "pub(super) fn backfill_scoped_restore(",
             ),
-            item(scoped, "fn backfill_scoped_restore(", ""),
+            item(
+                scoped,
+                "fn backfill_scoped_restore(",
+                "pub(super) fn backfill_scoped_restore_observed(",
+            ),
+            item(
+                scoped,
+                "fn backfill_scoped_restore_observed(",
+                "fn backfill_scoped_restore_after_lock(",
+            ),
+            item(scoped, "fn backfill_scoped_restore_after_lock(", ""),
         ];
-        assert!(ranges[0].end < ranges[1].start);
-        let scoped_reads = format!(
-            "{}{}{}",
-            &scoped[..ranges[0].start],
-            &scoped[ranges[0].end..ranges[1].start],
-            &scoped[ranges[1].end..]
-        );
+        assert!(ranges.windows(2).all(|pair| pair[0].end < pair[1].start));
+        let mut scoped_reads = String::new();
+        let mut start = 0;
+        for range in [&ranges[0], &ranges[3]] {
+            scoped_reads.push_str(&scoped[start..range.start]);
+            start = range.end;
+        }
+        scoped_reads.push_str(&scoped[start..]);
         for (connection, sentinel) in [
             (
                 "use scoped_restore::invalidate_stale_generation_scoped;",
@@ -1305,7 +1130,7 @@ mod loader_gate_observation_tests {
             ),
             (
                 "use scoped_restore::backfill_scoped_restore;",
-                "fn load_inflight_probe_with_scope(",
+                "mod probe_report;",
             ),
         ] {
             let end = owned.find(connection).expect(connection) + connection.len();
@@ -1317,6 +1142,11 @@ mod loader_gate_observation_tests {
         }
         let reads = owned.split_once("fn classify_inflight_row(").unwrap().1;
         let reads = reads.split_once("\nmod boot_reaper;").unwrap().0;
+        let child = include_str!("removal/probe_report.rs");
+        let child = child
+            .split_once("\n#[cfg(test)]\n#[path")
+            .map_or(child, |(production, _)| production);
+        let reads = format!("{reads}\n{child}");
         let effects = [
             "fs::remove_file",
             "fs::rename",
