@@ -2,6 +2,12 @@
 use super::super::recovery_engine::recover_idle_partial_response;
 use super::*;
 
+/// #2843: when the background idle relay loop discovers that a session's
+/// transcript path changed, scan this many bytes back from EOF (not from EOF
+/// itself) so a prompt already written to the freshly-resolved transcript is
+/// still observed and its response relayed.
+const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
+
 #[cfg(unix)]
 pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
     if CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED.swap(true, Ordering::AcqRel) {

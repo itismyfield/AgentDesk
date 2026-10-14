@@ -1,4 +1,5 @@
 //! Finds and publishes Claude sources without changing a running body reader.
+#![cfg(unix)]
 use super::*;
 
 #[cfg(unix)]

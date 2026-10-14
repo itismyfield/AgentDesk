@@ -124,9 +124,7 @@ use self::relay_ownership::{
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 pub(in crate::services::discord) mod synthetic_start;
 #[cfg(unix)]
-pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
-    DormantSyntheticClaim, capture_dormant_partial,
-};
+pub(in crate::services::discord) use synthetic_start::bridge_handoff::capture_dormant_partial;
 pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
     preserve_admitted_source, preserve_stamped_source,
 };
@@ -161,7 +159,6 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
-#[cfg(unix)]
 mod claude_source;
 mod headless;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
@@ -173,12 +170,12 @@ use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
 use self::claude_idle_bridge::{
     buffer_idle_prefix, idle_stream_message_is_content, idle_tail_tool_opens,
     stream_tui_idle_response_through_bridge,
-    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_bridge::{
     compose_tui_idle_response, forward_idle_stream_into_bridge,
     tui_idle_tail_should_commit_runtime_binding_offset,
+    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
@@ -217,11 +214,6 @@ const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
-/// #2843: when the background idle relay loop discovers that a session's
-/// transcript path changed, scan this many bytes back from EOF (not from EOF
-/// itself) so a prompt already written to the freshly-resolved transcript is
-/// still observed and its response relayed.
-const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
