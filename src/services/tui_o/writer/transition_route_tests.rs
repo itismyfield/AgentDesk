@@ -242,7 +242,7 @@ async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
     );
     let _hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
     let stopping = Rc::clone(&watches);
-    route::on_reply(move || drop(stopping.stopping.send_replace(true)));
+    route::on_reply(move || stopping.stopping.send_modify(|stop| *stop = true));
     let (status, answer) = routed(route(&ready, chain.context(), chain.request(JOB))).await;
     let stale = (status, &answer["result"]);
     let expected = (StatusCode::CONFLICT, &json!("stale_actor_reply"));

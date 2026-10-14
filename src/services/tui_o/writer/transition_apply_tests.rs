@@ -207,11 +207,12 @@ async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
     let reply = ask(&actor, Operation::Inspect(request.clone()), chain.context()).await;
     assert!(matches!(reply.scope, Some(Err(_))), "[T9:unverified]");
     drop(_unread);
-    let old = chain.sources[0].session_id.clone();
-    let holes: [(&str, fn(&mut SourceHistory, String)); 2] = [
-        ("incomplete", |history, _| history.complete = false),
-        ("pinless", |history, session| {
-            let seen = Utc::now();
+    for case in ["incomplete", "pinless"] {
+        let (pin, mut history) = execution(chain.sources.last().unwrap(), Utc::now());
+        if case == "incomplete" {
+            history.complete = false;
+        } else {
+            let (session, seen) = (chain.sources[0].session_id.clone(), Utc::now());
             let (pin, since) = (None, None);
             history.awaiting = Some(Visit {
                 session,
@@ -219,11 +220,7 @@ async fn transition_inspect_issues_its_scope_from_its_final_snapshot_only() {
                 since,
                 seen,
             });
-        }),
-    ];
-    for (case, hole) in holes {
-        let (pin, mut history) = execution(chain.sources.last().unwrap(), Utc::now());
-        hole(&mut history, old.clone());
+        }
         let _held = force_execution_for_tests(Ok((pin, history)));
         let reply = ask(&actor, Operation::Inspect(request.clone()), chain.context()).await;
         let judged = reply.summary.is_some() && matches!(reply.execution, Some(Err(_)));
