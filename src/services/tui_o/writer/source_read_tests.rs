@@ -276,7 +276,9 @@ async fn resume_older_native_header(delayed_descriptor: bool) {
     assert!(f.fold().pending.is_empty(), "older resume must resolve");
     assert_eq!(f.fold().verified.unwrap().source.session_id, B);
     assert_eq!(f.current().session_id.as_deref(), Some(B));
-    assert!(!dedupe::codex_verified_input_blocked(&f.context.tmux_session));
+    assert!(!dedupe::codex_verified_input_blocked(
+        &f.context.tmux_session
+    ));
     append(&f.path(B), &unit("b", "older B"));
     polls().await;
     assert_eq!(port.posts(), vec!["initial A", "older B"]);
@@ -313,7 +315,9 @@ fn source_read_initial_fresh_older_native_header_stays_pending() {
         assert!(f.fold().verified.is_none());
         assert_eq!(f.fold().pending.len(), 1);
         assert!(dedupe::runtime_binding_for_tmux_session(&f.context.tmux_session).is_none());
-        assert!(dedupe::codex_verified_input_blocked(&f.context.tmux_session));
+        assert!(dedupe::codex_verified_input_blocked(
+            &f.context.tmux_session
+        ));
         dedupe::codex_verified::resolve_registered_claims();
     }
 }
