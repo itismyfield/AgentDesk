@@ -784,6 +784,7 @@ jobs:
               # covers the inflight std::fs::File advisory-lock owners and the
               # restart-v2 per-platform fs backend, listed by hand until now.
               - 'src/services/discord/admin_host_guard.rs'
+              - 'src/services/discord/busy_followup_retry_store/**'
               - 'src/services/discord/catch_up/**'
               - 'src/services/discord/codex_adoption_runtime/**'
               - 'src/services/discord/commands/**'
