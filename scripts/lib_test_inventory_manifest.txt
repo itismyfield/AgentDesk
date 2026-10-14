@@ -1198,6 +1198,7 @@ server::routes::agents_turn_deliver::pg_tests::the_switch_off_keeps_every_route_
 server::routes::agents_turn_deliver::tests::each_delivery_carries_only_its_documented_fields
 server::routes::agents_turn_deliver::tests::invalid_turn_target_is_422
 server::routes::agents_turn_deliver::tests::malformed_input_is_rejected_before_any_lookup
+server::routes::agents_turn_target::tests::a_retired_runtime_refuses_turn_start_before_the_hold_and_the_start
 server::routes::agents_turn_target::tests::agent_turn_channel_override_selects_its_provider_and_rejects_mismatch
 server::routes::audit_explicit_auth_routes_tests::audit_runs_without_panic_for_all_config_combos
 server::routes::audit_explicit_auth_routes_tests::empty_strings_are_treated_as_unset
@@ -1780,6 +1781,7 @@ services::claude::claude_tui_session_resolution_tests::stranded_followup_user_dr
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_quiescent_draft_can_recreate_hosted_tui
 services::claude::claude_tui_session_resolution_tests::unknown_transcript_with_prompt_marker_and_draft_reaches_recovery
 services::claude::claude_tui_session_resolution_tests::warm_followup_continues_after_prompt_draft_clear
+services::claude::guarded_owner_tests::a_retired_runtime_refuses_claude_before_the_binary_and_the_canary
 services::claude::guarded_owner_tests::cg_b2c_fresh_finalize_preserves_the_typed_post_fence_stop
 services::claude::guarded_owner_tests::cg_d1_upper_driver_hold_precedes_stale_cleanup_with_valid_clearance
 services::claude::herdr_turn::coldstop_input_tests::coldstop_claude_closed_never_begins_input_or_mutation
@@ -4209,6 +4211,7 @@ services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_
 services::discord::health::turn_deliver::inject_tests::shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg
 services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
 services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+services::discord::health::turn_deliver::tests::a_retired_runtime_refuses_remote_input_with_injection_on_or_off
 services::discord::health::turn_deliver::tests::an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
 services::discord::health::turn_deliver::tests::only_listed_authors_of_an_owned_bot_pass_even_when_allow_all_is_on
@@ -7012,6 +7015,7 @@ services::discord::router::message_handler::provider_dispatch::submission_tests:
 services::discord::router::message_handler::provider_dispatch::submission_tests::cg_d1_intake_actual_begin_preserves_running_cancelled_bridge
 services::discord::router::message_handler::provider_dispatch::submission_tests::headless_creator_installs_waiting_and_holds_a_refused_prompt
 services::discord::router::message_handler::provider_dispatch::submission_tests::intake_creator_installs_waiting_and_holds_a_refused_prompt
+services::discord::router::message_handler::provider_dispatch::tests::a_retired_runtime_refuses_before_the_host_branch_and_the_driver
 services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
@@ -7081,6 +7085,7 @@ services::discord::router::message_handler::typing_indicator::tests::typing_retr
 services::discord::router::message_handler::typing_indicator::tests::unrelated_channel_signals_do_not_stop_typing
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
+services::discord::router::message_handler::voice_announcement_route::voice_route_tests::retired_notice_failure_is_retried_by_the_duplicate_only_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn
 services::discord::router::message_handler::voice_announcement_scope::tests::announce_bot_readable_without_metadata_is_dropped
@@ -10561,6 +10566,7 @@ services::discord::voice_barge_in::tests::progress_playback_does_not_steal_activ
 services::discord::voice_barge_in::tests::progress_playback_registers_handle_when_no_final_result_active
 services::discord::voice_barge_in::tests::progress_subscriber_receives_optional_playback_channel
 services::discord::voice_barge_in::tests::progress_subscriber_receives_voice_turn_events
+services::discord::voice_barge_in::tests::retired_text_reply_tests::voice_text_reply_refuses_a_retired_foreground_before_the_model
 services::discord::voice_barge_in::tests::runtime_config_snapshot_reflects_mutable_voice_state
 services::discord::voice_barge_in::tests::spoken_sensitivity_command_updates_state_and_existing_monitor
 services::discord::voice_barge_in::tests::stale_spoken_result_clear_does_not_remove_newer_live_playback
@@ -10572,9 +10578,12 @@ services::discord::voice_barge_in::tests::voice_channel_for_background_fail_clos
 services::discord::voice_barge_in::tests::voice_channel_for_background_fail_closed_on_multi_agent_without_disambiguator
 services::discord::voice_barge_in::tests::voice_channel_for_background_prefers_active_runtime_route
 services::discord::voice_barge_in::tests::voice_channel_for_background_uses_config_fallback_without_active_route
+services::discord::voice_barge_in::tests::voice_defer_and_drain_hold_a_retired_background_target
 services::discord::voice_barge_in::tests::voice_handoff_cancel_observation_uses_local_reason_before_tombstone
 services::discord::voice_barge_in::tests::voice_handoff_cancel_observation_uses_tombstone_without_local_cancel
 services::discord::voice_barge_in::tests::voice_runtime_uses_file_stt_by_default_and_stream_when_opted_in
+services::discord::voice_barge_in::tests::voice_summary_refuses_a_retired_foreground_without_fallback_speech
+services::discord::voice_barge_in::tests::voice_transcript_refuses_a_retired_foreground_inside_the_claim_winner
 services::discord::voice_barge_in::tests::voice_transcript_simple_question_uses_foreground_tts_without_background_handoff
 services::discord::voice_barge_in::tests::voice_transcript_work_request_hands_off_via_announce_bot_and_tts_ack
 services::discord::voice_barge_in::tests::voice_turn_guild_id_prefers_source_and_falls_back_to_target
@@ -11334,6 +11343,8 @@ services::provider_cli::session_guard::host_guard_tests::another_hosts_launch_re
 services::provider_error_transcript::tests::ignores_normal_error_discussion
 services::provider_error_transcript::tests::qwen_terminal_error_requires_latest_complete_wrapper_envelope
 services::provider_error_transcript::tests::recognizes_narrow_provider_error_envelopes
+services::provider_exec::tests::a_retired_runtime_refuses_one_shot_execution_before_the_adapter
+services::provider_hosting::retired_runtime_for_tests::a_retired_scope_is_exact_thread_local_and_lifted_on_drop
 services::provider_hosting::tests::any_requested_tui_hosting_channel_runtime_tui_alone_is_enough
 services::provider_hosting::tests::any_requested_tui_hosting_picks_up_explicit_runtime_tui
 services::provider_hosting::tests::any_requested_tui_hosting_provider_runtime_pipe_overrides_channel_tui_hosting_legacy
@@ -11346,6 +11357,7 @@ services::provider_hosting::tests::codex_remote_ssh_gate_defaults_off
 services::provider_hosting::tests::codex_remote_ssh_gate_mirrors_explicit_true
 services::provider_hosting::tests::defaults_request_tui_for_claude_only
 services::provider_hosting::tests::explicit_provider_config_overrides_default
+services::provider_hosting::tests::fallible_resolver_keeps_every_production_selection
 services::provider_hosting::tests::provider_runtime_claude_e_on_claude_routes_to_adapter_when_available
 services::provider_hosting::tests::provider_runtime_claude_e_on_codex_falls_back_with_unsupported_reason
 services::provider_hosting::tests::provider_runtime_pipe_overrides_tui_hosting_true
