@@ -832,3 +832,90 @@ fn a_third_snapshot_after_a_failed_save_is_indeterminate_and_refuses_later_write
     assert!(refused.contains("changed outside its owner"), "{refused}");
     assert_eq!(bytes(channel).unwrap(), third.as_bytes());
 }
+
+/// Spends one input's retry budget, as the retry store's own latch records it.
+fn park_retries(channel: ChannelId, id: u64) {
+    let queues = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let record = queues.parent().unwrap().join(format!(
+        "discord_busy_followup_retries/claude/{channel}/{id}.json"
+    ));
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let budget = json!({ "notice_message_id": 9, "busy_retry_count": 3,
+        "first_busy_retry_at_ms": 1, "active_retry_ms": 0, "capped": true, "notice_bound": true });
+    fs::write(record, budget.to_string()).unwrap();
+}
+
+/// A reservation that moves the first ready input past a parked one keeps an unacknowledged debt
+/// through a failed save, a NotSent, a submission, an Unknown head and a restart.
+#[test]
+fn a_debt_survives_every_outcome_of_a_reservation_past_a_parked_input() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let channel = ChannelId::new(6_813_621);
+    let (x, p) = (human(91, 7, "superseded", 5), human(92, 8, "parked", 5));
+    let (h, b) = (human(93, 9, "head", 5), human(94, 10, "tail", 5));
+    let mut state = seeded(channel, vec![x.clone(), p.clone(), h.clone(), b.clone()]);
+    let remaining = vec![p.clone(), h.clone(), b.clone()];
+    let events = vec![exit(&x, QueueExitKind::Superseded)];
+    let debt = commit(&mut state, channel, remaining, events).remove(0);
+    drop(state);
+    park_retries(channel, 92);
+    let items = |channel| {
+        let items = disk(channel)["items"].as_array().cloned().unwrap();
+        let id = |item: &Value| item["message_id"].as_u64().unwrap();
+        items.iter().map(id).collect::<Vec<_>>()
+    };
+
+    block_on(async {
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let before = bytes(channel);
+        save_fault::fail_next(channel);
+        let failed = handle.claim_queued_head(QueueIdentity::of(&h), ctx()).await;
+        assert!(matches!(failed, QueuedHeadClaim::PersistenceFailed(_)));
+        assert_eq!(
+            bytes(channel),
+            before,
+            "a failed save leaves the file as it was"
+        );
+
+        let ticket = reserve(&handle, &h).await;
+        assert_eq!(items(channel), [93, 92, 94]);
+        assert_eq!(disk(channel)["queue_exit_debts"], json!([value(&debt)]));
+        assert!(settle(&handle, ticket, HeadOutcome::NotSent).await);
+        assert_eq!(disk(channel)["queue_exit_debts"], json!([value(&debt)]));
+
+        let ticket = reserve(&handle, &h).await;
+        let HeadSettle::Committed(Some(ticket)) = handle
+            .settle_queued_head(ticket, HeadOutcome::MayHaveSent, ctx())
+            .await
+        else {
+            panic!("MayHaveSent was not committed");
+        };
+        assert!(settle(&handle, ticket, HeadOutcome::Injected).await);
+        assert_eq!(items(channel), [92, 94]);
+
+        let ticket = reserve(&handle, &b).await;
+        assert_eq!(items(channel), [94, 92]);
+        let HeadSettle::Committed(Some(ticket)) = handle
+            .settle_queued_head(ticket, HeadOutcome::MayHaveSent, ctx())
+            .await
+        else {
+            panic!("MayHaveSent was not committed");
+        };
+        let unknown = handle
+            .settle_queued_head(ticket, HeadOutcome::Unconfirmed, ctx())
+            .await;
+        assert!(matches!(unknown, HeadSettle::Unknown));
+        assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
+
+        let restart = ChannelMailboxRegistry::default().handle(channel);
+        assert!(
+            restart
+                .enqueue(human(95, 11, "after", 5), ctx())
+                .await
+                .enqueued
+        );
+    });
+    assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
+    assert_eq!(disk(channel)["terminal_identities"][0]["primary"], 93);
+    assert_eq!(read(channel), [value(&debt)]);
+}
