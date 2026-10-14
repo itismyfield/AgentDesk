@@ -45,6 +45,13 @@ use self::status_panel_completion_producer::*;
 // #3479 r8: behavior-preserving extraction of pure clusters into leaf modules.
 #[path = "recovery_engine/jsonl_extract.rs"]
 mod jsonl_extract;
+// Dormant until the restore and idle paths dispatch to it.
+#[cfg(test)]
+#[path = "recovery_engine/legacy_restart_replay.rs"]
+mod legacy_restart_replay;
+#[cfg(test)]
+#[path = "recovery_engine/legacy_restart_replay_tests.rs"]
+mod legacy_restart_replay_tests;
 #[path = "recovery_engine/output_path_detect.rs"]
 mod output_path_detect;
 #[path = "recovery_engine/phase_policy.rs"]
