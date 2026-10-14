@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d906af44c75064a3220e7e687f86e40fd78588ec",
+  "measured_at_sha": "8065c910d418489c6e71c2067a30396f35f7739a",
   "records": [
     {
       "root": "migrations/postgres",
@@ -7911,15 +7911,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:30acb0aab5e4f80aa29990d6e8e2395d9adc604c94b28294243c6996917cf108"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:7e57f6c8f8ff400b0d7a3d15d117851db6bb4588118d44bd719bbdd61e927457"
     },
     {
@@ -7939,6 +7930,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:a6b79879722978a44eb86bc07c025696f33e009da18a0847b556bd0dbcac4258"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ac602d5b09a4c2be79f5d5de14d9f0c87212f1f4df4d41d86fff1d97b4be38b9"
     },
     {
       "root": "src",
