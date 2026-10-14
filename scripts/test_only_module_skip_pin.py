@@ -37,6 +37,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/engine/ops/exec_ops/circuit_evidence_tests.rs",
         "src/services/discord/inflight/circuit_evidence_tests.rs",
         "src/services/discord/relay_recovery_circuit_evidence_tests.rs",
+        "src/services/tui_o/store/codex_provenance/p5a2_projection_tests.rs",
+        "src/services/tui_o/writer/p5a2_actor_tests.rs",
+        "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/live_grant_tests.rs",
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
@@ -703,6 +706,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_placeholders/tests/n3bc_tests.rs",
+        "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+        "src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_merge_tests.rs",
         "src/services/discord/inflight/save_store/coordinate_replay_tests.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay_tests.rs",
@@ -711,6 +716,11 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim/strict_yield_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown/reown_tests.rs",
+        "src/services/discord/restart_report/model/tests.rs",
+        "src/services/discord/restart_report/model/entry_tests.rs",
+        "src/services/recovery_defer/tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
     }
@@ -719,6 +729,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/ledger.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
@@ -800,10 +812,21 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
+        "src/db/channel_recovery_custody.rs",
+        "src/services/turn_orchestrator/recovery_custody/mod.rs",
+        "src/services/turn_orchestrator/recovery_custody/capability.rs",
+        "src/services/turn_orchestrator/recovery_custody/denial_index.rs",
+        "src/services/turn_orchestrator/recovery_custody/model.rs",
+        "src/services/turn_orchestrator/recovery_custody/operation.rs",
+        "src/services/turn_orchestrator/recovery_custody/reconcile.rs",
         "src/services/discord/turn_presence/activity/tail.rs",
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
+        "src/services/discord/restart_report/model.rs",
+        "src/services/discord/restart_report/capacity.rs",
+        "src/services/recovery_defer.rs",
+        "src/services/recovery_defer/cursor.rs",
     }
 )
 

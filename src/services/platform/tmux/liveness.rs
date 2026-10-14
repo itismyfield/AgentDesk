@@ -1,5 +1,7 @@
 use super::*;
 
+const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[cfg(test)]
 pub(crate) mod tests;
 
