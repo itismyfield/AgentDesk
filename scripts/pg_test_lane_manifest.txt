@@ -305,7 +305,6 @@ src/services/tui_o/writer/repost_turn_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs
-src/services/turn_orchestrator/recovery_custody/mailbox_access_tests.rs
 src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs
 src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs
 src/voice/announce_meta.rs
@@ -634,12 +633,12 @@ services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
-services::turn_orchestrator::registry_purge::mailbox_access::tests
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests::dormant
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests::migration
 services::turn_orchestrator::registry_purge::recovery_custody::reconcile_pg_tests
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::mailbox_contact
 voice::announce_meta::tests
 voice::turn_link::tests
 [tests]
@@ -2385,9 +2384,6 @@ services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
 services::turn_lifecycle::host_guard_tests::force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg
-services::turn_orchestrator::registry_purge::mailbox_access::tests::s3act_b3b4a2b1_a_carried_install_runs_on_either_branch_without_a_zero_count_gap_pg
-services::turn_orchestrator::registry_purge::mailbox_access::tests::s3act_b3b4a2b1_a_lost_install_answer_is_recovered_from_the_same_actor_pg
-services::turn_orchestrator::registry_purge::mailbox_access::tests::s3act_b3b4a2b1_the_adapter_hands_every_refused_carrier_back_unchanged_pg
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests::dormant::s3act_b3b4a1_l00_admission_and_home_read_match_the_base_oracle_pg
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests::migration::s3act_b3b4a1_a_0139_migrator_refuses_a_schema_with_0140_pg
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests::migration::s3act_b3b4a1_migration_applies_to_an_empty_database_and_reruns_as_a_no_op_pg
@@ -2422,6 +2418,9 @@ services::turn_orchestrator::registry_purge::recovery_custody::reconcile_pg_test
 services::turn_orchestrator::registry_purge::recovery_custody::reconcile_pg_tests::s3act_b3b4a1_u03_queue_commit_row_reuses_its_debt_pg
 services::turn_orchestrator::registry_purge::recovery_custody::reconcile_pg_tests::s3act_b3b4a1_u03_reserved_only_and_marker_only_rows_pg
 services::turn_orchestrator::registry_purge::recovery_custody::reconcile_pg_tests::s3act_b3b4a1_u03_source_return_row_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::mailbox_contact::s3act_b3b4a2b1_a_carried_install_runs_on_either_branch_without_a_zero_count_gap_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::mailbox_contact::s3act_b3b4a2b1_a_lost_install_answer_is_recovered_from_the_same_actor_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::mailbox_contact::s3act_b3b4a2b1_the_adapter_hands_every_refused_carrier_back_unchanged_pg
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_a00_an_undecided_row_settles_first_and_no_lock_crosses_an_await_pg
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r02_a_full_registry_evicts_nothing_and_reclaims_only_a_closed_slot_pg
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r03_a_successor_waits_for_every_worker_apply_and_capability_pg
