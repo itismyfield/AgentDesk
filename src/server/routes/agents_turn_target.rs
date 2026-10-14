@@ -137,13 +137,16 @@ fn resolve_bound_target(
 
 /// 409 when a turn that never claimed the mailbox (TUI-direct, adopted or monitor) still
 /// holds the channel, or a turn-mode transcript reads busy or unknown: a start there would
-/// report `started` and then lose the prompt.
+/// report `started` and then lose the prompt. A retired runtime answers 422 before any hold.
 pub(super) async fn external_turn_conflict(
     registry: Option<&crate::services::discord::health::HealthRegistry>,
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
     use crate::services::discord::health::{ExternalHold, external_turn_hold_for_start};
+    if let Some(refused) = retired_target(provider, channel_id) {
+        return Some(refused);
+    }
     let hold = external_turn_hold_for_start(registry, provider, channel_id).await?;
     let error = match hold {
         ExternalHold::Unknown => format!("channel {channel_id}'s TUI turn state is unknown"),
@@ -152,6 +155,20 @@ pub(super) async fn external_turn_conflict(
     let reason = hold.reason();
     let body = json!({"ok": false, "status": "conflict", "reason": reason, "error": error});
     Some((StatusCode::CONFLICT, Json(body)))
+}
+
+fn retired_target(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    use crate::services::provider_hosting::{RetiredRuntimeError, ensure_runtime_executable};
+    ensure_runtime_executable(provider, Some(channel_id)).err()?;
+    let (reason, error) = (
+        RetiredRuntimeError::CODE,
+        RetiredRuntimeError::NEW_INPUT_NOTICE,
+    );
+    let body = json!({"ok": false, "status": "invalid_target", "reason": reason, "error": error});
+    Some((StatusCode::UNPROCESSABLE_ENTITY, Json(body)))
 }
 
 /// The supervised presence of the agent's turn channel; null outside turn mode.
@@ -172,6 +189,11 @@ pub(super) async fn start_headless_turn_on_target(
     source: Option<String>,
     metadata: Option<serde_json::Value>,
 ) -> Result<(String, &'static str), crate::services::discord::HeadlessTurnStartError> {
+    use crate::services::provider_hosting::{RetiredRuntimeError, ensure_runtime_executable};
+    if ensure_runtime_executable(&target.provider, Some(target.channel_id)).is_err() {
+        let reason = RetiredRuntimeError::CODE.to_string();
+        return Err(crate::services::discord::HeadlessTurnStartError::InvalidTarget(reason));
+    }
     let channel_name_hint = (!target.primary_channel.chars().all(|ch| ch.is_ascii_digit()))
         .then_some(target.primary_channel);
     crate::services::discord::health::start_headless_agent_turn(
@@ -254,5 +276,57 @@ mod tests {
                 .unwrap();
             assert_eq!(target.provider.as_str(), provider);
         }
+    }
+
+    /// `/turn/start` and the voice conductor refuse a retired runtime, held or not, once resolved
+    /// and before the external hold or a start; otherwise the held channel answers its 409.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retired_runtime_refuses_turn_start_before_the_hold_and_the_start() {
+        use crate::services::discord::HeadlessTurnStartError;
+        use crate::services::discord::health::{HealthRegistry, seed_external_turn_row_for_tests};
+        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (channel, unheld) = (6_570_621_u64, 6_570_622_u64);
+        let provider = ProviderKind::Claude;
+        seed_external_turn_row_for_tests(&provider, channel);
+        let registry = HealthRegistry::new();
+        let conflict = |channel: u64| {
+            let (registry, provider) = (&registry, &provider);
+            async move {
+                let response = external_turn_conflict(Some(registry), provider, channel).await;
+                response.map(|(status, Json(body))| {
+                    let reason = body["reason"].as_str().unwrap_or("-").to_string();
+                    format!("{} {reason}", status.as_u16())
+                })
+            }
+        };
+        let start = || {
+            let target = AgentTurnTarget {
+                provider: provider.clone(),
+                primary_channel: channel.to_string(),
+                channel_id: channel,
+            };
+            start_headless_turn_on_target(&registry, target, "status?".to_string(), None, None)
+        };
+        let retired_start = |result: &Result<(String, &'static str), HeadlessTurnStartError>| {
+            let code = RetiredRuntimeError::CODE;
+            matches!(result, Err(HeadlessTurnStartError::InvalidTarget(reason)) if reason == code)
+        };
+
+        {
+            let _retired = retired_runtime_for_tests::retire(&provider, Some(channel));
+            let _unheld = retired_runtime_for_tests::retire(&provider, Some(unheld));
+            for target in [channel, unheld] {
+                let refused = conflict(target).await;
+                assert_eq!(refused.as_deref(), Some("422 runtime_retired:claude-e"));
+            }
+            let started = start().await;
+            assert!(retired_start(&started), "{started:?}");
+        }
+        let held = conflict(channel).await;
+        assert_eq!(held.as_deref(), Some("409 external_turn_active"));
+        assert_eq!(conflict(unheld).await, None);
+        let started = start().await;
+        assert!(!retired_start(&started), "{started:?}");
     }
 }
