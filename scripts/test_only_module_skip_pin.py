@@ -713,6 +713,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/recovery_defer/tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
+        "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
     }
 )
 
