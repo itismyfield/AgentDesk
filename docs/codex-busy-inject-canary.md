@@ -20,7 +20,24 @@ no hot reload or instantaneous revocation of an already pasted input.
 - Claude and the Claude-only queued-head capability keep their existing paths.
 - External input modes do not bypass the Codex channel gate.
 
-## Before a live canary
+## 즉시 활성화 — 카나리 생략
+
+사용자 결정(2026-10-14)에 따라 구현 착지 즉시 활성화하며 카나리는 생략한다.
+이미 목록에 있는 Codex 채널은 C4 바이너리가 뜨는 순간 활성화된다.
+
+1. 첫 C4 프로세스를 실행하기 전에 각 실행 노드의 기존 목록과 그 목록이
+   허용하는 실제 Codex 채널 전체를 대조한다. `*`와 기존 등록 채널도 포함한다.
+2. 정본 `~/.adk/release/config/launchd.env`에서 기존 ID를 보존하면서 승인된
+   채널만 추가한다. `ADK_BUSY_INJECT`는 변경하지 않는다.
+3. 정본에서 release 서비스 정의를 재생성하고 기존의 안전한 release 절차로
+   프로세스를 교체한다. 환경 파일 수정만으로는 실행 중인 gate가 바뀌지 않는다.
+4. 새 SHA·PID·시작 시각·유효 목록을 확인한 뒤 활성화 완료로 판정한다.
+   미확정 입력은 재전송하지 않고 아래 rollback 절차를 따른다.
+
+아래 카나리·n≥10·J8 절은 선택적인 측정 절차이며 활성화의 선행조건이 아니다.
+실행하지 않은 측정은 PASS로 기록하지 않는다.
+
+## Optional measurement: before a live canary
 
 These are deployment checks for the coordinator; implementation tests do not
 establish their live values.
@@ -35,7 +52,7 @@ establish their live values.
 5. Require independently validated J8 measurement tooling before claiming a
    live J8 result. Unit and PG fixtures alone cannot establish that result.
 
-## Sample and verdict
+## Optional measurement: sample and verdict
 
 Start A through real Discord input, confirm its native model turn is busy,
 then submit B once through Discord. Preserve native and Discord evidence for

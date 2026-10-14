@@ -519,7 +519,7 @@ fn codex_discord_attempt_new_turn_delivers_through_production_ledger_pg() {
             )
             .unwrap();
             inject_hook::set_pane_program(channel, program);
-            inject_hook::enable_codex(channel);
+            let _gate = crate::services::discord::router::busy_inject_support::open_gate(channel);
             let message = MessageId::new(5_845_256);
             let generation = crate::services::discord::runtime_store::process_generation();
             let request = HumanInputRequest {
