@@ -341,6 +341,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs",
         "src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs",
         "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
+        "src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs",
         "src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs",
         "src/services/discord/commands/control/home_fence_tests.rs",
         "src/services/tui_o/writer/deliver_home_tests.rs",
