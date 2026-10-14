@@ -18,21 +18,38 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-MODULES = ("channel_recovery_custody", "recovery_custody", "recovery_registry")
+MODULES = ("channel_recovery_custody", "recovery_custody", "recovery_registry", "mailbox_access",
+           "mailbox_transport")
 BODY = (
     "src/db/channel_recovery_custody.rs",
     "src/services/turn_orchestrator/recovery_custody/",
     "src/services/turn_orchestrator/recovery_registry/",
 )
 PURGE = "src/services/turn_orchestrator/registry_purge.rs"
+MAILBOX = "src/services/turn_orchestrator.rs"
+FENCE = "src/services/turn_orchestrator/input_fence.rs"
+INCARNATION = "src/services/turn_orchestrator/incarnation.rs"
 # file -> the only lines that may name a B3b-4 module there, each under exactly `#[cfg(test)]`.
 DECLARATIONS = {
     "src/db/mod.rs": ("pub(crate) mod channel_recovery_custody;",),
     PURGE: (
         '#[path = "recovery_custody/mod.rs"]', "pub(crate) mod recovery_custody;",
         '#[path = "recovery_registry/mod.rs"]', "pub(crate) mod recovery_registry;",
+        '#[path = "recovery_custody/mailbox_access.rs"]', "mod mailbox_access;",
+        '#[path = "recovery_custody/mailbox_transport.rs"]', "pub(super) mod mailbox_transport;",
     ),
+    # The actor's carried apply: one test-only message variant.
+    MAILBOX: ("Carried(Box<registry_purge::mailbox_transport::Carried>),",),
 }
+# file -> the only other lines a slice may add there, each a test-only arm of that variant.
+WIRING = {
+    MAILBOX: ("ChannelMailboxMsg::Carried(msg) => msg.apply(&mut state, channel_id, own_recovery_done),",
+              "use incarnation::spawn_channel_mailbox;"),
+    FENCE: ("M::Carried(carried) => carried.persistence(),", "M::Carried(carried) => carried.refuse_fenced(failure),"),
+    PURGE: ("M::Carried(carried) => carried.refuse_closed(),",),
+}
+# file -> the file its removed lines must reappear in: request and spawn moved, not rewritten.
+MOVED = {MAILBOX: INCARNATION}
 # file -> (gate, item): test-only seams outside the bodies; the gate sits right above the item.
 SEAMS = {
     "src/services/agent_recovery/admission.rs": ("#[cfg(test)]", "impl AdmissionGuard {"),
@@ -54,13 +71,20 @@ FORBIDDEN = (
     "src/services/discord/queue_dispatch/kickoff.rs", "src/services/discord/queue_io.rs",
     "src/services/discord/mod.rs",
 )
+# The writers and restore paths the actor slice leaves to the writer slice.
+WRITERS = (
+    "src/services/turn_orchestrator/queued_head.rs", "src/services/turn_orchestrator/pending_queue_persistence.rs",
+    "src/services/turn_orchestrator/scoped_claim.rs", "src/services/turn_orchestrator/installed_actor_handoff.rs",
+    "src/services/turn_orchestrator/queue_enqueue.rs", "src/services/cluster/channel_home*",
+    "src/services/tui_o/*", "src/services/discord/recovery_engine/restore_inflight*",
+)
 # policy -> (globs that must not change, files that may change only in their DECLARATIONS lines).
 POLICIES = {
     # Every PR: the structural checks above only, so unrelated DB or migration work still passes.
     "dormant": ((), ()),
     # The feature PR against its base branch: what no B3b-4 slice changes.
     "b3b4": (FORBIDDEN + ("src/services/discord/runtime_bootstrap*", "migrations/*", "src/db/*"),
-             (PURGE,)),
+             (PURGE, MAILBOX, FENCE)),
     # Slice 4a2b-0 against its start head: only the dormant bodies, this gate and registrations.
     "4a2b-0": (FORBIDDEN + (
         "src/services/turn_orchestrator.rs", "src/services/turn_orchestrator/incarnation.rs", PURGE,
@@ -68,6 +92,10 @@ POLICIES = {
         "src/services/turn_orchestrator/pending_queue_persistence.rs",
         "src/services/turn_orchestrator/queued_head.rs", "src/services/turn_orchestrator/queue_enqueue.rs",
         "src/services/discord/*", ".github/workflows/*", "src/db/*", "migrations/*"), ()),
+    # Slice 4a2b-1: the actor contact; the mailbox, fence and purge change only in their wiring.
+    "4a2b-1": (FORBIDDEN + WRITERS + (
+        "src/services/discord/runtime_bootstrap*", ".github/workflows/*", "src/db/*", "migrations/*"),
+        (MAILBOX, FENCE, PURGE)),
 }
 NAMED = re.compile(r"\b(?:%s)\b" % "|".join(MODULES))
 
@@ -113,16 +141,21 @@ def check(root):
                 if any(text.endswith(item) or item in text for item in TEST_ONLY) and not gated:
                     errors.append(f"{path}:{number}: test fixture without #[cfg(test)]: {text}")
             elif NAMED.search(text) and not text.startswith("//"):
+                gates = gate_above(lines, number - 1)
                 if text not in allowed:
                     errors.append(f"{path}:{number}: reference to a dormant module outside it: {text}")
-                elif text.startswith("pub(crate) mod") and "#[cfg(test)]" not in gate_above(lines, number - 1):
+                elif not text.startswith("#[") and "#[cfg(test)]" not in gates:
                     errors.append(f"{path}:{number}: declaration not under #[cfg(test)]: {text}")
-                elif text.startswith("pub(crate) mod") and any(
-                        not gate.startswith(("#[cfg(test)]", "#[path")) for gate in gate_above(lines, number - 1)):
+                elif any(not gate.startswith(("#[cfg(test)]", "#[path")) for gate in gates):
                     errors.append(f"{path}:{number}: declaration gate is not exactly #[cfg(test)]: {text}")
     for path, declared in DECLARATIONS.items():
         text = [line.strip() for line in sources.get(path, [])]
         errors.extend(f"{path}: declaration missing: {item}" for item in declared if text.count(item) != 1)
+    for path, wired in WIRING.items():
+        lines = sources.get(path, [])
+        errors.extend(f"{path}:{number}: wiring not under #[cfg(test)]: {line.strip()}"
+                      for number, line in enumerate(lines, 1)
+                      if line.strip() in wired and "#[cfg(test)]" not in gate_above(lines, number - 1))
     for path, (gate, item) in SEAMS.items():
         lines = sources.get(path, [])
         at = [index for index, line in enumerate(lines) if line.strip() == item]
@@ -152,6 +185,19 @@ def git(root, *args):
     return done.stdout
 
 
+def changed_lines(root, base, name):
+    """The (sign, stripped text) of each changed line of `name`, without blank and comment lines."""
+    diff = git(root, "diff", "-U0", f"{base}...HEAD", "--", name).splitlines()
+    lines = [(line[0], line[1:].strip()) for line in diff
+             if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+    return [(sign, text) for sign, text in lines if text and not text.startswith("//")]
+
+
+def visible(text):
+    """A moved line without the visibility its new module gives it."""
+    return re.sub(r"^pub(\([^)]*\))? ", "", text)
+
+
 def changed_forbidden(root, base, policy, extra):
     forbidden, declared_only = POLICIES[policy] if policy else (FORBIDDEN, ())
     globs = forbidden + tuple(extra)
@@ -160,12 +206,14 @@ def changed_forbidden(root, base, policy, extra):
         if any(fnmatch.fnmatch(name, glob) for glob in globs):
             errors.append(f"{name}: changed against {base} but must stay as it is")
         elif name in declared_only:
-            allowed = DECLARATIONS[name] + ("#[cfg(test)]",)
-            diff = git(root, "diff", "-U0", f"{base}...HEAD", "--", name).splitlines()
-            lines = [line[1:].strip() for line in diff
-                     if line[:1] in "+-" and not line.startswith(("+++", "---"))]
-            errors.extend(f"{name}: `{line}` changed; only its gated declarations may"
-                          for line in lines if line not in allowed)
+            allowed = DECLARATIONS.get(name, ()) + WIRING.get(name, ()) + ("#[cfg(test)]",)
+            moved = [visible(text) for sign, text in changed_lines(root, base, MOVED[name])
+                     if sign == "+"] if name in MOVED else []
+            for sign, line in changed_lines(root, base, name):
+                if sign == "-" and visible(line) in moved:
+                    moved.remove(visible(line))
+                elif line not in allowed:
+                    errors.append(f"{name}: `{line}` changed; only its gated declarations may")
     return errors
 
 
