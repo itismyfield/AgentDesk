@@ -161,6 +161,8 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
+#[cfg(unix)]
+mod claude_source;
 mod headless;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
 mod session_rotation_settle;
@@ -183,14 +185,8 @@ pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel
 #[cfg(unix)]
 use self::claude_idle_runtime::{
     DEAD_ORPHANED_PANE_PROBE_DELAY, DEAD_ORPHANED_PANE_PROBE_SAMPLES,
-    advance_claude_tmux_runtime_binding_offset, claude_continuation_binding_supersedes_launch,
-    claude_tui_rehydrate_start_offset, claude_tui_runtime_binding_matches_launch,
-    resolve_idle_relay_transcript, resolve_rehydrated_tmux_channel_id,
-    resolved_claude_idle_relay_transcript_path, spawn_claude_idle_transcript_relay,
-};
-#[cfg(unix)]
-pub(in crate::services::discord) use self::claude_idle_runtime::{
-    claude_tui_launch_context, other_session_claimed_transcripts,
+    advance_claude_tmux_runtime_binding_offset, claude_tui_rehydrate_start_offset,
+    resolve_rehydrated_tmux_channel_id, spawn_claude_idle_transcript_relay,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_runtime::{
@@ -203,6 +199,15 @@ use self::claude_idle_tail::{
 #[cfg(unix)]
 use self::claude_idle_tail::{
     maybe_spawn_claude_idle_response_tail, spawn_claude_idle_response_tail_once,
+};
+#[cfg(unix)]
+use self::claude_source::{
+    claude_continuation_binding_supersedes_launch, claude_tui_runtime_binding_matches_launch,
+    resolve_idle_relay_transcript, resolved_claude_idle_relay_transcript_path,
+};
+#[cfg(unix)]
+pub(in crate::services::discord) use self::claude_source::{
+    claude_tui_launch_context, other_session_claimed_transcripts,
 };
 #[cfg(unix)]
 use self::session_rotation_settle::settle_claude_session_rotations;
