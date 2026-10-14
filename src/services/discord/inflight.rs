@@ -29,9 +29,7 @@ pub(crate) mod read_only_owner_snapshot;
 mod restart_mark_fence_tests;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 
-// #3479: the pure domain model moved to `model.rs`; re-export every public
-// item at its original visibility so existing `inflight::*` / `super::*`
-// references across the discord module resolve unchanged.
+// Re-export the domain model at its existing visibility for root and sibling callers.
 pub(in crate::services::discord) use model::{
     InflightTurnIdentity, InflightTurnState, RelayOwnerKind, TurnSource, opt_channel_id,
     opt_message_id, optional_message_id, transfer_end,
