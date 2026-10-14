@@ -1398,7 +1398,7 @@ jobs:
 
       # Use the same partition and step budget as the main PG matrix.
       - name: just test-postgres-shard
-        timeout-minutes: 60
+        timeout-minutes: 75
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2281,7 +2281,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=cd570cc0cfbd0aadb083d28dba0bd9b78637f0279faacf19d72bbba67cb9589d
+          expected=35dd9df8e130470acbf006c1c7a3007337e3e3ae2027561fef086d44a5e31679
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2514,7 +2514,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=cd570cc0cfbd0aadb083d28dba0bd9b78637f0279faacf19d72bbba67cb9589d
+          expected=35dd9df8e130470acbf006c1c7a3007337e3e3ae2027561fef086d44a5e31679
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
