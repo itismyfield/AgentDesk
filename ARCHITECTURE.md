@@ -199,6 +199,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_recovery_custody.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -1858,9 +1859,16 @@ src/
 │   │   │   │   ├── stop_command_catch_up_e2e.rs
 │   │   │   │   └── thread_guard_host_e2e.rs
 │   │   │   ├── synthetic_start/
+│   │   │   │   ├── bridge_handoff/
+│   │   │   │   │   ├── reown/
+│   │   │   │   │   │   └── reown_tests.rs
+│   │   │   │   │   └── reown.rs
+│   │   │   │   ├── non_bridge_claim/
+│   │   │   │   │   └── strict_yield_tests.rs
 │   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
+│   │   │   │   ├── non_bridge_claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
@@ -2919,6 +2927,15 @@ src/
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
 │   │   │   └── prefix.rs
+│   │   ├── recovery_custody/
+│   │   │   ├── capability.rs
+│   │   │   ├── custody_pg_tests.rs
+│   │   │   ├── denial_index.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── model.rs
+│   │   │   ├── operation.rs
+│   │   │   ├── reconcile.rs
+│   │   │   └── reconcile_pg_tests.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
