@@ -842,3 +842,6 @@ mod boundary_tests;
 
 /// A Codex runtime replaced in process: the relay follows the new runtime's routing.
 mod runtime_switch_tests;
+
+/// The idle loop re-owns a refused delegation, and a failed reader leaves it for the repair.
+mod reown_tests;

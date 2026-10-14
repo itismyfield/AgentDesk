@@ -170,6 +170,7 @@ pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 2] = [
 /// skipped here, which is what makes the preceding settle phase load-bearing.
 #[cfg(unix)]
 pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
+    use super::synthetic_start::non_bridge_claim::{NonBridgeHandoff, hand_off_observed_turn};
     for (tmux_session_name, binding) in
         super::background_child_completion::claude_bindings_after_child_completions(shared).await
     {

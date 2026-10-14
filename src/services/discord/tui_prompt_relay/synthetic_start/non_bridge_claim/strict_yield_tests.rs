@@ -376,6 +376,213 @@ fn reowned_turn_resumes_through_the_dormant_consumer_after_a_failed_tail() {
     });
 }
 
+/// The wiring holds the channel lock from its claim through its owner adopt. A hand-off that
+/// starts in between cannot commit first, so the late adopt never lands on a re-owned turn.
+#[test]
+fn reown_cannot_commit_between_a_claim_and_its_owner_adopt() {
+    isolated(|dir| async move {
+        let (b, end) = transcript(&dir, "adopt-race.jsonl", "");
+        // Observed with no watcher, the hook lease is the bridge's; the claim then delegates to
+        // the watcher that appeared, which the wiring has to adopt into the lease.
+        let turn = Turn::observe(170, &b, end, Some(&b), None);
+        assert_eq!(
+            turn.lease.relay_owner,
+            ExternalInputRelayOwner::BridgeAdapter
+        );
+        turn.watch(b.to_str().expect("utf8 path"));
+        let adopt_pause = &super::super::super::synthetic_start_wiring::ADOPT_PAUSE;
+        let (claimed, adopt) = arm(adopt_pause, turn.channel);
+        let wiring = turn.wire();
+        tokio::pin!(wiring);
+        tokio::select! {
+            _ = claimed.notified() => {}
+            _ = &mut wiring => panic!("the wiring adopts the claim's watcher owner"),
+        }
+        assert_eq!(
+            turn.row().effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        turn.stop_watcher();
+
+        // Virtual time runs the hand-off through its refusal until it parks with no timer left.
+        tokio::time::pause();
+        let handoff = turn.hand_off(&b);
+        tokio::pin!(handoff);
+        let overtook = tokio::select! {
+            biased;
+            handoff = &mut handoff => Some(handoff),
+            _ = tokio::time::sleep(Duration::from_secs(60)) => None,
+        };
+        tokio::time::resume();
+        adopt.notify_one();
+        let adopted = wiring.await;
+        assert_eq!(adopted.relay_owner, ExternalInputRelayOwner::TmuxWatcher);
+        let overtaken = overtook.is_some();
+        let handoff = match overtook {
+            Some(handoff) => handoff,
+            None => handoff.await,
+        };
+        let NonBridgeHandoff::Reowned(current) = handoff else {
+            panic!("the refused turn is re-owned: {handoff:?}");
+        };
+        assert_eq!(
+            turn.live_lease(),
+            Some(current.clone()),
+            "the re-own's bridge lease is the last one stored"
+        );
+        assert!(turn.capture(&b, &current).await.is_ok(), "capture");
+        assert!(!overtaken, "the re-own finished inside the claim's lock");
+    });
+}
+
+/// The real Claude idle caller observes the prompt with no row yet, the hook wiring then
+/// delegates the turn to a watcher that dies, and the caller tails the re-owned turn under the
+/// lease the re-own stored rather than its own.
+#[test]
+fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
+    isolated(|dir| async move {
+        // Session-bound delivery lets the caller scan beside a live watcher, and makes the
+        // caller's own lease a non-bridge one.
+        enable_session_bound_delivery();
+        let dir = std::fs::canonicalize(dir).expect("canonical dir");
+        let (b, end) = transcript(&dir, "caller.jsonl", "");
+        let turn = Turn::observe(180, &b, end, Some(&b), Some(&b));
+        crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+            "claude",
+            &turn.tmux,
+            turn.channel.get(),
+        );
+        let mut prompts = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
+        let (entered, resume) = arm(&HANDOFF_PAUSE, turn.channel);
+        let caller =
+            super::super::super::claude_idle_runtime::relay_idle_claude_bindings(&turn.shared);
+        tokio::pin!(caller);
+        tokio::select! {
+            _ = entered.notified() => {}
+            _ = &mut caller => panic!("the caller reaches the hand-off"),
+        }
+        let no_row =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, turn.channel.get());
+        assert!(no_row.is_none(), "the caller came through with no row");
+        let observed = loop {
+            let prompt = prompts.try_recv().expect("the caller published its prompt");
+            if prompt.tmux_session_name == turn.tmux {
+                break prompt;
+            }
+        };
+        let observer = turn.live_lease().expect("the caller's lease");
+        assert_ne!(
+            observer.relay_owner,
+            ExternalInputRelayOwner::BridgeAdapter,
+            "fixture: the caller's own lease cannot start a bridge tail"
+        );
+
+        // The hook relay's half, on the event the caller published.
+        let mut hook_lease =
+            super::super::super::relay_ownership::record_observed_external_turn_lease(
+                &turn.shared,
+                &observed,
+                turn.channel,
+            );
+        assert_eq!(
+            hook_lease.turn_id, observer.turn_id,
+            "the hook and the caller name one turn"
+        );
+        let decision = super::super::super::observed_prompt_decision::relay_observed_prompt_injected_prompt_decision(&observed.prompt);
+        let deferred =
+            super::super::super::synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+                &turn.shared,
+                "claude",
+                turn.channel,
+                &observed,
+                turn.anchor(),
+                false,
+                &decision,
+                &mut hook_lease,
+            )
+            .await;
+        assert!(!deferred, "no prior turn, so the claim runs inline");
+        assert_ne!(
+            turn.row().effective_relay_owner_kind(),
+            RelayOwnerKind::None,
+            "the claim delegated the turn"
+        );
+        turn.stop_watcher();
+        resume.notify_one();
+        caller.await;
+
+        let current = turn.live_lease().expect("stored lease");
+        assert_eq!(current.relay_owner, ExternalInputRelayOwner::BridgeAdapter);
+        assert_eq!(current.turn_id, observer.turn_id);
+        assert_eq!(
+            turn.row().effective_relay_owner_kind(),
+            RelayOwnerKind::None
+        );
+        let tails = super::super::super::CLAUDE_IDLE_RESPONSE_TAILS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert!(tails.contains(&turn.tmux), "the caller tails the turn");
+    });
+}
+
+/// The bridge tail of a re-owned turn admits its native terminal, which stamps the native
+/// session on the row. The witness the re-own recorded follows that write, so the turn is
+/// still resumable by its own actor afterwards.
+#[test]
+fn reowned_turn_keeps_its_bridge_witness_through_a_native_terminal_admission() {
+    use std::os::unix::fs::MetadataExt;
+    isolated(|dir| async move {
+        let dir = std::fs::canonicalize(dir).expect("canonical dir");
+        let body = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"B\"}]}}\n";
+        let (b, end) = transcript(&dir, "admitted.jsonl", body);
+        let turn = Turn::observe(190, &b, end, Some(&b), Some(&b));
+        turn.wire().await;
+        turn.stop_watcher();
+        let NonBridgeHandoff::Reowned(current) = turn.hand_off(&b).await else {
+            panic!("re-owned");
+        };
+        let claim = turn.capture(&b, &current).await.expect("capture");
+        let generation = crate::services::tmux_common::session_temp_path(&turn.tmux, "generation");
+        std::fs::write(generation, b"1").expect("tmux generation");
+        let file = std::fs::metadata(&b).expect("transcript");
+        let frame = StreamMessage::ClaudeTuiTerminalDone {
+            result: "B".to_string(),
+            session_id: Some("native-session-5808".to_string()),
+            transcript_path: b.display().to_string(),
+            tmux_session_name: turn.tmux.clone(),
+            turn_nonce: claim.row.turn_nonce.clone().expect("turn nonce"),
+            source_start: claim.row.turn_start_offset.expect("turn start"),
+            complete_record_end: file.len(),
+            generation_mtime_ns:
+                crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(&turn.tmux),
+            source_file_dev: file.dev(),
+            source_file_ino: file.ino(),
+            actor: Arc::downgrade(&claim.actor),
+            kind: crate::services::agent_protocol::NativeTerminalKind::Completed,
+        };
+        let (mut local, mut baseline) = (claim.row.clone(), claim.row.clone());
+        let admitted = local
+            .admit_tui_terminal_frame(
+                &mut baseline,
+                &inflight::InflightTurnIdentity::from_state(&claim.row),
+                true,
+                (&turn.shared, &claim.actor),
+                "B",
+                frame,
+            )
+            .await;
+        assert!(admitted.is_ok(), "the terminal is admitted: {admitted:?}");
+        let row = turn.row();
+        assert_eq!(row.session_id.as_deref(), Some("native-session-5808"));
+        drop(claim);
+        let resumed = super::super::bridge_handoff::capture_dormant_partial(&turn.shared, &row, &b);
+        assert!(
+            resumed.await.is_some(),
+            "the admitted row resumes on its witness"
+        );
+    });
+}
+
 #[derive(Clone, Default)]
 struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
 

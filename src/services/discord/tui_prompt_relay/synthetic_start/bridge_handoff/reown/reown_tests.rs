@@ -31,8 +31,10 @@ pub(in crate::services::discord::tui_prompt_relay::synthetic_start) fn isolated<
         .build()
         .expect("runtime")
         .block_on(body(root.path().to_path_buf()));
-    let slots: [&PauseSlot; 2] = [
+    let slots: [&PauseSlot; 4] = [
         &super::super::super::non_bridge_claim::REVALIDATE_PAUSE,
+        &super::super::super::non_bridge_claim::HANDOFF_PAUSE,
+        &super::super::super::super::synthetic_start_wiring::ADOPT_PAUSE,
         &REOWN_PAUSE,
     ];
     for slot in slots {
@@ -285,6 +287,24 @@ impl Turn {
             &self.lease,
         )
         .await
+    }
+
+    fn row_path(&self) -> PathBuf {
+        let root = inflight::inflight_runtime_root().expect("runtime root");
+        inflight::inflight_state_path(&root, &ProviderKind::Claude, self.channel.get())
+    }
+
+    /// The row file as stored, then whether the bridge and the delegated proof maps hold the
+    /// channel: everything but the lease that a refused re-own must leave alone.
+    fn stored(&self) -> (Vec<u8>, bool, bool) {
+        let key = (CLAUDE.to_owned(), self.channel.get());
+        let claimed =
+            (CLAIMS.lock().unwrap_or_else(|poison| poison.into_inner())).contains_key(&key);
+        (
+            std::fs::read(self.row_path()).expect("row file"),
+            claimed,
+            delegated_proof_held(&ProviderKind::Claude, self.channel),
+        )
     }
 
     async fn reown(&self) -> Result<ExternalInputRelayLease, &'static str> {
@@ -542,5 +562,257 @@ fn delegated_actor_proofs_do_not_accumulate() {
         second.claim().await;
         assert!(!delegated_proof_held(&ProviderKind::Claude, first.channel));
         assert!(delegated_proof_held(&ProviderKind::Claude, second.channel));
+    });
+}
+
+/// Parks `turn`'s re-own just before its commit and returns it with the resume signal.
+macro_rules! parked_reown {
+    ($turn:expr, $reown:ident, $resume:ident) => {
+        let (entered, $resume) = arm(&REOWN_PAUSE, $turn.channel);
+        let $reown = $turn.reown();
+        tokio::pin!($reown);
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut $reown => panic!("the re-own reaches its commit: {result:?}"),
+        }
+    };
+}
+
+/// The lease the re-own read is replaced or cleared before its commit, each through the entry
+/// that does so in production: nothing is committed and the successor, or no lease, stands.
+#[test]
+fn reown_commits_nothing_when_the_stored_lease_changes_before_the_commit() {
+    isolated(|dir| async move {
+        for (n, case) in [
+            (140, "control"),
+            (141, "next turn observed"),
+            (142, "same turn re-recorded"),
+            (143, "cleared by its tail guard"),
+            (144, "cleared by its hook guard"),
+            (145, "cleared outright"),
+        ] {
+            let (b, end) = transcript(&dir, &format!("lease-{n}.jsonl"), "");
+            // Only a bridge-owned lease reaches the tail guard's exact clear: observe with no
+            // watcher, then let the claim delegate to one without the wiring's adopt.
+            let bridge_leased = case == "cleared by its tail guard";
+            let turn = Turn::observe(n, &b, end, Some(&b), (!bridge_leased).then_some(&*b));
+            if bridge_leased {
+                turn.watch(b.to_str().expect("utf8 path"));
+                turn.claim().await;
+            } else {
+                turn.wire().await;
+            }
+            turn.stop_watcher();
+            let stored = turn.live_lease().expect("stored lease");
+            assert_eq!(
+                stored.turn_id, turn.lease.turn_id,
+                "{case}: this turn's lease"
+            );
+            let before = turn.stored();
+            parked_reown!(turn, reown, resume);
+            let successor = match case {
+                "control" => Some(stored.clone()),
+                "next turn observed" => Some(
+                    super::super::super::super::relay_ownership::record_external_turn_lease_for_output(
+                        &turn.shared,
+                        &ProviderKind::Claude,
+                        turn.channel,
+                        &turn.tmux,
+                        RuntimeHandoffKind::ClaudeTui,
+                        &b,
+                        chrono::Utc::now() + chrono::Duration::seconds(1),
+                    ),
+                ),
+                "same turn re-recorded" => Some(
+                    crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+                        CLAUDE,
+                        &turn.tmux,
+                        stored.clone(),
+                    ),
+                ),
+                "cleared by its tail guard" => {
+                    drop(TuiDirectExternalInputLeaseGuard::new(
+                        ProviderKind::Claude,
+                        &turn.tmux,
+                        turn.channel,
+                        &stored,
+                    ));
+                    None
+                }
+                "cleared by its hook guard" => {
+                    drop(
+                        super::super::super::super::relay_ownership::TuiDirectObservedLeaseEarlyReturnGuard::arm(
+                            CLAUDE,
+                            &turn.tmux,
+                            turn.channel,
+                            stored.generation,
+                        ),
+                    );
+                    None
+                }
+                _ => {
+                    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease(
+                        CLAUDE,
+                        &turn.tmux,
+                        turn.channel.get(),
+                    );
+                    None
+                }
+            };
+            assert_eq!(
+                turn.live_lease(),
+                successor,
+                "{case}: the entry took effect"
+            );
+            resume.notify_one();
+            let result = reown.await;
+            if case == "control" {
+                assert!(result.is_ok(), "control re-owns: {result:?}");
+                continue;
+            }
+            let changed = "live lease changed before the re-own committed";
+            assert_eq!(result.err(), Some(changed), "{case}");
+            assert_eq!(
+                turn.live_lease(),
+                successor,
+                "{case}: successor lease stands"
+            );
+            assert_eq!(
+                turn.stored(),
+                before,
+                "{case}: row bytes and proofs untouched"
+            );
+        }
+    });
+}
+
+/// A re-own whose row save fails, or whose bridge witness is refused after the save, keeps the
+/// lease it read and the delegated proof, and leaves the row delegated.
+#[test]
+fn reown_keeps_the_lease_and_the_delegation_when_its_commit_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    isolated(|dir| async move {
+        for (n, case, expected) in [
+            (160, "row save fails", "re-owned row was not saved"),
+            (161, "witness refused", "bridge witness was refused"),
+        ] {
+            let (b, end) = transcript(&dir, &format!("commit-{n}.jsonl"), "");
+            let turn = Turn::observe(n, &b, end, Some(&b), Some(&b));
+            let stored = turn.wire().await;
+            turn.stop_watcher();
+            let (before, before_row) = (turn.stored(), turn.row());
+            parked_reown!(turn, reown, resume);
+            let row_dir = turn.row_path().parent().expect("row dir").to_path_buf();
+            let mut _rival = None;
+            if case == "row save fails" {
+                std::fs::set_permissions(&row_dir, std::fs::Permissions::from_mode(0o555))
+                    .expect("read-only row dir");
+            } else {
+                // Another live allocation already witnesses the row the re-own is about to save.
+                let mut ownerless = turn.row();
+                ownerless.set_relay_owner_kind(RelayOwnerKind::None);
+                let rival = Arc::new(CancelToken::from_persisted_turn_nonce(
+                    ownerless.turn_nonce.clone(),
+                ));
+                assert!(record(&ownerless, Some(&rival), None), "rival witness");
+                _rival = Some(rival);
+            }
+            resume.notify_one();
+            let result = reown.await;
+            std::fs::set_permissions(&row_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("writable row dir");
+            assert_eq!(result.err(), Some(expected), "{case}");
+            assert_eq!(turn.live_lease(), Some(stored), "{case}: the lease as read");
+            assert!(delegated_proof_held(&ProviderKind::Claude, turn.channel));
+            let mut row = turn.row();
+            assert_eq!(
+                row.effective_relay_owner_kind(),
+                RelayOwnerKind::Watcher,
+                "{case}"
+            );
+            if case == "row save fails" {
+                assert_eq!(turn.stored(), before, "{case}: nothing was written");
+            } else {
+                // The restore is a write of its own; only its save bookkeeping differs.
+                row.save_generation = before_row.save_generation;
+                row.updated_at = before_row.updated_at.clone();
+                assert_eq!(
+                    serde_json::to_value(&row).expect("row json"),
+                    serde_json::to_value(&before_row).expect("row json"),
+                    "{case}"
+                );
+            }
+        }
+    });
+}
+
+/// A stopped watcher that could read `E` may still be mid-send. The re-own takes the turn only
+/// once that watcher's task has ended, and then judges the row the task left behind.
+#[test]
+fn reown_waits_for_a_stopped_watcher_task_to_end() {
+    isolated(|dir| async move {
+        for (n, case) in [
+            (150, "still sending"),
+            (151, "delivered, then ended"),
+            (152, "ended without sending"),
+        ] {
+            let (b, end) = transcript(&dir, &format!("stopped-{n}.jsonl"), "");
+            let turn = Turn::observe(n, &b, end, Some(&b), Some(&b));
+            let stored = turn.wire().await;
+            let watcher = turn.shared.tmux_watchers.by_tmux_session.get(&turn.tmux);
+            let cancel = watcher.expect("registered watcher").cancel.clone();
+            // The watcher's supervised task outlives its cancel until `finish` lets it return.
+            let finish = Arc::new(Notify::new());
+            let (released, channel, delivers) = (
+                finish.clone(),
+                turn.channel,
+                case == "delivered, then ended",
+            );
+            let task = crate::services::discord::task_supervisor::spawn_observed_tmux_watcher(
+                "test_5808_stopped_watcher",
+                turn.shared.clone(),
+                turn.tmux.clone(),
+                cancel.clone(),
+                async move {
+                    released.notified().await;
+                    if delivers {
+                        let mut sent = inflight::load_inflight_state_read_only(
+                            &ProviderKind::Claude,
+                            channel.get(),
+                        )
+                        .expect("delegated row");
+                        sent.last_watcher_relayed_offset = Some(1);
+                        inflight::save_inflight_state(&sent).expect("watcher commit");
+                    }
+                },
+            );
+            cancel.store(true, Ordering::Release);
+            let before = turn.stored();
+            if case == "still sending" {
+                tokio::time::pause();
+                let result = turn.reown().await;
+                tokio::time::resume();
+                assert_eq!(result.err(), Some(SEND_UNKNOWN), "{case}");
+                assert_eq!(
+                    turn.stored(),
+                    before,
+                    "{case}: row bytes and proofs untouched"
+                );
+                assert_eq!(turn.live_lease(), Some(stored), "{case}: lease untouched");
+                finish.notify_one();
+                task.await.expect("watcher task");
+                continue;
+            }
+            finish.notify_one();
+            let result = turn.reown().await;
+            task.await.expect("watcher task");
+            if delivers {
+                let delivered = "row is not this turn's undelivered delegation";
+                assert_eq!(result.err(), Some(delivered), "{case}");
+                assert_eq!(turn.live_lease(), Some(stored), "{case}: lease untouched");
+            } else {
+                assert!(result.is_ok(), "{case}: {result:?}");
+            }
+        }
     });
 }

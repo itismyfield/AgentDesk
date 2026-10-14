@@ -707,6 +707,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/repost/pg_statements_tests.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim/strict_yield_tests.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown/reown_tests.rs",
+        "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/reown_tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
     }

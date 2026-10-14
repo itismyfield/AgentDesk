@@ -2,6 +2,8 @@ use super::super::codex_adoption_runtime::ObservationRuntimeId;
 use super::super::codex_adoption_runtime::boot::DiscoveryPass;
 use super::super::{inflight, task_supervisor};
 use super::idle_transcript_scan::CodexTurnPrompt;
+#[cfg(unix)]
+use super::synthetic_start::non_bridge_claim::{NonBridgeHandoff, hand_off_observed_turn};
 use super::*;
 #[cfg(unix)]
 fn advance_codex_tui_runtime_binding_and_marker_offset(
