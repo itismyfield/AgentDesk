@@ -10476,6 +10476,7 @@ services::discord::voice_barge_in::tests::progress_playback_does_not_steal_activ
 services::discord::voice_barge_in::tests::progress_playback_registers_handle_when_no_final_result_active
 services::discord::voice_barge_in::tests::progress_subscriber_receives_optional_playback_channel
 services::discord::voice_barge_in::tests::progress_subscriber_receives_voice_turn_events
+services::discord::voice_barge_in::tests::retired_text_reply_tests::voice_text_reply_refuses_a_retired_foreground_before_the_model
 services::discord::voice_barge_in::tests::runtime_config_snapshot_reflects_mutable_voice_state
 services::discord::voice_barge_in::tests::spoken_sensitivity_command_updates_state_and_existing_monitor
 services::discord::voice_barge_in::tests::stale_spoken_result_clear_does_not_remove_newer_live_playback
@@ -10492,7 +10493,6 @@ services::discord::voice_barge_in::tests::voice_handoff_cancel_observation_uses_
 services::discord::voice_barge_in::tests::voice_handoff_cancel_observation_uses_tombstone_without_local_cancel
 services::discord::voice_barge_in::tests::voice_runtime_uses_file_stt_by_default_and_stream_when_opted_in
 services::discord::voice_barge_in::tests::voice_summary_refuses_a_retired_foreground_without_fallback_speech
-services::discord::voice_barge_in::tests::voice_text_reply_refuses_a_retired_foreground_before_the_model
 services::discord::voice_barge_in::tests::voice_transcript_refuses_a_retired_foreground_inside_the_claim_winner
 services::discord::voice_barge_in::tests::voice_transcript_simple_question_uses_foreground_tts_without_background_handoff
 services::discord::voice_barge_in::tests::voice_transcript_work_request_hands_off_via_announce_bot_and_tts_ack
@@ -11254,6 +11254,7 @@ services::provider_error_transcript::tests::ignores_normal_error_discussion
 services::provider_error_transcript::tests::qwen_terminal_error_requires_latest_complete_wrapper_envelope
 services::provider_error_transcript::tests::recognizes_narrow_provider_error_envelopes
 services::provider_exec::tests::a_retired_runtime_refuses_one_shot_execution_before_the_adapter
+services::provider_hosting::retired_runtime_for_tests::a_retired_scope_is_exact_thread_local_and_lifted_on_drop
 services::provider_hosting::tests::any_requested_tui_hosting_channel_runtime_tui_alone_is_enough
 services::provider_hosting::tests::any_requested_tui_hosting_picks_up_explicit_runtime_tui
 services::provider_hosting::tests::any_requested_tui_hosting_provider_runtime_pipe_overrides_channel_tui_hosting_legacy

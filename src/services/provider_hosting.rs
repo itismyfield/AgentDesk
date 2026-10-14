@@ -417,6 +417,20 @@ pub(crate) mod retired_runtime_for_tests {
             super::install_provider_hosting_config(&crate::config::Config::default());
         }
     }
+
+    /// A refusal holds for its exact provider/channel scope on the installing thread until drop.
+    #[test]
+    fn a_retired_scope_is_exact_thread_local_and_lifted_on_drop() {
+        let claude = ProviderKind::Claude;
+        let retired = retire(&claude, Some(7));
+        assert!(is_retired(&claude, Some(7)));
+        assert!(!is_retired(&claude, None));
+        assert!(!is_retired(&ProviderKind::Codex, Some(7)));
+        let elsewhere = std::thread::spawn(|| is_retired(&ProviderKind::Claude, Some(7)));
+        assert!(!elsewhere.join().expect("probe thread"));
+        drop(retired);
+        assert!(!is_retired(&claude, Some(7)));
+    }
 }
 
 pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSessionSelection {
