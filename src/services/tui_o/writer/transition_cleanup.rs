@@ -17,6 +17,8 @@ use crate::services::tui_o::store::spool::{
 
 #[path = "transition_observe.rs"]
 pub(crate) mod observe;
+#[path = "transition_scope.rs"]
+pub(crate) mod scope;
 use observe::{FileSeen, Observation, Present};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -234,6 +236,7 @@ pub(crate) fn judge(snapshot: &Snapshot, request: &Request) -> Judgment {
 }
 
 /// The hop's seq and pane; a hop stored without them takes both from one validated history match.
+/// The approved scope places each hop with this same resolution.
 fn hop(snapshot: &Snapshot, key: &str, next: &Successor) -> Result<(u64, Option<String>), Unclear> {
     if let Some(seq) = next.seq {
         return Ok((seq, next.tmux_session.clone()));

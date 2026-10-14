@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail unless the operator route is the transition cleanup's only production sender: it alone looks
-up the port, builds an operation, sends it and consumes the reply; `request_as` stays in the port,
-and no production code builds Apply. Test files and `#[cfg(test)]` items are left out."""
+up the port, builds an operation, Apply included, sends it and consumes the reply; `request_as`
+stays in the port. Test files and `#[cfg(test)]` items are left out."""
 import functools
 import re
 import sys
@@ -18,8 +18,18 @@ WRITER = "src/services/tui_o/writer/"
 IMPORTERS = {ROUTE, "src/services/discord/health/o_transition.rs"}
 CFG_TEST = re.compile(r"#\[cfg\((?:test|all\(test[^\]]*)\)\]")
 ATTR = re.compile(r"\s*#\[[^\]]*\]")
-BUILT = re.compile(r"Operation::(Inspect|Apply)\(\s*\w*\s*\)?\s*(=>|\|)?")
+BUILT = re.compile(r"Operation::(Inspect|Apply)\s*\(")
 READINESS = re.compile(r"tui_o::writer::host\b[^;]*\b(?:Readiness|process_readiness)\b")
+
+
+def paren_end(code, start):
+    """Index of the parenthesis closing the one at `start`, or the end of `code`."""
+    depth = 0
+    for index in range(start, len(code)):
+        depth += {"(": 1, ")": -1}.get(code[index], 0)
+        if depth == 0:
+            return index
+    return len(code)
 
 
 @functools.lru_cache(maxsize=None)
@@ -54,12 +64,12 @@ def file_errors(path, code):
     if READINESS.search(code) and re.search(r"\.transition\s*\(", code) and path != ROUTE:
         errors.append("looks up a transition port outside the route")
     for built in BUILT.finditer(code):
-        if built.group(2):
+        # A match arm or or-pattern destructures an operation rather than building one.
+        after = code[paren_end(code, built.end() - 1) + 1:].lstrip()
+        if after.startswith(("=>", "|")):
             continue
         if path != ROUTE:
             errors.append(f"builds Operation::{built.group(1)} outside the route")
-        if built.group(1) == "Apply":
-            errors.append("builds Operation::Apply, which is not open")
     if path == ROUTE and len(re.findall(r"\.request\s*\(", code)) != 1:
         errors.append("the route must send exactly once")
     return [f"{path}: {error}" for error in errors]

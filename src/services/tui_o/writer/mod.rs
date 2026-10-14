@@ -195,7 +195,7 @@ mod historical_hops;
 mod past_bind;
 mod renumbered;
 mod transition_cleanup;
-/// The operator route `POST /api/o/transition` is its only production sender, and only Inspects.
+/// The operator route `POST /api/o/transition` is its only production sender.
 pub(crate) mod transition_port;
 
 #[cfg(test)]

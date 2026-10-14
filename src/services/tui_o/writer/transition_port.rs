@@ -4,10 +4,12 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use serde::Serialize;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::rotation::transition::Watch;
+use super::transition_cleanup::scope::ScopeApproval;
+pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
 pub(crate) use super::transition_cleanup::{Request, Termination};
 use crate::services::cluster::channel_home::CommandPermit;
@@ -20,12 +22,20 @@ const MAILBOX: usize = 4;
 /// The wall clock the actor's probes stamp, read on the worker as each probe starts.
 pub(crate) type Wall = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) enum Operation {
     /// Judges after both probes and writes nothing.
     Inspect(Request),
-    /// Retires each source the judgment passes, one per actor poll.
-    Apply(Request),
+    /// Retires each source the judgment passes, one per actor poll, while the scope is still the
+    /// one whose digest the Inspect gave.
+    Apply(Request, ScopeDigest),
+}
+
+/// The operation a job runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum Kind {
+    Inspect,
+    Apply,
 }
 
 /// What the requester vouches for beside the request.
@@ -77,8 +87,10 @@ pub(crate) enum Hold {
     Limit,
     /// An earlier write of this job failed, so this one was not tried.
     NotTried,
-    /// The actor was stopping, so neither this nor the rest of the job was written.
+    /// The actor or its host was stopping, so neither this nor the rest of the job was written.
     Stopping,
+    /// The scope is no longer the one the job accepted, so neither this nor the rest was written.
+    InspectScopeChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -105,6 +117,10 @@ pub(crate) struct Hop {
 pub(crate) struct Reply {
     pub job_id: String,
     pub refused: Option<Refused>,
+    /// The operation of the job answering; `None` when refused without one.
+    pub operation: Option<Kind>,
+    /// An Inspect's scope from its final snapshot, or the scope an Apply accepted; `None` without.
+    pub scope: Option<Result<ScopeApproval, String>>,
     pub hops: Vec<Hop>,
     pub summary: Option<Summary>,
     /// The sources the current execution holds, which no candidate may be.
@@ -145,6 +161,8 @@ impl Reply {
         Self {
             job_id: job_id.to_owned(),
             refused: Some(refused),
+            operation: None,
+            scope: None,
             hops: Vec::new(),
             summary: None,
             execution: None,
@@ -169,10 +187,17 @@ pub(crate) struct Receiver {
     /// The writer's gate, which owns a channel without a registered home.
     pub(super) gate: Arc<OwnershipGate>,
     pub(super) wall: Wall,
+    /// The host's stop, raised before the actor's own stop reaches it.
+    pub(super) stopping: watch::Receiver<bool>,
 }
 
 impl TransitionPort {
-    pub(crate) fn new(generation: u64, gate: Arc<OwnershipGate>, wall: Wall) -> (Self, Receiver) {
+    pub(crate) fn new(
+        generation: u64,
+        gate: Arc<OwnershipGate>,
+        wall: Wall,
+        stopping: watch::Receiver<bool>,
+    ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
         let port = Self {
             generation,
@@ -185,6 +210,7 @@ impl TransitionPort {
             receive,
             gate,
             wall,
+            stopping,
         };
         (port, receiver)
     }
@@ -241,7 +267,7 @@ impl Receiver {
         };
         if envelope.generation != self.generation || !Arc::ptr_eq(&envelope.run, &self.run) {
             let job = match &envelope.operation {
-                Operation::Inspect(request) | Operation::Apply(request) => &request.job_id,
+                Operation::Inspect(request) | Operation::Apply(request, _) => &request.job_id,
             };
             let _ = (envelope.reply).send(Reply::refused(job, Refused::ForeignRun));
             return Ok(None);

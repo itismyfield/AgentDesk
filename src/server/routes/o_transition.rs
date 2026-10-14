@@ -1,5 +1,6 @@
 //! `POST /api/o/transition`: an operator's Inspect of the transition cleanup the channel's writer
-//! actor would do. This handler is the cleanup's only production sender; Apply is not open yet.
+//! actor would do, or its Apply under the scope digest that Inspect gave. This handler is the
+//! cleanup's only production sender.
 
 use std::net::SocketAddr;
 
@@ -13,7 +14,9 @@ use serde_json::{Value, json};
 use super::AppState;
 use crate::services::discord::health::o_transition::{Target, resolve_context};
 use crate::services::tui_o::writer::host::{Readiness, process_readiness};
-use crate::services::tui_o::writer::transition_port::{Context, Operation, Request, Termination};
+use crate::services::tui_o::writer::transition_port::{
+    Context, Operation, Request, ScopeDigest, Termination,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +37,8 @@ pub(super) struct Body {
     operator: String,
     reason: String,
     termination: Option<Termination>,
+    /// The digest the confirming Inspect gave, required by an Apply and refused with an Inspect.
+    scope_digest: Option<String>,
 }
 
 pub(crate) type Answer = (StatusCode, Json<Value>);
@@ -56,8 +61,8 @@ fn local_operator(peer: &SocketAddr, headers: &HeaderMap, port: u16) -> bool {
             .is_some_and(|origin| crate::utils::loopback_url::is_loopback_url(origin, Some(port)))
 }
 
-/// Peer and Origin, body, operation, dependencies, then the context: nothing before the Origin
-/// check reads PG or the runtime, and an Apply reaches neither.
+/// Peer and Origin, body, operation and digest, dependencies, then the context: nothing before the
+/// Origin check reads PG or the runtime, and an Apply without a well-formed digest reaches neither.
 pub(super) async fn transition(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -84,13 +89,21 @@ pub(super) async fn transition(
     {
         return refused(StatusCode::BAD_REQUEST, "bad_request", "empty field");
     }
-    if matches!(body.operation, Asked::Apply) {
-        return refused(
-            StatusCode::CONFLICT,
-            "apply_not_open",
-            "only inspect is open",
-        );
-    }
+    let digest = match (&body.operation, body.scope_digest.as_deref()) {
+        (Asked::Inspect, None) => None,
+        (Asked::Apply, Some(shown)) => match ScopeDigest::parse(shown) {
+            Ok(digest) => Some(digest),
+            Err(detail) => return refused(StatusCode::BAD_REQUEST, "bad_request", &detail),
+        },
+        (Asked::Inspect, Some(_)) => {
+            let detail = "an inspect takes no scope digest";
+            return refused(StatusCode::BAD_REQUEST, "bad_request", detail);
+        }
+        (Asked::Apply, None) => {
+            let detail = "an apply needs the scope digest of its inspect";
+            return refused(StatusCode::BAD_REQUEST, "bad_request", detail);
+        }
+    };
     let (Some(registry), Some(pool)) = (state.health_registry.as_ref(), state.pg_pool.as_ref())
     else {
         let detail = "runtime unavailable";
@@ -114,24 +127,32 @@ pub(super) async fn transition(
         reason: body.reason,
         termination: body.termination,
     };
-    inspect(&process_readiness(), body.channel, context, request).await
+    let operation = match digest {
+        None => Operation::Inspect(request),
+        Some(digest) => Operation::Apply(request, digest),
+    };
+    send(&process_readiness(), body.channel, context, operation).await
 }
 
-/// Sends the Inspect to the channel's running actor and answers with its reply only while the run
-/// it went to is still the channel's current one.
-pub(crate) async fn inspect(
+/// Sends the operation to the channel's running actor and answers with its reply only while the
+/// run it went to is still the channel's current one.
+pub(crate) async fn send(
     readiness: &Readiness,
     channel: u64,
     context: Context,
-    request: Request,
+    operation: Operation,
 ) -> Answer {
+    let done = match operation {
+        Operation::Inspect(_) => "inspected",
+        Operation::Apply(..) => "applied",
+    };
     let Some(port) = readiness.transition(channel) else {
         let detail = "the channel's writer takes no request now";
         return refused(StatusCode::CONFLICT, "actor_unavailable", detail);
     };
     #[cfg(test)]
     test_hooks::SENDS.with(|count| count.set(count.get() + 1));
-    let reply = match port.request(Operation::Inspect(request), context).await {
+    let reply = match port.request(operation, context).await {
         Ok(reply) => reply,
         Err(detail) => return refused(StatusCode::BAD_GATEWAY, "reply_lost", &detail),
     };
@@ -139,7 +160,7 @@ pub(crate) async fn inspect(
     test_hooks::replied();
     let consumed = readiness.with_transition_reply(channel, &port, reply, |reply| {
         let ok = reply.refused.is_none();
-        let result = if ok { "inspected" } else { "actor_refused" };
+        let result = if ok { done } else { "actor_refused" };
         let status = if ok {
             StatusCode::OK
         } else {

@@ -16,7 +16,9 @@ impl<I: HostIo> Hosted<'_, I> {
     pub(super) fn spawn_ports<T>(&self, spawn: impl FnOnce() -> T) -> (Ports, T) {
         let generation = self.claim.generation;
         let wall: transition_port::Wall = Arc::new(SystemTime::now);
-        let (transition, receiver) = TransitionPort::new(generation, Arc::clone(self.gate), wall);
+        let stopping = self.stopping.clone();
+        let (transition, receiver) =
+            TransitionPort::new(generation, Arc::clone(self.gate), wall, stopping);
         let (submission, spawned) = if self.provider == ShadowProvider::Codex {
             let (submission, commands) = actor::codex_submission::Port::new(generation);
             let spawn = || actor::codex_submission::spawning(commands, spawn);
