@@ -9,11 +9,11 @@ use crate::services::turn_orchestrator::prefix::{self, Prefix};
 pub(in crate::services::discord) enum QueuedReach {
     /// The switch or the channel gate is closed: nothing beyond the entry point's own rule runs.
     Closed,
-    /// Nothing is ready to paste, or the channel is held by recovery or cleanup.
+    /// Nothing typable is ready to paste, or the channel is held by recovery or cleanup.
     NoCandidate,
     /// The gate, a retry record or the REST handle could not be read; look again in a minute.
     Wait,
-    /// A first ready input stands behind nothing but parked ones.
+    /// A typable first ready input stands behind nothing but parked ones.
     Ready,
 }
 
@@ -74,10 +74,12 @@ pub(in crate::services::discord) async fn queued_reach(
         return QueuedReach::Closed;
     }
     let class = |item: &Intervention| input_class(provider, channel_id, item);
-    match prefix::select(&snapshot.intervention_queue, class) {
-        Prefix::Ready { .. } => QueuedReach::Ready,
+    let queue = &snapshot.intervention_queue;
+    match prefix::select(queue, class) {
+        Prefix::Ready { at } if prefix::eligible(&queue[at]) => QueuedReach::Ready,
         Prefix::Unavailable => QueuedReach::Wait,
-        Prefix::None => QueuedReach::NoCandidate,
+        // The actor refuses an untypable first ready input; the idle start takes it later.
+        Prefix::Ready { .. } | Prefix::None => QueuedReach::NoCandidate,
     }
 }
 
