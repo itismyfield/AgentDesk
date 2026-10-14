@@ -41,11 +41,18 @@ class SenderSurfaceTests(unittest.TestCase):
             with self.subTest(text=text[-60:]):
                 self.assertTrue(self.with_source(path, text))
 
-    def test_route_apply_or_second_send_is_red(self):
-        for text in ("\nfn f(p: P) { p.request(Operation::Apply(r), c); }\n",
-                     "\nasync fn f(p: P) { p.request(o, c).await; }\n"):
-            with self.subTest(text=text):
-                self.assertTrue(self.with_source(guard.ROUTE, text))
+    def test_route_second_send_is_red(self):
+        text = "\nasync fn f(p: P) { p.request(o, c).await; }\n"
+        self.assertTrue(self.with_source(guard.ROUTE, text))
+
+    def test_apply_is_built_only_in_the_route(self):
+        built = "\nfn f(r: R, d: D) -> Operation { Operation::Apply(make(r), d) }\n"
+        self.assertEqual(self.with_source(guard.ROUTE, built), [])
+        for path in (ACTOR, OTHER):
+            with self.subTest(path=path):
+                self.assertTrue(self.with_source(path, built))
+        arm = "\nfn f(o: Operation) { match o { Operation::Apply(r, (d)) => (), _ => () } }\n"
+        self.assertEqual(self.with_source(ACTOR, arm), [])
 
     def test_test_gated_and_comment_mentions_pass(self):
         gated = ("\n#[cfg(test)]\nfn f(p: P) { p.request(Operation::Inspect(r), c); }\n"

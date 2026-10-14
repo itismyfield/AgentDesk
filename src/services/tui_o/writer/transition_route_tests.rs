@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::server::routes::o_transition::{inspect, test_hooks as route};
+use crate::server::routes::o_transition::{send as routed_send, test_hooks as route};
 use crate::services::claude_tui::source_verify::Left;
 use crate::services::cluster::channel_home::register_for_test;
 use crate::services::discord::health::o_transition::home_admission;
@@ -42,7 +42,9 @@ type Routed = tokio::task::JoinHandle<(StatusCode, Json<Value>)>;
 
 fn route(ready: &Arc<Readiness>, context: Context, request: Request) -> Routed {
     let ready = Arc::clone(ready);
-    tokio::spawn(async move { inspect(&ready, CHANNEL, context, request).await })
+    tokio::spawn(
+        async move { routed_send(&ready, CHANNEL, context, Operation::Inspect(request)).await },
+    )
 }
 
 /// Runs the actor, letting each probe worker finish, until the route answers.
@@ -212,7 +214,9 @@ async fn transition_route_consumes_no_reply_of_a_run_replaced_meanwhile() {
         Arc::clone(&chain.harness.gate),
     );
     let kept = Rc::clone(&watches);
-    let (next, _receiver) = TransitionPort::new(1, Arc::clone(&gate), Arc::new(SystemTime::now));
+    let wall = Arc::new(SystemTime::now);
+    let (next, _receiver) =
+        TransitionPort::new(1, Arc::clone(&gate), wall, watch::channel(false).1);
     route::on_reply(move || {
         drop(replaced.borrow_mut().take());
         *replaced.borrow_mut() = Some(kept.host(&again, &gate, &next));
@@ -323,16 +327,20 @@ mod pg {
 
     const KEY_OF_ROW: &str = "claude/hrot-c1/mac-mini:row";
 
+    use crate::config::Config;
+
     fn app(
         registry: Arc<crate::services::discord::health::HealthRegistry>,
         pool: sqlx::PgPool,
+        port: u16,
     ) -> axum::Router {
         let mut engine_config = crate::config::Config::default();
         engine_config.policies.hot_reload = false;
         let engine = crate::engine::PolicyEngine::new(&engine_config).unwrap();
         let tx = crate::server::ws::new_broadcast();
         let buffer = crate::server::ws::spawn_batch_flusher(tx.clone());
-        let config = crate::config::Config::default();
+        let mut config = crate::config::Config::default();
+        config.server.port = port;
         crate::server::routes::api_router_with_pg(
             engine,
             config,
@@ -450,7 +458,7 @@ mod pg {
             };
             let (ready, watches) = (process_readiness(), Watches::new(true, false));
             let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
-            let app = app(registry, pool.clone());
+            let app = app(registry, pool.clone(), Config::default().server.port);
             let request = chain.request(JOB);
             let ended = match &request.termination {
                 Some(Termination::Confirmed(end)) => json!({"Confirmed": end}),
@@ -561,6 +569,166 @@ mod pg {
                 "[P2:nonce]"
             );
             assert_eq!(files(&chain.dir()), before, "[P2:writes_nothing]");
+            let _ = std::fs::remove_file(&marker);
+            drop(hosted);
+            halt(actor.stop, actor.task).await;
+            pool.close().await;
+            db.drop().await;
+        });
+    }
+
+    /// `agentdesk o …` as the binary parses it.
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        o: crate::cli::o::OArgs,
+    }
+
+    async fn cli(args: Vec<String>) -> Result<(), String> {
+        let ran = tokio::task::spawn_blocking(move || {
+            let parsed = <Cli as clap::Parser>::try_parse_from(args).unwrap();
+            crate::cli::o::run(parsed.o)
+        });
+        ran.await.unwrap()
+    }
+
+    // The CLI's Inspect writes its manifest and its Apply sends that manifest back, over TCP to the
+    // router and the actor of a real PG row: the one hop the scope holds is retired with its audit,
+    // the hop past the cutoff is untouched, and the manifest is never rewritten.
+    #[test]
+    fn transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The runtime root's guard holds the shared env lock this base is set under.
+        let base = std::ffi::OsString::from(format!("http://127.0.0.1:{port}"));
+        let _base = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_API_URL",
+            &base,
+        );
+        let threaded = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        threaded.block_on(async {
+            let chain = chain(2);
+            let _current = chain.current();
+            let actor = run(&chain);
+            settle(&chain).await;
+            let rig = HerdrRig::start();
+            let _endpoints = rig.registry_on_this_thread();
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let (shared, registry) = runtime(&pool).await;
+            let root = crate::config::runtime_root().unwrap().display().to_string();
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            PreparedIncarnation::create(BindingContext {
+                schema: 1,
+                provider: "claude".into(),
+                created_at: Utc::now(),
+                execution_nonce: nonce.clone(),
+                tmux_session: chain.pane.clone(),
+                channel_id: Some(CHANNEL),
+                owner_runtime_root: root.clone(),
+                host: None,
+                expected_native_session_id: None,
+                launch_mode: "fresh".into(),
+                provider_root: None,
+                first_prompt_digest: None,
+                source_policy: None,
+            })
+            .unwrap();
+            let marker =
+                crate::services::tmux_common::session_temp_path(&chain.pane, "spawn_nonce");
+            std::fs::write(&marker, &nonce).unwrap();
+            let owner = HostedOwner {
+                provider: "claude".into(),
+                discord_token_hash: shared.token_hash.clone(),
+                channel_id: CHANNEL.to_string(),
+                logical_key: chain.pane.clone(),
+                owner_node: NODE.into(),
+                runtime_root: root,
+            };
+            let mut bound = record(&owner, &nonce, HostedState::Bound);
+            bound.location = Some(HostedLocation {
+                host: "herdr".into(),
+                execution_node: NODE.into(),
+                endpoint_config_key: KEY.into(),
+                socket_addr: rig.socket().display().to_string(),
+                named_session: SESSION.into(),
+                pane_id: PANE.into(),
+            });
+            store(&pool, &owner, &serde_json::to_value(bound).unwrap()).await;
+            let (ready, watches) = (process_readiness(), Watches::new(true, false));
+            let hosted = watches.host(&ready, &chain.harness.gate, &actor.port);
+            // Nested under `/api` as the server's web surface mounts it.
+            let service = axum::Router::new().nest("/api", app(registry, pool.clone(), port));
+            let service = service.into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let served = tokio::spawn(async move { axum::serve(listener, service).await });
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("manifest.json").display().to_string();
+            let inspect = [
+                "agentdesk",
+                "transition",
+                "inspect",
+                "--channel",
+                &CHANNEL.to_string(),
+                "--session-key",
+                KEY_OF_ROW,
+                "--execution-nonce",
+                &nonce,
+                "--cutoff",
+                "2",
+                "--operator",
+                "operator",
+                "--reason",
+                "herdr transition",
+                "--job-id",
+                JOB,
+                "--ended",
+                "mac-mini",
+                &chain.pane,
+                "2",
+                "2",
+                "the tmux pane is gone",
+                "--manifest",
+                &manifest,
+            ];
+            let inspect = inspect.map(str::to_owned).to_vec();
+            assert_eq!(cli(inspect).await, Ok(()), "[PA:inspect]");
+            let written = std::fs::read(&manifest).unwrap();
+            let shown: Value = serde_json::from_slice(&written).unwrap();
+            let hops = &shown["answer"]["reply"]["scope"]["Ok"]["hops"];
+            let listed = (hops.as_array().map(Vec::len), &hops[0]["key"]);
+            assert_eq!(
+                listed,
+                (Some(1), &json!(chain.key(0))),
+                "[PA:manifest_scope]"
+            );
+            let (outside, before) = (chain.cursor_file(1), chain.cursor_file(0));
+            let apply = [
+                "agentdesk",
+                "transition",
+                "apply",
+                "--manifest",
+                &manifest,
+                "--confirm",
+            ];
+            let apply = apply.map(str::to_owned).to_vec();
+            assert_eq!(cli(apply).await, Ok(()), "[PA:apply]");
+            assert_ne!(chain.cursor_file(0), before, "[PA:in_scope_written]");
+            let retired = (chain.cursor(0).retired, chain.audit(0));
+            assert_eq!(retired, (true, Some(JOB.to_string())), "[PA:in_scope]");
+            assert_eq!(chain.cursor_file(1), outside, "[PA:out_of_scope]");
+            assert_eq!(chain.audit(1), None, "[PA:out_of_scope]");
+            assert_eq!(
+                std::fs::read(&manifest).unwrap(),
+                written,
+                "[PA:manifest_kept]"
+            );
+            served.abort();
             let _ = std::fs::remove_file(&marker);
             drop(hosted);
             halt(actor.stop, actor.task).await;

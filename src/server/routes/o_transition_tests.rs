@@ -148,25 +148,56 @@ async fn transition_route_refuses_all_but_a_loopback_peer_with_this_ports_origin
     }
 }
 
-// Apply is refused by name before any context is resolved; a malformed body never reaches it.
+// An Apply without a well-formed v1 scope digest, or an Inspect with one, is refused before any
+// context is resolved; a malformed body never reaches it, and a digested Apply goes on to it.
 #[tokio::test]
-async fn transition_route_refuses_apply_before_any_read() {
+async fn transition_route_refuses_an_apply_without_its_inspects_digest_before_any_read() {
     let open = app(None).await;
     let origin = format!("http://127.0.0.1:{}", port());
     let headers = [("origin", origin.as_str())];
-    let (status, answer, reached) = post(&open, LOOPBACK, &headers, &body("apply")).await;
-    let refused = (status, answer["result"].clone());
-    assert_eq!(
-        refused,
-        (StatusCode::CONFLICT, json!("apply_not_open")),
-        "[A3:apply]"
-    );
-    assert_eq!(reached, (0, 0), "[A3:apply] resolved, sent");
-    let unknown = body("inspect").replace("\"reason\"", "\"extra\":1,\"reason\"");
-    let (status, _, reached) = post(&open, LOOPBACK, &headers, &unknown).await;
-    assert_eq!(
-        (status, reached),
-        (StatusCode::BAD_REQUEST, (0, 0)),
-        "[A3:unknown_field]"
-    );
+    let hex = "ab".repeat(32);
+    let with = |operation: &str, digest: &str| {
+        let digest = format!("\"scope_digest\":\"{digest}\",\"reason\"");
+        body(operation).replace("\"reason\"", &digest)
+    };
+    let refused = [
+        ("apply_without", body("apply")),
+        (
+            "apply_null",
+            body("apply").replace("\"reason\"", "\"scope_digest\":null,\"reason\""),
+        ),
+        ("apply_v2", with("apply", &format!("hrot-scope-v2:{hex}"))),
+        ("apply_bare", with("apply", &hex)),
+        (
+            "apply_short",
+            with("apply", &format!("hrot-scope-v1:{}", &hex[2..])),
+        ),
+        (
+            "apply_long",
+            with("apply", &format!("hrot-scope-v1:{hex}00")),
+        ),
+        (
+            "apply_not_hex",
+            with("apply", &format!("hrot-scope-v1:{}", "zz".repeat(32))),
+        ),
+        (
+            "inspect_with",
+            with("inspect", &format!("hrot-scope-v1:{hex}")),
+        ),
+        (
+            "unknown_field",
+            body("inspect").replace("\"reason\"", "\"extra\":1,\"reason\""),
+        ),
+    ];
+    for (case, body) in refused {
+        let (status, answer, reached) = post(&open, LOOPBACK, &headers, &body).await;
+        let refused = (status, answer["result"].clone(), reached);
+        let bad = (StatusCode::BAD_REQUEST, json!("bad_request"), (0, 0));
+        assert_eq!(refused, bad, "[A3:{case}] {answer}");
+    }
+    let digested = with("apply", &format!("hrot-scope-v1:{hex}"));
+    let (status, answer, reached) = post(&open, LOOPBACK, &headers, &digested).await;
+    let resolved = (status, answer["result"].clone(), reached);
+    let wanted = (StatusCode::CONFLICT, json!("refused"), (1, 0));
+    assert_eq!(resolved, wanted, "[A3:digested] {answer}");
 }

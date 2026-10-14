@@ -16,21 +16,26 @@ use crate::services::claude_tui::source_verify::{SourceHistory, Visit};
 use crate::services::cluster::channel_home::HomeGate;
 use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::store::fault::{self, Step};
+use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::{Cursor, ExecutionEnd};
 use crate::services::tui_o::writer::actor::{
     Owing, force_execution_for_tests, spawn_projecting, transition_hooks as hooks,
 };
 use crate::services::tui_o::writer::rotation::RETIRED_WATCH;
 use crate::services::tui_o::writer::rotation::transition::Watch;
+use crate::services::tui_o::writer::transition_cleanup::scope::approve;
 use crate::services::tui_o::writer::transition_cleanup::{
-    Owed, Refusal, Request, Termination, Unclear, Verdict,
+    Home, Owed, Refusal, Request, Snapshot, Termination, Unclear, Verdict,
 };
 use crate::services::tui_o::writer::transition_port::{
-    self, Context, Hold, Operation, Outcome, Refused, Reply, TransitionPort,
+    self, Context, Hold, Kind, Operation, Outcome, Refused, Reply, ScopeDigest, TransitionPort,
 };
 use crate::services::tui_o::writer::{ReaderConfig, WriterConfig};
 
 const JOB: &str = "hrot-job";
+/// A well-formed digest of no scope.
+const UNSCOPED: &str =
+    "hrot-scope-v1:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A channel switched over source 0, then `hops` sources each bound from the one before in one
 /// pane by a launch record no hook made, so no hop is proven. The last source is current.
@@ -115,6 +120,53 @@ impl Chain {
         }
     }
 
+    /// The digest an Inspect of `request` gives the chain as it was built, every old source's hop
+    /// at its seq in the pane; `None` where an Inspect gives none.
+    fn digest(&self, request: &Request) -> Option<ScopeDigest> {
+        let mut rotation = Rotation::default();
+        let mut cursors = Vec::new();
+        for (n, pair) in self.sources.windows(2).enumerate() {
+            let next = Successor {
+                seq: Some(n as u64 + 2),
+                tmux_session: Some(self.pane.clone()),
+                ..Successor::from(pair[1].clone())
+            };
+            rotation.successors.insert(self.key(n), next);
+            let source = pair[0].clone();
+            let (retired, transition_cleanup) = (false, None);
+            let prefix_hash = String::new();
+            cursors.push(Cursor {
+                source,
+                captured_through: 0,
+                prefix_hash,
+                retired,
+                transition_cleanup,
+            });
+        }
+        let snapshot = Snapshot {
+            channel: CHANNEL,
+            provider: ShadowProvider::Claude,
+            home: Home::Settled,
+            rotation,
+            cursors,
+            pinned: Ok(None),
+            execution: Ok(Vec::new()),
+            sources: BTreeMap::new(),
+            legacy_hops: Ok(BTreeMap::new()),
+            obligations: Ok(Default::default()),
+        };
+        let approved = approve(&snapshot, request, &self.context());
+        approved.ok().map(|scope| scope.digest)
+    }
+
+    /// An Apply of `request` under the digest its Inspect gives, or one no scope has.
+    fn apply(&self, request: Request) -> Operation {
+        let digest = self
+            .digest(&request)
+            .unwrap_or_else(|| ScopeDigest::parse(UNSCOPED).unwrap());
+        Operation::Apply(request, digest)
+    }
+
     /// The pane's execution holds only the current source.
     fn current(&self) -> impl Drop {
         let current = self.sources.last().unwrap();
@@ -182,6 +234,8 @@ fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, Sour
 struct Run {
     port: TransitionPort,
     stop: watch::Sender<bool>,
+    /// The host's stop, which the actor's own stop follows only later.
+    host: watch::Sender<bool>,
     task: Actor,
     unsettled: watch::Receiver<Option<usize>>,
 }
@@ -200,7 +254,9 @@ fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>)
         }
         w0 + (tokio::time::Instant::now() - t0)
     });
-    let (port, receiver) = TransitionPort::new(1, Arc::clone(&chain.harness.gate), wall);
+    let (host, stopping) = watch::channel(false);
+    let gate = Arc::clone(&chain.harness.gate);
+    let (port, receiver) = TransitionPort::new(1, gate, wall, stopping);
     let (stop, stopped) = watch::channel(false);
     let (published, unsettled) = watch::channel(None);
     let projections = (
@@ -219,6 +275,7 @@ fn run_with(chain: &Chain, readers: Option<ReaderConfig>, held: Arc<AtomicBool>)
     Run {
         port,
         stop,
+        host,
         task,
         unsettled,
     }
@@ -305,7 +362,7 @@ async fn transition_apply_retires_each_old_hop_with_its_audit_once_both_probes_h
             .borrow_mut()
             .push((*projection.borrow(), files(&dir), locked));
     });
-    let asked = send(&actor, Operation::Apply(chain.request(JOB)), context);
+    let asked = send(&actor, chain.apply(chain.request(JOB)), context);
     let free = Rc::new(RefCell::new(None));
     let probing = Rc::clone(&free);
     let reply = answered_after(asked, 1, move || {
@@ -418,12 +475,17 @@ async fn transition_apply_settles_all_fifty_nine_hops_of_both_fixtures() {
         let before = files(&chain.dir());
         let mut unchecked = chain.request("hrot-unchecked");
         unchecked.termination = None;
-        let reply = ask(&actor, Operation::Apply(unchecked), chain.context()).await;
+        let refused = ask(&actor, chain.apply(unchecked.clone()), chain.context()).await;
+        let reply = ask(&actor, Operation::Inspect(unchecked), chain.context()).await;
         assert_eq!(
             files(&chain.dir()),
             before,
             "[59:unchecked_writes] {legacy:?}"
         );
+        let unscoped =
+            Refused::Unread("inspect_scope_changed: no checked end: inspect only".into());
+        assert_eq!(refused.refused, Some(unscoped), "[59:unchecked_apply]");
+        assert!(matches!(reply.scope, Some(Err(_))), "[59:unchecked_scope]");
         let unknown = Verdict::Unknown(Unclear::NoTermination);
         let refused = (reply.hops.iter())
             .all(|hop| hop.judged.verdict == unknown && hop.outcome == Outcome::Unchanged);
@@ -432,12 +494,7 @@ async fn transition_apply_settles_all_fifty_nine_hops_of_both_fixtures() {
             "[59:unchecked] {:?}",
             reply.hops
         );
-        let reply = ask(
-            &actor,
-            Operation::Apply(chain.request(JOB)),
-            chain.context(),
-        )
-        .await;
+        let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
         let retired = (0..59).filter(|n| chain.cursor(*n).retired && chain.audit(*n).is_some());
         assert_eq!(retired.count(), 59, "[59:retired] {legacy:?}");
         for n in legacy {
@@ -482,13 +539,7 @@ async fn transition_job_probes_at_most_sixty_four_candidates() {
         (0..65).all(|n| !chain.cursor(n).retired),
         "[B4:inspect_writes]"
     );
-    let apply = || {
-        ask(
-            &actor,
-            Operation::Apply(chain.request(JOB)),
-            chain.context(),
-        )
-    };
+    let apply = || ask(&actor, chain.apply(chain.request(JOB)), chain.context());
     apply().await;
     let reply = apply().await;
     let done = (0..65).filter(|n| chain.cursor(*n).retired && chain.audit(*n).is_some());
@@ -528,19 +579,11 @@ async fn transition_probes_run_on_one_worker_however_slow_it_is() {
     settle(&chain).await;
     held.store(true, Ordering::Release);
     let base = hooks::started();
-    let asked = send(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    );
+    let asked = send(&actor, chain.apply(chain.request(JOB)), chain.context());
     steps(5).await;
     assert_eq!(hooks::started() - base, 1, "[B4:one_worker]");
     append(&chain.paths[5], &row("n9", "still posting"));
-    let again = send(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    );
+    let again = send(&actor, chain.apply(chain.request(JOB)), chain.context());
     let other = send(
         &actor,
         Operation::Inspect(chain.request("other")),
@@ -576,11 +619,7 @@ async fn transition_second_probe_back_past_the_deadline_writes_nothing() {
     let actor = run_with(&chain, None, Arc::clone(&held));
     settle(&chain).await;
     let (base, before) = (hooks::started(), files(&chain.dir()));
-    let asked = send(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    );
+    let asked = send(&actor, chain.apply(chain.request(JOB)), chain.context());
     for _ in 0..5 {
         if hooks::started() > base {
             break;
@@ -619,12 +658,7 @@ async fn transition_apply_keeps_what_it_retired_before_a_failed_write_and_resume
                 .push(fault::plant(&dir, Step::Write, full, Some(1)));
         }
     });
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     drop(hook);
     let done = outcomes(&reply);
     let with = |wanted: Outcome| (0..3).find(|n| done[&chain.key(*n)] == wanted);
@@ -648,12 +682,7 @@ async fn transition_apply_keeps_what_it_retired_before_a_failed_write_and_resume
     let kept = chain.cursor_file(first);
     let actor = run(&chain);
     polls(3).await;
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     assert!((0..3).all(|n| chain.cursor(n).retired), "[T2:resumed]");
     assert_eq!(chain.cursor_file(first), kept, "[T2:not_rewritten]");
     let done = outcomes(&reply);
@@ -682,12 +711,7 @@ async fn transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_
             .borrow_mut()
             .push(fault::plant(&dir, Step::ReplaceDirSync, full, Some(1)));
     });
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     drop(hook);
     assert_eq!(*actor.unsettled.borrow(), None, "[T5:projection]");
     let cause = actor.task.await.unwrap().unwrap();
@@ -715,12 +739,7 @@ async fn transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_
     );
     let actor = run(&chain);
     polls(3).await;
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     assert_eq!(
         outcomes(&reply)[&chain.key(0)],
         Outcome::AlreadyDone,
@@ -747,11 +766,7 @@ async fn transition_apply_holds_a_source_whose_inputs_changed_after_its_probes()
         let current = chain.current();
         let actor = run(&chain);
         settle(&chain).await;
-        let asked = send(
-            &actor,
-            Operation::Apply(chain.request(JOB)),
-            chain.context(),
-        );
+        let asked = send(&actor, chain.apply(chain.request(JOB)), chain.context());
         let swapped = Rc::new(RefCell::new(None));
         let swap = Rc::clone(&swapped);
         let (old, new) = (chain.paths[0].clone(), chain.sources[1].clone());
@@ -813,16 +828,17 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
         ..chain.context()
     };
     let base = hooks::started();
-    drop(actor.port.request(
-        Operation::Apply(chain.request(JOB)),
-        with(permits[0].take()),
-    ));
+    drop(
+        actor
+            .port
+            .request(chain.apply(chain.request(JOB)), with(permits[0].take())),
+    );
     polls(3).await;
     assert_eq!(hooks::started() - base, 0, "[T4:dropped_before]");
     assert_eq!(home.commands_in_flight(), 2, "[T4:dropped_before]");
     let asked = send(
         &actor,
-        Operation::Apply(chain.request(JOB)),
+        chain.apply(chain.request(JOB)),
         with(permits[1].take()),
     );
     for _ in 0..5 {
@@ -860,71 +876,88 @@ async fn transition_job_keeps_its_permit_until_it_ends_however_the_requester_lef
 }
 
 // A stop raised while the poll that would retire a source awaits a POST is read again before the
-// write: nothing is written, and the job answers with its permit released.
+// write, the host's too before its stop reaches the actor: nothing is written, and the job answers
+// with its permit released.
 #[tokio::test(start_paused = true)]
 async fn transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held() {
-    let chain = chain(1);
-    let _current = chain.current();
-    let held = Arc::new(AtomicBool::new(false));
-    let release = Release(Arc::clone(&held));
-    let actor = run_with(&chain, None, Arc::clone(&held));
-    settle(&chain).await;
-    let home = admitting_home();
-    let context = Context {
-        permit: home.admit_command("claude"),
-        ..chain.context()
-    };
-    let (base, kept) = (hooks::started(), chain.cursor_file(0));
-    let asked = send(&actor, Operation::Apply(chain.request(JOB)), context);
-    for _ in 0..5 {
-        if hooks::started() > base {
-            break;
+    for host in [false, true] {
+        let chain = chain(1);
+        let _current = chain.current();
+        let held = Arc::new(AtomicBool::new(false));
+        let release = Release(Arc::clone(&held));
+        let actor = run_with(&chain, None, Arc::clone(&held));
+        settle(&chain).await;
+        let home = admitting_home();
+        let context = Context {
+            permit: home.admit_command("claude"),
+            ..chain.context()
+        };
+        let (base, kept) = (hooks::started(), chain.cursor_file(0));
+        let asked = send(&actor, chain.apply(chain.request(JOB)), context);
+        for _ in 0..5 {
+            if hooks::started() > base {
+                break;
+            }
+            polls(1).await;
         }
-        polls(1).await;
-    }
-    hooks::settle_workers();
-    held.store(true, Ordering::Release);
-    let (port, lease) = (&chain.harness.port, &chain.harness.lease);
-    lease.busy.store(true, Ordering::SeqCst);
-    append(&chain.paths[1], &row("n9", "held back"));
-    for _ in 0..30 {
-        if hooks::started() - base == 2 {
-            break;
+        hooks::settle_workers();
+        held.store(true, Ordering::Release);
+        let (port, lease) = (&chain.harness.port, &chain.harness.lease);
+        lease.busy.store(true, Ordering::SeqCst);
+        append(&chain.paths[1], &row("n9", "held back"));
+        for _ in 0..30 {
+            if hooks::started() - base == 2 {
+                break;
+            }
+            steps(1).await;
         }
-        steps(1).await;
-    }
-    assert_eq!(hooks::started() - base, 2, "[stop:second_probe]");
-    drop(release);
-    hooks::settle_workers();
-    for _ in 0..5 {
-        if actor.unsettled.borrow().is_none() {
-            break;
+        assert_eq!(hooks::started() - base, 2, "[stop:{host}:second_probe]");
+        drop(release);
+        hooks::settle_workers();
+        for _ in 0..5 {
+            if actor.unsettled.borrow().is_none() {
+                break;
+            }
+            steps(1).await;
         }
-        steps(1).await;
-    }
-    assert_eq!(*actor.unsettled.borrow(), None, "[stop:applying]");
-    let (unhold, hold) = tokio::sync::oneshot::channel();
-    port.lazy.store(true, Ordering::SeqCst);
-    *port.hold.lock().unwrap() = Some(hold);
-    lease.busy.store(false, Ordering::SeqCst);
-    for _ in 0..5 {
-        if !port.started.lock().unwrap().is_empty() {
-            break;
+        assert_eq!(*actor.unsettled.borrow(), None, "[stop:{host}:applying]");
+        let (unhold, hold) = tokio::sync::oneshot::channel();
+        port.lazy.store(true, Ordering::SeqCst);
+        *port.hold.lock().unwrap() = Some(hold);
+        lease.busy.store(false, Ordering::SeqCst);
+        for _ in 0..5 {
+            if !port.started.lock().unwrap().is_empty() {
+                break;
+            }
+            steps(1).await;
         }
-        steps(1).await;
+        assert_eq!(
+            *port.started.lock().unwrap(),
+            ["http"],
+            "[stop:{host}:posting]"
+        );
+        let stop = if host { &actor.host } else { &actor.stop };
+        stop.send_replace(true);
+        unhold.send(()).unwrap();
+        let reply = asked.await.unwrap().unwrap();
+        assert_eq!(chain.audit(0), None, "[stop:{host}:audit]");
+        assert_eq!(chain.cursor_file(0), kept, "[stop:{host}:cursor]");
+        let outcome = outcomes(&reply)[&chain.key(0)].clone();
+        assert_eq!(
+            outcome,
+            Outcome::Held(Hold::Stopping),
+            "[stop:{host}:outcome]"
+        );
+        assert_eq!(home.commands_in_flight(), 0, "[stop:{host}:permit]");
+        let last = port.posts().last().cloned();
+        assert_eq!(
+            last.as_deref(),
+            Some("held back"),
+            "[stop:{host}:delivered]"
+        );
+        actor.stop.send_replace(true);
+        actor.task.await.unwrap();
     }
-    assert_eq!(*port.started.lock().unwrap(), ["http"], "[stop:posting]");
-    actor.stop.send_replace(true);
-    unhold.send(()).unwrap();
-    let reply = asked.await.unwrap().unwrap();
-    assert_eq!(chain.audit(0), None, "[stop:audit]");
-    assert_eq!(chain.cursor_file(0), kept, "[stop:cursor]");
-    let outcome = outcomes(&reply)[&chain.key(0)].clone();
-    assert_eq!(outcome, Outcome::Held(Hold::Stopping), "[stop:outcome]");
-    assert_eq!(home.commands_in_flight(), 0, "[stop:permit]");
-    let last = port.posts().last().cloned();
-    assert_eq!(last.as_deref(), Some("held back"), "[stop:delivered]");
-    actor.task.await.unwrap();
 }
 
 // Output the actor still queues refuses every hop until it is delivered.
@@ -985,12 +1018,7 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     let _current = chain.current();
     let actor = run(&chain);
     settle(&chain).await;
-    ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     assert!(chain.cursor(0).retired);
     halt(actor.stop, actor.task).await;
     let actor = run(&chain);
@@ -1006,13 +1034,13 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     for (case, change) in changes {
         let mut request = chain.request(JOB);
         change(&mut request);
-        let reply = ask(&actor, Operation::Apply(request), chain.context()).await;
+        let reply = ask(&actor, chain.apply(request), chain.context()).await;
         assert_eq!(chain.cursor_file(0), kept, "[B3:{case}] written");
         assert_eq!(reply.refused, Some(Refused::JobConflict), "[B3:{case}]");
     }
     let mut later = chain.request(JOB);
     later.at += TimeDelta::hours(1);
-    let reply = ask(&actor, Operation::Apply(later), chain.context()).await;
+    let reply = ask(&actor, chain.apply(later), chain.context()).await;
     assert_eq!(chain.cursor_file(0), kept, "[B3:retry] written");
     assert_eq!(
         outcomes(&reply)[&chain.key(0)],
@@ -1036,12 +1064,7 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     assert_eq!(grown(&chain.harness), [alarm], "[A3:alarm]");
     assert_eq!(*actor.unsettled.borrow(), Some(1), "[A1:unsettled]");
     let kept = chain.cursor_file(0);
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     assert!(!chain.cursor(0).retired, "[B3:read_again_not_retired]");
     assert_eq!(chain.cursor_file(0), kept, "[B3:read_again_not_retired]");
     let outcome = outcomes(&reply)[&chain.key(0)].clone();
@@ -1049,8 +1072,9 @@ async fn transition_job_is_compared_whole_and_never_applied_again_to_a_source_re
     halt(actor.stop, actor.task).await;
 }
 
-// The job in progress answers its own ID asked again with its receipt only for the same request,
-// `at` aside; a change of operator, reason, cutoff or end is a conflict that writes nothing.
+// The job in progress answers its own ID asked again with its receipt only for the same operation
+// and request, `at` aside, whatever scope it asks for; a change of operation, operator, reason,
+// cutoff or end is a conflict that writes nothing.
 #[tokio::test(start_paused = true)]
 async fn transition_job_in_progress_refuses_its_id_asked_with_another_request() {
     let chain = chain(8);
@@ -1069,9 +1093,17 @@ async fn transition_job_in_progress_refuses_its_id_asked_with_another_request() 
         .map(|(case, change)| {
             let mut request = chain.request(JOB);
             change(&mut request);
-            (*case, Operation::Apply(request), chain.context())
+            (*case, chain.apply(request), chain.context())
         })
         .collect();
+    let unscoped = ScopeDigest::parse(UNSCOPED).unwrap();
+    asks.push((
+        "operation",
+        Operation::Inspect(chain.request(JOB)),
+        chain.context(),
+    ));
+    let asked = Operation::Apply(chain.request(JOB), unscoped);
+    asks.push(("digest", asked, chain.context()));
     let (port, writes, sent) = (actor.port.clone(), Rc::new(Cell::new(0)), Rc::default());
     let (count, record): (_, Rc<RefCell<Vec<_>>>) = (Rc::clone(&writes), Rc::clone(&sent));
     let _hook = hooks::on_retire(move || {
@@ -1082,25 +1114,28 @@ async fn transition_job_in_progress_refuses_its_id_asked_with_another_request() 
             record.borrow_mut().push((case, asked));
         }
     });
-    ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     assert_eq!(writes.get(), 8, "[B3:in_progress] writes");
     let audited = |n: usize| {
         let audit = chain.cursor(n).transition_cleanup;
         audit.is_some_and(|a| a.operator == "operator" && a.reason == "herdr transition")
     };
     assert!((0..8).all(audited), "[B3:in_progress] audits");
+    let accepted = chain.digest(&chain.request(JOB));
     for (case, asked) in sent.take() {
-        let refused = asked.await.unwrap().unwrap().refused;
+        let reply = asked.await.unwrap().unwrap();
         let wanted = match case {
-            "at" => Refused::InProgress,
+            "at" | "digest" => Refused::InProgress,
             _ => Refused::JobConflict,
         };
-        assert_eq!(refused, Some(wanted), "[B3:in_progress:{case}]");
+        assert_eq!(reply.refused, Some(wanted), "[B3:in_progress:{case}]");
+        if case == "digest" {
+            let receipt = (
+                reply.operation,
+                reply.scope.map(|scope| scope.unwrap().digest),
+            );
+            assert_eq!(receipt, (Some(Kind::Apply), accepted), "[B3:receipt]");
+        }
     }
     halt(actor.stop, actor.task).await;
 }
@@ -1115,12 +1150,7 @@ async fn transition_apply_that_finds_its_file_grown_after_the_write_reports_it_r
     settle(&chain).await;
     let path = chain.paths[0].clone();
     let hook = hooks::on_retire(move || append(&path, &row("m8", "grew at the write")));
-    let reply = ask(
-        &actor,
-        Operation::Apply(chain.request(JOB)),
-        chain.context(),
-    )
-    .await;
+    let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
     drop(hook);
     assert!(!chain.cursor(0).retired, "[regrew:read_again]");
     assert_eq!(chain.audit(0).as_deref(), Some(JOB), "[regrew:receipt]");
@@ -1154,12 +1184,7 @@ async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retireme
             let _current = chain.current();
             let mut actor = run_with(&chain, config, Arc::default());
             settle(&chain).await;
-            let reply = ask(
-                &actor,
-                Operation::Apply(chain.request(JOB)),
-                chain.context(),
-            )
-            .await;
+            let reply = ask(&actor, chain.apply(chain.request(JOB)), chain.context()).await;
             let watch = config.map_or(Watch::Fd, |_| Watch::Path);
             let outcome = outcomes(&reply)[&chain.key(0)].clone();
             assert_eq!(outcome, Outcome::Retired(watch), "[{case}] retired");
@@ -1217,3 +1242,6 @@ async fn transition_cleaned_source_that_grows_reads_again_as_a_provider_retireme
 
 #[path = "transition_route_tests.rs"]
 mod route_tests;
+
+#[path = "transition_apply_tests.rs"]
+mod apply_tests;
