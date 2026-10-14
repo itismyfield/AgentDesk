@@ -413,6 +413,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs",
         "src/services/discord/recovery_engine/restore_inflight/ready_without_output_tests.rs",
+        "src/services/discord/recovery_engine/recovery_completion_outcome_tests.rs",
         "src/services/discord/recovery_engine/routing_orphan_tests.rs",
         "src/services/discord/recovery_paths/o_anchor_repost_tests.rs",
         "src/services/discord/relay_coord_tests.rs",
@@ -439,6 +440,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/session_relay_sink/o_delivery_e2e_tests.rs",
         "src/services/discord/session_relay_sink/tests.rs",
         "src/services/discord/session_relay_sink/turn_parser/resend_dedupe_tests.rs",
+        "src/services/discord/single_message_panel_tests.rs",
         "src/services/discord/status_panel_orphan_store_tests.rs",
         "src/services/discord/task_notification_delivery/claim_at_post_tests.rs",
         "src/services/discord/task_notification_delivery/tests.rs",
@@ -721,6 +723,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/recovery_defer/tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
+        "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
     }
 )
@@ -826,6 +829,10 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/restart_report/capacity.rs",
         "src/services/recovery_defer.rs",
         "src/services/recovery_defer/cursor.rs",
+        "src/services/turn_orchestrator/recovery_registry/mod.rs",
+        "src/services/turn_orchestrator/recovery_registry/entry.rs",
+        "src/services/turn_orchestrator/recovery_registry/rehydrate.rs",
+        "src/services/turn_orchestrator/recovery_registry/witness.rs",
     }
 )
 

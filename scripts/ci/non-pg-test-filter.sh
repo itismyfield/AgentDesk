@@ -902,6 +902,7 @@ NON_PG_FILTER_REPLAY=(
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
+  services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r01_every_default_and_resolve_sees_one_core_slot_and_attempt
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password
