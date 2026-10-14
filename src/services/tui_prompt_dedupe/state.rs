@@ -42,7 +42,7 @@ impl TuiPromptDedupeState {
         let expired = self.runtime_by_tmux.iter().filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL).map(|(tmux, _)| tmux.clone()).collect::<Vec<_>>();
         for tmux in expired {
             #[rustfmt::skip]
-            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| self.runtime_by_tmux.remove(&tmux));
+            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |authority| { authority.invalidate(); self.runtime_by_tmux.remove(&tmux) });
         }
         // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
         // streaming turn's anchor is not purged mid-stream (see the constant). The
@@ -88,8 +88,16 @@ impl TuiPromptDedupeState {
 
     pub(super) fn purge_expired_runtime_binding_under_authority(
         &mut self,
-        tmux_session_name: &str,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) {
+        let tmux_session_name = authority.session();
+        if self
+            .runtime_by_tmux
+            .get(tmux_session_name)
+            .is_some_and(|entry| entry.recorded_at.elapsed() > SESSION_MAPPING_TTL)
+        {
+            authority.invalidate();
+        }
         #[rustfmt::skip]
         self.runtime_by_tmux.retain(|key, entry| key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL);
     }

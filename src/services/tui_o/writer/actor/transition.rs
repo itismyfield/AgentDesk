@@ -18,11 +18,12 @@ use crate::services::tui_o::store::spool::Cursor;
 use crate::services::tui_o::writer::rotation::RETIRE_QUIET;
 use crate::services::tui_o::writer::rotation::transition::Watch;
 use crate::services::tui_o::writer::transition_cleanup::observe::{FileSeen, Observation, observe};
+use crate::services::tui_o::writer::transition_cleanup::scope::{ScopeApproval, approve};
 use crate::services::tui_o::writer::transition_cleanup::{
     Judged, Request, Termination, Unclear, Verdict, judge,
 };
 use crate::services::tui_o::writer::transition_port::{
-    Context, Envelope, Hold, Hop, Operation, Outcome, Receiver, Refused, Reply, Wall,
+    Context, Envelope, Hold, Hop, Kind, Operation, Outcome, Receiver, Refused, Reply, Wall,
 };
 
 /// Candidates one job probes; the rest wait for a later job.
@@ -39,6 +40,8 @@ pub(super) struct Transitions {
     job: Option<Job>,
     /// The actor's stop, read again just before each retirement write.
     stop: watch::Receiver<bool>,
+    /// Which receipt takes the candidate kept for one, in turns across this run's jobs.
+    turn: usize,
 }
 
 impl Transitions {
@@ -48,6 +51,7 @@ impl Transitions {
             receiver,
             job,
             stop,
+            turn: 0,
         }
     }
 
@@ -70,6 +74,10 @@ type Worker = mpsc::Receiver<Vec<(String, Observation)>>;
 struct Job {
     request: Request,
     apply: bool,
+    /// The scope an Apply was admitted for, never replaced while it runs.
+    scope: Option<ScopeApproval>,
+    /// The host's stop, read with the actor's before each retirement write.
+    stopping: watch::Receiver<bool>,
     context: Context,
     reply: oneshot::Sender<Reply>,
     gate: Arc<OwnershipGate>,
@@ -99,7 +107,17 @@ impl Job {
     fn receipt(&self) -> Reply {
         Reply {
             hops: Self::hops(self.first.clone(), &self.outcomes),
+            operation: Some(self.kind()),
+            scope: self.scope.clone().map(Ok),
             ..Reply::refused(&self.request.job_id, Refused::InProgress)
+        }
+    }
+
+    fn kind(&self) -> Kind {
+        if self.apply {
+            Kind::Apply
+        } else {
+            Kind::Inspect
         }
     }
 }
@@ -119,6 +137,14 @@ fn conflicts<'a>(mut cursors: impl Iterator<Item = &'a Cursor>, request: &Reques
                     || Some(&done.ended) != ended)
         })
     })
+}
+
+/// The actor's clock; a test may move it on just as a worker's probes are taken.
+fn now() -> Instant {
+    let now = Instant::now();
+    #[cfg(test)]
+    let now = now + test_hooks::skew();
+    now
 }
 
 /// The path still shows the file the second probe saw.
@@ -164,24 +190,27 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return;
         };
         let (gate, wall) = (Arc::clone(&receiver.gate), Arc::clone(&receiver.wall));
+        let stopping = receiver.stopping.clone();
         let Envelope {
             operation,
             context,
             reply,
             ..
         } = envelope;
-        let (apply, request) = match operation {
-            Operation::Inspect(request) => (false, request),
-            Operation::Apply(request) => (true, request),
+        let (apply, request, expected) = match operation {
+            Operation::Inspect(request) => (false, request, None),
+            Operation::Apply(request, digest) => (true, request, Some(digest)),
         };
         let refused = match &self.transitions.job {
             Some(job) if job.request.job_id == request.job_id => {
-                // Only the same request, `at` aside, with no audit against it gets the receipt.
+                // Only the same operation and request, `at` aside, with no audit against it gets
+                // the receipt; the scope it asks for neither joins nor changes the job.
                 let asked = Request {
                     at: job.request.at,
                     ..request.clone()
                 };
-                if asked == job.request && !conflicts(self.writer.store().cursors(), &request) {
+                let same = apply == job.apply && asked == job.request;
+                if same && !conflicts(self.writer.store().cursors(), &request) {
                     let _ = reply.send(job.receipt());
                     return;
                 }
@@ -207,15 +236,39 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 return;
             }
         };
+        // A new Apply runs only on the scope its Inspect approved, compared on this snapshot.
+        let scope = match expected.map(|digest| (digest, approve(&snapshot, &request, &context))) {
+            None => None,
+            Some((digest, Ok(scope))) if scope.digest == digest => Some(scope),
+            Some((_, scoped)) => {
+                let mut detail = "inspect_scope_changed".to_owned();
+                if let Err(error) = scoped {
+                    detail = format!("{detail}: {error}");
+                }
+                let _ = reply.send(Reply::refused(&request.job_id, Refused::Unread(detail)));
+                return;
+            }
+        };
         let first = judge(&snapshot, &request).hops;
         let cursors: BTreeMap<String, &Cursor> = (snapshot.cursors.iter())
             .map(|c| (source_key(&c.source), c))
             .collect();
         let unprobed = |hop: &&Judged| hop.verdict == Verdict::Unknown(Unclear::NotObserved);
-        let mut unprobed: Vec<&Judged> = first.iter().filter(unprobed).collect();
-        // Sources still to retire take the candidates first, receipts already written after them.
-        let done = |c: &&Cursor| c.retired || c.transition_cleanup.is_some();
-        unprobed.sort_by_key(|hop| cursors.get(&hop.key).is_none_or(done));
+        // Sources still to retire take the candidates first, receipts already written after them;
+        // a full budget of the former keeps its last candidate for a receipt, in turns.
+        let pending = |hop: &&Judged| {
+            cursors
+                .get(&hop.key)
+                .is_some_and(|c| !c.retired && c.transition_cleanup.is_none())
+        };
+        let (mut unprobed, mut receipts): (Vec<&Judged>, Vec<&Judged>) =
+            first.iter().filter(unprobed).partition(pending);
+        if unprobed.len() >= CANDIDATES && !receipts.is_empty() {
+            let turn = self.transitions.turn % receipts.len();
+            self.transitions.turn = self.transitions.turn.wrapping_add(1);
+            unprobed.insert(CANDIDATES - 1, receipts.remove(turn));
+        }
+        unprobed.extend(receipts);
         let (mut probes, mut outcomes) = (BTreeMap::new(), BTreeMap::new());
         for (index, hop) in unprobed.into_iter().enumerate() {
             let Some(cursor) = cursors.get(&hop.key).filter(|_| index < CANDIDATES) else {
@@ -235,6 +288,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         self.transitions.job = Some(Job {
             request,
             apply,
+            scope,
+            stopping,
             context,
             reply,
             gate,
@@ -245,7 +300,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             probes,
             stage: Stage::First,
             worker: None,
-            deadline: Instant::now() + DEADLINE,
+            deadline: now() + DEADLINE,
             hashed: 0,
             outcomes,
         });
@@ -260,7 +315,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             let outcome = self.retire_one(job, &key, unsettled);
             let rest = match outcome {
                 Outcome::Unknown => Some(Outcome::Held(Hold::NotTried)),
-                Outcome::Held(Hold::Stopping) => Some(outcome.clone()),
+                Outcome::Held(Hold::Stopping | Hold::InspectScopeChanged) => Some(outcome.clone()),
                 _ => None,
             };
             job.outcomes.insert(key, outcome);
@@ -296,8 +351,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if job.probes.is_empty() {
             return true;
         }
-        let now = Instant::now();
         if let Some(worker) = &job.worker {
+            #[cfg(test)]
+            test_hooks::receiving();
             let seen = match worker.try_recv() {
                 Ok(seen) => seen,
                 Err(mpsc::TryRecvError::Empty) => return false,
@@ -305,8 +361,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             };
             job.worker = None;
             let first = matches!(job.stage, Stage::First);
-            // Probes taken past the deadline stay unrecorded, so a late one never admits a write.
-            let late = now >= job.deadline;
+            // The clock is read once the probes are taken, so probes taken past the deadline stay
+            // unrecorded, however close to it they came back.
+            let late = now() >= job.deadline;
             for (key, seen) in seen {
                 if let Some(probe) = job.probes.get_mut(&key).filter(|_| !late) {
                     *(if first {
@@ -317,6 +374,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 }
             }
         }
+        let now = now();
         if now >= job.deadline {
             return true;
         }
@@ -392,6 +450,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         else {
             return Outcome::Held(Hold::Stale);
         };
+        let approved = |scope: &ScopeApproval| {
+            let now = approve(&snapshot, &job.request, &job.context);
+            now.is_ok_and(|now| now.digest == scope.digest)
+        };
+        if !job.scope.as_ref().is_some_and(approved) {
+            return Outcome::Held(Hold::InspectScopeChanged);
+        }
         let cursor = (snapshot.cursors.iter()).find(|c| source_key(&c.source) == key);
         let Some(cursor) = cursor.filter(|cursor| self.token(cursor) == probe.token) else {
             return Outcome::Held(Hold::Stale);
@@ -406,8 +471,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             Some(Verdict::Eligible(_)) => return Outcome::Held(Hold::PriorCleanup),
             _ => return Outcome::Unchanged,
         };
-        // A stop raised while this poll awaited delivery is read again here, before the write.
-        if *self.transitions.stop.borrow() {
+        // A stop raised while this poll awaited delivery is read again here, before the write; the
+        // host's is read too, as its own stop may not have reached the actor yet.
+        if *self.transitions.stop.borrow() || *job.stopping.borrow() {
             return Outcome::Held(Hold::Stopping);
         }
         #[cfg(test)]
@@ -438,8 +504,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Answers the job with the judgment of the actor's state now and the projection after it.
     fn finish(&mut self, job: Job) {
+        let operation = Some(job.kind());
         let Job {
             request,
+            scope: accepted,
             context,
             reply,
             gate,
@@ -448,22 +516,40 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             outcomes,
             ..
         } = job;
-        let (hops, summary, execution) = match self.build_snapshot(&context, &gate, &probes) {
-            Ok((snapshot, _)) => {
-                let judgment = judge(&snapshot, &request);
-                let hops = Job::hops(judgment.hops, &outcomes);
-                (hops, Some(judgment.summary), Some(snapshot.execution))
-            }
-            Err(detail) => (Job::hops(first, &outcomes), None, Some(Err(detail))),
-        };
+        // An Apply answers with the scope it accepted; only an Inspect's final snapshot issues one.
+        let accepted = accepted.map(Ok);
+        let (hops, summary, execution, diagnostics, scope) =
+            match self.build_snapshot(&context, &gate, &probes) {
+                Ok((snapshot, common)) => {
+                    let judgment = judge(&snapshot, &request);
+                    let hops = Job::hops(judgment.hops, &outcomes);
+                    let diagnostics = common.diagnostics(&snapshot, &context.nonce);
+                    let scope = accepted.or_else(|| Some(approve(&snapshot, &request, &context)));
+                    let execution = Some(snapshot.execution);
+                    (
+                        hops,
+                        Some(judgment.summary),
+                        execution,
+                        Some(diagnostics),
+                        scope,
+                    )
+                }
+                Err(detail) => {
+                    let hops = Job::hops(first, &outcomes);
+                    (hops, None, Some(Err(detail)), None, accepted)
+                }
+            };
         let stopped = self.writer.is_stopped();
         let _ = reply.send(Reply {
             job_id: request.job_id,
             refused: None,
+            operation,
+            scope,
             hops,
             summary,
             execution,
             unsettled: if stopped { None } else { self.unsettled() },
+            diagnostics,
         });
         drop(context.permit);
     }
@@ -476,11 +562,37 @@ pub(crate) mod test_hooks {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     thread_local! {
         static WORKERS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
         static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
         static AT_RETIRE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static SKEW: Cell<(Option<Duration>, Duration)> = const { Cell::new((None, Duration::ZERO)) };
+    }
+
+    pub(super) fn receiving() {
+        SKEW.with(|skew| match skew.get() {
+            (Some(armed), _) => skew.set((None, armed)),
+            (None, _) => {}
+        });
+    }
+
+    pub(super) fn skew() -> Duration {
+        SKEW.with(|skew| skew.get().1)
+    }
+
+    /// Moves the actors' clock on this thread by `by` just as one next takes a worker's probes,
+    /// until the guard drops.
+    pub(crate) fn skew_at_receipt(by: Duration) -> impl Drop {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                SKEW.with(|skew| skew.set((None, Duration::ZERO)));
+            }
+        }
+        SKEW.with(|skew| skew.set((Some(by), Duration::ZERO)));
+        Clear
     }
 
     pub(super) fn worker_started() -> Arc<AtomicBool> {

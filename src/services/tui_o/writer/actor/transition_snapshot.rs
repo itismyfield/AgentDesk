@@ -13,9 +13,11 @@ use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::Cursor;
 use crate::services::tui_o::writer::transition_cleanup::observe::Observation;
 use crate::services::tui_o::writer::transition_cleanup::{
-    Home, Obligations, ReaderView, Snapshot, SourceFacts,
+    Home, Obligations, ReaderView, Snapshot, SourceFacts, hop,
 };
-use crate::services::tui_o::writer::transition_port::Context;
+use crate::services::tui_o::writer::transition_port::{
+    Candidate, Context, Diagnostics, HistoryView, Overlap,
+};
 use crate::services::tui_prompt_dedupe::binding_context::{
     SpawnNonceMarker, observe_spawn_nonce_marker,
 };
@@ -45,6 +47,88 @@ pub(super) struct Probe {
     pub token: Token,
     pub earlier: Option<Observation>,
     pub later: Option<Observation>,
+}
+
+impl Common {
+    /// The execution `snapshot` was judged against, read with `nonce`, never read again.
+    pub(super) fn diagnostics(&self, snapshot: &Snapshot, nonce: &str) -> Diagnostics {
+        let history = (self.execution.as_ref()).map(|(pinned, history)| HistoryView {
+            complete: history.complete,
+            pinned: pinned.clone(),
+            sessions: sessions(history),
+        });
+        let overlaps =
+            (history.as_ref()).map_or_else(|_| Vec::new(), |view| overlaps(snapshot, view));
+        Diagnostics {
+            nonce: nonce.to_owned(),
+            history: history.map_err(Clone::clone),
+            overlaps,
+            candidates: candidates(snapshot),
+        }
+    }
+}
+
+/// Every old source of `snapshot` with the pane its hop resolves to, for the operator to find.
+fn candidates(snapshot: &Snapshot) -> Vec<Candidate> {
+    let candidate = |cursor: &Cursor| {
+        let key = source_key(&cursor.source);
+        let next = snapshot.rotation.successors.get(&key)?;
+        let pane = hop(snapshot, &key, next).ok().and_then(|(_, pane)| pane);
+        let source = cursor.source.clone();
+        Some(Candidate { key, source, pane })
+    };
+    snapshot.cursors.iter().filter_map(candidate).collect()
+}
+
+fn sessions(history: &SourceHistory) -> Vec<(&'static str, String, Option<SourceId>)> {
+    let visits = [
+        ("current", &history.current),
+        ("awaiting", &history.awaiting),
+    ];
+    let visits = visits.into_iter().filter_map(|(role, visit)| {
+        (visit.as_ref()).map(|visit| (role, visit.session.clone(), visit.pin.clone()))
+    });
+    let left =
+        (history.left.iter()).map(|(session, left)| ("left", session.clone(), left.pin.clone()));
+    visits.chain(left).collect()
+}
+
+/// Every old source a pin may be, compared as the judgment's current-source check compares, and
+/// every one an unpinned session may be, as `execution_sources` refuses it.
+fn overlaps(snapshot: &Snapshot, view: &HistoryView) -> Vec<Overlap> {
+    let pinned = (view.sessions.iter()).filter_map(|(_, _, pin)| pin.as_ref());
+    let pins: Vec<&SourceId> = view.pinned.iter().chain(pinned).collect();
+    let old =
+        |cursor: &&Cursor| (snapshot.rotation.successors).contains_key(&source_key(&cursor.source));
+    let overlap = |cursor: &Cursor| {
+        let old = &cursor.source;
+        let same = |pin: &SourceId| {
+            pin.path == old.path || pin.session_id == old.session_id || pin.ino == old.ino
+        };
+        let mut held_by: Vec<SourceId> = Vec::new();
+        for pin in pins.iter().copied().filter(|pin| same(pin)) {
+            if !held_by.contains(pin) {
+                held_by.push(pin.clone());
+            }
+        }
+        let named = |session: &String| old.session_id.is_empty() || *session == old.session_id;
+        let unpinned = (view.sessions.iter())
+            .filter(|(_, session, pin)| pin.is_none() && named(session))
+            .map(|(_, session, _)| session.clone());
+        let unpinned: Vec<String> = unpinned.collect();
+        let key = source_key(old);
+        (!held_by.is_empty() || !unpinned.is_empty()).then_some(Overlap {
+            key,
+            held_by,
+            unpinned,
+        })
+    };
+    snapshot
+        .cursors
+        .iter()
+        .filter(old)
+        .filter_map(overlap)
+        .collect()
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {

@@ -34,6 +34,7 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/cluster/stream_relay/source_read_proof_tests.rs",
         "src/db/intake_outbox/owner_fence_pg_tests.rs",
         "src/db/intake_outbox/postgres_tests.rs",
         "src/services/cluster/intake_worker/owner_fence_pg_tests.rs",
@@ -41,10 +42,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/p5a2_actor_tests.rs",
         "src/services/tui_prompt_dedupe/runtime_binding/codex_verified/provenance/live_grant_tests.rs",
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
-        "src/services/discord/queue_io/queued_head_auto_tests.rs",
         "src/services/tui_o/store/spool_transition_tests.rs",
         "src/services/tui_o/writer/transition_cleanup_tests.rs",
         "src/services/tui_o/writer/transition_observe_tests.rs",
+        "src/services/discord/queue_io/queued_head_auto_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",
         "src/services/discord/runtime_bootstrap/queued_recovery_draft_tests.rs",
@@ -659,6 +660,11 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/transition_actor_tests.rs",
         "src/services/tui_o/writer/transition_execution_tests.rs",
         "src/services/tui_o/writer/transition_host_tests.rs",
+        "src/cli/o_transition_tests.rs",
+        "src/server/routes/o_transition_tests.rs",
+        "src/services/tui_o/writer/transition_route_tests.rs",
+        "src/services/tui_o/writer/transition_apply_tests.rs",
+        "src/services/tui_o/writer/transition_scope_tests.rs",
         "src/services/tui_o/writer/rotation/transition_tests.rs",
         "src/services/tui_o/writer/owed_tests.rs",
         "src/services/tui_o/writer/verified_delivery_tests.rs",
