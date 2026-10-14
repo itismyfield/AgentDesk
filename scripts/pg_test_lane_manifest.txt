@@ -156,6 +156,7 @@ src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/placeholder_sweeper/retirement_tests.rs
+src/services/discord/queue_io/queued_head_auto_tests.rs
 src/services/discord/queue_io/queued_head_inject_tests.rs
 src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
@@ -475,6 +476,7 @@ services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
 services::discord::queue_io::queued_head_inject::tests
+services::discord::queue_io::queued_head_inject::tests::auto
 services::discord::recovery_engine::herdr_before_start_restart::tests
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
@@ -1590,6 +1592,14 @@ services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placehol
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::queue_io::queued_head_inject::tests::a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg
 services::discord::queue_io::queued_head_inject::tests::a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg

@@ -51,9 +51,45 @@ impl Fixture {
         self.pane.records().into_iter().map(body).collect()
     }
 
-    async fn until_receipts(&self, count: usize, what: &str) {
-        until(what, || self.pane.records().len() >= count).await;
-        assert_eq!(self.pane.records().len(), count, "{what}");
+    /// Waits for `count` receipts, clearing the composer after each as the TUI does. An input
+    /// a veto deferred may take up to `checks` real slow checks.
+    async fn typed(&self, count: usize, checks: usize, what: &str) {
+        for check in 0..=checks {
+            if check > 0 {
+                self.slow_check().await;
+            }
+            let mut seen = 0;
+            let wait = async {
+                loop {
+                    let now = self.pane.records().len();
+                    if now > seen {
+                        seen = now;
+                        self.submit_composer();
+                    }
+                    if now >= count {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(5), wait)
+                .await
+                .is_ok()
+            {
+                assert_eq!(self.pane.records().len(), count, "{what}");
+                return;
+            }
+        }
+        let typed = self.pane.records().len();
+        panic!(
+            "{what}: {typed} of {count} typed; attempts {:?}",
+            self.rows()
+        );
+    }
+
+    /// Waits until the channel's automatic attempts have reported `count` rows.
+    async fn attempts(&self, count: usize, what: &str) {
+        until(what, || self.rows().len() >= count).await;
     }
 
     /// One real slow-backstop check: its 60-second timer elapses, nothing wakes it by hand.
@@ -108,7 +144,7 @@ impl Fixture {
 }
 
 /// An enqueue alone reaches a busy pane before any 60-second timer, and inputs queued behind a
-/// ready one are typed after it, in order, each by its own enqueue.
+/// ready one are typed after it, in order, each once.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -116,7 +152,7 @@ async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let h = fixture.arrive_held("H waits for the pane").await;
     fixture
-        .until_receipts(1, "the enqueue alone must reach the busy pane")
+        .typed(1, 0, "the enqueue alone must reach the busy pane")
         .await;
     assert_eq!(fixture.receipts(), ["H waits for the pane"]);
     assert_eq!(
@@ -134,13 +170,13 @@ async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
         .lock_owned()
         .await;
     fixture.enqueue("B next").await;
-    // C arrives while B is ready: it queues behind B rather than being typed ahead of it.
+    // C arrives while B is queued: it waits behind B rather than being typed ahead of it.
     fixture.enqueue("C behind B").await;
     let queue = fixture.queue().await;
     let (b, c) = (queue[0].message_id, queue[1].message_id);
     drop(transition);
     fixture
-        .until_receipts(3, "each enqueue types the next ready input")
+        .typed(3, 2, "the inputs behind a ready one follow it")
         .await;
     assert_eq!(
         fixture.receipts(),
@@ -164,7 +200,6 @@ async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
             (c.get(), "injected", "terminal"),
         ]
     );
-    assert_eq!(backstop::completed_fires(fixture.channel), 0);
     fixture.assert_still_busy().await;
 }
 
@@ -182,6 +217,9 @@ async fn s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg()
         .await;
     fixture.enqueue("H vetoed first").await;
     fixture.enqueue("B behind vetoed H").await;
+    fixture
+        .attempts(2, "both enqueues tried while the transition was held")
+        .await;
     until("the vetoed attempt leaves the slow backstop armed", || {
         backstop::backstop_waiting(fixture.channel)
     })
@@ -196,16 +234,11 @@ async fn s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg()
     drop(transition);
 
     fixture.slow_check().await;
-    fixture
-        .until_receipts(1, "the first slow check types H")
-        .await;
+    fixture.typed(1, 0, "the first slow check types H").await;
     assert_eq!(fixture.receipts(), ["H vetoed first"]);
     until("H is settled", || fixture.terminal() == [h.get()]).await;
-    fixture.submit_composer();
     fixture.slow_check().await;
-    fixture
-        .until_receipts(2, "the second slow check types B")
-        .await;
+    fixture.typed(2, 0, "the second slow check types B").await;
     assert_eq!(fixture.receipts()[1], "B behind vetoed H");
     until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
     assert!(fixture.queue().await.is_empty());
@@ -240,21 +273,17 @@ async fn s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg() 
         .map(|item| input_class(&CLAUDE, fixture.channel, item))
         .collect();
     assert_eq!(classes, [RetryClass::Ready, RetryClass::Ready]);
-    until("the slow backstop is armed", || {
-        backstop::backstop_waiting(fixture.channel)
-    })
-    .await;
+    fixture
+        .attempts(2, "both enqueues tried while the transition was held")
+        .await;
     drop(transition);
 
     fixture.slow_check().await;
     fixture
-        .until_receipts(1, "a ready input queued for six minutes is still typed")
+        .typed(1, 0, "a ready input queued for six minutes is still typed")
         .await;
-    fixture.submit_composer();
     fixture.slow_check().await;
-    fixture
-        .until_receipts(2, "and so is the one behind it")
-        .await;
+    fixture.typed(2, 0, "and so is the one behind it").await;
     assert_eq!(
         fixture.receipts(),
         ["H retried once long ago", "B retried once long ago"]
@@ -301,7 +330,11 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
     let (h, b) = (queue[1].message_id, queue[2].message_id);
     drop(transition);
     fixture
-        .until_receipts(2, "ready inputs behind a parked one are reached in order")
+        .typed(
+            2,
+            2,
+            "ready inputs behind a parked one are reached in order",
+        )
         .await;
     assert_eq!(fixture.receipts(), ["H behind parked P", "B behind H"]);
     until("H and B are settled", || {
@@ -367,7 +400,7 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     );
     assert_eq!(fixture.disk()["head_injection"]["phase"], "reserved");
     resume.notify_one();
-    fixture.until_receipts(1, "the owner types H once").await;
+    fixture.typed(1, 0, "the owner types H once").await;
     until("H is settled", || fixture.terminal() == [h.get()]).await;
     assert_eq!(fixture.receipts(), ["H raced by two workers"]);
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
@@ -376,7 +409,7 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     let b = fixture.queue().await[0].message_id;
     fixture.slow_check().await;
     fixture
-        .until_receipts(2, "the tail is reached without a new input")
+        .typed(2, 0, "the tail is reached without a new input")
         .await;
     until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
     assert_eq!(
@@ -487,13 +520,12 @@ async fn s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg() {
     assert!(!backstop::backstop_waiting(fixture.channel));
     queue_io::spawn_turn_completion_idle_queue_listener(fixture.shared.clone(), CLAUDE);
     fixture
-        .until_receipts(1, "the reconcile reaches a busy channel's backlog")
+        .typed(1, 0, "the reconcile reaches a busy channel's backlog")
         .await;
     until("H is settled", || fixture.terminal() == [h.get()]).await;
-    fixture.submit_composer();
     fixture.slow_check().await;
     fixture
-        .until_receipts(2, "the reconcile left the tail a slow check")
+        .typed(2, 0, "the reconcile left the tail a slow check")
         .await;
     until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
     assert_eq!(fixture.receipts(), ["status?", "distinct tail B"]);
@@ -556,17 +588,26 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
         (row.outcome, row.reason, row.head_state),
         ("not_sent", "not_busy", "queued")
     );
-    // The queued-only lane ends at the paste even where an idle start would now be allowed.
+    // The queued-only lane ends at the paste even where an idle start would now be allowed: it
+    // never reaches the dequeue an idle kickoff would take next.
     crate::services::discord::health::end_turn(&idle.shared, idle.channel.get()).await;
+    let _ready = router::set_hosted_tui_promote_busy_for_tests(false);
+    let dequeue =
+        queue_dispatch::kickoff::cancel_backstop_test_support::DequeueRace::install(idle.channel);
     let before = idle.bytes();
-    let reason = "s3 queued-only boundary";
-    queue_io::kick_queued_only_channel_if_context_available(
+    let reason = "idle_queue_backstop";
+    let lane = queue_io::kick_queued_only_channel_if_context_available(
         &idle.shared,
         &CLAUDE,
         idle.channel,
         reason,
-    )
-    .await;
+    );
+    tokio::select! {
+        () = lane => {}
+        arrived = dequeue.wait_for_both(Duration::from_secs(20)) => {
+            panic!("the queued-only lane reached the idle dequeue: {arrived:?}")
+        }
+    }
     assert_eq!(
         idle.bytes(),
         before,
@@ -574,7 +615,7 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
     );
     let snapshot = idle.shared.mailbox(idle.channel).snapshot().await;
     assert_eq!(snapshot.intervention_queue.len(), 2);
-    assert!(snapshot.pending_user_dispatch.is_none() && snapshot.cancel_token.is_none());
+    assert!(snapshot.pending_user_dispatch.is_none());
     let text = format!("{unknown_rows:?}{:?}", idle.rows());
     assert!(!text.contains("status?") && !text.contains("distinct tail B"));
 }

@@ -6005,6 +6005,14 @@ services::discord::queue_io::presleep_tests::slow_backstop_rearms_when_kick_defe
 services::discord::queue_io::presleep_tests::transient_gate_backlog_counts_for_backstop
 services::discord::queue_io::queued_head_inject::tests::a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg
 services::discord::queue_io::queued_head_inject::tests::a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg
@@ -13738,6 +13746,10 @@ services::turn_orchestrator::queued_head::tests::an_unknown_head_blocks_every_co
 services::turn_orchestrator::queued_head::tests::legacy_and_v1_restarts_judge_the_same_singleton_eligible
 services::turn_orchestrator::queued_head::tests::only_a_plain_singleton_from_a_person_is_eligible
 services::turn_orchestrator::queued_head::tests::overflow_and_restore_never_displace_a_reserved_head
+services::turn_orchestrator::queued_head::tests::prefix::a_choice_gone_stale_before_the_claim_reserves_nothing
+services::turn_orchestrator::queued_head::tests::prefix::a_prefix_reservation_that_cannot_be_saved_restores_the_queue_and_its_records
+services::turn_orchestrator::queued_head::tests::prefix::nothing_behind_an_untypable_or_unreadable_input_overtakes_it
+services::turn_orchestrator::queued_head::tests::prefix::parked_inputs_ahead_move_behind_the_first_ready_one_in_the_reserving_write
 services::turn_orchestrator::queued_head::tests::restore_cancel_clear_and_purge_keep_a_reserved_head
 services::turn_orchestrator::queued_head::tests::the_downgrade_converts_only_a_resolved_snapshot
 services::turn_orchestrator::queued_head::tests::without_a_claim_the_queue_file_stays_the_legacy_array
