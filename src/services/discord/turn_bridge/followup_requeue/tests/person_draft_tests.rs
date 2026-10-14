@@ -118,7 +118,7 @@ async fn a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_i
         &state,
         None,
         None,
-        "turn-6714",
+        attempt("turn-6714"),
     )
     .await;
     assert!(outcome.requeued && !outcome.retry_capped);

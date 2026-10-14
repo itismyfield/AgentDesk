@@ -6,7 +6,8 @@ use crate::services::turn_orchestrator::pending_queue_persistence::{
     read_back_fault, save_fault,
 };
 use crate::services::turn_orchestrator::policy_close::{
-    PolicyClear, PolicyCloseRequest, PolicyMailboxOutcome, PolicyReceipt, PolicyRetain, test_hooks,
+    PolicyAuthority, PolicyClear, PolicyCloseRequest, PolicyMailboxOutcome, PolicyReceipt,
+    PolicyRetain, test_hooks,
 };
 use crate::services::turn_orchestrator::queued_head::{
     SnapshotMeta, parse_snapshot, snapshot_json,
@@ -186,7 +187,10 @@ impl Fixture {
             receipt: Box::new(Receipt(self.channel.get(), clear)),
             active: Arc::new(AtomicUsize::new(1)),
             persistence: ctx(),
+            trace: Default::default(),
         };
+        // The request carries this thread's armed hook, if any, on its own probe.
+        let request = test_hooks::bind(request);
         let outcome = self.handle.commit_policy_close(request).await;
         outcome.unwrap_or_else(|stage| panic!("policy close lost at {stage:?}"))
     }
@@ -198,7 +202,7 @@ impl PolicyReceipt for Receipt {
     fn channel(&self) -> u64 {
         self.0
     }
-    fn try_clear(&self) -> PolicyClear {
+    fn try_clear(&self, _authority: &PolicyAuthority<'_>) -> PolicyClear {
         self.1
     }
 }
@@ -247,18 +251,20 @@ fn refused(outcome: ScopedClaimOutcome) -> ScopedClaimRefusal {
     }
 }
 
-/// Panics once in the policy close step at `stage`, as a crash after the receipt clear would.
-fn panic_at(stage: Option<&'static str>) {
-    let Some(stage) = stage else {
-        test_hooks::observe(None);
-        return;
-    };
-    let mut fired = false;
-    test_hooks::observe(Some(Box::new(move |seen| {
-        if seen == stage && !std::mem::replace(&mut fired, true) {
-            panic!("injected policy close panic at {seen}");
-        }
-    })));
+/// Arms the next policy close built on this thread to panic once at `stage`, as a crash after the
+/// receipt clear would; the returned flag tells whether that panic was injected.
+fn panic_at(stage: Option<test_hooks::Stage>) -> Arc<std::sync::atomic::AtomicBool> {
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    assert!(!test_hooks::disarm(), "stale policy-close hook");
+    if let Some(stage) = stage {
+        let flag = fired.clone();
+        test_hooks::arm(Box::new(move |seen| {
+            if seen == stage && !flag.swap(true, Ordering::Relaxed) {
+                panic!("injected policy close panic at {seen:?}");
+            }
+        }));
+    }
+    fired
 }
 
 /// One claim step writes the queue without the message and its debt in a single snapshot, and
@@ -528,7 +534,10 @@ async fn scoped_claim_after_an_ambiguous_save_installs_only_its_published_snapsh
 async fn policy_close_then_scoped_claim() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    for (n, stage) in [None, Some("after_clear")].into_iter().enumerate() {
+    for (n, stage) in [None, Some(test_hooks::Stage::AfterClear)]
+        .into_iter()
+        .enumerate()
+    {
         let fx = actor(&registry, 5_342_401 + n as u64, &[241, 242]).await;
         let started = proof(fx.channel, 241);
         let token = started.token.clone();
@@ -543,9 +552,10 @@ async fn policy_close_then_scoped_claim() {
             ctx(),
         );
         assert!(start.await.started);
-        panic_at(stage);
+        let fired = panic_at(stage);
         let closed = fx.close(&started, PolicyClear::Cleared).await;
-        panic_at(None);
+        assert!(!test_hooks::disarm(), "{stage:?}: the close took the hook");
+        assert_eq!(fired.load(Ordering::Relaxed), stage.is_some(), "{stage:?}");
         assert!(
             matches!(closed, PolicyMailboxOutcome::Committed(_)),
             "{stage:?}"
@@ -575,14 +585,18 @@ async fn policy_close_then_scoped_claim() {
 async fn scoped_pending_then_policy_close() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
-    for (n, stage) in [None, Some("after_clear")].into_iter().enumerate() {
+    for (n, stage) in [None, Some(test_hooks::Stage::AfterClear)]
+        .into_iter()
+        .enumerate()
+    {
         let fx = actor(&registry, 5_342_501 + n as u64, &[251, 252]).await;
         let proof = proof(fx.channel, 251);
         let ids = fx.installed(&proof).await;
         let installed = fx.seen().await;
-        panic_at(stage);
+        let fired = panic_at(stage);
         let closed = fx.close(&proof, PolicyClear::Cleared).await;
-        panic_at(None);
+        assert!(!test_hooks::disarm(), "{stage:?}: the close took the hook");
+        assert_eq!(fired.load(Ordering::Relaxed), stage.is_some(), "{stage:?}");
         assert!(
             matches!(closed, PolicyMailboxOutcome::Committed(_)),
             "{stage:?}"
