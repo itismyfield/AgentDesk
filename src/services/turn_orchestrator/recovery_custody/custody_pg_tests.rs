@@ -704,7 +704,9 @@ async fn s3act_b3b4a1_ever_scoped_survives_close_and_legacy_reuse_pg() {
         target: None,
         local: NODE.into(),
     };
-    let _attempt = slot.begin(scope, 1).ok().expect("an attempt");
+    let Ok(_attempt) = slot.begin(scope, 1) else {
+        panic!("the first observation starts the attempt");
+    };
     let before = seal("q1", None, None);
     let admission = fx.admit(&ch).await;
     let reserved = custody.reserve(admission, scoped(&ch, before.clone(), 41));
