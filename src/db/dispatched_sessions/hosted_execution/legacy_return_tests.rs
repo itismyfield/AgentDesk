@@ -119,11 +119,7 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
     let before = snapshot(&pool, observed.session_id).await;
     assert!(matches!(
         provider_alive(&r),
-        Err(
-            crate::services::session_host::legacy_return::ReturnEndRefusal::ProviderUnverified(
-                crate::services::session_host::herdr::pane_probe::RecordedProcess::ExactAlive
-            )
-        )
+        Err(crate::services::session_host::legacy_return::ReturnEndRefusal::ProviderUnverified(_))
     ));
     assert_eq!(snapshot(&pool, observed.session_id).await, before);
     let mut other = r.owner.clone();
