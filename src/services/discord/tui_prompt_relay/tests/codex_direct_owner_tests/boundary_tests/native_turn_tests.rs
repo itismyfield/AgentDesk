@@ -596,19 +596,20 @@ fn codex_direct_deferred_input_keeps_its_native_turn_across_a_restart() {
     );
     let second_end = std::fs::metadata(&rollout).unwrap().len();
     append(&rollout, &item_completed_line_for(&t2));
+    let tails_before = tail_starts(ChannelId::new(channel));
     runtime().block_on(async {
         let _live_pane = live_pane_tmux(&root);
         let fx = Fixture::start_with(&root, channel, tmux, true).await;
         synthetic_start::restore_pending_starts(&fx.shared, &ProviderKind::Codex);
         assert!(
-            wait_for(Duration::from_secs(15), || fx
-                .codex
-                .row()
-                .is_some_and(|row| row.external_turn_id != record.lease_turn_id))
+            wait_for(Duration::from_secs(15), || fx.codex.row().is_some()
+                && tail_starts(ChannelId::new(channel)) > tails_before)
             .await,
             "the restored input was never claimed and repaired"
         );
         let row = fx.codex.row().expect("restored row");
+        // The repair resumes the restored turn rather than issuing a new one.
+        assert_eq!(row.external_turn_id, record.lease_turn_id);
         assert_eq!(row.user_msg_id, anchor);
         assert_eq!(row.native_turn_id.as_deref(), Some(t2.as_str()));
         assert_eq!(row.turn_start_offset, Some(second_end));
