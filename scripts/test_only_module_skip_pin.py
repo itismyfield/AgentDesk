@@ -721,6 +721,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/recovery_defer/tests.rs",
         "src/services/discord/turn_presence/activity/tail_tests.rs",
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
+        "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
     }
 )
@@ -826,6 +827,10 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/restart_report/capacity.rs",
         "src/services/recovery_defer.rs",
         "src/services/recovery_defer/cursor.rs",
+        "src/services/turn_orchestrator/recovery_registry/mod.rs",
+        "src/services/turn_orchestrator/recovery_registry/entry.rs",
+        "src/services/turn_orchestrator/recovery_registry/rehydrate.rs",
+        "src/services/turn_orchestrator/recovery_registry/witness.rs",
     }
 )
 

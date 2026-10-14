@@ -513,6 +513,7 @@ jobs:
               - 'src/services/turn_lifecycle.rs'
               - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'
               - 'src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs'
+              - 'src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
