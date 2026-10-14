@@ -24,6 +24,7 @@ mod headless_turn;
 pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
+pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
 // task. Unix-gated because its transcript coordinate is the `(dev, ino)`

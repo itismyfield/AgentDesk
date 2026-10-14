@@ -516,6 +516,7 @@ jobs:
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
               - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
+              - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'

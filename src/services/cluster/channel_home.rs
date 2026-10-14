@@ -542,7 +542,6 @@ impl HomeGate {
     }
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
-    #[cfg(test)]
     pub(crate) fn admit_at_epoch(
         &self,
         provider: &str,
@@ -552,7 +551,6 @@ impl HomeGate {
         self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
     }
 
-    #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
         provider: &str,

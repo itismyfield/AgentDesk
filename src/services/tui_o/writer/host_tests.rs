@@ -1006,8 +1006,8 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
-struct ProducerPane {
-    tmux: &'static str,
+pub(super) struct ProducerPane {
+    pub(super) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
     _root: tempfile::TempDir,
@@ -1019,7 +1019,7 @@ struct ProducerPane {
 
 #[cfg(unix)]
 impl ProducerPane {
-    fn launch(a: &str, a_path: &Path) -> Self {
+    pub(super) fn launch(a: &str, a_path: &Path) -> Self {
         use crate::services::tui_prompt_dedupe as dedupe;
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1087,7 +1087,7 @@ impl Drop for ProducerPane {
 }
 
 #[cfg(unix)]
-fn session_row(session: &str) -> Vec<u8> {
+pub(super) fn session_row(session: &str) -> Vec<u8> {
     let row = serde_json::json!({"type": "mode", "sessionId": session});
     let mut line = serde_json::to_vec(&row).unwrap();
     line.push(b'\n');
