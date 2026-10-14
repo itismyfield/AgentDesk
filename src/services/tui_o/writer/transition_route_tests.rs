@@ -388,9 +388,8 @@ mod pg {
         .unwrap();
     }
 
-    // Through the router and a real PG row: a row of another channel, provider, node, bot, runtime
-    // root, endpoint or nonce reaches no actor and writes nothing; the row's own execution reaches
-    // the hosted actor once, whose Inspect writes nothing either.
+    // Through the router and a real PG row: a row that is not the target's own execution reaches no
+    // actor; the row's own execution reaches the hosted actor once, and its Inspect writes nothing.
     #[test]
     fn transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg() {
         let _root = crate::config::TestRuntimeRootGuard::new();

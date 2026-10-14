@@ -1,6 +1,5 @@
-//! `agentdesk o transition inspect` against loopback mocks: one POST to a loopback base carrying
-//! the base's Origin and no token, no redirect or environment proxy followed, and an answer it
-//! cannot prove harmless never shown as one.
+//! `agentdesk o transition inspect` against loopback mocks: one POST with the base's Origin and no
+//! token, no redirect or proxy followed, and no unproven answer shown as harmless.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener};
