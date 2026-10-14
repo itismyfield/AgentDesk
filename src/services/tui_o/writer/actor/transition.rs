@@ -37,12 +37,18 @@ const HASH_BUDGET: u64 = 2 * CANDIDATES as u64 * (32 << 20);
 pub(super) struct Transitions {
     receiver: Option<Receiver>,
     job: Option<Job>,
+    /// The actor's stop, read again just before each retirement write.
+    stop: watch::Receiver<bool>,
 }
 
 impl Transitions {
-    pub(super) fn new(receiver: Option<Receiver>) -> Self {
+    pub(super) fn new(receiver: Option<Receiver>, stop: watch::Receiver<bool>) -> Self {
         let job = None;
-        Self { receiver, job }
+        Self {
+            receiver,
+            job,
+            stop,
+        }
     }
 
     /// A job is retiring sources, so the channel's unsettled count is not final.
@@ -170,8 +176,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         let refused = match &self.transitions.job {
             Some(job) if job.request.job_id == request.job_id => {
-                let _ = reply.send(job.receipt());
-                return;
+                // Only the same request, `at` aside, with no audit against it gets the receipt.
+                let asked = Request {
+                    at: job.request.at,
+                    ..request.clone()
+                };
+                if asked == job.request && !conflicts(self.writer.store().cursors(), &request) {
+                    let _ = reply.send(job.receipt());
+                    return;
+                }
+                Some(Refused::JobConflict)
             }
             Some(_) => Some(Refused::Busy),
             None if self.sources.transition_provider() == ShadowProvider::Codex => {
@@ -194,11 +208,17 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         };
         let first = judge(&snapshot, &request).hops;
+        let cursors: BTreeMap<String, &Cursor> = (snapshot.cursors.iter())
+            .map(|c| (source_key(&c.source), c))
+            .collect();
         let unprobed = |hop: &&Judged| hop.verdict == Verdict::Unknown(Unclear::NotObserved);
+        let mut unprobed: Vec<&Judged> = first.iter().filter(unprobed).collect();
+        // Sources still to retire take the candidates first, receipts already written after them.
+        let done = |c: &&Cursor| c.retired || c.transition_cleanup.is_some();
+        unprobed.sort_by_key(|hop| cursors.get(&hop.key).is_none_or(done));
         let (mut probes, mut outcomes) = (BTreeMap::new(), BTreeMap::new());
-        for (index, hop) in first.iter().filter(unprobed).enumerate() {
-            let cursor = (snapshot.cursors.iter()).find(|c| source_key(&c.source) == hop.key);
-            let Some(cursor) = cursor.filter(|_| index < CANDIDATES) else {
+        for (index, hop) in unprobed.into_iter().enumerate() {
+            let Some(cursor) = cursors.get(&hop.key).filter(|_| index < CANDIDATES) else {
                 outcomes.insert(hop.key.clone(), Outcome::Held(Hold::Limit));
                 continue;
             };
@@ -238,14 +258,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 return true;
             };
             let outcome = self.retire_one(job, &key, unsettled);
-            let failed = outcome == Outcome::Unknown;
+            let rest = match outcome {
+                Outcome::Unknown => Some(Outcome::Held(Hold::NotTried)),
+                Outcome::Held(Hold::Stopping) => Some(outcome.clone()),
+                _ => None,
+            };
             job.outcomes.insert(key, outcome);
             let Stage::Apply(queue) = &mut job.stage else {
                 return true;
             };
-            if failed {
+            if let Some(rest) = rest {
                 for key in queue.drain(..) {
-                    job.outcomes.insert(key, Outcome::Held(Hold::NotTried));
+                    job.outcomes.insert(key, rest.clone());
                 }
             }
             return queue.is_empty();
@@ -272,6 +296,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if job.probes.is_empty() {
             return true;
         }
+        let now = Instant::now();
         if let Some(worker) = &job.worker {
             let seen = match worker.try_recv() {
                 Ok(seen) => seen,
@@ -280,8 +305,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             };
             job.worker = None;
             let first = matches!(job.stage, Stage::First);
+            // Probes taken past the deadline stay unrecorded, so a late one never admits a write.
+            let late = now >= job.deadline;
             for (key, seen) in seen {
-                if let Some(probe) = job.probes.get_mut(&key) {
+                if let Some(probe) = job.probes.get_mut(&key).filter(|_| !late) {
                     *(if first {
                         &mut probe.earlier
                     } else {
@@ -290,7 +317,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 }
             }
         }
-        let now = Instant::now();
         if now >= job.deadline {
             return true;
         }
@@ -380,6 +406,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             Some(Verdict::Eligible(_)) => return Outcome::Held(Hold::PriorCleanup),
             _ => return Outcome::Unchanged,
         };
+        // A stop raised while this poll awaited delivery is read again here, before the write.
+        if *self.transitions.stop.borrow() {
+            return Outcome::Held(Hold::Stopping);
+        }
         #[cfg(test)]
         test_hooks::at_retire();
         unsettled.send_replace(None);

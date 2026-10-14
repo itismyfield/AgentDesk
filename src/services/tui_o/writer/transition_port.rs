@@ -57,7 +57,8 @@ pub(crate) enum Refused {
     Busy,
     /// This job runs already; the reply is its receipt so far.
     InProgress,
-    /// The job ID names a recorded cleanup of another operator, reason, cutoff or end.
+    /// The job ID names a recorded cleanup, or the job in progress, of another operator, reason,
+    /// cutoff or end.
     JobConflict,
     Unread(String),
 }
@@ -75,6 +76,8 @@ pub(crate) enum Hold {
     Limit,
     /// An earlier write of this job failed, so this one was not tried.
     NotTried,
+    /// The actor was stopping, so neither this nor the rest of the job was written.
+    Stopping,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

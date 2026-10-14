@@ -289,7 +289,7 @@ where
         verified,
         sources,
         bindings,
-        transitions: transition::Transitions::new(transitions),
+        transitions: transition::Transitions::new(transitions, stop.clone()),
         notice: None,
         waiting: Waiting::default(),
         clock: (
@@ -984,7 +984,7 @@ mod test_support {
             verified: None,
             sources: Sources::new(channel, provider, Arc::clone(&bindings)),
             bindings,
-            transitions: transition::Transitions::new(None),
+            transitions: transition::Transitions::new(None, watch::channel(false).1),
             notice: None,
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),
