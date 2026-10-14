@@ -253,152 +253,9 @@ fn s0o_snapshot_budget_counts_alignment_and_resume_rereads() {
     assert!(idle(&mut reader));
 }
 
-fn activity_code(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut code = bytes.to_vec();
-    let mut i = 0;
-    while i < bytes.len() {
-        let start = i;
-        if bytes[i..].starts_with(b"//") {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-        } else if bytes[i..].starts_with(b"/*") {
-            i += 2;
-            let mut depth = 1;
-            while i < bytes.len() && depth > 0 {
-                if bytes[i..].starts_with(b"/*") {
-                    depth += 1;
-                    i += 2;
-                } else if bytes[i..].starts_with(b"*/") {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if bytes[i] == b'"' {
-            let hashes = bytes[..i].iter().rev().take_while(|b| **b == b'#').count();
-            let raw = i > hashes && bytes[i - hashes - 1] == b'r';
-            i += 1;
-            while i < bytes.len() {
-                if !raw && bytes[i] == b'\\' {
-                    i = (i + 2).min(bytes.len());
-                } else if bytes[i] == b'"'
-                    && (!raw || bytes[i + 1..].starts_with(&vec![b'#'; hashes]))
-                {
-                    i += 1 + if raw { hashes } else { 0 };
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-        } else if bytes[i] == b'\'' {
-            let mut end = i + 1;
-            if bytes.get(end) == Some(&b'\\') {
-                end += 2;
-                if bytes.get(i + 2) == Some(&b'u') && bytes.get(end) == Some(&b'{') {
-                    while end < bytes.len() && bytes[end] != b'}' {
-                        end += 1;
-                    }
-                    end += 1;
-                } else if bytes.get(i + 2) == Some(&b'x') {
-                    end += 2;
-                }
-            } else if let Some(ch) = source[end..].chars().next() {
-                end += ch.len_utf8();
-            }
-            if bytes.get(end) != Some(&b'\'') {
-                i += 1;
-                continue;
-            }
-            i = end + 1;
-        } else {
-            i += 1;
-            continue;
-        }
-        for byte in &mut code[start..i] {
-            if *byte != b'\n' {
-                *byte = b' ';
-            }
-        }
-    }
-    String::from_utf8(code).unwrap()
-}
-
-fn test_activity_item_end(source: &str, start: usize) -> Option<usize> {
-    let head = &source[start..];
-    let prefix = r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?";
-    let body = regex::Regex::new(&format!(
-        r"{prefix}(?:(?:async|unsafe|const)\s+)*(?:fn|mod|impl|struct|enum|trait|union|extern|macro_rules|if|match|loop|while|for)\b|^\s*\{{"
-    ))
-    .unwrap()
-    .is_match(head);
-    let statement = regex::Regex::new(&format!(r"{prefix}(?:const|static|type|use|let)\b"))
-        .unwrap()
-        .is_match(head);
-    let field = regex::Regex::new(&format!(r"{prefix}[A-Za-z_][A-Za-z_0-9]*\s*[:,]"))
-        .unwrap()
-        .is_match(head);
-    if !body && !statement && !field {
-        return None;
-    }
-    let tokens = regex::Regex::new(r"[A-Za-z_][A-Za-z_0-9]*|[^\s]").unwrap();
-    let mut closers = Vec::new();
-    let mut body_opened = false;
-    // Only Rust delimiters nest; comparison and shift operators do not.
-    for token in tokens.find_iter(head) {
-        match token.as_str() {
-            "(" => closers.push(")"),
-            "[" => closers.push("]"),
-            "{" => {
-                body_opened |= body && closers.is_empty();
-                closers.push("}");
-            }
-            ")" | "]" | "}" => {
-                if closers.pop() != Some(token.as_str()) {
-                    return None;
-                }
-                if body_opened && closers.is_empty() {
-                    return Some(start + token.end());
-                }
-            }
-            ";" if closers.is_empty() => return Some(start + token.end()),
-            "," if field && !body && !statement && closers.is_empty() => {
-                return Some(start + token.end());
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn dormant_activity_modules(source: &str) -> bool {
-    let mut code = activity_code(source).into_bytes();
-    let original = String::from_utf8(code.clone()).unwrap();
-    let gates = regex::Regex::new(r"#\s*\[\s*cfg\s*\(([^\]]*)\)\s*\]").unwrap();
-    for gate in gates.captures_iter(&original) {
-        if code[gate.get(0).unwrap().start()] != b'#' {
-            continue;
-        }
-        let condition: String = gate[1].chars().filter(|c| !c.is_whitespace()).collect();
-        if condition != "test" && !condition.starts_with("all(test,") {
-            continue;
-        }
-        let start = gate.get(0).unwrap().start();
-        let Some(end) = test_activity_item_end(&original, gate.get(0).unwrap().end()) else {
-            return false;
-        };
-        code[start..end].fill(b' ');
-    }
-    let production = String::from_utf8(code).unwrap();
-    !regex::Regex::new(r"\bmod\s+(tail|unbound)\s*;|\b(tail|unbound)\s*::")
-        .unwrap()
-        .is_match(&production)
-}
-
 #[test]
 fn s0o_limits_and_dormant_activity_source_are_unchanged() {
+    use sha2::{Digest, Sha256};
     let limits = Limits::default();
     assert_eq!(limits.tail, 32 * 1024 * 1024);
     assert_eq!(limits.tail_start(limits.full), None);
@@ -406,52 +263,13 @@ fn s0o_limits_and_dormant_activity_source_are_unchanged() {
         limits.tail_start(limits.full + 1),
         Some(limits.full + 1 - limits.tail)
     );
-    assert!(dormant_activity_modules(include_str!("../activity.rs")));
-    assert!(dormant_activity_modules(
-        "#[cfg(all(test, unix))] mod tail; #[cfg(test)] mod unbound;"
-    ));
-    assert!(dormant_activity_modules(
-        "fn live() { let _ = r###\"tail::x }\"###; } // unbound::x"
-    ));
-    assert!(dormant_activity_modules(
-        "#[cfg(test)] fn t() { let _ = '{'; } fn live() {}"
-    ));
-    for source in [
-        "mod tail;",
-        "#[cfg(not(test))] mod unbound;",
-        "fn live() { tail::x(); }",
-        "#[cfg(test)] mod t {} fn live() { unbound::x(); }",
-        "#[cfg(test)] mod t { #[cfg(test)] fn nested() {} } fn live() { tail::x(); }",
-        "#[cfg(any(test, unix))] mod unbound;",
-    ] {
-        assert!(!dormant_activity_modules(source), "{source}");
-    }
-    for source in [
-        "#[cfg(test)] const _: bool = 1 < 2; fn live() {}",
-        "#[cfg(test)] const _: u32 = 1 << 2; fn live() {}",
-        "#[cfg(test)] const _: u32 = 1 >> 2; fn live() {}",
-        "#[cfg(test)] const _: bool = { 1 < 2 }; fn live() {}",
-        "#[cfg(test)] fn generic<T, U>(_: T) -> Option<U> { tail::x(); } fn live() {}",
-        "#[cfg(test)] type Generic<T, U> = Result<T, U>; fn live() {}",
-        "#[cfg(test)] mod t { #[cfg(test)] const _: bool = 1 < 2; fn nested<T, U>() { unbound::x(); } } fn live() {}",
-    ] {
-        assert!(dormant_activity_modules(source), "{source}");
-    }
-    let unsafe_suffixes = [
-        "#[cfg(test)] const _: bool = 1 < 2; mod tail;",
-        "#[cfg(test)] const _: bool = 1 < 2; fn live() { tail::x(); }",
-        "#[cfg(test)] const _: bool = 1 < 2; fn live() { unbound::x(); }",
-        "#[cfg(test)] const _: u32 = 1 << 2; mod unbound;",
-        "#[cfg(test)] const _: u32 = 1 << 2; fn live() { tail::x(); }",
-        "#[cfg(test)] const _: u32 = 1 >> 2; fn live() { unbound::x(); }",
-    ];
-    let accepted: Vec<_> = unsafe_suffixes
-        .into_iter()
-        .filter(|source| dormant_activity_modules(source))
-        .collect();
-    assert!(
-        accepted.is_empty(),
-        "unsafe non-test suffix accepted: {accepted:?}"
+    let source = include_str!("../activity.rs").replace("\r\n", "\n");
+    let production = source
+        .strip_suffix("\n#[cfg(all(test, unix))]\nmod tail;\n")
+        .unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(production.as_bytes())),
+        "8c42aa4c34e6c5f8b0f5e61973751ad451637cf94a86312a8bfd58a017bdda0b"
     );
 }
 

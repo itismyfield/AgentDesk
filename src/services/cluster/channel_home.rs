@@ -671,20 +671,6 @@ fn first_mount(homes: &Registry) -> Option<MutexGuard<'static, ()>> {
         .then(|| FIRST_MOUNT.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// Runs `admit` only while `channel` has no Home; no Home can mount until it returns.
-pub(crate) fn admit_unhomed<T>(channel: u64, admit: impl FnOnce() -> T) -> Option<T> {
-    with_homes(|homes| {
-        let _first = first_mount(homes);
-        let Some(homes) = homes.get() else {
-            return Some(admit());
-        };
-        let registry = lock_homes(homes);
-        #[cfg(test)]
-        tests::before_unhomed_poll();
-        (!registry.gates.contains_key(&channel.to_string())).then(admit)
-    })
-}
-
 /// Reads the registered gates; while none was ever registered nothing is locked.
 fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
     with_homes(|homes| {

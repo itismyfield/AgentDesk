@@ -1479,7 +1479,6 @@ services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is
 services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
 services::discord::commands::control::input_clear::tests::a_superseded_ticket_holds_until_a_new_clear_cuts_its_inputs_pg
 services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
-services::discord::commands::control::input_clear::tests::b2b1_ledger_clear_withdraws_at_admission_and_again_when_its_reset_runs_pg
 services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
 services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
 services::discord::commands::control::native::herdr_tests::a_clear_waiting_on_the_guard_commits_only_on_its_own_pending_pg
@@ -1808,7 +1807,6 @@ services::discord::router::message_handler::watchdog::host_tests::a_withheld_pau
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
-services::discord::runtime_bootstrap::gateway_handback_integration_tests::b2b1_lease_loss_and_yield_withdraw_only_gateway_approvals_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::configured_idle_expiry_reaches_the_lease_session_and_zero_disables_it_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::empty_handbacks_survive_restart_then_suppression_keeps_serving_and_self_fences_pg
@@ -1854,7 +1852,6 @@ services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_t
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_resume_rechecks_home_epoch_and_input_fence_pg
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_retained_terminal_keeps_reason_and_obligation_pg
 services::discord::runtime_bootstrap::queued_recovery::scoped_inflight_restore_tests::s3act_b2_unverified_receipts_block_without_durable_error_holds_pg
-services::discord::session_idle_cleanup::tests::b2b1_idle_cleanup_retires_only_the_sessions_it_removes_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests::exact_owned_row_with_null_cwd_is_channel_scoped_empty_path
@@ -2083,7 +2080,6 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_roll
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::a_stop_after_its_turns_start_was_read_runs_only_for_the_current_token
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_cold_start_accepts_intent_without_marker_then_sends_once
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base
-services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_stop_after_a_normal_exit_seal_sends_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cold_unsubmitted_stop_closes_only_after_a_no_attempt_exit
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut::restart_real_cutpoints_reach_their_runtime_boundaries_pg
