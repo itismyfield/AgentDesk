@@ -22,6 +22,7 @@ use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
     BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
+use crate::services::discord::router::queued_head_inject_covers;
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -139,17 +140,16 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
-/// Codex TUI sessions take busy-turn input only once this is on, whichever mode the env sets.
-pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = false;
+/// Codex capability is limited by the existing Discord channel gate below.
+pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = true;
 
-/// Tests read the same constant; a test may also open one channel, as turning it on would.
+/// Require the requested channel itself; intake permission from its parent is insufficient.
 fn codex_enabled(channel_id: u64) -> bool {
     #[cfg(test)]
     if test_hook::codex_enabled(channel_id) {
         return true;
     }
-    let _ = channel_id;
-    CODEX_BUSY_INJECT_ENABLED
+    CODEX_BUSY_INJECT_ENABLED && queued_head_inject_covers(ChannelId::new(channel_id), None)
 }
 
 /// Who holds the channel at one read: the mailbox claim and the durable row.
@@ -277,7 +277,11 @@ pub(super) fn tui_session(
         .into_iter()
         .flatten()
         .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
-    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(binding.relay_output_path())))
+    let output = match provider {
+        ProviderKind::Codex => binding.output_path.as_str(),
+        _ => binding.relay_output_path(),
+    };
+    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(output)))
 }
 
 fn live_tui_session(
@@ -1169,6 +1173,10 @@ pub(crate) mod test_hook {
     pub(crate) fn forced(channel_id: u64) -> Option<(InjectMode, PathBuf)> {
         let forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
         forced.as_ref()?.get(&channel_id).cloned()
+    }
+
+    pub(crate) fn set_pane_program(channel_id: u64, program: PathBuf) {
+        set(channel_id, InjectMode::All, program);
     }
 
     pub(crate) fn set(channel_id: u64, mode: InjectMode, program: PathBuf) {
