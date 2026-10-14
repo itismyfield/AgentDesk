@@ -2739,6 +2739,8 @@ src/
 │   │   ├── store/
 │   │   │   ├── codex_provenance/
 │   │   │   │   ├── mutation.rs
+│   │   │   │   ├── p5a2_projection_tests.rs
+│   │   │   │   ├── projection.rs
 │   │   │   │   ├── submit_floor.rs
 │   │   │   │   └── submit_floor_tests.rs
 │   │   │   ├── cleanup_witness.rs
@@ -2755,6 +2757,8 @@ src/
 │   │   │   ├── rotation_tests.rs
 │   │   │   └── spool.rs
 │   │   ├── writer/
+│   │   │   ├── actor/
+│   │   │   │   └── codex_submission.rs
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
 │   │   │   │   ├── fold.rs
@@ -2821,6 +2825,7 @@ src/
 │   │   │   ├── operator_resume_tests.rs
 │   │   │   ├── owed.rs
 │   │   │   ├── owed_tests.rs
+│   │   │   ├── p5a2_actor_tests.rs
 │   │   │   ├── past_bind.rs
 │   │   │   ├── pieces.rs
 │   │   │   ├── readers_host_tests.rs
@@ -2879,9 +2884,12 @@ src/
 │   │   │   │   ├── provenance/
 │   │   │   │   │   ├── admission.rs
 │   │   │   │   │   ├── admission_tests.rs
+│   │   │   │   │   ├── decisions.rs
 │   │   │   │   │   ├── dormant.rs
 │   │   │   │   │   ├── dormant_construction.rs
 │   │   │   │   │   ├── dormant_tests.rs
+│   │   │   │   │   ├── live_grant.rs
+│   │   │   │   │   ├── live_grant_tests.rs
 │   │   │   │   │   ├── permission.rs
 │   │   │   │   │   └── permission_tests.rs
 │   │   │   │   └── provenance.rs
