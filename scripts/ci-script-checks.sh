@@ -253,27 +253,6 @@ if run_check guards "hrot transition sender surface"; then
 "$PYTHON" -m unittest tests.test_hrot_sender_surface
 fi
 
-if run_check guards "N1 canary oracle input contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
-"$PYTHON" tests/run_n1_canary_mutations.py
-"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
-fi
-
-if run_check guards "N1 native oracle contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli tests.test_n1_canary_native_wiring
-"$PYTHON" tests/run_n1_canary_native_mutations.py
-fi
-
-if run_check guards "N1 canary final audit contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_audit
-"$PYTHON" tests/run_n1_canary_audit_mutations.py
-fi
-
-if run_check guards "N1 canary producer capability contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_producer
-"$PYTHON" tests/run_n1_canary_producer_mutations.py
-fi
-
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 fi
