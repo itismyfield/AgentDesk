@@ -638,6 +638,7 @@ src/
 │   │   │   ├── adoption_retry.rs
 │   │   │   ├── codex_ingress_tests.rs
 │   │   │   ├── native_clear_fence_tests.rs
+│   │   │   ├── o_restart_preservation_tests.rs
 │   │   │   ├── observation_ingress.rs
 │   │   │   ├── observation_ingress_tests.rs
 │   │   │   ├── rehydration_ingress_tests.rs

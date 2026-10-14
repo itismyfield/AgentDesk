@@ -562,6 +562,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/pending_history_tests.rs",
         "src/services/claude_tui/hook_server/observation_ingress_tests.rs",
         "src/services/claude_tui/hook_server/rehydration_ingress_tests.rs",
+        "src/services/claude_tui/hook_server/o_restart_preservation_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration_pending_tests.rs",
         "src/services/discord/tui_prompt_relay/headless_tests.rs",
         "src/services/discord/tui_direct_pending_start/tests/headless_row_tests.rs",
