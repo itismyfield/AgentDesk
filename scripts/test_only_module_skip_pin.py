@@ -178,6 +178,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/clear_launch_tests.rs",
         "src/services/tui_o/writer/canary_policy_tests.rs",
         "src/services/codex_tui/verified_tail/diagnostic_tests.rs",
+        "src/services/tui_o/writer/input_facts/observation_tests.rs",
         "src/services/tui_o/writer/input_facts/tests.rs",
         "src/services/tui_o/writer/input_facts/resume_tests.rs",
         "src/services/discord/turn_presence/activity_tests.rs",
@@ -653,6 +654,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/before_start_stop_disk_gate_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_clear_order_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_policy_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_protected_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
         "src/services/discord/runtime_bootstrap/boot_retirement/cohort_tests.rs",
@@ -705,6 +707,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/turn_presence/activity/tail_tests.rs",
+        "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
     }
 )
 
@@ -797,6 +801,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/turn_orchestrator/recovery_custody/model.rs",
         "src/services/turn_orchestrator/recovery_custody/operation.rs",
         "src/services/turn_orchestrator/recovery_custody/reconcile.rs",
+        "src/services/discord/turn_presence/activity/tail.rs",
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
