@@ -265,6 +265,7 @@ fn run_legacy_ingress(race_channel_registration: bool) {
 #[test]
 fn marker_io_guard_rejects_only_this_threads_binding_publication() {
     use crate::services::cluster::stream_relay::source_read_proof::tests::hold_revisions_for_tests;
+    let _dedupe_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (held_tx, held_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let holder = std::thread::spawn(move || {
@@ -279,13 +280,11 @@ fn marker_io_guard_rejects_only_this_threads_binding_publication() {
     release_tx.send(()).unwrap();
     holder.join().unwrap();
 
-    let panic = std::panic::catch_unwind(|| {
-        with_runtime_binding_authority("marker-guard-same-thread", |_| {
-            assert_marker_publication_unlocked_for_tests();
-        })
+    // Catching inside the publication keeps the unwind from poisoning STATE for other tests.
+    let panic = with_runtime_binding_authority("marker-guard-same-thread", |_| {
+        std::panic::catch_unwind(assert_marker_publication_unlocked_for_tests)
     })
     .expect_err("marker IO inside this thread's binding publication must be rejected");
-    STATE.clear_poison();
     let message = panic
         .downcast_ref::<&str>()
         .map(|message| message.to_string())
