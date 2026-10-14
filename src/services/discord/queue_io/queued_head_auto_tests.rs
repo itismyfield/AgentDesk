@@ -532,8 +532,9 @@ async fn s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg() {
     fixture.assert_still_busy().await;
 }
 
-/// The attempt row names a delivery only where the actor committed it. A paste the pane took but
-/// the queue could not settle reads unknown, an idle pane reads not sent, and no row carries text.
+/// The attempt row names a delivery or a kept head only where the actor committed it. A paste the
+/// pane took but the queue could not settle reads unknown; an idle pane, or a head another worker
+/// settled before this attempt's claim, reads unavailable; no row carries text.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -586,7 +587,8 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
     let row = &idle.rows()[0];
     assert_eq!(
         (row.outcome, row.reason, row.head_state),
-        ("not_sent", "not_busy", "queued")
+        ("not_sent", "not_busy", "unavailable"),
+        "the idle pane vetoed before any claim"
     );
     // The queued-only lane ends at the paste even where an idle start would now be allowed: it
     // never reaches the dequeue an idle kickoff would take next.
@@ -618,4 +620,235 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
     assert!(snapshot.pending_user_dispatch.is_none());
     let text = format!("{unknown_rows:?}{:?}", idle.rows());
     assert!(!text.contains("status?") && !text.contains("distinct tail B"));
+    drop(idle);
+    drop(_idle_gate);
+
+    let raced = Fixture::build(6_813_533, "all").await;
+    let _raced_gate = router::busy_inject_support::open_gate(raced.channel.get());
+    let transition = raced
+        .shared
+        .session_transition_lock(raced.channel)
+        .lock_owned()
+        .await;
+    queue_io::with_post_enqueue_idle_queue_kick_suppressed(raced.enqueue("H settled elsewhere"))
+        .await;
+    drop(transition);
+    let h = raced.queue().await[0].clone();
+    // The attempt chooses H, then waits on the core lock before its claim.
+    let core = raced.shared.core.lock().await;
+    let attempt = raced.spawn_kick();
+    until("the attempt chose H", || {
+        OFFERED_HEADS.lock().unwrap().contains(&h.message_id)
+    })
+    .await;
+    let mailbox = raced.shared.mailbox(raced.channel);
+    let context = || queue_dispatch::persistence_context(&raced.shared, &CLAUDE, raced.channel);
+    let gate = router::queued_head_inject_covers;
+    let claim = mailbox.claim_queued_head_if_enabled(
+        QueueIdentity::of(&h),
+        context(),
+        raced.channel,
+        None,
+        gate,
+    );
+    let QueuedHeadClaim::Reserved(ticket) = claim.await else {
+        panic!("the other worker reserves H");
+    };
+    use crate::services::turn_orchestrator::{HeadOutcome, HeadSettle};
+    let may = mailbox.settle_queued_head(ticket, HeadOutcome::MayHaveSent, context());
+    let HeadSettle::Committed(Some(ticket)) = may.await else {
+        panic!("MayHaveSent was not committed");
+    };
+    let done = mailbox.settle_queued_head(ticket, HeadOutcome::Injected, context());
+    assert!(matches!(done.await, HeadSettle::Committed(None)));
+    assert_eq!(raced.terminal(), [h.message_id.get()]);
+    drop(core);
+    attempt.await.unwrap();
+    let rows: Vec<_> = raced
+        .rows()
+        .iter()
+        .map(|row| (row.head_message_id, row.outcome, row.head_state))
+        .collect();
+    assert_eq!(
+        rows,
+        [(h.message_id.get(), "not_sent", "unavailable")],
+        "this attempt never kept the head the other worker settled"
+    );
+    assert_eq!(raced.pane.tmux_calls(), 0);
+}
+
+/// An input of a shape the pane is never given, queued as the first ready one.
+fn untypable(channel: ChannelId, shape: &str) -> Intervention {
+    use crate::services::turn_orchestrator::{
+        InterventionMode, SourceMessageQueuedGeneration as Source, SourceMessageTextSegment,
+    };
+    let id = MessageId::new(channel.get() + 900);
+    let generation = runtime_store::process_generation();
+    let mut item = Intervention {
+        author_id: UserId::new(200),
+        author_is_bot: false,
+        message_id: id,
+        queued_generation: generation,
+        source_message_ids: vec![id],
+        source_message_queued_generations: vec![Source::user_instruction(id, generation)],
+        source_text_segments: Vec::new(),
+        text: format!("H shaped as {shape}"),
+        mode: InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    };
+    match shape {
+        "command" => item.text = "/compact now".into(),
+        "composite" => {
+            let second = MessageId::new(id.get() + 1);
+            item.source_message_ids.push(second);
+            let source = Source::user_instruction(second, generation);
+            item.source_message_queued_generations.push(source);
+            item.text = "first\nsecond".into();
+            let segment = |message_id, text: &str| SourceMessageTextSegment {
+                message_id,
+                text: text.into(),
+            };
+            item.source_text_segments = vec![segment(id, "first"), segment(second, "second")];
+        }
+        _ => item.pending_uploads = vec!["s3-upload.png".into()],
+    }
+    item
+}
+
+/// A command, merged or upload-bearing first ready input is never pasted and no plain input
+/// behind it is pasted in its place; a slow check that finds it ends rather than staying armed.
+#[tokio::test(flavor = "current_thread")]
+async fn s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, shape) in [
+        (6_813_551, "command"),
+        (6_813_552, "composite"),
+        (6_813_553, "upload"),
+    ] {
+        let fixture = Fixture::build(channel, "all").await;
+        let _gate = router::busy_inject_support::open_gate(channel);
+        let enqueue = crate::services::discord::mailbox_enqueue_intervention;
+        let head = untypable(fixture.channel, shape);
+        let outcome = enqueue(&fixture.shared, &CLAUDE, fixture.channel, head.clone()).await;
+        assert!(
+            outcome.enqueued && outcome.persistence_error.is_none(),
+            "{shape}"
+        );
+        let b = fixture.arrive_held("plain B behind").await;
+        quiet().await;
+        let queue = fixture.queue().await;
+        let ids: Vec<MessageId> = queue.iter().map(|item| item.message_id).collect();
+        assert_eq!(ids, [head.message_id, b], "{shape}");
+        assert_eq!(
+            input_class(&CLAUDE, fixture.channel, &queue[0]),
+            RetryClass::Ready,
+            "{shape}: H is the first ready input"
+        );
+        assert!(
+            !backstop::backstop_waiting(fixture.channel),
+            "{shape}: the enqueues armed nothing"
+        );
+        // A slow check another producer armed finds nothing to paste and ends.
+        let armed = queue_io::arm_slow_idle_queue_backstop_if_queue_nonempty(
+            &fixture.shared,
+            &CLAUDE,
+            fixture.channel,
+            "s3 untypable head producer",
+        )
+        .await;
+        assert!(armed, "{shape}");
+        fixture.slow_check().await;
+        quiet().await;
+        assert!(
+            !backstop::backstop_waiting(fixture.channel),
+            "{shape}: the slot ends"
+        );
+        assert_eq!(fixture.pane.tmux_calls(), 0, "{shape}: nothing was pasted");
+        assert!(fixture.receipts().is_empty(), "{shape}");
+        assert!(
+            !OFFERED_HEADS.lock().unwrap().contains(&b),
+            "{shape}: B never passed H"
+        );
+        let after: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
+        assert_eq!(after, ids, "{shape}");
+        fixture.assert_still_busy().await;
+    }
+}
+
+/// A thread whose parent alone opens the gate keeps its backlog watched while the thread cannot be
+/// read: the enqueue's look and an armed check both wait, and the slow timer types each input
+/// once the read succeeds again, with no new input and no kick from the test.
+#[tokio::test(flavor = "current_thread")]
+async fn s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let parent = ChannelId::new(6_813_540);
+    let fixture = Fixture::build_in(6_813_541, "all", Some(parent)).await;
+    let _gate = router::busy_inject_support::open_gate(parent.get());
+    assert!(!router::queued_head_inject_covers(fixture.channel, None));
+
+    let refused = fixture.refuse_channel_reads(true);
+    let h = fixture.arrive_held("H in a gated thread").await;
+    until("the enqueue's look left the slow backstop armed", || {
+        backstop::backstop_waiting(fixture.channel)
+    })
+    .await;
+    assert!(
+        fixture.refuse_channel_reads(true) > refused,
+        "the look did fail to read"
+    );
+    assert_eq!(fixture.pane.tmux_calls(), 0);
+    fixture.refuse_channel_reads(false);
+    fixture.slow_check().await;
+    fixture
+        .typed(1, 0, "the slow timer types H once the thread reads")
+        .await;
+    until("H is settled", || fixture.terminal() == [h.get()]).await;
+
+    // B is offered while the transition is held, so its veto leaves the backstop armed.
+    let transition = fixture
+        .shared
+        .session_transition_lock(fixture.channel)
+        .lock_owned()
+        .await;
+    fixture.enqueue("B in a gated thread").await;
+    fixture.attempts(2, "B was offered and vetoed").await;
+    until("the veto left the slow backstop armed", || {
+        backstop::backstop_waiting(fixture.channel)
+    })
+    .await;
+    let b = fixture.queue().await[0].message_id;
+    let refused = fixture.refuse_channel_reads(true);
+    drop(transition);
+    fixture.slow_check().await;
+    until("the armed check that could not read keeps its slot", || {
+        backstop::backstop_waiting(fixture.channel)
+    })
+    .await;
+    assert!(
+        fixture.refuse_channel_reads(true) > refused,
+        "the check did fail to read"
+    );
+    assert_eq!(fixture.receipts(), ["H in a gated thread"]);
+    fixture.refuse_channel_reads(false);
+    fixture.slow_check().await;
+    fixture
+        .typed(2, 0, "the slow timer types B once the thread reads")
+        .await;
+    until("B is settled", || fixture.terminal() == [h.get(), b.get()]).await;
+    assert_eq!(
+        fixture.receipts(),
+        ["H in a gated thread", "B in a gated thread"]
+    );
+    let injected = fixture
+        .rows()
+        .into_iter()
+        .filter(|row| row.outcome == "injected");
+    let injected: Vec<u64> = injected.map(|row| row.head_message_id).collect();
+    assert_eq!(injected, [h.get(), b.get()]);
+    fixture.assert_still_busy().await;
 }

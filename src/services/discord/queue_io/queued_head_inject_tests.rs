@@ -41,6 +41,8 @@ struct Fixture {
     holder_message: MessageId,
     http: Arc<serenity::Http>,
     channel_gets: Arc<AtomicUsize>,
+    /// While set, every read of the channel itself fails; it counts the reads it refused.
+    refuse_reads: Arc<(std::sync::atomic::AtomicBool, AtomicUsize)>,
     server: tokio::task::JoinHandle<()>,
     _rest: crate::services::discord::shared_state::test_rest::Guard,
 }
@@ -91,6 +93,11 @@ impl Fixture {
 
     /// A busy Claude channel behind the real route, with nothing queued yet.
     async fn build(channel: u64, mode: &str) -> Self {
+        Self::build_in(channel, mode, None).await
+    }
+
+    /// As `build`, for a thread of `parent` when one is named.
+    async fn build_in(channel: u64, mode: &str, parent: Option<ChannelId>) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         crate::db::agents::insert_agent_channels_for_tests(
@@ -102,6 +109,14 @@ impl Fixture {
         .await;
         let registry = Arc::new(HealthRegistry::new());
         let shared = register_inject_runtime(&registry, &[channel], Some(pool.clone())).await;
+        // A thread's routing is checked against its parent, which the bot is allowed in.
+        let allowed = parent.map(|parent| parent.get());
+        shared
+            .settings
+            .write()
+            .await
+            .allowed_channel_ids
+            .extend(allowed);
         shared
             .http
             .cached_bot_token
@@ -122,6 +137,11 @@ impl Fixture {
 
         let channel_gets = Arc::new(AtomicUsize::new(0));
         let counted_gets = channel_gets.clone();
+        let refuse_reads = Arc::new((
+            std::sync::atomic::AtomicBool::new(false),
+            AtomicUsize::new(0),
+        ));
+        let refused = refuse_reads.clone();
         let rest_app = Router::new().route("/gateway", axum::routing::get(
             |ws: axum::extract::ws::WebSocketUpgrade| async {
                 ws.on_upgrade(|mut socket| async move {
@@ -129,19 +149,31 @@ impl Fixture {
                 })
             },
         )).fallback(move |method: Method, uri: axum::http::Uri| {
-            let counted_gets = counted_gets.clone();
+            let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
             async move {
+            use axum::response::IntoResponse;
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
             assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
-            if uri.path() == format!("/api/v10/channels/{}", channel.get()) {
-                counted_gets.fetch_add(1, Relaxed);
-            }
-            axum::Json(json!({
+            let mut answer = json!({
                 "id": channel.get().to_string(), "type": 0,
                 "name": "s2b-claude", "guild_id": "6813000",
                 "position": 0, "permission_overwrites": [], "nsfw": false,
                 "parent_id": null
-            }))
+            });
+            if uri.path() == format!("/api/v10/channels/{}", channel.get()) {
+                counted_gets.fetch_add(1, Relaxed);
+                if refused.0.load(Relaxed) {
+                    refused.1.fetch_add(1, Relaxed);
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                if let Some(parent) = parent {
+                    answer["type"] = json!(11);
+                    answer["parent_id"] = json!(parent.get().to_string());
+                }
+            } else if let Some(parent) = parent.filter(|p| uri.path().ends_with(&format!("/{p}"))) {
+                answer["id"] = json!(parent.get().to_string());
+            }
+            axum::Json(answer).into_response()
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -186,6 +218,7 @@ impl Fixture {
             holder_message,
             http,
             channel_gets,
+            refuse_reads,
             server,
             _rest: rest,
         }
@@ -250,6 +283,12 @@ impl Fixture {
 
     fn gets(&self) -> usize {
         self.channel_gets.load(Relaxed)
+    }
+
+    /// Makes reads of the channel fail, or read again; returns how many it has refused so far.
+    fn refuse_channel_reads(&self, refuse: bool) -> usize {
+        self.refuse_reads.0.store(refuse, Relaxed);
+        self.refuse_reads.1.load(Relaxed)
     }
 
     fn disk(&self) -> Value {
@@ -746,6 +785,13 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         );
         let disk = fixture.disk();
         assert!(disk.is_array() || disk["head_injection"].is_null());
+        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let row = rows.iter().rev().find(|row| row.channel_id == channel);
+        assert_eq!(
+            row.map(|row| (row.outcome, row.head_state)),
+            Some(("not_sent", "queued")),
+            "{phase}/idle={idle}: the actor committed the head back to the queue"
+        );
         let snapshot = fixture.shared.mailbox(fixture.channel).snapshot().await;
         assert!(
             snapshot

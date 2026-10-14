@@ -44,15 +44,16 @@ pub(super) async fn queued_target_matches(
 
 impl InjectAttempt {
     /// `(outcome, reason, head_state)` of a finished queued-head attempt: `terminal` and `queued`
-    /// only where the actor committed that state, otherwise `unknown` or `unavailable`.
+    /// only where the actor committed that state, otherwise `unknown` or `unavailable`. A NotSent
+    /// the actor committed comes back as `HandedBack`; a bare one never reached its claim.
     pub(crate) fn queued_report(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Injected { .. } => ("injected", "", "terminal"),
-            Self::NotSent(veto) => ("not_sent", veto, "queued"),
+            Self::NotSent(veto) => ("not_sent", veto, "unavailable"),
             Self::HandbackFailed(HEAD_UNKNOWN) => ("blocked", HEAD_UNKNOWN, "unknown"),
             Self::HandbackFailed(detail) => ("blocked", detail, "unavailable"),
             Self::Unconfirmed { detail, .. } => ("unconfirmed", detail, "unknown"),
-            Self::HandedBack { veto, .. } => ("not_sent", veto, "unavailable"),
+            Self::HandedBack { veto, .. } => ("not_sent", veto, "queued"),
             Self::OwnerFailed { .. } => ("unconfirmed", "owner_failed", "unavailable"),
         }
     }

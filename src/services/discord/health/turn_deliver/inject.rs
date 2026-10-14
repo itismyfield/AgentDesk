@@ -628,6 +628,11 @@ async fn queued_attempt(
                     detail: "queued_settle_unknown",
                 };
             }
+            // A committed NotSent is the actor's proof that the head is back at the queue front.
+            if let InjectAttempt::NotSent(veto) = attempt {
+                let turn_id = turn_id.unwrap_or_default();
+                return InjectAttempt::HandedBack { turn_id, veto };
+            }
         }
         attempt
     };

@@ -130,7 +130,11 @@ pub(in crate::services::discord) async fn try_busy(
         head_state,
     }
     .emit();
-    !matches!(attempt, health::InjectAttempt::NotSent(_))
+    // A head the actor handed back was not sent either: the caller's own start may follow.
+    !matches!(
+        attempt,
+        health::InjectAttempt::NotSent(_) | health::InjectAttempt::HandedBack { .. }
+    )
 }
 
 #[cfg(all(test, unix))]

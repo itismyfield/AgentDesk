@@ -11,7 +11,8 @@ pub(in crate::services::discord) enum QueuedReach {
     Closed,
     /// Nothing typable is ready to paste, or the channel is held by recovery or cleanup.
     NoCandidate,
-    /// The gate, a retry record or the REST handle could not be read; look again in a minute.
+    /// The gate, the thread's parent, a retry record or the REST handle could not be read; look
+    /// again in a minute.
     Wait,
     /// A typable first ready input stands behind nothing but parked ones.
     Ready,
@@ -66,9 +67,10 @@ pub(in crate::services::discord) async fn queued_reach(
             http
         }
     };
-    let parent = session_runtime::resolve_thread_parent(http, channel_id)
-        .await
-        .map(|(id, _)| id);
+    // An unread parent is no parent-less channel: a thread its parent gates would read closed.
+    let Ok(parent) = session_runtime::checked_thread_parent(http, channel_id).await else {
+        return QueuedReach::Wait;
+    };
     let gate = router::queued_head_inject_covers;
     if !health::InjectOrigin::queued_head_gate_enabled(provider, channel_id, parent, gate) {
         return QueuedReach::Closed;
