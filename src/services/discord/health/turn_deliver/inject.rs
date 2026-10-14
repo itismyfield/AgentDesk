@@ -275,7 +275,11 @@ pub(super) fn tui_session(
         .into_iter()
         .flatten()
         .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
-    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(binding.relay_output_path())))
+    let output = match provider {
+        ProviderKind::Codex => binding.output_path.as_str(),
+        _ => binding.relay_output_path(),
+    };
+    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(output)))
 }
 
 fn live_tui_session(

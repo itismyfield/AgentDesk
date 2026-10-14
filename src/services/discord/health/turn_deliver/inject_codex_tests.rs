@@ -184,6 +184,82 @@ impl Drop for CodexPane {
     }
 }
 
+/// A launched Codex binding has a native rollout and a separate relay transcript.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_injection_reads_native_with_a_separate_relay_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+    let ch = 5_845_231;
+    let pane = CodexPane::new(ch, &steerable(), RuntimeHandoffKind::CodexTui);
+    pane.set(
+        "relay.jsonl",
+        "{\"type\":\"assistant\",\"message\":{\"content\":\"relay only\"}}\n",
+    );
+    let session = pane.session();
+    let mut binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
+            .expect("native binding");
+    binding.relay_output_path = Some(pane.path("relay.jsonl").display().to_string());
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+    test_hook::enable_codex(ch);
+    assert_eq!(
+        pane.attempt(&shared).await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    assert_eq!(pane.keys(), "paste-buffer+send-keys");
+    assert_eq!(
+        crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+            &session,
+            &pane.header(),
+            None,
+            Some(TURN),
+            chrono::Utc::now(),
+        ),
+        crate::services::tui_prompt_dedupe::PromptObservation::InjectedSteer,
+    );
+    assert!(
+        !fs::read_to_string(pane.path("relay.jsonl"))
+            .unwrap()
+            .contains(&pane.header())
+    );
+}
+
+/// Claude keeps reading the relay accessor when the binding's other file is not a transcript.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_injection_keeps_reading_a_separate_relay_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool));
+    let ch = 5_845_232;
+    let pane = super::inject_tests::InjectPane::new(ch, "all");
+    pane.set("native.jsonl", &steerable());
+    let session = pane.session();
+    let mut binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)
+            .expect("Claude binding");
+    binding.relay_output_path = Some(binding.output_path.clone());
+    binding.output_path = pane.path("native.jsonl").display().to_string();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(&session, binding);
+    let request = HumanInputRequest {
+        channel_id: ChannelId::new(ch),
+        provider: ProviderKind::Claude,
+        text: "status?".to_string(),
+        author_id: 200,
+        source: "imessage".to_string(),
+        metadata: None,
+        channel_name_hint: None,
+    };
+    assert_eq!(
+        inject::attempt(&shared, &request, inject::Origin::External).await,
+        InjectAttempt::Injected { turn_id: None }
+    );
+    assert_eq!(pane.keys(), vec!["paste-buffer", "send-keys"]);
+    assert_eq!(pane.records().len(), 1);
+}
+
 /// With the shipped constant off, a Codex input is refused exactly as before, first and before the
 /// session transition or any pane call; enabling Codex lets the same input reach the transition.
 #[tokio::test(flavor = "current_thread")]
