@@ -310,8 +310,11 @@ pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_q
     let mut backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
     if backlog_units == 0 {
-        // The idle rule sees nothing to start; a busy channel may still hold a ready input.
-        backlog_units = queued_lane_backlog_units(shared, provider, channel_id, &snapshot).await;
+        // Box the queued eligibility check so intake and restore futures stay small.
+        backlog_units = Box::pin(queued_lane_backlog_units(
+            shared, provider, channel_id, &snapshot,
+        ))
+        .await;
     }
     if backlog_units == 0 {
         return false;
