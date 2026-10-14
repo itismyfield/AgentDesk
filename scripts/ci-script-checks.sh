@@ -243,11 +243,6 @@ if run_check guards "TUI output shadow write-zero census"; then
 "$PYTHON" scripts/check_o_shadow_write_zero.py
 fi
 
-if run_check guards "N1 observation effect boundary"; then
-"$PYTHON" scripts/check_n1_observation_boundary.py
-"$PYTHON" -m unittest tests.test_n1_observation_boundary
-fi
-
 if run_check guards "N1 canary oracle input contracts"; then
 "$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
 "$PYTHON" tests/run_n1_canary_mutations.py
