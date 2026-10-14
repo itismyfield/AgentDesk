@@ -12907,13 +12907,16 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_settles_all_fifty_nine_hops_of_both_fixtures
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_that_finds_its_file_grown_after_the_write_reports_it_read_again
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_whose_directory_sync_fails_is_unknown_until_the_store_reopens
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_apply_writes_nothing_once_a_stop_comes_while_delivery_is_held
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_cleaned_source_that_grows_reads_again_as_a_provider_retirement_does
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_in_progress_refuses_its_id_asked_with_another_request
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_is_compared_whole_and_never_applied_again_to_a_source_read_again
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_keeps_its_permit_until_it_ends_however_the_requester_left
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_job_probes_at_most_sixty_four_candidates
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_uncounted_posts_unknown
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_judges_what_the_actor_still_owes_from_its_own_state
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_probes_run_on_one_worker_however_slow_it_is
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::transition_second_probe_back_past_the_deadline_writes_nothing
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_codex_filled_rebind_keeps_its_own_source
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_rebind_onto_a_stored_source_whose_bytes_changed_halts_without_attaching
 services::tui_o::writer::tests::actor::rotation::source_identity_tests::a_filled_return_takes_its_reader_out_of_rotation_and_restarts_keep_it_out
