@@ -1404,4 +1404,181 @@ async fn legacy_array_bot_busy_preserves_restored_original() {
     f.shared.mailboxes.remove_fixture_for_test(f.channel);
 }
 
+fn full_queued_original(original: &Intervention) -> impl std::fmt::Debug + PartialEq + '_ {
+    let Intervention {
+        author_id,
+        author_is_bot,
+        message_id,
+        queued_generation,
+        source_message_ids,
+        source_message_queued_generations,
+        source_text_segments,
+        text,
+        mode,
+        created_at,
+        reply_context,
+        has_reply_boundary,
+        merge_consecutive,
+        pending_uploads,
+        voice_announcement,
+    } = original;
+    (
+        (
+            author_id,
+            author_is_bot,
+            message_id,
+            queued_generation,
+            source_message_ids,
+            source_message_queued_generations
+                .iter()
+                .map(|source| {
+                    (
+                        source.message_id,
+                        source.queued_generation,
+                        source.enqueued_at_epoch_us,
+                        source.preserve_on_cancel,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            source_text_segments
+                .iter()
+                .map(|source| (source.message_id, &source.text))
+                .collect::<Vec<_>>(),
+            text,
+        ),
+        (
+            mode,
+            created_at,
+            reply_context,
+            has_reply_boundary,
+            merge_consecutive,
+            pending_uploads,
+            voice_announcement,
+        ),
+    )
+}
+
+async fn queued_ledger_keeps_actual_owner(channel: u64, received: bool) {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let f = Fixture::new(channel).await;
+    let mut head = item(channel + 2);
+    head.author_is_bot = true;
+    head.author_id = UserId::new(42);
+    head.source_message_ids
+        .insert(0, MessageId::new(channel + 1));
+    head.source_message_queued_generations.insert(
+        0,
+        SourceMessageQueuedGeneration {
+            message_id: MessageId::new(channel + 1),
+            queued_generation: 4,
+            enqueued_at_epoch_us: Some(654321),
+            preserve_on_cancel: false,
+        },
+    );
+    head.source_text_segments.insert(
+        0,
+        SourceMessageTextSegment {
+            message_id: MessageId::new(channel + 1),
+            text: "absorbed source".into(),
+        },
+    );
+    head.text = format!("absorbed source\n{}", head.text);
+    head.pending_uploads = vec!["Q1".into(), "Q2".into()];
+    head.reply_context = Some("original reply".into());
+    head.has_reply_boundary = true;
+    head.voice_announcement = Some(crate::voice::prompt::VoiceTranscriptAnnouncement {
+        transcript: "voice original".into(),
+        user_id: "43".into(),
+        utterance_id: format!("c2c1-queued-{channel}"),
+        language: "ko".into(),
+        verbose_progress: true,
+        started_at: Some("2026-10-14T03:00:00+09:00".into()),
+        completed_at: Some("2026-10-14T03:00:01+09:00".into()),
+        samples_written: Some(48000),
+        control_channel_id: Some(channel),
+        stt_mode: Some("file".into()),
+        stt_latency_ms: Some(120),
+    });
+    f.enqueue(head).await;
+    f.enqueue(item(channel + 3)).await;
+    let taken = f.take().await;
+    let original = taken
+        .intervention
+        .as_ref()
+        .expect("real dequeued head")
+        .clone();
+    let lease = taken
+        .dispatch_lease
+        .as_ref()
+        .expect("real R1 lease")
+        .clone();
+    let admission = if received {
+        super::super::ledger::test_received(channel)
+    } else {
+        super::super::ledger::test_deferred(channel)
+    };
+    super::super::ledger::inject_test_admission(admission);
+    let admitted = f.admit(&taken).await;
+    assert!(admitted.local_permit.is_none());
+    let before = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    let result = finish_admitted_queued_intake(&f.deps(), admitted).await;
+    assert!(
+        result.is_err(),
+        "ledger receipt or deferral never means Executed"
+    );
+    let error = result.err().unwrap();
+    assert!(
+        error.is::<QueuedLedgerOutcome>(),
+        "C error must retain original and actual lease"
+    );
+    let outcome = error.downcast::<QueuedLedgerOutcome>().unwrap();
+    assert!(matches!(
+        (&outcome.admission, received),
+        (IntakeAdmission::LedgerReceived(_), true) | (IntakeAdmission::LedgerDeferred(_), false)
+    ));
+    assert_eq!(
+        full_queued_original(&outcome.original),
+        full_queued_original(&original)
+    );
+    assert_eq!(outcome.provider, f.provider);
+    assert_eq!(outcome.channel_id, f.channel);
+    assert!(
+        Arc::ptr_eq(&outcome.dispatch_lease, &lease),
+        "actual R1 lease must survive"
+    );
+    let after = discord::mailbox_snapshot(&f.shared, f.channel).await;
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.pending_user_dispatch_source_ids,
+        before.pending_user_dispatch_source_ids
+    );
+    assert_eq!(
+        f.ids().await,
+        [channel + 3],
+        "C carrier must not run the R1 restore loop"
+    );
+    assert_eq!(
+        f.shared.core.lock().await.sessions[&f.channel].pending_uploads,
+        ["U"]
+    );
+    assert!(
+        !crate::voice::announce_meta::global_store().contains(original.message_id),
+        "C admission must not publish an execution voice announcement"
+    );
+    println!(
+        "C2C1_QUEUED_CONSUMER_FIXTURE received={received} real_dequeue=true actual_lease=true wal_receipt_fixture=injected"
+    );
+    f.shared.mailboxes.remove_fixture_for_test(f.channel);
+}
+
+#[tokio::test]
+async fn c2c1_queued_received_preserves_original_and_actual_lease() {
+    queued_ledger_keeps_actual_owner(8_016_000, true).await;
+}
+
+#[tokio::test]
+async fn c2c1_queued_deferred_preserves_original_and_actual_lease() {
+    queued_ledger_keeps_actual_owner(8_017_000, false).await;
+}
+
 mod retry_tests;
