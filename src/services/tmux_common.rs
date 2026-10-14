@@ -40,12 +40,29 @@ pub(crate) fn source_authority_contention_key_for_tests(
     }
 }
 
-pub(crate) struct TmuxSourceAuthority<'a>(&'a str);
+pub(crate) struct TmuxSourceAuthority<'a>(&'a str, &'a str);
 
 impl<'a> TmuxSourceAuthority<'a> {
     pub(crate) fn session(&self) -> &'a str {
         self.0
     }
+
+    pub(crate) fn invalidate(&self) {
+        invalidate_session_temp_source(self.1);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin(
+        &self,
+    ) -> Option<crate::services::cluster::stream_relay::source_read_proof::SourcePin> {
+        crate::services::cluster::stream_relay::source_read_proof::SourcePin::capture(
+            self.1.to_owned(),
+        )
+    }
+}
+
+pub(crate) fn invalidate_session_temp_source(stem: &str) {
+    crate::services::cluster::stream_relay::source_read_proof::invalidate_source(stem);
 }
 
 fn source_authority_lock_for_key(key: &str) -> Arc<Mutex<()>> {
@@ -102,7 +119,7 @@ pub(crate) fn with_tmux_source_authority<R>(
 ) -> R {
     let key = session_temp_prefix(tmux_session_name.trim());
     with_source_authority_key(&key, || {
-        operation(&TmuxSourceAuthority(tmux_session_name.trim()))
+        operation(&TmuxSourceAuthority(tmux_session_name.trim(), &key))
     })
 }
 
@@ -110,13 +127,17 @@ pub(crate) fn try_with_tmux_source_authority<R>(
     tmux_session_name: &str,
     operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
 ) -> Option<R> {
-    let lock = source_authority_lock_for_key(&session_temp_prefix(tmux_session_name.trim()));
+    let key = session_temp_prefix(tmux_session_name.trim());
+    let lock = source_authority_lock_for_key(&key);
     let _guard = match lock.try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return None,
     };
-    Some(operation(&TmuxSourceAuthority(tmux_session_name.trim())))
+    Some(operation(&TmuxSourceAuthority(
+        tmux_session_name.trim(),
+        &key,
+    )))
 }
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
@@ -1094,12 +1115,8 @@ pub fn persistent_sessions_dir() -> Option<PathBuf> {
     crate::config::runtime_root().map(|root| root.join(SESSIONS_SUBDIR))
 }
 
-/// Get the platform-appropriate directory for AgentDesk session runtime files.
-///
-/// Prefers the persistent path under `runtime_root()/runtime/sessions/` so
-/// that session jsonl/FIFO/owner markers survive across dcserver restarts
-/// (see issue #892). Falls back to `std::env::temp_dir()` only when a
-/// runtime root is not available.
+/// Prefer persistent runtime session storage, falling back to the platform temp directory.
+
 pub fn agentdesk_temp_dir() -> String {
     match persistent_sessions_dir() {
         Some(dir) => {
@@ -1222,8 +1239,8 @@ const TMUX_AUTH_PROFILE_TEMP_EXT: &str = "auth_profile";
 /// location and the legacy `/tmp/` location so cleanup is total regardless
 /// of where the wrapper originally wrote.
 pub fn cleanup_session_temp_files(session_name: &str) {
-    with_tmux_source_authority(session_name, |_| {
-        cleanup_session_temp_files_under_source_authority(session_name)
+    with_tmux_source_authority(session_name, |authority| {
+        cleanup_session_temp_files_under_source_authority(authority, session_name)
     });
 }
 
@@ -1242,11 +1259,14 @@ pub(crate) fn cleanup_native_clear_fallback_under_source_authority(
     if authority.session() != session.name() {
         return false;
     }
-    cleanup_session_temp_files_under_source_authority(authority.session());
+    cleanup_session_temp_files_under_source_authority(authority, authority.session());
     true
 }
 
-fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
+fn cleanup_session_temp_files_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    session_name: &str,
+) {
     // All extensions we ever allocate under the session prefix.
     const EXTS: &[&str] = &[
         "jsonl",
@@ -1256,12 +1276,7 @@ fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
         "sh",
         "generation",
         TMUX_AUTH_PROFILE_TEMP_EXT,
-        // #3087: the per-spawn status-panel instance nonce. Must be swept on
-        // teardown like the other session temp files — otherwise a respawn whose
-        // fresh nonce write fails (logged, non-fatal) would leave the PRIOR
-        // spawn's nonce readable, yielding the same instance key as the old
-        // spawn and suppressing the panel reset on a genuinely new session.
-        // (Mirrors `SPAWN_NONCE_SUFFIX` in discord::tmux_session_files.)
+        // Remove the old spawn nonce so a failed respawn cannot inherit its instance key.
         "spawn_nonce",
         "exit_reason",
         TMUX_RUNTIME_KIND_TEMP_EXT,
@@ -1271,6 +1286,12 @@ fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
         CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT,
         CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
     ];
+    if EXTS.iter().chain([&CODEX_TUI_HOME_TEMP_EXT]).any(|ext| {
+        std::fs::symlink_metadata(session_temp_path(session_name, ext)).is_ok()
+            || std::fs::symlink_metadata(legacy_tmp_session_path(session_name, ext)).is_ok()
+    }) {
+        authority.invalidate();
+    }
     for ext in EXTS {
         let _ = std::fs::remove_file(session_temp_path(session_name, ext));
         let _ = std::fs::remove_file(legacy_tmp_session_path(session_name, ext));
@@ -1301,13 +1322,36 @@ pub fn tmux_channel_path(tmux_session_name: &str) -> String {
 
 /// Persist the Discord channel owning a tmux session across dcserver restarts.
 pub fn write_tmux_channel_binding(tmux_session_name: &str, channel_id: u64) -> Result<(), String> {
+    with_tmux_source_authority(tmux_session_name, |authority| {
+        write_tmux_channel_binding_with_name(authority, tmux_session_name, channel_id)
+    })
+}
+
+pub(crate) fn write_tmux_channel_binding_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    channel_id: u64,
+) -> Result<(), String> {
+    write_tmux_channel_binding_with_name(authority, authority.session(), channel_id)
+}
+
+fn write_tmux_channel_binding_with_name(
+    authority: &TmuxSourceAuthority<'_>,
+    tmux_session_name: &str,
+    channel_id: u64,
+) -> Result<(), String> {
     if channel_id == 0 {
         return Err("tmux channel binding requires a non-zero channel id".to_string());
     }
     let path = std::path::PathBuf::from(tmux_channel_path(tmux_session_name));
     let temp_path = path.with_extension("channel.tmp");
+    let changed = read_tmux_channel_binding(tmux_session_name) != Some(channel_id);
     std::fs::write(&temp_path, channel_id.to_string())
-        .and_then(|_| std::fs::rename(&temp_path, &path))
+        .and_then(|_| {
+            if changed {
+                authority.invalidate();
+            }
+            std::fs::rename(&temp_path, &path)
+        })
         .map_err(|e| format!("Failed to write tmux channel binding: {e}"))
 }
 
@@ -1456,47 +1500,46 @@ pub const JSONL_SIZE_CAP_BYTES: u64 = 20 * 1024 * 1024;
 /// Target size to keep after truncation.
 pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 
-/// Truncate a jsonl file from the head, keeping only complete lines totaling
-/// at most `target_keep_bytes`. A leading partial line after the keep-window
-/// is dropped so the first byte of the rewritten file is the first byte of a
-/// complete line.
-///
-/// Returns `Ok(Some(new_size))` if the file was rewritten, `Ok(None)` if the
-/// file is under cap, missing, not a regular file, or no longer the file the
-/// caller judged (see `rotation_target_was_swapped`).
-///
-/// Every byte coordinate is measured on the opened fd and never on the path. A
-/// second rotation of the same relay jsonl — #3277 leaves two watcher instances on
-/// one — can land between any two lookups of that name, so a size read before the
-/// open answers for whichever inode the name held then, and an offset derived from
-/// it cuts into a tail the replacement file has already shortened.
-///
-/// `path` must already be resolved. On unix the swap check reads it back with
-/// `symlink_metadata`, so a spelling whose last component is a legitimate link never
-/// matches the fd the open landed on and is refused on every call. Off unix that
-/// check is a no-op — std exposes no (dev, ino) there — so such a spelling is not so
-/// much refused as unchecked, which is the other half of why the resolved path is
-/// what belongs here. [`classify_watcher_jsonl_owner`] hands its verdict back
-/// carrying the path it judged, which is that path.
-///
-/// `eof_witnesses` are byte offsets into this file that callers hold and that this
-/// rewrite would invalidate: the rotation proceeds only if every one of them equals
-/// the length measured on the fd (#5452 R2). Each element means "the holder of this
-/// coordinate has consumed the file to here", so equality with the length is the
-/// statement that nobody is mid-file. One element differing is a refusal, and the
-/// element count is what varies as callers grow — the rule below does not.
-///
-/// The measurement is the fd's `fstat`, never a `metadata(path)` at the call site:
-/// the caller's own stat would answer for whichever inode the name held then, which
-/// is precisely the stat/open race the fd-identity checks above exist to close. An
-/// empty slice therefore does not mean "no coordinates exist", it means "this caller
-/// holds none" — the production call site always passes at least the watcher's own
-/// read offset.
+/// Keep complete tail lines only when every EOF witness matches the opened regular file.
+/// The resolved path must still name that FD before rename; refusals return `Ok(None)`.
+#[cfg(test)]
 pub fn truncate_jsonl_head_safe(
     path: &Path,
     size_cap_bytes: u64,
     target_keep_bytes: u64,
     eof_witnesses: &[u64],
+) -> std::io::Result<Option<u64>> {
+    truncate_jsonl_head_with_invalidation(
+        path,
+        size_cap_bytes,
+        target_keep_bytes,
+        eof_witnesses,
+        || (),
+    )
+}
+
+pub(crate) fn truncate_jsonl_head_safe_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    path: &Path,
+    size_cap_bytes: u64,
+    target_keep_bytes: u64,
+    eof_witnesses: &[u64],
+) -> std::io::Result<Option<u64>> {
+    truncate_jsonl_head_with_invalidation(
+        path,
+        size_cap_bytes,
+        target_keep_bytes,
+        eof_witnesses,
+        || authority.invalidate(),
+    )
+}
+
+fn truncate_jsonl_head_with_invalidation(
+    path: &Path,
+    size_cap_bytes: u64,
+    target_keep_bytes: u64,
+    eof_witnesses: &[u64],
+    invalidate: impl FnOnce(),
 ) -> std::io::Result<Option<u64>> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -1509,24 +1552,10 @@ pub fn truncate_jsonl_head_safe(
         return Ok(None);
     }
 
-    // fstat, on the fd the check above just identified, so the size is this file's
-    // and not the previous occupant of the name. Concretely: A replaces a 21 MiB
-    // relay jsonl with the 15 MiB rewrite while B is between its stat and its open.
-    // B's open and identity check both land on the new file and agree, but B's
-    // `21 MiB - 15 MiB` offset seeks 6 MiB into a file that is now entirely tail, so
-    // B keeps 9 MiB of the 15 A just published and drops the rest — and once the
-    // stale size exceeds the live one by more than `target_keep_bytes`, the seek is
-    // past EOF and B publishes an empty file. The under-cap answer moves here for
-    // the same reason: it must be given about the file that is there.
+    // Measure the retained FD so a concurrent rotation cannot supply a stale path length.
     let opened = file.metadata()?;
 
-    // Type, from that same fstat, and this is where the regular-file rule is actually
-    // enforced. The ownership verdict reached it on an `lstat` of the name, and the
-    // name can be replaced between that `lstat` and the open above — so the entry the
-    // open landed on is the only one whose type this can know. The identity check
-    // above does not cover it: a FIFO moved onto the name is what both the open and
-    // that check see, so they agree, and agreeing is not the same as being a file we
-    // may rewrite. A device or a socket at the name is no more ours than a FIFO is.
+    // Recheck the opened object type because the path may have changed since ownership was judged.
     if !opened.file_type().is_file() {
         return Ok(None);
     }
@@ -1536,12 +1565,7 @@ pub fn truncate_jsonl_head_safe(
         return Ok(None);
     }
 
-    // The idle gate, decided against this fd's length. Refusing here rather than at
-    // the caller is what keeps the comparison honest: the caller holds offsets but
-    // not this file's length, and any length it read for itself would be a stat of
-    // the name. Order behind the cap check is deliberate — an under-cap file and a
-    // busy one must give the same `Ok(None)`, so neither can be told from the other
-    // by the return value.
+    // A busy or under-cap source keeps the same `Ok(None)` policy.
     if eof_witnesses.iter().any(|witness| *witness != size) {
         return Ok(None);
     }
@@ -1552,15 +1576,7 @@ pub fn truncate_jsonl_head_safe(
     file.seek(SeekFrom::Start(start_offset))?;
     let mut buf = Vec::with_capacity((size - start_offset) as usize);
     file.read_to_end(&mut buf)?;
-    // `file` is deliberately still open: its (dev, ino) is the identity everything
-    // below is authorised against, and the pre-rename re-check compares the entry
-    // back to it.
-
-    // Drop any partial leading line: advance past the first newline so the
-    // kept buffer begins at a line boundary. If no newline exists in buf
-    // at all, we're keeping a single partial line — drop everything rather
-    // than risk emitting a garbled record. (This is the rare case where
-    // target_keep_bytes lands in the middle of an exceptionally huge line.)
+    // Retain this FD for the final entry and length checks.
     let keep_start = if start_offset == 0 {
         0 // no truncation needed at the head
     } else {
@@ -1573,24 +1589,17 @@ pub fn truncate_jsonl_head_safe(
     let kept = &buf[keep_start..];
     let new_size = kept.len() as u64;
 
-    // Staging siblings are per-attempt names, so a process that dies mid-rotation
-    // leaves one behind that nothing will ever reuse or clean. Swept here, on the
-    // way to creating the next one.
+    // Sweep stale per-attempt siblings before staging this rewrite.
     sweep_stale_rotation_staging(path);
 
-    // Atomic-ish rewrite: write to a sibling temp, then rename it over the target.
-    // `create_new`, so the sibling is created and never opened onto — a link left
-    // at that name would take a `create(true)` rewrite through to whatever it
-    // points at, the damage the ownership gate exists to prevent, without needing
-    // to win a race for it.
+    // Exclusive creation keeps the sibling from opening onto somebody else's file.
     let tmp_path = rotation_staging_sibling(path);
     let mut out = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&tmp_path)?;
 
-    // Past the open, the sibling is this attempt's own file, so failing back
-    // over it cannot remove staging another instance is still filling.
+    // Failure removes only this attempt's exclusively created sibling.
     let mut staged = out.write_all(kept);
     if staged.is_ok() {
         preserve_rotation_target_mtime(&out, &opened, path);
@@ -1601,27 +1610,24 @@ pub fn truncate_jsonl_head_safe(
         #[cfg(test)]
         run_rotation_before_rename_hook_for_tests();
 
-        // The entry is checked once more here, against the same fd, because the
-        // window the post-open check closed reopens while the staging file is being
-        // written: `rename` removes whatever directory entry `path` names at the
-        // moment it runs, so an entry replaced during the write — a foreign file
-        // moved in, a link put there — would be the entry this rename unlinks, and
-        // for a file whose only name that is, publishing our bytes over it destroys
-        // it. Refuse instead, dropping the staging file, having touched nothing.
-        //
-        // `rotation_target_size_changed` answers the other half of the same
-        // question. The swap check asks whether the name still holds this inode;
-        // this asks whether the inode still holds the bytes that were snapshotted.
-        // A wrapper appending during the write leaves both agreeing on identity
-        // while the rename would publish a rewrite that never saw those bytes and
-        // unlink the only inode carrying them. Refuse for the same reason and at
-        // the same cost, dropping the staging file.
+        // Refuse a swapped or appended source before rename so no unseen bytes are discarded.
         let refuse_rename = match rotation_target_was_swapped(&file, path) {
             Ok(false) => rotation_target_size_changed(&file, size),
             swapped_or_error => swapped_or_error,
         };
         match refuse_rename {
-            Ok(false) => staged = std::fs::rename(&tmp_path, path),
+            Ok(false) => {
+                invalidate();
+                staged = std::fs::rename(&tmp_path, path);
+                #[cfg(test)]
+                if staged.is_ok() {
+                    ROTATION_AFTER_RENAME.with_borrow_mut(|hook| {
+                        if let Some(hook) = hook.take() {
+                            hook();
+                        }
+                    });
+                }
+            }
             Ok(true) => {
                 let _ = std::fs::remove_file(&tmp_path);
                 return Ok(None);
@@ -1636,17 +1642,8 @@ pub fn truncate_jsonl_head_safe(
     Ok(Some(new_size))
 }
 
-/// Open a rotation target for reading in a way that cannot wait on it.
-///
-/// The ownership verdict's regular-file rule is decided on an `lstat` of the name in
-/// [`adk_path_holds_resolved_file`], and the name can be replaced between that `lstat`
-/// and this open. A plain `O_RDONLY` open of a FIFO blocks until a writer arrives, and
-/// this open runs inside the rotation's `spawn_blocking`, whose result the watcher's
-/// poll loop awaits — so a FIFO moved onto the name inside that window would stop that
-/// session's relaying outright, not for a tick but until someone opened the other end.
-/// `O_NONBLOCK` returns immediately instead, which leaves the caller's `fstat` free to
-/// refuse the thing on its type. Regular files are unaffected: POSIX gives `O_NONBLOCK`
-/// no meaning for reads on them.
+/// Nonblocking open prevents a FIFO swapped onto the judged path from stopping the watcher.
+/// The caller rechecks regular-file type on the opened FD.
 #[cfg(unix)]
 fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1657,9 +1654,7 @@ fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
-/// Off unix there is no `O_NONBLOCK` to set through `OpenOptions`. The caller's `fstat`
-/// still refuses whatever is not a regular file, so what is missing here is not the
-/// refusal but the guarantee that reaching it costs no wait.
+/// Off Unix the open cannot request nonblocking mode; type checks still apply.
 #[cfg(not(unix))]
 fn open_rotation_target_without_waiting(path: &Path) -> std::io::Result<File> {
     File::open(path)
@@ -3794,4 +3789,9 @@ another scrolled-back prose line";
             capture
         ));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ROTATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }

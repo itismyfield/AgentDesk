@@ -162,6 +162,7 @@ src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/placeholder_sweeper/retirement_tests.rs
+src/services/discord/queue_io/queued_head_auto_tests.rs
 src/services/discord/queue_io/queued_head_inject_tests.rs
 src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
@@ -238,6 +239,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs
 src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs
+src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs
 src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs
@@ -308,6 +310,7 @@ src/services/tui_o/repost/writer_activation_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/tui_o/writer/late_adopt_delegated_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
+src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
 src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs
@@ -489,6 +492,7 @@ services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
 services::discord::queue_io::queued_head_inject::tests
+services::discord::queue_io::queued_head_inject::tests::auto
 services::discord::recovery_engine::herdr_before_start_restart::tests
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
@@ -575,6 +579,7 @@ services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::replay_hold_tests
@@ -642,6 +647,7 @@ services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
 services::turn_orchestrator::registry_purge::recovery_custody::custody_pg_tests
@@ -1544,6 +1550,9 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
+services::discord::health::turn_deliver::inject_codex_tests::claude_injection_keeps_reading_a_separate_relay_pg
+services::discord::health::turn_deliver::inject_codex_tests::codex_injection_reads_native_with_a_separate_relay_pg
+services::discord::health::turn_deliver::inject_codex_tests::codex_listed_channel_uses_production_enablement_pg
 services::discord::health::turn_deliver::inject_tests::a_busy_pane_takes_the_input_whoever_holds_the_channel_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_caller_leaves_the_handback_and_its_kick_to_the_owner_pg
 services::discord::health::turn_deliver::inject_tests::a_cancelled_request_keeps_the_transition_and_its_alert_until_the_paste_ends_pg
@@ -1633,6 +1642,16 @@ services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placehol
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::queue_io::queued_head_inject::tests::a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg
 services::discord::queue_io::queued_head_inject::tests::a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_restored_backlog_is_reached_by_the_reconcile_alone_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg
+services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg
@@ -2039,6 +2058,7 @@ services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor
@@ -2415,6 +2435,9 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_blo
 services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_every_sender_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
+services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
 services::turn_host::tests::unconfigured_channel_with_a_herdr_row_is_refused_and_a_configured_one_needs_a_readable_row_pg
 services::turn_lifecycle::host_guard_tests::force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg
 services::turn_lifecycle::host_guard_tests::force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg
@@ -2458,6 +2481,14 @@ services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_test
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r03_a_successor_waits_for_every_worker_apply_and_capability_pg
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r04_a_late_result_or_drop_of_an_earlier_attempt_changes_nothing_pg
 services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_rehydrate_shows_a_row_undecided_and_tells_a_live_owner_from_a_lost_one_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_a_a_lookup_creates_nothing_and_never_settles_unmanaged_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_bcdg_a_carried_apply_never_idles_and_a_refusal_hands_it_back_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_e_an_arm_is_kept_only_by_its_own_attempt_and_namespace_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_f_an_owner_change_waits_for_the_registry_quiescence_permit_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_r1b_a_succession_holds_the_slot_until_its_commit_is_decided_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_r1b_a_worker_covers_its_arm_until_the_attempt_keeps_it_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_r1b_an_arm_the_registry_did_not_keep_never_lets_the_owner_change_pg
+services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2b0_r1b_the_same_owner_reserves_a_closed_row_again_only_once_drained_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
 voice::announce_meta::tests::durable_handoff_persist_does_not_resurrect_consumed_row
 voice::announce_meta::tests::durable_handoff_round_trips_and_consumes_exactly_once

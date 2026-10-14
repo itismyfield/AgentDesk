@@ -41657,6 +41657,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/tui_o/writer/transition_route_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:23fd982cccd17acbdfc1408206f6370bb417fa7f626328c2f5e7a56dcbc7fddf"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/turn_host_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -41941,6 +41950,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:3d499eda5ff20e0a950d683da7ae9b5bc11df9f9a06867643808a257ef326f2f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:73841d119c851dcf9494125c3a6c2bb36cce34c58587e53a31aea49551baae22"
     },
     {
       "root": "src",

@@ -110,7 +110,8 @@ fn sgr_faint(params: &str, mut faint: bool) -> bool {
     faint
 }
 
-/// The bottom-most `❯` row between two equal full borders, with only a measured footer below.
+/// The bottom-most `❯` row between two equal full borders; below, only status-line rows and then
+/// a measured footer as the last row drawn.
 pub(super) fn read(capture: &str) -> Screen {
     let rows: Vec<Row> = capture.lines().map(row).collect();
     let border = |index: usize| -> Option<usize> {
@@ -130,28 +131,70 @@ pub(super) fn read(capture: &str) -> Screen {
     let Some(bottom) = (prompt + 1..rows.len()).find(|&index| border(index).is_some()) else {
         return UNKNOWN;
     };
-    // A box that closes at another width, or whose footer is cut, unmeasured or followed by more
-    // rows (another box, a `!` bash-mode prompt), is stale or not a layout read here.
-    let mut below = rows[bottom + 1..].iter().map(|row| row.plain.trim_end());
-    if border(bottom) != Some(width)
-        || !below.next().is_some_and(footer)
-        || below.any(|row| !row.is_empty())
-    {
+    // A box that closes at another width, a footer cut, unmeasured or not last, or a row between
+    // that is no status line (another box, a `!` bash-mode prompt, a blank) is stale or unread.
+    let last = rows
+        .iter()
+        .rposition(|row| !row.plain.trim_end().is_empty());
+    let Some(foot) = last.filter(|&last| last > bottom && footer(rows[last].plain.trim_end()))
+    else {
+        return UNKNOWN;
+    };
+    let statusline = &rows[bottom + 1..foot];
+    if border(bottom) != Some(width) || !statusline.iter().all(|row| status_line(&row.plain)) {
         return UNKNOWN;
     }
+    // A stash marker under the box is in no measured layout, so the row above cannot rule it out.
+    let marked = |row: &Row| row.plain.contains('\u{203a}') || row.plain.contains("stash");
     Screen {
         composer: composer(&rows[prompt..bottom]),
-        stash: stash(&rows[status].plain, width),
+        stash: if statusline.iter().any(marked) {
+            Stash::Unknown
+        } else {
+            stash(&rows[status].plain, width)
+        },
     }
 }
 
-/// The bypass-mode footer, its cycle hint and the busy hint; a footer cut at the edge is not.
+/// A row of the user's status line, drawn two columns in like the footer; never a box edge, a
+/// prompt or a second footer.
+fn status_line(row: &str) -> bool {
+    let first = row
+        .strip_prefix("  ")
+        .and_then(|rest| rest.trim_start().chars().next());
+    !row.starts_with(FOOTER)
+        && first.is_some_and(|c| c != '❯' && !('\u{2500}'..='\u{257f}').contains(&c))
+}
+
+/// The bypass-mode footer and its cycle hint, then the busy hint or the pill counting background
+/// work; a footer cut at the edge is not.
 fn footer(row: &str) -> bool {
     let Some(rest) = row.strip_prefix(FOOTER) else {
         return false;
     };
     let rest = rest.strip_prefix(" (shift+tab to cycle)").unwrap_or(rest);
-    matches!(rest, "" | " \u{b7} esc to interrupt")
+    match rest.strip_prefix(" \u{b7} ") {
+        None => rest.is_empty(),
+        Some("esc to interrupt") => true,
+        Some(pill) => pill.split(", ").all(counted),
+    }
+}
+
+/// `1 monitor` or `4 monitors`: a whole count whose noun agrees with it, as Claude Code 2.1.299
+/// names background shells, monitors, local agents and mixed tasks.
+fn counted(phrase: &str) -> bool {
+    let Some((count, noun)) = phrase.split_once(' ') else {
+        return false;
+    };
+    let whole =
+        !count.is_empty() && !count.starts_with('0') && count.bytes().all(|b| b.is_ascii_digit());
+    let noun = if count == "1" {
+        Some(noun)
+    } else {
+        noun.strip_suffix('s')
+    };
+    let stems = ["shell", "monitor", "local agent", "background task"];
+    whole && noun.is_some_and(|noun| stems.contains(&noun))
 }
 
 fn composer(rows: &[Row]) -> Composer {

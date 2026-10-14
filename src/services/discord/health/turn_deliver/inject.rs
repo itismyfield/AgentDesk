@@ -3,6 +3,7 @@
 //! once enabled, `codex_tui::busy_inject`.
 
 mod names;
+mod queued_support;
 
 use futures::FutureExt;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
     BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
+use crate::services::discord::router::queued_head_inject_covers;
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -28,6 +30,7 @@ use crate::services::turn_orchestrator::{
     HeadSettle, InjectionSettlement, Intervention, QueueIdentity, QueuedHeadClaim, ReserveOutcome,
 };
 use names::{codex_unconfirmed_name, codex_veto_name, unconfirmed_name, veto_name};
+use queued_support::{HEAD_UNKNOWN, queued_target_matches};
 use tokio::sync::OwnedMutexGuard;
 
 /// `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read
@@ -137,17 +140,16 @@ pub(super) fn mode(channel_id: u64) -> InjectMode {
     }
 }
 
-/// Codex TUI sessions take busy-turn input only once this is on, whichever mode the env sets.
-pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = false;
+/// Codex capability is limited by the existing Discord channel gate below.
+pub(super) const CODEX_BUSY_INJECT_ENABLED: bool = true;
 
-/// Tests read the same constant; a test may also open one channel, as turning it on would.
+/// Require the requested channel itself; intake permission from its parent is insufficient.
 fn codex_enabled(channel_id: u64) -> bool {
     #[cfg(test)]
     if test_hook::codex_enabled(channel_id) {
         return true;
     }
-    let _ = channel_id;
-    CODEX_BUSY_INJECT_ENABLED
+    CODEX_BUSY_INJECT_ENABLED && queued_head_inject_covers(ChannelId::new(channel_id), None)
 }
 
 /// Who holds the channel at one read: the mailbox claim and the durable row.
@@ -275,7 +277,11 @@ pub(super) fn tui_session(
         .into_iter()
         .flatten()
         .find_map(|session| binding(&session).map(|binding| (session, binding)))?;
-    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(binding.relay_output_path())))
+    let output = match provider {
+        ProviderKind::Codex => binding.output_path.as_str(),
+        _ => binding.relay_output_path(),
+    };
+    (binding.runtime_kind == runtime).then(|| (session, PathBuf::from(output)))
 }
 
 fn live_tui_session(
@@ -471,36 +477,6 @@ fn busy_episode(request: &HumanInputRequest, target: &Target) -> Option<String> 
     episode::busy(&request.provider, request.channel_id.get(), &holder)
 }
 
-async fn queued_target_matches(
-    shared: &SharedData,
-    request: &HumanInputRequest,
-    target: &Target,
-    before_effect: bool,
-) -> bool {
-    let named = channel_name(shared, request.channel_id).await;
-    let (snapshot, row) = observe(shared, request).await;
-    let claim = match (&snapshot.cancel_token, &target.claim) {
-        (None, None) => true,
-        (Some(token), Some((expected, kind, message))) => {
-            Arc::ptr_eq(token, expected)
-                && snapshot.active_turn_kind == *kind
-                && snapshot.active_user_message_id == *message
-        }
-        _ => false,
-    };
-    claim
-        && row.as_ref().map(row_key) == target.row
-        && binding_key(&target.session) == target.binding
-        && live_tui_session(
-            shared,
-            request,
-            RuntimeHandoffKind::ClaudeTui,
-            row.as_ref(),
-            named,
-        ) == Some((target.session.clone(), target.transcript.clone()))
-        && (!before_effect || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
-}
-
 async fn queued_attempt(
     shared: &Arc<SharedData>,
     request: &HumanInputRequest,
@@ -544,6 +520,7 @@ async fn queued_attempt(
             QueuedHeadClaim::Reserved(ticket) => ticket,
             QueuedHeadClaim::NotEligible => return InjectAttempt::NotSent("queued_not_eligible"),
             QueuedHeadClaim::PersistenceFailed(error) => return persistence_failed(error),
+            QueuedHeadClaim::BlockedUnknown => return InjectAttempt::HandbackFailed(HEAD_UNKNOWN),
             _ => return InjectAttempt::HandbackFailed("queued_head_blocked"),
         };
         let item = held.item();
@@ -654,6 +631,11 @@ async fn queued_attempt(
                     turn_id,
                     detail: "queued_settle_unknown",
                 };
+            }
+            // A committed NotSent is the actor's proof that the head is back at the queue front.
+            if let (InjectAttempt::NotSent(veto), Some(turn_id)) = (&attempt, turn_id) {
+                let veto = *veto;
+                return InjectAttempt::HandedBack { turn_id, veto };
             }
         }
         attempt
@@ -1191,6 +1173,10 @@ pub(crate) mod test_hook {
     pub(crate) fn forced(channel_id: u64) -> Option<(InjectMode, PathBuf)> {
         let forced = FORCED.lock().unwrap_or_else(|e| e.into_inner());
         forced.as_ref()?.get(&channel_id).cloned()
+    }
+
+    pub(crate) fn set_pane_program(channel_id: u64, program: PathBuf) {
+        set(channel_id, InjectMode::All, program);
     }
 
     pub(crate) fn set(channel_id: u64, mode: InjectMode, program: PathBuf) {

@@ -1775,6 +1775,8 @@ fn herdr_items_have_no_production_caller() {
         (WATCH_HOST, 1),
         // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
+        // Operator transition context: checks the row sits on a registered endpoint, never a host.
+        ("src/services/discord/health/o_transition.rs", 0),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
