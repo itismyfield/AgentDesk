@@ -403,6 +403,9 @@ mod b2b1_presence_withdraw_tests {
         watchers.insert(ChannelId::new(x), handle("b2b1-a"));
         watchers.insert(ChannelId::new(y), handle("b2b1-b"));
         let (tx, ty, tz) = (probe.arm(x), probe.arm(y), probe.arm(z));
+        let other = crate::services::discord::make_shared_data_for_tests();
+        let elsewhere = Probe::install(&other);
+        let foreign = [elsewhere.arm(x), elsewhere.arm(y)];
         // x takes y's session: x's own session and y's ownership are both displaced.
         assert!(
             watchers
@@ -412,6 +415,10 @@ mod b2b1_presence_withdraw_tests {
         assert!(!Probe::current(&tx), "channel-displaced owner");
         assert!(!Probe::current(&ty), "session-displaced owner");
         assert!(Probe::current(&tz));
+        assert!(
+            foreign.iter().all(Probe::current),
+            "another registry's runtime"
+        );
         assert!(Probe::current(&probe.arm(x)), "the new owner starts fresh");
     }
 

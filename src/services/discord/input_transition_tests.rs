@@ -134,12 +134,23 @@ mod supported {
             let busy = root
                 .path()
                 .join("discord_busy_followup_retries/claude/9/8.json");
+            // A moving input whose retries are spent stays put: the new input cannot carry them.
             save(
                 &busy,
                 &json!({"notice_message_id":108,"busy_retry_count":1,"first_busy_retry_at_ms":100}),
             );
-            let mut host = files(root.path());
             let ledger = Ledger::open(root.path(), 9).unwrap();
+            let refused = files(root.path())
+                .collect(&ledger)
+                .err()
+                .expect("refused")
+                .to_string();
+            assert!(refused.contains("busy retry budget"), "{refused}");
+            save(
+                &busy,
+                &json!({"notice_message_id":108,"busy_retry_count":0,"first_busy_retry_at_ms":100}),
+            );
+            let mut host = files(root.path());
             assert_eq!(host.collect(&ledger).unwrap().len(), 3);
             assert_eq!(
                 host.captured.len(),
@@ -454,7 +465,7 @@ mod supported {
                 );
                 save(
                     &busy,
-                    &json!({"notice_message_id":81,"busy_retry_count":1,"first_busy_retry_at_ms":1}),
+                    &json!({"notice_message_id":81,"busy_retry_count":0,"first_busy_retry_at_ms":1}),
                 );
                 let mut adapter = files(root.path());
                 adapter.effects.accepted = true;
@@ -636,5 +647,27 @@ mod supported {
         assert_eq!(rows.owner(8), Owner::Ledger);
         assert_eq!(rows.owner(5), Owner::Legacy);
         assert_eq!(host.effects.actor_started, 1);
+    }
+
+    #[test]
+    fn queue_snapshot_holding_exit_debt_stays_legacy_and_keeps_its_bytes() {
+        let root = sandbox();
+        let path = root
+            .path()
+            .join("discord_pending_queue/claude/token/9.json");
+        let debt = json!({"event_id": "exit-5", "episode": "episode-5", "kind": "cancelled",
+            "intervention": item(5), "state": "unacked"});
+        save(
+            &path,
+            &json!({"version": 1, "items": [item(8)], "queue_exit_debts": [debt]}),
+        );
+        let original = fs::read(&path).unwrap();
+        let mut host = files(root.path());
+        let mut lease = LedgerLease::new(root.path(), 9);
+        let mut movement = Move::prepare(&mut lease, &mut host).unwrap();
+        assert_eq!(movement.advance(&mut lease, &mut host), Outcome::Legacy);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(host.effects.legacy.is_empty());
+        assert_eq!(host.effects.actor_started, 0);
     }
 }

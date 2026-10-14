@@ -320,7 +320,10 @@ struct ActualDriverIsolation {
 }
 
 async fn actual_driver_case(mode: &'static str) {
-    use crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook;
+    use crate::services::claude_tui::hook_server::adoption_retry::DurableKind;
+    use crate::services::claude_tui::hook_server::observation_ingress::{
+        IngressOutcome, observe_binding_hook,
+    };
     use crate::services::tui_prompt_dedupe::{
         self as dedupe,
         binding_context::{
@@ -331,6 +334,15 @@ async fn actual_driver_case(mode: &'static str) {
     use crate::services::turn_orchestrator::ChannelMailboxRegistry;
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    // A canonical short parent keeps native claims and temporary IPC paths stable.
+    let temp_parent = std::env::temp_dir().canonicalize().unwrap();
+    let temp_parent = if temp_parent.as_os_str().len() <= 24 {
+        temp_parent
+    } else {
+        std::fs::canonicalize("/tmp").unwrap()
+    };
+    let _tmpdir =
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &temp_parent);
     let _dedupe_lock = ActualDriverIsolation {
         _state: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
     };
@@ -402,13 +414,18 @@ async fn actual_driver_case(mode: &'static str) {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
     let claim = serde_json::json!({"session_id":native_id,"transcript_path":source.path,"source":"startup","prompt":null});
-    let _ = observe_binding_hook(
+    let observed = observe_binding_hook(
         "codex",
         "session-start",
         Some(native_id),
         Some(native_id),
         &claim,
         &headers,
+    );
+    assert_eq!(
+        observed,
+        IngressOutcome::Durable(DurableKind::Adopted),
+        "the native hook must durably adopt the real source"
     );
     assert!(
         dedupe::binding_events::codex::read_ownership(&context)

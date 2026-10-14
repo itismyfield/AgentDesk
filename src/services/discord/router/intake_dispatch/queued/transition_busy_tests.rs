@@ -107,6 +107,7 @@ struct Fixture {
     task: tokio::task::JoinHandle<()>,
     _env: crate::config::TestEnvVarGuard,
     _routing: crate::config::TestEnvVarGuard,
+    _config: crate::config::TestEnvVarGuard,
     _root: tempfile::TempDir,
 }
 impl Drop for Fixture {
@@ -125,6 +126,7 @@ impl Fixture {
             "ADK_INTAKE_ROUTING_MODE",
             "disabled".as_ref(),
         );
+        let config = super::local_admission_config_after_shared_test_env_lock(root.path());
         let channel = ChannelId::new(channel);
         let redirect = Arc::new(std::sync::Mutex::new(None::<ChannelId>));
         let target = redirect.clone();
@@ -180,6 +182,7 @@ impl Fixture {
             task,
             _env: env,
             _routing: routing,
+            _config: config,
             _root: root,
         }
     }
@@ -1400,3 +1403,5 @@ async fn legacy_array_bot_busy_preserves_restored_original() {
     );
     f.shared.mailboxes.remove_fixture_for_test(f.channel);
 }
+
+mod retry_tests;

@@ -5,7 +5,7 @@ pub(crate) mod agent_handoff;
 pub(crate) mod agentdesk_config;
 mod answer_flush_barrier;
 pub(crate) mod bot_role;
-mod busy_followup_retry_store;
+pub(crate) mod busy_followup_retry_store;
 #[cfg(unix)]
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
@@ -107,6 +107,10 @@ pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
+pub(crate) use turn_presence::entrypoints::{
+    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
+    withdraw_unmounted as presence_withdraw_unmounted,
+};
 #[cfg(all(test, unix))]
 pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
@@ -316,7 +320,7 @@ use formatting::{format_for_discord, format_tool_input, send_long_message_raw, t
 #[cfg(test)]
 use inflight::save_inflight_state;
 use inflight::{InflightTurnState, load_inflight_states};
-pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path};
+pub(crate) use inflight::{clear_inflight_state, lock_inflight_state_path, policy_op};
 use placeholder_controller::queued_card_gate::{self, QueuedCardDisposition, QueuedCardTeardown};
 pub(in crate::services::discord) use prompt_builder::load_channel_recent_context;
 use prompt_builder::{RecoveryContextManifestInput, build_system_prompt_with_manifest};

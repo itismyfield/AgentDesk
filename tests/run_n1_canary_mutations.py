@@ -65,12 +65,19 @@ MUTANTS = [
     ("file-delete", "n1_turn_canary_oracle.py", '    print(json.dumps(result, sort_keys=True))',
      '    Path("/fixture-only-never-executed").unlink()\n    print(json.dumps(result, sort_keys=True))',
      "tests.test_n1_canary_collection.EffectBoundary.test_production_has_only_audited_io"),
-    ("cli-pass", "n1_turn_canary_oracle.py", "return 2\n", "return 0\n",
+    ("cli-pass", "n1_turn_canary_oracle.py", "code = finish(result)", "code = 0",
      "tests.test_n1_canary_oracle.Fixture.test_valid_inputs_still_cannot_pass"),
     ("remove-ci-wiring", "ci-script-checks.sh",
      '"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection', "true",
      "tests.test_n1_canary_collection.EffectBoundary.test_ci_registration_is_in_a_required_shard"),
 ]
+if os.environ.get("AGENTDESK_REQUIRE_PG") == "1":
+    MUTANTS.extend([
+        ("text-channel-bigint-reverted", "evidence.py", "WHERE channel_id = :'channel'",
+         "WHERE channel_id = :'channel'::bigint", "tests.test_n1_canary_pg.URIConnection.test_uri_reaches_expected_database_and_enforces_readonly"),
+        ("numeric-channel-normalization-removed", "evidence.py", 'row["channel_id"] = int(row["channel_id"])',
+         "pass", "tests.test_n1_canary_pg.URIConnection.test_text_channels_reach_numeric_origin_audit"),
+    ])
 
 
 def main():

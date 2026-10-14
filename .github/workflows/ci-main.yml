@@ -191,15 +191,27 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  pg_shards:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        run: |
+          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   postgres:
     name: PostgreSQL tests (shard ${{ matrix.shard }})
+    needs: pg_shards
     runs-on: ubuntu-latest
-    # Each shard runs one generated part of the PG selection on its own database;
+    # Each shard hashes the real PG selection on its own database;
     # the run stays green only if both shards succeed.
     strategy:
       fail-fast: false
-      matrix:
-        shard: [0, 1]
+      matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}
     env:
       PG_INCLUDE_SHARD: ${{ matrix.shard }}
       RUST_BACKTRACE: 1
