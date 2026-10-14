@@ -708,6 +708,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim/strict_yield_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown/reown_tests.rs",
         "src/services/discord/restart_report/model/tests.rs",
         "src/services/discord/restart_report/model/entry_tests.rs",
         "src/services/recovery_defer/tests.rs",
@@ -719,6 +721,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 # Production-looking basenames classified as test-only by the shared resolver.
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
+        "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
         "src/services/discord/router/intake_dispatch/ledger.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
