@@ -100,13 +100,10 @@ channel lost its TUI binding. Restore the binding; do not delete the store to ge
 
 ## 3. Confirm activation
 
-These checks establish writer activation. Before measuring N1, also require effective turn
-selection, successful retirement of the channel's synthetic population, and a same-boot,
-same-channel `n1_mode_confirmed` event with `actual_confirmed_at_us` inside its confirmation
-window (§5). A failed or partial retirement leaves Legacy turn-mode active. An `init` alone
-does not authorize N1 measurement (P33: `src/services/tui_o/turn_mode.rs:8–80`,
-`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`,
-`src/services/tui_o/n1_observation.rs:93–100`).
+These checks establish writer activation. A failed or partial retirement of the channel's
+synthetic population leaves Legacy turn-mode active (`src/services/tui_o/turn_mode.rs:8–80`,
+`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`). Check the relayed
+output with the source-to-Discord comparison in §5.
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
 - `<runtime_root>/o_store/o_era` exists (first canary only) and
@@ -225,6 +222,16 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 ## 5. Observe
 
 The N1 turn canary was dropped and its manifest, producer and 50-turn oracle tooling removed.
+Drive marked inputs with the E2E driver (`--cell codex-tui` for Codex), then compare that run's
+markers in the native transcript and Discord read-only:
+
+```sh
+python3 scripts/e2e/run_tui_relay.py --cell claude-tui --channel-id <CHANNEL_ID> --run-id <RUN_ID>
+python3 -m scripts.e2e.tui_relay.source_compare --channel-id <CHANNEL_ID> --run-id <RUN_ID>
+```
+
+Require exit 0. Evidence without markers exits 2; a `missing_relay`, `lost` or `duplicated`
+verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 
 ## 6. Forbidden during the canary
 
