@@ -10263,6 +10263,7 @@ services::discord::turn_end_wip_warning::tests::dropped_reservation_can_be_claim
 services::discord::turn_end_wip_warning::tests::final_wire_bounds_oversized_worktree_warning_5325
 services::discord::turn_end_wip_warning::tests::final_wire_reserves_normal_warning_after_full_panel_and_metadata_5325
 services::discord::turn_end_wip_warning::tests::zero_expected_user_msg_id_never_matches_inflight
+services::discord::turn_finalizer::cleanup::terminal_release::tests::release_counts_once_and_keeps_the_followup_turn_state
 services::discord::turn_finalizer::cleanup::tests::already_finalized_loser_does_not_claim_reaction_cleanup
 services::discord::turn_finalizer::cleanup::tests::backstop_reaction_cleanup_keeps_thread_origin_when_original_succeeds
 services::discord::turn_finalizer::cleanup::tests::backstop_reaction_cleanup_targets_dispatch_parent_channel
