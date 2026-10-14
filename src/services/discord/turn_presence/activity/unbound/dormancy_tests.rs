@@ -5,39 +5,74 @@ use crate::services::discord::{
 };
 use crate::services::platform::tmux::session_inventory::tests::ProbeTrace;
 use poise::serenity_prelude::ChannelId;
-use std::cell::RefCell;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-thread_local! { static TRACE: RefCell<Option<(u64, Arc<AtomicUsize>)>> = const { RefCell::new(None) }; }
+static TRACE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<u64, Arc<AtomicUsize>>>> =
+    std::sync::LazyLock::new(Default::default);
 pub(super) fn reached(channel: u64) {
-    TRACE.with(|slot| {
-        if let Some((observed, count)) = &*slot.borrow() {
-            if *observed == channel {
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    });
+    if let Some(count) = TRACE.lock().unwrap().get(&channel) {
+        count.fetch_add(1, Ordering::SeqCst);
+    }
 }
-struct Trace(Arc<AtomicUsize>);
+struct Trace(u64, Arc<AtomicUsize>);
 impl Trace {
     fn new(channel: u64) -> Self {
         let count = Arc::new(AtomicUsize::new(0));
-        TRACE.with(|slot| assert!(slot.replace(Some((channel, count.clone()))).is_none()));
-        Self(count)
+        assert!(
+            TRACE
+                .lock()
+                .unwrap()
+                .insert(channel, count.clone())
+                .is_none()
+        );
+        Self(channel, count)
     }
     fn calls(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.1.load(Ordering::SeqCst)
     }
 }
 impl Drop for Trace {
     fn drop(&mut self) {
-        TRACE.with(|slot| {
-            slot.replace(None);
-        });
+        TRACE.lock().unwrap().remove(&self.0);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn activation_candidates_counter_crosses_the_blocking_worker() {
+    const CHANNEL: u64 = 69_181_997;
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let root = tempfile::tempdir().unwrap();
+    let observer = Trace::new(CHANNEL);
+    let ports = activity::LivePorts {
+        root: Some(root.path().to_owned()),
+    };
+    let candidates = tokio::task::spawn_blocking(move || {
+        ports.scoped(|| {
+            let log = crate::services::tui_o::writer::binding::ChannelBindingLog::new(
+                CHANNEL,
+                ShadowProvider::Claude,
+            );
+            observe_candidates(
+                CHANNEL,
+                &ProviderKind::Claude,
+                Some("worker-positive"),
+                &[],
+                &log,
+            )
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(candidates.current.is_some());
+    assert_eq!(
+        observer.calls(),
+        1,
+        "worker collection was invisible to its positive counter"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

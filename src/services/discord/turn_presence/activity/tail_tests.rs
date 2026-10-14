@@ -56,6 +56,38 @@ fn idle(reader: &mut TailReader) -> bool {
 }
 
 #[test]
+fn s1_tail_shrink_ahead_of_cursor_is_not_eof() {
+    let rows = [event("task_started", Some("A")), event("task_complete", Some("A")),
+        event("task_started", Some("B"))];
+    let (_root, binding) = fixture(ShadowProvider::Codex, &rows);
+    let mut reader = TailReader::open(binding.clone(), limits(1)).unwrap();
+    let end = std::fs::metadata(&binding.source.path).unwrap().len();
+    std::fs::OpenOptions::new().write(true).open(&binding.source.path).unwrap()
+        .set_len(end - serde_json::to_vec(&rows[2]).unwrap().len() as u64 - 1).unwrap();
+    assert!(reader.bootstrap().is_err(), "snapshot shrink ahead of cursor was accepted");
+}
+
+#[test]
+fn s1_resume_revalidates_old_guard_before_carry() {
+    for tamper in [false, true] {
+        let (_root, binding) = fixture(ShadowProvider::Codex, &[
+            event("task_started", Some("A")), blocked(), event("task_complete", Some("A"))]);
+        let mut reader = TailReader::open(binding.clone(), limits(4096)).unwrap();
+        assert!(reader.poll(4096, Some(reader.meta.bootstrap_end)).is_err());
+        assert!(reader.facts.resume_point().is_some());
+        if tamper {
+            let mut bytes = std::fs::read(&binding.source.path).unwrap();
+            let at = bytes.windows(3).position(|w| w == b"\"A\"").unwrap();
+            bytes[at + 1] = b'B';
+            std::fs::write(&binding.source.path, bytes).unwrap();
+        }
+        let resumed = reader.resume();
+        assert_eq!(resumed.is_err(), tamper, "old observation must authenticate the handoff");
+        if !tamper { assert!(idle(&mut reader)); }
+    }
+}
+
+#[test]
 fn s0o_codex_lifetime_across_worker_installed_and_typed_resume() {
     let start = event("task_started", Some("A"));
     let close = event("task_complete", Some("A"));

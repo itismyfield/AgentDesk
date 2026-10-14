@@ -12,6 +12,9 @@ use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvidence, BindingRecord, BindingTarget,
 };
 
+#[path = "activity_tests/large.rs"]
+mod large;
+
 const CHANNEL: u64 = 6_100_001;
 const SESSION: &str = "presence-parent";
 

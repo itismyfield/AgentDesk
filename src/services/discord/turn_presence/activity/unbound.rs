@@ -1,4 +1,4 @@
-//! Dormant, read-only Unbound evidence; no result here grants a start capability.
+//! Read-only Unbound evidence; no result here grants a start capability.
 use std::collections::BTreeMap;
 
 use crate::config::{Config, session_hosts::BootSessionHosts};
@@ -72,6 +72,7 @@ fn unbound_candidates(
     events: Result<Vec<BindingEvent>, String>,
     inflight: &Result<Option<InflightTurnState>, String>,
 ) -> Result<Candidates, String> {
+    #[cfg(test)]
     dormancy_tests::reached(channel);
     let events = events?;
     let row = inflight.as_ref().map_err(Clone::clone)?;
@@ -153,6 +154,7 @@ fn unbound_candidates(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Scope {
     LocalInventory,
+    LocalNameless,
     HerdrFirstCreate,
     HerdrRetired,
     Hold(&'static str),
@@ -193,6 +195,7 @@ fn host_scope(reads: HostReads<'_>) -> HostScope {
     }
 }
 fn host_scope_result(reads: HostReads<'_>) -> Scope {
+    #[cfg(test)]
     dormancy_tests::reached(reads.channel);
     let hold = Scope::Hold;
     let (Ok(mut evidence), Ok(row)) = (reads.evidence, reads.inflight.as_ref()) else {
@@ -211,7 +214,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
     {
         return hold("probe_failed");
     }
-    let marker = marker_witness(reads.marker);
+    let marker = observed_marker(reads.marker);
     if matches!(marker, HostWitness::ReadFailed(_)) {
         return hold("probe_failed");
     }
@@ -232,7 +235,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
     }
     evidence.session_key = Some(key.clone());
     evidence.session_name = Some(reads.name.into());
-    if evidence.session_record != session_record_witness(reads.exact) {
+    if evidence.session_record != observed_row(reads.exact) {
         return hold("identity_unresolved");
     }
     if let Some(row) = row {
@@ -368,6 +371,7 @@ fn decide_unbound(
     let Ok(candidates) = candidates else {
         return Verdict::Hold("probe_failed");
     };
+    #[cfg(test)]
     dormancy_tests::reached(candidates.channel);
     if candidates.conflict || candidates.inflight {
         return Verdict::Hold("identity_unresolved");
@@ -382,20 +386,35 @@ fn decide_unbound(
         return Verdict::Hold("identity_unresolved");
     }
     if candidates.current.is_none()
-        && !matches!(scope.result, Scope::LocalInventory | Scope::Hold(_))
+        && !matches!(
+            scope.result,
+            Scope::LocalInventory | Scope::LocalNameless | Scope::Hold(_)
+        )
     {
         return Verdict::Hold("candidate_unresolved");
     }
-    match scope.result {
-        Scope::Hold(reason) => return Verdict::Hold(reason),
-        Scope::HerdrFirstCreate => return Verdict::Absent(Absence::HerdrFirstCreate),
-        Scope::HerdrRetired => return Verdict::Absent(Absence::HerdrRetired),
-        Scope::LocalInventory => {}
+    if matches!(scope.result, Scope::LocalNameless) && candidates.current.is_some() {
+        return Verdict::Hold("identity_unresolved");
     }
+    let hosted = match scope.result {
+        Scope::Hold(reason) => return Verdict::Hold(reason),
+        Scope::HerdrFirstCreate => Some(Absence::HerdrFirstCreate),
+        Scope::HerdrRetired => Some(Absence::HerdrRetired),
+        Scope::LocalInventory | Scope::LocalNameless => None,
+    };
     let names = match inventory {
         Inventory::Sessions(names) => names.as_slice(),
         Inventory::Empty(_) => &[],
-        Inventory::ProbeFailed(_) => return Verdict::Hold("probe_failed"),
+        Inventory::ProbeFailed(_) => {
+            let trace = candidates.names.iter().any(|c| {
+                matches!(c.origin, Origin::Binding(_) | Origin::Inflight)
+                    || owners.get(&c.name).is_some_and(Option::is_some)
+            });
+            return match (hosted, trace) {
+                (Some(absence), false) => Verdict::Absent(absence),
+                _ => Verdict::Hold("probe_failed"),
+            };
+        }
     };
     if names.iter().any(|name| {
         candidates.names.iter().any(|c| c.name == *name)
@@ -409,10 +428,63 @@ fn decide_unbound(
     {
         return Verdict::Hold("owner_unresolved");
     }
-    if candidates.current.is_none() {
+    if let Some(absence) = hosted {
+        return Verdict::Absent(absence);
+    }
+    if candidates.current.is_none()
+        && !(matches!(scope.result, Scope::LocalNameless)
+            && candidates.names.is_empty()
+            && names.is_empty())
+    {
         return Verdict::Hold("candidate_unresolved");
     }
     Verdict::Absent(Absence::LocalInventory)
+}
+
+// Keep the existing read-only resolver adapter and its witnesses in one module.
+fn observed_row(lookup: &HostedLookup) -> HostWitness {
+    session_record_witness(lookup)
+}
+fn observed_marker(marker: HostKindMarker) -> HostWitness {
+    marker_witness(marker)
+}
+fn raw_evidence(
+    key: Option<String>,
+    name: Option<String>,
+    exact: &HostedLookup,
+    marker: HostKindMarker,
+    runtime: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+    process: bool,
+) -> SessionTargetEvidence {
+    SessionTargetEvidence {
+        session_key: key,
+        session_name: name,
+        session_record: observed_row(exact),
+        inflight_locator: HostWitness::Absent,
+        host_marker: observed_marker(marker),
+        runtime_kind_marker: runtime,
+        process_registry_hit: process,
+        ..SessionTargetEvidence::unread()
+    }
+}
+fn local_registration(config: &Config, channel: u64, provider: &ProviderKind) -> bool {
+    let bindings: Vec<_> = config
+        .agents
+        .iter()
+        .flat_map(|a| a.channels.iter())
+        .filter(|(_, b)| b.channel_id().and_then(|id| id.parse::<u64>().ok()) == Some(channel))
+        .collect();
+    !bindings.is_empty()
+        && bindings.iter().all(|(name, binding)| {
+            let name = binding
+                .provider()
+                .unwrap_or_else(|| (*name).into())
+                .trim()
+                .to_ascii_lowercase();
+            name == provider.as_str() && channel_effective_tui_request(config, binding, &name)
+        })
+        && BootSessionHosts::from_config(config)
+            .is_ok_and(|boot| boot.herdr_endpoint(channel).is_none())
 }
 
 #[cfg(test)]
@@ -420,3 +492,5 @@ mod dormancy_tests;
 #[cfg(test)]
 #[path = "unbound/unit_tests.rs"]
 mod tests;
+
+pub(super) mod live;

@@ -149,24 +149,97 @@ fn prepare(mut command: Command) -> Command {
     command
 }
 
-pub(crate) fn probe_session_inventory() -> Inventory {
-    tests::record_probe();
-    #[cfg(test)]
-    if let Some((command, socket)) = tests::take_command() {
-        return probe_command(command, socket, Duration::from_secs(3));
-    }
-    match tmux_command() {
-        Ok(command) => probe_command(command, None, Duration::from_secs(3)),
-        Err(error) => Inventory::ProbeFailed(error.to_string()),
+/// One inventory and the command context in which it was obtained.
+#[derive(Clone, Debug)]
+pub(crate) struct Observation {
+    pub inventory: Inventory,
+    context: Option<Namespace>,
+    ambient: [Option<OsString>; 3],
+    production: bool,
+    process: (u32, u32, Option<PathBuf>),
+}
+impl Observation {
+    pub(crate) fn current(&self) -> bool {
+        if self.ambient != ambient() || self.process != process_context() {
+            return false;
+        }
+        match &self.context {
+            Some(context) if context.current() => {
+                !self.production
+                    || tmux_command()
+                        .is_ok_and(|command| Namespace::capture(&command, None) == *context)
+            }
+            None => tmux_command().is_err(),
+            _ => false,
+        }
     }
 }
+fn process_context() -> (u32, u32, Option<PathBuf>) {
+    // SAFETY: these calls only read the process credentials.
+    (
+        unsafe { libc::getuid() },
+        unsafe { libc::geteuid() },
+        std::env::current_dir().ok(),
+    )
+}
+fn ambient() -> [Option<OsString>; 3] {
+    [
+        std::env::var_os("TMUX"),
+        std::env::var_os("TMUX_TMPDIR"),
+        std::env::var_os("PATH"),
+    ]
+}
+pub(crate) fn observe_inventory(channel: u64) -> Observation {
+    #[cfg(test)]
+    {
+        tests::record_probe();
+        tests::record_channel_probe(channel);
+        if let Some((command, socket)) = tests::take_command() {
+            return observe_command(command, socket, Duration::from_secs(3), false);
+        }
+    }
+    let _ = channel;
+    let observed_ambient = ambient();
+    let process = process_context();
+    match tmux_command() {
+        Ok(command) => observe_command(command, None, Duration::from_secs(3), true),
+        Err(error) => Observation {
+            inventory: Inventory::ProbeFailed(error.to_string()),
+            context: None,
+            ambient: observed_ambient,
+            production: true,
+            process,
+        },
+    }
+}
+#[cfg(test)]
+pub(crate) fn probe_session_inventory() -> Inventory {
+    observe_inventory(0).inventory
+}
+#[cfg(test)]
 fn probe_command(command: Command, socket: Option<PathBuf>, timeout: Duration) -> Inventory {
+    observe_command(command, socket, timeout, false).inventory
+}
+fn observe_command(
+    command: Command,
+    socket: Option<PathBuf>,
+    timeout: Duration,
+    production: bool,
+) -> Observation {
     let context = Namespace::capture(&command, socket);
+    let process = process_context();
     let command = prepare(command);
-    match wait_for_tmux_output(command, timeout, "tmux session inventory") {
+    let inventory = match wait_for_tmux_output(command, timeout, "tmux session inventory") {
         Ok(output) if context.current() => classify_output(&output, &context, filesystem),
         Ok(_) => Inventory::ProbeFailed("namespace changed".into()),
         Err(error) => Inventory::ProbeFailed(error),
+    };
+    Observation {
+        inventory,
+        context: Some(context),
+        ambient: ambient(),
+        production,
+        process,
     }
 }
 

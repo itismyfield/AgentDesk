@@ -77,7 +77,7 @@ fn wait_for_tmux_output(
 
 mod availability;
 pub(crate) mod health_probe;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(crate) mod session_inventory;
 mod sized;
 

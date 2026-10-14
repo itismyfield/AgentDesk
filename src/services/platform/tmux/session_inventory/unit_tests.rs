@@ -8,6 +8,68 @@ use std::sync::{
 
 thread_local! { static PROBE_TRACE: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) }; }
 thread_local! { static COMMAND: RefCell<Option<(Command, Option<PathBuf>)>> = const { RefCell::new(None) }; }
+
+static CHANNEL_PROBES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeMap<u64, Arc<AtomicUsize>>>,
+> = std::sync::LazyLock::new(Default::default);
+pub(crate) struct ChannelProbeTrace(u64, Arc<AtomicUsize>);
+impl ChannelProbeTrace {
+    pub(crate) fn new(channel: u64) -> Self {
+        let count = Arc::new(AtomicUsize::new(0));
+        assert!(
+            CHANNEL_PROBES
+                .lock()
+                .unwrap()
+                .insert(channel, count.clone())
+                .is_none()
+        );
+        Self(channel, count)
+    }
+    pub(crate) fn calls(&self) -> usize {
+        self.1.load(Ordering::SeqCst)
+    }
+}
+impl Drop for ChannelProbeTrace {
+    fn drop(&mut self) {
+        CHANNEL_PROBES.lock().unwrap().remove(&self.0);
+    }
+}
+pub(super) fn record_channel_probe(channel: u64) {
+    if let Some(count) = CHANNEL_PROBES.lock().unwrap().get(&channel) {
+        count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn activation_inventory_counter_crosses_the_blocking_worker() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("uncreated");
+    const CHANNEL: u64 = 69_181_998;
+    let trace = ChannelProbeTrace::new(CHANNEL);
+    let observed = tokio::task::spawn_blocking(move || {
+        let mut command = tmux_command().unwrap();
+        command
+            .arg("-S")
+            .arg(&socket)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE");
+        COMMAND.with(|slot| assert!(slot.replace(Some((command, Some(socket)))).is_none()));
+        observe_inventory(CHANNEL)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        observed.inventory,
+        Inventory::Empty(EmptyReason::MissingSocket(_))
+    ));
+    assert!(observed.current());
+    assert_eq!(
+        trace.calls(),
+        1,
+        "worker probe was invisible to its positive counter"
+    );
+}
 pub(super) fn take_command() -> Option<(Command, Option<PathBuf>)> {
     COMMAND.with(|slot| slot.borrow_mut().take())
 }
@@ -70,6 +132,75 @@ fn failed(result: Inventory) {
 }
 
 #[test]
+fn s1_inventory_runtime_constructor_injects_path() {
+    const NAME: &str = "services::platform::tmux::session_inventory::tests::s1_inventory_runtime_constructor_injects_path";
+    if std::env::var_os("ADK_S1_PATH_CHILD").is_none() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("ADK_S1_PATH_CHILD", "1")
+            .env_remove("PNPM_HOME")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    } else {
+        let bin = tempfile::tempdir().unwrap();
+        let program = bin.path().join("absolute-tool");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let command =
+            crate::services::platform::binary_resolver::runtime_command(&program).unwrap();
+        let explicit = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value);
+        assert!(
+            explicit.is_some(),
+            "production runtime_command omitted PATH injection"
+        );
+        let snapshot = Namespace::capture(&command, None);
+        assert_eq!(snapshot.path.as_deref(), explicit);
+        assert_eq!(command.get_program(), program.as_os_str());
+        assert_eq!(
+            snapshot.runtime_path.as_deref(),
+            crate::services::platform::binary_resolver::prepared_runtime_path()
+        );
+    }
+}
+
+#[test]
+fn s1_inventory_prepared_snapshot_is_environment_independent() {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let before = std::env::var_os("PNPM_HOME");
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "services::platform::tmux::session_inventory::tests::u_inventory_command_context",
+            "--nocapture",
+        ])
+        .env("PNPM_HOME", "/tmp/pnpm:alternate")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "special environment rejected the independent prepared cache: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    assert_eq!(std::env::var_os("PNPM_HOME"), before);
+}
+
+#[test]
 fn u_inventory_command_context() {
     let bin = tempfile::tempdir().unwrap();
     let tool = bin.path().join("tmux");
@@ -77,8 +208,8 @@ fn u_inventory_command_context() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
     // The first prepared cache and each command's PATH are independent snapshots.
-    assert!(crate::services::platform::binary_resolver::merged_runtime_path().is_some());
-    let prepared = crate::services::platform::binary_resolver::prepared_runtime_path().unwrap();
+    let _ = crate::services::platform::binary_resolver::merged_runtime_path();
+    let prepared = crate::services::platform::binary_resolver::prepared_runtime_path();
     let mut runtime = crate::services::platform::binary_resolver::command_with_path(
         std::ffi::OsStr::new("tmux"),
         Some(bin.path().as_os_str()),
@@ -95,7 +226,7 @@ fn u_inventory_command_context() {
     assert_eq!(runtime.get_program(), tool.as_os_str());
     assert_eq!(effective_path, bin.path().as_os_str());
     assert_eq!(snapshot.path.as_deref(), Some(effective_path));
-    assert_eq!(snapshot.runtime_path.as_deref(), Some(prepared));
+    assert_eq!(snapshot.runtime_path.as_deref(), prepared);
     runtime
         .env("TMUX", "/tmp/test-socket,10,0")
         .env("LISTEN_PID", "10")

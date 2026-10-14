@@ -149,6 +149,17 @@ impl InputFacts {
         facts.carried = resume.carried.clone();
         Ok(facts)
     }
+    /// Carries a typed block only after the previous observation authenticates the handoff.
+    pub fn resume_observation_checked(&self) -> Result<Self, String> {
+        let Capture::Observation(old) = &self.capture else {
+            return Err("handoff requires an observation capture".into());
+        };
+        old.validate_handoff().map_err(|e| e.to_string())?;
+        let resume = self.resume_point().ok_or("not a typed block")?;
+        let next = Self::resume_observation(self.binding.clone(), resume)?;
+        old.validate_handoff().map_err(|e| e.to_string())?;
+        Ok(next)
+    }
     pub fn boundaries(&self) -> &[Boundary] {
         &self.boundaries
     }

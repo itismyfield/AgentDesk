@@ -13,6 +13,62 @@ use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 
 const CHANNEL: u64 = 69_180_001;
+
+#[test]
+fn s1_hosted_absence_cannot_hide_related_inventory() {
+    for scope in [Scope::HerdrFirstCreate, Scope::HerdrRetired] {
+        let c = candidates(Some("hosted-first"), &[], vec![], None).unwrap();
+        let current = c.current.clone().unwrap();
+        let verdict = decide_unbound(
+            Ok(c),
+            HostScope {
+                channel: CHANNEL,
+                provider: ProviderKind::Claude,
+                name: current.clone(),
+                result: scope,
+            },
+            &Inventory::Sessions(vec![current]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            verdict,
+            Verdict::Hold("watcher_unbound"),
+            "hosted absence bypassed a related live tmux session"
+        );
+    }
+}
+
+#[test]
+fn s1_nameless_local_scope_requires_a_complete_empty_inventory() {
+    for (registered, names, expected) in [
+        (true, vec![], Verdict::Absent(Absence::LocalInventory)),
+        (false, vec![], Verdict::Hold("candidate_unresolved")),
+        (
+            true,
+            vec!["other-owned".to_string()],
+            Verdict::Hold("candidate_unresolved"),
+        ),
+    ] {
+        let c = candidates(None, &[], vec![], None);
+        let scope = HostScope {
+            channel: CHANNEL,
+            provider: ProviderKind::Claude,
+            name: String::new(),
+            result: if registered {
+                Scope::LocalNameless
+            } else {
+                Scope::LocalInventory
+            },
+        };
+        let owners = [("other-owned".to_string(), Some(CHANNEL + 1))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            decide_unbound(c, scope, &Inventory::Sessions(names), &owners),
+            expected
+        );
+    }
+}
 fn fallback(channel: u64, provider: ProviderKind, basis: &str) -> RegisteredChannelBinding {
     RegisteredChannelBinding {
         channel_id: channel,
