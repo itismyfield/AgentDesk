@@ -135,6 +135,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 |---|---|---|
 | `src/db/o_channel_homes.rs` | 생성·변경·관측 | `delegate` :234, `adopt` :307, `renew` :373(유일한 `HeldHome` 생성자), `force_orphan` :403, 진단 `list_homes` :439·`open_intake_by_epoch` :460, 관측 `read_home_at`(row와 PG 시각을 한 SELECT로) |
 | `src/db/intake_outbox.rs` | 라우팅 | claim SQL :674–683. epoch 없는 행은 row 없는 채널에서만, epoch 행은 같은 epoch row에서만 |
+| `src/db/intake_outbox/worker_status.rs` | 라우팅·admission | `HOME_CLAIM_FENCE` :87–96. claim은 home row의 provider·holder·epoch를 재검사하고, epoch 없는 행은 row 없는 채널에서만 고른다 |
 | `src/db/mod.rs` | 배선 | 모듈 선언 :32 |
 | `src/cli/channel_home.rs` | 변경·진단 | 운영자 `delegate` :168, `begin_reclaim` :182, `force_orphan` :197, 진단 `list_homes` :120, `read_home` :138 |
 | `src/cli/args.rs` | 배선 | CLI 인자 :571 |
@@ -181,7 +182,9 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/tui_o/cutover/intake_route.rs` | readiness·라우팅 | `home_availability::refusal` :39, `held_channels`·`intake_held_channels` :58–59, `any_registered` :88 |
 | `src/services/tui_o/repost/runner.rs` | admission·readiness | `registered_channel`·`home_availability::refusal` :37–38 |
 | `src/services/tui_o/writer/deliver.rs` | admission | `admit` :157–166(availability 거절 뒤 home `admit_post`) |
+| `src/services/tui_o/writer/actor/transition_snapshot.rs` | admission | `home_now` :155. 등록 home의 기대 epoch·Owned·Open을 확인하고, home 없는 채널은 writer gate를 확인한다 |
 | `src/services/tui_o/writer/host.rs` | admission·readiness | `owned_now` :353, `home_availability::refusal` :499, `registered_channel` :505 |
+| `src/services/tui_o/writer/transition_port.rs` | admission 보관 | `Context::permit` :40. 요청자가 취득한 `CommandPermit`를 작업 종료까지 보관하며 새 permit을 발급하지 않는다 |
 | `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
 | `src/server/routes/agents_stop.rs` | admission | `admit_command`·`admit_unattributed` :66–70 |
 | `src/server/routes/queue_api.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `command_mutant` :206·:240 |
