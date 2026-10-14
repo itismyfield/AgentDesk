@@ -58,13 +58,11 @@ impl Readiness {
     }
 
     /// The running actor's port, while it takes work as `with_submission` checks it.
-    #[cfg(test)]
     pub(crate) fn transition(&self, channel: u64) -> Option<TransitionPort> {
         self.with_transition(channel, |port| Ok(port.clone())).ok()
     }
 
     /// Consumes `reply` only while the run `sent` named is still the channel's current one.
-    #[cfg(test)]
     pub(crate) fn with_transition_reply<T>(
         &self,
         channel: u64,
@@ -78,7 +76,6 @@ impl Readiness {
         })
     }
 
-    #[cfg(test)]
     fn with_transition<T>(
         &self,
         channel: u64,

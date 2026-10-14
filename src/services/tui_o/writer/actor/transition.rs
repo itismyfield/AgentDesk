@@ -448,14 +448,17 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             outcomes,
             ..
         } = job;
-        let (hops, summary, execution) = match self.build_snapshot(&context, &gate, &probes) {
-            Ok((snapshot, _)) => {
-                let judgment = judge(&snapshot, &request);
-                let hops = Job::hops(judgment.hops, &outcomes);
-                (hops, Some(judgment.summary), Some(snapshot.execution))
-            }
-            Err(detail) => (Job::hops(first, &outcomes), None, Some(Err(detail))),
-        };
+        let (hops, summary, execution, diagnostics) =
+            match self.build_snapshot(&context, &gate, &probes) {
+                Ok((snapshot, common)) => {
+                    let judgment = judge(&snapshot, &request);
+                    let hops = Job::hops(judgment.hops, &outcomes);
+                    let diagnostics = common.diagnostics(&snapshot, &context.nonce);
+                    let execution = Some(snapshot.execution);
+                    (hops, Some(judgment.summary), execution, Some(diagnostics))
+                }
+                Err(detail) => (Job::hops(first, &outcomes), None, Some(Err(detail)), None),
+            };
         let stopped = self.writer.is_stopped();
         let _ = reply.send(Reply {
             job_id: request.job_id,
@@ -464,6 +467,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             summary,
             execution,
             unsettled: if stopped { None } else { self.unsettled() },
+            diagnostics,
         });
         drop(context.permit);
     }

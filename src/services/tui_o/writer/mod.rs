@@ -195,7 +195,7 @@ mod historical_hops;
 mod past_bind;
 mod renumbered;
 mod transition_cleanup;
-/// Dormant: no request is sent to it outside the tests yet.
+/// The operator route `POST /api/o/transition` is its only production sender, and only Inspects.
 pub(crate) mod transition_port;
 
 #[cfg(test)]

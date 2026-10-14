@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use super::rotation::transition::Watch;
-use super::transition_cleanup::{Judged, Request, Summary};
+use super::transition_cleanup::{Judged, Summary};
+pub(crate) use super::transition_cleanup::{Request, Termination};
 use crate::services::cluster::channel_home::CommandPermit;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
@@ -110,6 +111,33 @@ pub(crate) struct Reply {
     pub execution: Option<Result<Vec<SourceId>, String>>,
     /// The channel's `rotation_unsettled` once the job ended; `None` after a failed write.
     pub unsettled: Option<usize>,
+    /// The execution the answering judgment read, from the same snapshot; `None` without one.
+    pub diagnostics: Option<Diagnostics>,
+}
+
+/// The pane's execution as the final snapshot read it, and the old sources it may be.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Diagnostics {
+    pub nonce: String,
+    pub history: Result<HistoryView, String>,
+    pub overlaps: Vec<Overlap>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HistoryView {
+    pub complete: bool,
+    pub pinned: Option<SourceId>,
+    /// The current, awaiting and left sessions in that order, each with its pin if it has one.
+    pub sessions: Vec<(&'static str, String, Option<SourceId>)>,
+}
+
+/// An old source sharing a path, session ID or inode with a pin, as the judgment holds it, or
+/// whose session ID an unpinned session has.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Overlap {
+    pub key: String,
+    pub held_by: Vec<SourceId>,
+    pub unpinned: Vec<String>,
 }
 
 impl Reply {
@@ -121,6 +149,7 @@ impl Reply {
             summary: None,
             execution: None,
             unsettled: None,
+            diagnostics: None,
         }
     }
 }
@@ -171,7 +200,6 @@ impl TransitionPort {
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
     /// runs to its end with the permit, and only the reply is lost.
-    #[cfg(test)]
     pub(crate) async fn request(
         &self,
         operation: Operation,
@@ -181,7 +209,6 @@ impl TransitionPort {
     }
 
     /// [`Self::request`] naming the run of `named` while it goes into this port's mailbox.
-    #[cfg(test)]
     pub(crate) async fn request_as(
         &self,
         named: &Self,
