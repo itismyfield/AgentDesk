@@ -74,8 +74,6 @@ pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
 #[cfg(test)]
-pub(in crate::services::discord) use watcher_lifecycle::n4d2_pause_install_after_host;
-#[cfg(test)]
 pub use watcher_lifecycle::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };

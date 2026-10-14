@@ -65,12 +65,10 @@ mod restore_support;
 pub(super) use self::restore_support::*;
 #[path = "lifecycle/tests.rs"]
 mod tests;
-pub(super) use self::tests::*;
 
 #[path = "lifecycle/ready_failure.rs"]
 mod ready_failure;
 pub(in crate::services::discord) use self::ready_failure::fail_dispatch_for_ready_for_input_stall;
-pub(super) use self::ready_failure::*;
 
 #[path = "lifecycle/recovery_markers.rs"]
 mod recovery_markers;
@@ -101,8 +99,6 @@ mod o_only_install;
 #[cfg(test)]
 pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
 #[cfg(test)]
-pub(in crate::services::discord) use o_only_install::tests::pause_host as n4d2_pause_install_after_host;
-#[cfg(test)]
 pub use o_only_install::{
     OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
 };
@@ -128,4 +124,3 @@ pub(in crate::services::discord) use self::restore_mapping::session_belongs_to_c
 
 #[path = "lifecycle/restore_tests.rs"]
 mod restore_tests;
-pub(super) use self::restore_tests::*;

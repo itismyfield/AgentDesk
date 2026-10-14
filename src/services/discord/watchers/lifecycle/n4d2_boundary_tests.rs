@@ -58,6 +58,15 @@ async fn joined(ticket: watcher_completion::Ticket) {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Invalidation {
+    Source,
+    NonRegular,
+    Generation,
+    Owner,
+    Reset,
+}
+
 #[tokio::test]
 async fn n4d2_terminal_invalidated_authority_self_exits_and_retains_custody() {
     if !isolated(
