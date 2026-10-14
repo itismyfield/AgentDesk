@@ -58,9 +58,8 @@ async fn reached(entered: &Notify, what: &str) {
     assert!(reached.is_ok(), "the idle loop never reached {what}");
 }
 
-/// One channel whose live watcher reads the rollout itself, the real idle loop running, and
-/// the turn it produces: the loop observes a typed prompt with no row yet and parks at its
-/// hand-off, the hook wiring claims and delegates the turn, and the watcher dies.
+/// A channel on the real idle loop whose typed prompt the hook wiring delegated to a live
+/// watcher on the rollout, with the loop parked at its hand-off and the watcher then dead.
 struct Delegated {
     shared: Arc<SharedData>,
     codex: CodexChannel,
@@ -205,9 +204,8 @@ fn codex_idle_loop_reowns_a_turn_whose_watcher_died_and_delivers_it_once() {
     });
 }
 
-/// The re-owned turn's reader cannot open the rollout, so it fails before any content. The row,
-/// its turn and its mailbox actor stay, and once the rollout is readable the ownerless repair
-/// resumes that same turn and delivers the answer once, with no second prompt.
+/// A reader that fails before any content keeps the re-owned row, turn and actor; the ownerless
+/// repair then resumes that same turn and delivers the answer once.
 #[test]
 fn codex_reader_failure_before_content_leaves_the_reowned_turn_for_the_repair() {
     use std::os::unix::fs::PermissionsExt;

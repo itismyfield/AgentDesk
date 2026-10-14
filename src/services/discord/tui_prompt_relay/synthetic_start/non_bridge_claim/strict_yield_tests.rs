@@ -435,9 +435,8 @@ fn reown_cannot_commit_between_a_claim_and_its_owner_adopt() {
     });
 }
 
-/// The real Claude idle caller observes the prompt with no row yet, the hook wiring then
-/// delegates the turn to a watcher that dies, and the caller tails the re-owned turn under the
-/// lease the re-own stored: the tail's guard releases that lease when the tail ends.
+/// The real Claude idle caller re-owns a turn delegated to a watcher that died, and tails it
+/// under the stored lease: the tail's guard releases that lease when the tail ends.
 #[test]
 fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
     isolated(|dir| async move {
@@ -537,9 +536,8 @@ fn claude_idle_caller_tails_a_reowned_turn_under_the_stored_lease() {
     });
 }
 
-/// The bridge tail of a re-owned turn admits its native terminal, which stamps the native
-/// session on the row. The witness the re-own recorded follows that write, so the turn is
-/// still resumable by its own actor afterwards.
+/// A re-owned turn's native terminal admission rewrites its row; the re-own's witness follows
+/// that write, so the turn stays resumable by its own actor.
 #[test]
 fn reowned_turn_keeps_its_bridge_witness_through_a_native_terminal_admission() {
     use std::os::unix::fs::MetadataExt;
