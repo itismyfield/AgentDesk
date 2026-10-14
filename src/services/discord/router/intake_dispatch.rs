@@ -25,6 +25,8 @@ impl std::error::Error for QueuedTransitionBusyHandoff {}
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
+#[cfg(test)]
+mod ledger;
 mod notice;
 mod policy_channel;
 mod queued;
@@ -101,6 +103,10 @@ impl LocalAdmissionPermit {
 
 #[derive(Debug)]
 pub(crate) enum IntakeAdmission {
+    #[cfg(test)]
+    LedgerReceived(Box<ledger::LedgerReceived>),
+    #[cfg(test)]
+    LedgerDeferred(Box<ledger::LedgerDeferred>),
     Local(LocalAdmissionPermit),
     Forwarded {
         target_instance_id: String,
@@ -537,6 +543,16 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
         )
         .await?;
         let admission = admit_text_intake(deps, &submission).await;
+        #[cfg(test)]
+        let admission = ledger::take_test_admission(admission);
+        #[cfg(test)]
+        if ledger::is_ledger(&admission)
+            && !crate::services::discord::input_runtime::supervisor::mutant(
+                "c2c1_c_receipt_checkpoints",
+            )
+        {
+            return finish_text_intake_admission(deps, admission, submission).await;
+        }
         legacy_allowed(
             deps.shared,
             deps.http,
@@ -559,6 +575,14 @@ pub(crate) async fn finish_text_intake_admission(
     admission: IntakeAdmission,
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    #[cfg(test)]
+    if ledger::is_ledger(&admission)
+        && !crate::services::discord::input_runtime::supervisor::mutant(
+            "c2c1_generic_guard_precedes_c",
+        )
+    {
+        return Err(Box::new(ledger::LedgerOutcome(admission)));
+    }
     legacy_allowed(
         deps.shared,
         deps.http,
@@ -567,6 +591,10 @@ pub(crate) async fn finish_text_intake_admission(
     )
     .await?;
     match admission {
+        #[cfg(test)]
+        admission @ (IntakeAdmission::LedgerReceived(_) | IntakeAdmission::LedgerDeferred(_)) => {
+            return Err(Box::new(ledger::LedgerOutcome(admission)));
+        }
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
         }
@@ -735,6 +763,14 @@ async fn defer_live_submission(
 
 fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_msg_id: &str) {
     match admission {
+        #[cfg(test)]
+        IntakeAdmission::LedgerReceived(received) => {
+            tracing::debug!(?received, "input ledger responsibility retained")
+        }
+        #[cfg(test)]
+        IntakeAdmission::LedgerDeferred(deferred) => {
+            tracing::debug!(?deferred, "input ledger rescan or restore required")
+        }
         IntakeAdmission::Forwarded {
             target_instance_id,
             outbox_id,

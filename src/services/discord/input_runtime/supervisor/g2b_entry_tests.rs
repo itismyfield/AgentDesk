@@ -821,7 +821,10 @@ async fn c2_actual_serve_publishes_existing_client_only_after_adopt_and_final_vi
     sent.expect("fixture: the original command sender reaches the running supervisor");
     let responsibility = responsibility.expect("fixture: the raw lookup receives an actual reply");
     assert!(
-        matches!(responsibility, Responsibility::Known { key: 41, .. }),
+        matches!(
+            responsibility.responsibility,
+            Responsibility::Known { key: 41, .. }
+        ),
         "fixture: boot and the original mailbox independently resolve the durable row"
     );
     assert!(
