@@ -1408,12 +1408,12 @@ class ScenarioFilterFailClosed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = root / "agentdesk.yaml"
-            agents = (("claude-pipe", "claude", "111"), ("claude-tui", "claude", "222"),
-                      ("codex-pipe", "codex", "444"),
-                      ("codex-tui", "codex", "555"))
+            agents = (("adk-claude-pipe-e2e", "claude", "111"), ("adk-claude-tui-2-e2e", "claude", "222"),
+                      ("adk-codex-pipe-e2e", "codex", "444"),
+                      ("adk-codex-tui-e2e", "codex", "555"))
             config.write_text("agents:\n" + "".join(
-                f"  - {{id: adk-{cell}-e2e, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
-                for cell, provider, channel in agents
+                f"  - {{id: {agent}, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
+                for agent, provider, channel in agents
             ), encoding="utf-8")
             output = root / "matrix"
             proc = subprocess.run(
