@@ -29,10 +29,16 @@ pub(crate) async fn return_legacy_pg(
         return Err(HostedTransitionError::ExpectedOverwrite);
     }
     let mut tx = pool.begin().await.map_err(database_error)?;
+    // Lock before evaluating the heartbeat so a lock wait cannot leave it stale.
+    sqlx::query("SELECT id FROM sessions WHERE id = $1 FOR UPDATE")
+        .bind(observed.session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(database_error)?;
     let result = sqlx::query(
         "UPDATE sessions
          SET returned_hosted_execution = hosted_execution,
-             hosted_execution = NULL, status = 'idle', last_heartbeat = NOW()
+             hosted_execution = NULL, status = 'idle', last_heartbeat = clock_timestamp()
          WHERE id = $1
            AND hosted_execution::TEXT IS NOT DISTINCT FROM $2::JSONB::TEXT
            AND hosted_execution->>'state' = 'retired'
@@ -71,4 +77,4 @@ fn database_error(error: sqlx::Error) -> HostedTransitionError {
 
 #[cfg(test)]
 #[path = "legacy_return_tests.rs"]
-mod tests;
+mod high_risk_recovery;

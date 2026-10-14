@@ -222,19 +222,62 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
         )
         .await
     });
-    // Wait for PostgreSQL to report the blocked UPDATE, rather than relying on sleep timing.
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE sessions%')")
-                .fetch_one(&pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
+    wait_for_row_lock(&pool).await;
     tx.commit().await.unwrap();
     let changed = snapshot(&pool, observed.session_id).await;
     assert_eq!(worker.await.unwrap().unwrap(), HostedCasOutcome::Stale);
     assert_eq!(snapshot(&pool, observed.session_id).await, changed);
+    pool.close().await;
+    db.drop().await;
+}
+
+async fn wait_for_row_lock(pool: &PgPool) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock')")
+                .fetch_one(pool).await.unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_return_heartbeat_is_measured_after_row_lock_pg() {
+    let (db, pool, observed, r) = setup().await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM sessions WHERE id = $1 FOR UPDATE")
+        .bind(observed.session_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let worker_pool = pool.clone();
+    let worker_obs = observed.clone();
+    let worker = tokio::spawn(async move {
+        return_legacy_pg(
+            &worker_pool,
+            &worker_obs,
+            &r.owner,
+            &r.execution_nonce,
+            &ended(&r),
+        )
+        .await
+    });
+    wait_for_row_lock(&pool).await;
+    let released_after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(worker.await.unwrap().unwrap(), HostedCasOutcome::Written);
+    let fresh: bool = sqlx::query_scalar("SELECT last_heartbeat >= $2 FROM sessions WHERE id = $1")
+        .bind(observed.session_id)
+        .bind(released_after)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(fresh, "heartbeat must be sampled after the row lock wait");
     pool.close().await;
     db.drop().await;
 }

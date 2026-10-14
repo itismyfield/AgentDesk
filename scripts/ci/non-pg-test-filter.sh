@@ -22,7 +22,6 @@ NON_PG_SKIP_ARGS=(
   --skip db::automation_candidates::verdict_tests
   --skip db::campaigns::tests
   --skip db::dispatched_session_rebind_override::tests
-  --skip db::dispatched_sessions::hosted_execution::legacy_return::tests
   --skip db::dispatched_sessions::tests
   --skip db::dispatches::delivery_events::tests
   --skip db::dispatches::outbox::delivery::tests

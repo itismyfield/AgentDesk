@@ -738,6 +738,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
         "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
+        "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
+        "src/services/session_host/herdr_gate/legacy_return_tests.rs",
     }
 )
 
