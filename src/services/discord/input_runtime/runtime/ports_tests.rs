@@ -498,7 +498,6 @@ fn c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind() {
                 "source_kind":"live_message", "message_kind":"regular"});
             input.as_object_mut().unwrap().remove(missing);
             let prepared = policy_source(60, channel, channel, input);
-            let source = Source::from_prepared(prepared.clone()).unwrap();
             let facts = source_policy_facts(&shared, &discord.http, &prepared).await;
             assert_eq!(facts.disposition, None, "missing {missing} is unreadable, not a prompt");
             assert_eq!(intake::classify(&facts, &prepared), Classification::Retry(intake::Retry::Unknown));
