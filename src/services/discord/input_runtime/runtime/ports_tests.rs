@@ -354,7 +354,12 @@ fn c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unkn
         assert_eq!(prepared.input(), &original);
         let population = fence::population_root().expect("test population root");
         assert!(!population.join("input_ledger").try_exists().unwrap());
-        assert!(!population.join("discord_pending_queue").try_exists().unwrap());
+        assert!(
+            !population
+                .join("discord_pending_queue")
+                .try_exists()
+                .unwrap()
+        );
         discord.assert_reads_only();
         drop(gate);
     });

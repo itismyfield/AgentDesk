@@ -217,12 +217,15 @@ fn rotate_owned_jsonl(
         RotationIdleVerdict::Busy(term) => return Ok(RotationOutcome::Refused(term)),
     };
 
-    crate::services::tmux_common::truncate_jsonl_head_safe(
-        target,
-        size_cap_bytes,
-        target_keep_bytes,
-        &eof_witnesses,
-    )
+    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+        crate::services::tmux_common::truncate_jsonl_head_safe_under_source_authority(
+            authority,
+            target,
+            size_cap_bytes,
+            target_keep_bytes,
+            &eof_witnesses,
+        )
+    })
     .map(|rotated| match rotated {
         Some(new_size) => RotationOutcome::Rotated(new_size),
         // The gate said idle and the fd disagreed: a witness was not at the length
