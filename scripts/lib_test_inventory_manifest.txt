@@ -9070,7 +9070,6 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_fresh_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::a_delegated_claim_is_refused_by_reclaim_capture_and_dormant
-services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::a_delegated_claim_leaves_yield_reclaim_capture_and_dormant_as_before
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::delegated_actor_proofs_do_not_accumulate
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_commits_nothing_when_the_stored_lease_changes_before_the_commit
 services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::reown::reown_tests::reown_keeps_the_lease_and_the_delegation_when_its_commit_fails
