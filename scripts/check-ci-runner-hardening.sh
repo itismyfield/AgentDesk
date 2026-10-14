@@ -2031,16 +2031,15 @@ done < <(workflow_files)
 validate_required_context_uniqueness
 validate_path_filter_required_mirrors
 
-if [ -f "$trusted_workflow" ]; then
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then
-    error "$trusted_workflow must not have a pull_request or pull_request_target trigger"
-  fi
-  grep -Eq '^[[:space:]]+push:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a trusted push trigger"
-  grep -Eq '^[[:space:]]+workflow_dispatch:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a workflow_dispatch trigger"
-  grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a merge_group trigger"
+# Trusted macOS runs on a timer or by hand only and no run cancels another:
+# a per-push run outlasts the gap between main pushes and never finishes.
+if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
+  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
+  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
+    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
+    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
+  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required
