@@ -184,9 +184,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn reown_refused_delega
 const ROLLBACK_FAILED: &str = "re-own could not be rolled back";
 const SEND_UNKNOWN: &str = "a stopped watcher may still be sending the observed source";
 
-/// The stopped watcher that could read `expected`, once no task of it can still be sending.
-/// A handle with no completion record runs no task; a task still pending at the deadline, or
-/// one whose end is unknown, refuses: cancel and a stale heartbeat prove nothing about a send.
+/// The stopped watcher that could read `expected`, once no task of it can still be sending: no
+/// completion record means no task, and a pending or unknown end refuses. Cancel proves nothing.
 async fn stopped_watcher_ended(
     watchers: &super::super::super::super::TmuxWatcherRegistry,
     tmux: &str,

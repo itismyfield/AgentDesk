@@ -679,9 +679,8 @@ pub(crate) fn with_external_input_relay_lease_if_matches<R, E>(
     Some(result)
 }
 
-/// Compare the whole stored lease, generation included, run `commit`, and only when it
-/// succeeds store `replacement` under a fresh generation. A mismatch (`None`) or a failed
-/// commit leaves the stored lease, or its absence, alone. `commit` holds STATE: no dedupe calls.
+/// Run `commit`, then store `replacement` under a fresh generation, only while the stored lease
+/// equals `expected`, generation included. `commit` holds STATE and must not call into dedupe.
 pub(crate) fn replace_external_input_relay_lease_if_matches<E>(
     provider: &str,
     tmux_session_name: &str,
