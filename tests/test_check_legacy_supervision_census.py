@@ -230,8 +230,8 @@ class DormantCensusTests(unittest.TestCase):
         self.assertRegex(errors[0], r"re-pin 'confirm_at_boot': '[0-9a-f]{64}'")
 
     def test_edit_outside_protected_functions_passes(self):
-        edited = lambda code: code.replace('let mut boundaries = Vec::new();',
-                                           'let mut boundaries = Vec::with_capacity(4);', 1)
+        edited = lambda code: code.replace('let retire = |channel|',
+                                           'let retire = |channel: u64|', 1)
         self.assertNotEqual(edited(guard.classifier._production_text(Path(self.TURN))),
                             guard.classifier._production_text(Path(self.TURN)))
         self.assertEqual(self.protected_audit(self.TURN, edited), [])
