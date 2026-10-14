@@ -1,6 +1,7 @@
 //! A Discord turn reserves its Codex handoff before submit; an input seen before the handoff
 //! names its native turn is held until the handoff binds, ends or expires.
 use super::*;
+use crate::services::codex_tui::session::checkpoint::first_user_record_created_since;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -42,7 +43,7 @@ impl RecordEvidence {
         Some((self.turn_id.as_deref()?, self.create_time?))
     }
 
-    fn created_since(&self, since: DateTime<Utc>) -> bool {
+    pub(crate) fn created_since(&self, since: DateTime<Utc>) -> bool {
         self.create_time
             .is_some_and(|created| created >= since - EVIDENCE_SKEW)
     }
@@ -57,6 +58,13 @@ pub(super) enum Evidence<'a> {
     Live,
     /// A rollout user record read in file order.
     Record(&'a RecordEvidence),
+    #[cfg(unix)]
+    Restored {
+        record: &'a RecordEvidence,
+        path: &'a Path,
+        start: u64,
+        entry: Option<&'a str>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,12 +76,12 @@ pub(super) struct ParkedObservation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct HandoffReservation {
-    generation: u64,
+pub(crate) struct HandoffReservation {
+    pub(super) generation: u64,
     origin: String,
-    reserved_wall: DateTime<Utc>,
+    pub(super) reserved_wall: DateTime<Utc>,
     bound: Option<String>,
-    parked: Vec<ParkedObservation>,
+    pub(super) parked: Vec<ParkedObservation>,
     #[cfg(unix)]
     #[serde(skip)]
     replay_from: Option<u64>,
@@ -186,9 +194,17 @@ pub(super) fn bind_matching_origin(
             at: observed_at,
         },
         Evidence::Record(record) => Proof::Record(record),
+        #[cfg(unix)]
+        Evidence::Restored { record, .. } => Proof::Record(record),
     };
-    bind_origin(provider, tmux, prompts, proof)
-        .filter(|outcome| !matches!(outcome, BindOutcome::NotOrigin))
+    bind_origin_guarded(
+        provider,
+        tmux,
+        prompts,
+        proof,
+        Some((evidence, native_turn)),
+    )
+    .filter(|outcome| !matches!(outcome, BindOutcome::NotOrigin))
 }
 
 fn bind_origin(
@@ -197,11 +213,45 @@ fn bind_origin(
     prompts: &[String],
     proof: Proof<'_>,
 ) -> Option<BindOutcome> {
+    bind_origin_guarded(provider, tmux, prompts, proof, None)
+}
+
+fn bind_origin_guarded(
+    provider: &str,
+    tmux: &str,
+    prompts: &[String],
+    proof: Proof<'_>,
+    guard: Option<(Evidence<'_>, Option<&str>)>,
+) -> Option<BindOutcome> {
     let provider = normalize_provider(provider);
     let tmux = tmux.trim();
     let (outcome, drained) = {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state.purge_expired();
+        #[cfg(unix)]
+        if let Some((
+            Evidence::Restored {
+                record,
+                path,
+                start,
+                entry,
+            },
+            turn,
+        )) = guard
+            && !restored_record_allowed(
+                &state,
+                tmux,
+                path,
+                start,
+                &prompts[0],
+                (entry, turn),
+                record,
+            )
+        {
+            return Some(BindOutcome::Conflict);
+        }
+        #[cfg(not(unix))]
+        let _ = guard;
         let key = PromptKey::new(&provider, tmux);
         let origin = state.handoff_by_tmux.get(&key)?.value.origin.clone();
         if !prompts.iter().any(|prompt| prompts_match(&origin, prompt)) {
@@ -459,6 +509,33 @@ fn durable_path(provider: &str, tmux: &str) -> Option<std::path::PathBuf> {
     })
 }
 
+fn saved_handoff(tmux: &str) -> std::io::Result<Option<DurableHandoff>> {
+    let Some(path) = durable_path("codex", tmux) else {
+        return Ok(None);
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_has_custody(tmux: &str) -> std::io::Result<bool> {
+    if STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .is_some_and(|entry| !entry.value.parked.is_empty())
+    {
+        return Ok(true);
+    }
+    Ok(saved_handoff(tmux)?.is_some_and(|saved| !saved.reservation.parked.is_empty()))
+}
+
 #[cfg(not(test))]
 fn durable_root() -> Option<std::path::PathBuf> {
     crate::config::runtime_root()
@@ -517,7 +594,10 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
 /// since a reservation that held inputs across the restart, which is restored too.
 pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u64 {
     let eof = std::fs::metadata(rollout_path)
-        .map(|metadata| metadata.len())
+        .ok()
+        .and_then(|metadata| {
+            crate::services::codex_tui::session::checkpoint::at(rollout_path, metadata.len()).ok()
+        })
         .unwrap_or(0);
     let provider = normalize_provider("codex");
     let tmux = tmux.trim();
@@ -536,10 +616,7 @@ pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u
         Some(Some(reserved_wall)) => reserved_wall,
         Some(None) => return eof,
         None => {
-            let Some(record) = durable_path(&provider, tmux)
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .and_then(|text| serde_json::from_str::<DurableHandoff>(&text).ok())
-            else {
+            let Some(record) = saved_handoff(tmux).ok().flatten() else {
                 return eof;
             };
             let reservation = record.reservation;
@@ -579,33 +656,250 @@ pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u
     first_user_record_created_since(rollout_path, reserved_wall).map_or(eof, |floor| floor.min(eof))
 }
 
+#[cfg(unix)]
+pub(crate) type CodexRestore =
+    crate::services::codex_tui::session::checkpoint::RestorePlan<HandoffReservation>;
+
+/// Keeps bootstrap observation, input custody and output checkpoints in separate namespaces.
+#[cfg(unix)]
+pub(crate) fn prepare_codex_restore(
+    tmux: &str,
+    source: crate::services::codex_tui::session::checkpoint::Source,
+    linked: bool,
+) -> std::io::Result<CodexRestore> {
+    source.check(tmux)?;
+    {
+        let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(scope) = state.codex_restore_by_tmux.get(tmux) {
+            scope.source.check(tmux)?;
+            if scope.source.matches_path(&source.path)
+                && scope.source.session_id == source.session_id
+            {
+                return Ok(scope.clone());
+            }
+            if !super::runtime_binding::codex_restore_replacement_allowed(
+                &state, tmux, scope, &source,
+            ) {
+                return Err(std::io::Error::other(
+                    "Codex restore custody source mismatch",
+                ));
+            }
+        }
+    }
+    let mut input_start = if linked {
+        codex_rehydrated_scan_offset(tmux, &source.path).min(source.complete_end)
+    } else {
+        source.complete_end
+    };
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let held = linked
+        .then(|| {
+            state
+                .handoff_by_tmux
+                .get(&PromptKey::new("codex", tmux))
+                .map(|entry| entry.value.clone())
+        })
+        .flatten();
+    drop(state);
+    if let Some(held) = &held {
+        input_start = first_user_record_created_since(&source.path, held.reserved_wall)
+            .unwrap_or(source.complete_end)
+            .min(source.complete_end);
+    }
+    Ok(CodexRestore::new(
+        source,
+        input_start,
+        held,
+        Default::default(),
+    ))
+}
+
+#[cfg(unix)]
+pub(crate) fn finish_codex_restore(
+    tmux: &str,
+    mut scope: CodexRestore,
+    stats: crate::services::codex_tui::session::checkpoint::ScanStats,
+) -> std::io::Result<u64> {
+    scope.source.check(tmux)?;
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(current) = state.codex_restore_by_tmux.get(tmux) {
+        current.source.check(tmux)?;
+        if current.source.matches_path(&scope.source.path)
+            && current.source.session_id == scope.source.session_id
+        {
+            return Ok(current.input_start);
+        }
+        if !super::runtime_binding::codex_restore_replacement_allowed(
+            &state,
+            tmux,
+            current,
+            &scope.source,
+        ) {
+            return Err(std::io::Error::other("Codex restore source changed"));
+        }
+    }
+    if let Some(current) = state.handoff_by_tmux.get(&PromptKey::new("codex", tmux))
+        && scope
+            .held
+            .as_ref()
+            .is_some_and(|held| current.value.generation != held.generation)
+    {
+        return Err(std::io::Error::other(
+            "Codex restore handoff generation changed",
+        ));
+    }
+    if let Some(current) = state
+        .handoff_by_tmux
+        .get_mut(&PromptKey::new("codex", tmux))
+        && scope
+            .held
+            .as_ref()
+            .is_some_and(|held| current.value.generation == held.generation)
+    {
+        current.value.replay_from = Some(scope.input_start);
+    }
+    let input_start = scope.input_start;
+    scope.unknown = stats;
+    stats.report(
+        &scope.source,
+        0,
+        scope.source.complete_end,
+        crate::services::codex_tui::session::checkpoint::ObservationKind::Unknown,
+    );
+    state.codex_restore_by_tmux.insert(tmux.to_string(), scope);
+    Ok(input_start)
+}
+
+/// Historical records can settle custody without acquiring an unrelated record's lease.
+#[cfg(unix)]
+pub(crate) fn codex_record_admission(
+    tmux: &str,
+    path: &Path,
+    start: u64,
+    prompt: &str,
+    ids: (Option<&str>, Option<&str>),
+    record: &RecordEvidence,
+) -> bool {
+    let (allowed, released) = {
+        let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(scope) = state.codex_restore_by_tmux.get(tmux) else {
+            return true;
+        };
+        if !scope.source.matches_path(path) || scope.source.check(tmux).is_err() {
+            return false;
+        }
+        if start >= scope.source.complete_end {
+            return true;
+        }
+        let key = PromptKey::new("codex", tmux);
+        let allowed = restored_record_allowed(&state, tmux, path, start, prompt, ids, record);
+        let released = if allowed {
+            Vec::new()
+        } else {
+            state.settle_handoff_for_record(&key, prompt, record)
+        };
+        (allowed, released)
+    };
+    if !allowed {
+        drain_parked("codex", tmux, released);
+        sync_durable("codex", tmux);
+    }
+    allowed
+}
+
+#[cfg(unix)]
+pub(super) fn restored_record_allowed(
+    state: &TuiPromptDedupeState,
+    tmux: &str,
+    path: &Path,
+    start: u64,
+    prompt: &str,
+    ids: (Option<&str>, Option<&str>),
+    record: &RecordEvidence,
+) -> bool {
+    let Some(scope) = state.codex_restore_by_tmux.get(tmux) else {
+        return true;
+    };
+    if !scope.source.matches_path(path) || scope.source.check(tmux).is_err() {
+        return false;
+    }
+    if start >= scope.source.complete_end {
+        return true;
+    }
+    scope.held.as_ref().is_some_and(|held| {
+        state
+            .handoff_by_tmux
+            .get(&PromptKey::new("codex", tmux))
+            .is_none_or(|entry| entry.value.generation == held.generation)
+            && record.created_since(held.reserved_wall)
+            && (prompts_match(&held.origin, prompt)
+                || held.parked.iter().any(|input| {
+                    prompts_match(&input.prompt, prompt)
+                        && input
+                            .native_turn
+                            .as_deref()
+                            .zip(ids.1)
+                            .is_none_or(|(a, b)| a == b)
+                        && (input.entry_ids.is_empty()
+                            || ids
+                                .0
+                                .is_none_or(|id| input.entry_ids.iter().any(|own| own == id)))
+                }))
+    })
+}
+
 /// Rejudges only the restored reservation's origin and held inputs on their own cursor.
 /// A response writer advancing the shared cursor cannot consume these unprocessed records.
 #[cfg(unix)]
 pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Path) {
     use std::io::{BufRead, Seek, SeekFrom};
     let key = PromptKey::new("codex", tmux.trim());
-    let held = STATE
+    let restored = STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .handoff_by_tmux
-        .get(&key)
-        .and_then(|entry| {
-            entry
-                .value
-                .replay_from
-                .map(|offset| (entry.value.clone(), offset))
+        .codex_restore_by_tmux
+        .get(tmux)
+        .cloned();
+    let held = restored
+        .as_ref()
+        .and_then(|scope| {
+            scope
+                .held
+                .as_ref()
+                .zip(scope.replay_from)
+                .map(|(held, start)| (held.clone(), start))
+        })
+        .or_else(|| {
+            STATE
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .handoff_by_tmux
+                .get(&key)
+                .and_then(|entry| {
+                    entry
+                        .value
+                        .replay_from
+                        .map(|start| (entry.value.clone(), start))
+                })
         });
     let Some((held, start)) = held else {
         return;
     };
-    let Ok(mut file) = std::fs::File::open(rollout_path) else {
+    let opened = match restored.as_ref() {
+        Some(scope) if scope.source.matches_path(rollout_path) => scope.source.reader(tmux),
+        Some(_) => return,
+        None => std::fs::File::open(rollout_path),
+    };
+    let Ok(mut file) = opened else {
         return;
     };
     let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
         return;
     };
-    let mut offset = if start > len { 0 } else { start };
+    if start > len {
+        return;
+    }
+    let mut offset = start;
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return;
     }
@@ -619,6 +913,7 @@ pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Pa
         if read == 0 || !line.ends_with('\n') {
             break;
         }
+        let record_start = offset;
         offset += read as u64;
         let Ok(json) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -637,53 +932,44 @@ pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Pa
             continue;
         };
         current = record.turn_id.clone().or(current);
-        if prompts_match(&held.origin, &prompt)
+        if codex_record_admission(
+            tmux,
+            rollout_path,
+            record_start,
+            &prompt,
+            (entry_id.as_deref(), current.as_deref()),
+            &record,
+        ) && (prompts_match(&held.origin, &prompt)
             || held
                 .parked
                 .iter()
-                .any(|input| prompts_match(&input.prompt, &prompt))
+                .any(|input| prompts_match(&input.prompt, &prompt)))
         {
-            observation::observe_codex_record_prompt_at(
+            observation::observe_restored_codex_record_prompt_at(
                 tmux,
-                &prompt,
-                entry_id.as_deref(),
-                current.as_deref(),
-                &record,
+                (rollout_path, record_start, &record),
+                (&prompt, entry_id.as_deref(), current.as_deref()),
                 Utc::now(),
             );
         }
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux)
+        && scope
+            .held
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.generation == held.generation)
+        && scope.source.check(tmux).is_ok()
+    {
+        scope.replay_from = Some(offset);
+        scope.input_start = scope.input_start.max(offset.min(scope.source.complete_end));
+    }
     if let Some(entry) = state
         .handoff_by_tmux
         .get_mut(&key)
         .filter(|entry| entry.value.generation == held.generation)
     {
         entry.value.replay_from = (!entry.value.parked.is_empty()).then_some(offset);
-    }
-}
-
-fn first_user_record_created_since(rollout_path: &Path, since: DateTime<Utc>) -> Option<u64> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(rollout_path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let (mut offset, mut line) = (0_u64, String::new());
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).ok()?;
-        if read == 0 || !line.ends_with('\n') {
-            return None;
-        }
-        let start = offset;
-        offset += read as u64;
-        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if extract_codex_rollout_user_prompt_with_entry_id(&json).is_some()
-            && RecordEvidence::from_record(&json).created_since(since)
-        {
-            return Some(start);
-        }
     }
 }
 

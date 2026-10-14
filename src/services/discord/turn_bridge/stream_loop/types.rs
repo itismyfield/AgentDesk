@@ -37,6 +37,7 @@ pub(crate) mod terminal_prepare_test {
 #[cfg(unix)]
 pub(in super::super) struct PinnedTerminalTransport<'a> {
     pub(in super::super) source: (&'a SharedData, &'a dyn TurnGateway, &'a ProviderKind),
+    pub(in super::super) admitted: Option<&'a CodexRange>,
     pub(in super::super) target: (ChannelId, ChannelId, MessageId),
     pub(in super::super) payload: (Option<&'a str>, &'a str, (u64, u64)),
     pub(in super::super) trace: (Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -59,6 +60,12 @@ impl PinnedTerminalTransport<'_> {
         let (shared, gateway, provider) = self.source;
         let (owner, channel, msg) = self.target;
         let (tmux, body, range) = self.payload;
+        if let Some(admitted) = self.admitted
+            && !admitted.parked_current(shared).await
+        {
+            pinned.release_without_receipt(NotDelivered);
+            return (false, false, None);
+        }
         let settle =
             cutover::begin_pinned_terminal(shared, provider, long, (owner, channel), range);
         let (message_id, failed, fallback) = if long {
@@ -153,6 +160,7 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, text);
     let (committed, _, receipt) = PinnedTerminalTransport {
         source: (shared, gateway, &provider),
+        admitted: Some(&admitted),
         target: (owner, channel, message),
         payload: (
             row.tmux_session_name.as_deref(),
@@ -288,6 +296,7 @@ macro_rules! dispatch_pinned_terminal {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
                     let transport = PinnedTerminalTransport {
                         source: ($shared.as_ref(), $gateway.as_ref(), &$provider),
+                        admitted: $admitted,
                         target: ($owner, $channel, $message),
                         payload: (
                             $inflight.tmux_session_name.as_deref(),

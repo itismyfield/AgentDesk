@@ -64,6 +64,7 @@ fn publish_stop(tmux: &str, turn: &str) {
 /// One Codex channel under the real idle rollout loop and observer, Discord recorded.
 struct Fixture {
     shared: Arc<SharedData>,
+    http: Arc<serenity::Http>,
     codex: CodexChannel,
     requests: Requests,
     /// Message POSTs still to be rejected.
@@ -120,7 +121,7 @@ impl Fixture {
                 http.clone(),
             )
             .await;
-        let rest = crate::services::discord::shared_state::test_rest::install(http);
+        let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
         let observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
         // The production hook observer; the test relays each published event itself.
         let (hooks, hook_rx) = tokio::sync::broadcast::channel(64);
@@ -134,6 +135,7 @@ impl Fixture {
         super::super::super::spawn_codex_idle_rollout_relay(shared.clone());
         Self {
             shared,
+            http,
             codex,
             requests,
             failing_posts,
@@ -402,7 +404,7 @@ fn live_pane_tmux(root: &Path) -> crate::config::TestEnvVarGuard {
     let tmux = dir.join("tmux");
     std::fs::write(
         &tmux,
-        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\ncase \"$1\" in list-panes) [ -f \"$(dirname \"$0\")/dead\" ] && echo 1 || echo 0;; esac\nexit 0\n",
+        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do case \"$1\" in -L|-S) shift;; esac; shift; done\ncase \"$1\" in list-sessions) /bin/cat \"$(dirname \"$0\")/names\" 2>/dev/null;; list-panes) [ -f \"$(dirname \"$0\")/dead\" ] && echo 1 || echo 0;; esac\nexit 0\n",
     )
     .expect("fake tmux");
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -456,6 +458,10 @@ fn resumed_channel(
 }
 
 fn run(scenario: impl FnOnce(PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
     let _env_lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -558,6 +564,13 @@ fn codex_direct_answer_keeps_its_boundary_when_a_later_direct_input_lands_first(
             let second_end = fx.append(&opening(&t2, PROMPT2));
             fx.append(&(item_completed_line_for(&t2) + &answer_for(&t2, RESPONSE2)));
             fx.scanned_past(second_end).await;
+            assert!(
+                crate::services::tui_prompt_dedupe::codex_restore_observation_for_tests(
+                    &fx.codex.tmux
+                )
+                .is_none(),
+                "a live same-binding poll installed a restore scope"
+            );
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
             let first_anchor = fx.codex.row().expect("first claim").user_msg_id;
             super::super::super::relay_observed_prompt(&fx.shared, second).await;

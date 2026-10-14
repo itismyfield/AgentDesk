@@ -136,6 +136,7 @@ fn restore_checkpoint(
             && codex_verified::consumer_allowed(authority, old)
     });
     if let Some(mut previous) = previous {
+        normalize_native(&mut previous, authority)?;
         if let Some((path, offset)) = checkpoint {
             previous.relay_output_path = Some(path);
             previous.relay_last_offset = Some(offset);
@@ -155,10 +156,8 @@ fn restore_checkpoint(
     binding.last_offset = marker
         .as_ref()
         .and_then(|value| value["rollout_start_offset"].as_u64())
-        .filter(|offset| {
-            fs::metadata(&binding.output_path).is_ok_and(|metadata| *offset <= metadata.len())
-        })
         .unwrap_or(0);
+    normalize_native(&mut binding, authority)?;
     binding.relay_last_offset = Some(0);
     // Discovery's spool EOF is not evidence that its bytes were delivered.
     binding.relay_output_path = binding
@@ -176,6 +175,98 @@ fn restore_checkpoint(
         binding.relay_last_offset = Some(binding.last_offset);
     }
     Ok(binding)
+}
+
+fn normalize_native(
+    binding: &mut TuiRuntimeBinding,
+    authority: &TmuxSourceAuthority<'_>,
+) -> io::Result<()> {
+    let (source, mut file) = crate::services::codex_tui::session::checkpoint::Source::open(
+        authority.session(),
+        Path::new(&binding.output_path),
+        binding.session_id.clone(),
+    )?;
+    binding.last_offset =
+        crate::services::codex_tui::session::checkpoint::boundary(&mut file, binding.last_offset)?;
+    source.check(authority.session())
+}
+
+pub(crate) fn migrate_raw_native_marker(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> io::Result<()> {
+    use crate::services::codex_tui::session::{checkpoint::Source, codex_tui_rollout_paths_same};
+    if !codex_verified::publication_allowed(authority, binding) {
+        return Err(io::Error::other("Codex migration source rejected"));
+    }
+    let path = marker_path(authority);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut marker: Value = serde_json::from_slice(&bytes)?;
+    let Some(saved) = marker["rollout_path"].as_str() else {
+        return Err(io::Error::other("Codex marker has no source"));
+    };
+    if !codex_tui_rollout_paths_same(Path::new(saved), Path::new(&binding.output_path)) {
+        return Ok(());
+    }
+    if marker["session_id"]
+        .as_str()
+        .zip(binding.session_id.as_deref())
+        .is_some_and(|(a, b)| a != b)
+    {
+        return Err(io::Error::other("Codex migration session changed"));
+    }
+    if codex_verified::current_context(authority)?.is_some()
+        && linked_marker(authority, binding)?.is_none()
+    {
+        return Err(io::Error::other("Codex migration marker proof changed"));
+    }
+    let Some(old) = marker["rollout_start_offset"].as_u64() else {
+        return Ok(());
+    };
+    let (source, mut file) = Source::open(
+        authority.session(),
+        Path::new(&binding.output_path),
+        binding.session_id.clone(),
+    )?;
+    let boundary = crate::services::codex_tui::session::checkpoint::boundary(&mut file, old)?;
+    if old == boundary {
+        return Ok(());
+    }
+    let previous = with_runtime_binding_state_under_source_authority(authority, |state| {
+        state
+            .runtime_by_tmux
+            .get(authority.session())
+            .map(|entry| entry.value.clone())
+    });
+    if previous
+        .as_ref()
+        .is_some_and(|binding| binding.last_offset != old && binding.last_offset > boundary)
+    {
+        return Err(io::Error::other("Codex migration runtime cursor changed"));
+    }
+    source.check(authority.session())?;
+    if fs::read(&path)? != bytes {
+        return Err(io::Error::other("Codex migration marker changed"));
+    }
+    marker["rollout_start_offset"] = json!(boundary);
+    crate::services::discord::runtime_store::atomic_write(Path::new(&path), &format!("{marker}\n"))
+        .map_err(io::Error::other)?;
+    with_runtime_binding_state_under_source_authority(authority, |state| {
+        if let Some(entry) = state.runtime_by_tmux.get_mut(authority.session())
+            && Some(&entry.value) == previous.as_ref()
+            && entry.value.last_offset == old
+        {
+            entry.value.last_offset = boundary;
+            if entry.value.relay_output_path.is_none() {
+                entry.value.relay_last_offset = Some(boundary);
+            }
+        }
+    });
+    source.check(authority.session())
 }
 
 pub(super) fn persist(
@@ -248,6 +339,30 @@ pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
     output_path: &str,
     last_offset: u64,
 ) -> bool {
+    matches!(
+        advance_cursor(authority, output_path, None, last_offset, true),
+        crate::services::codex_tui::session::checkpoint::Advance::Advanced { .. }
+            | crate::services::codex_tui::session::checkpoint::Advance::AlreadyAdvanced
+    )
+}
+
+pub(crate) fn advance_checked(
+    authority: &TmuxSourceAuthority<'_>,
+    output_path: &str,
+    expected: Option<u64>,
+    last_offset: u64,
+) -> crate::services::codex_tui::session::checkpoint::Advance {
+    advance_cursor(authority, output_path, expected, last_offset, false)
+}
+
+fn advance_cursor(
+    authority: &TmuxSourceAuthority<'_>,
+    output_path: &str,
+    expected: Option<u64>,
+    last_offset: u64,
+    legacy: bool,
+) -> crate::services::codex_tui::session::checkpoint::Advance {
+    use crate::services::codex_tui::session::checkpoint::{Advance, Source, at};
     let tmux_session_name = authority.session();
     let previous = with_runtime_binding_state_under_source_authority(authority, |state| {
         state
@@ -256,7 +371,52 @@ pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
             .map(|entry| entry.value.clone())
     });
     let Some(mut binding) = previous.clone() else {
-        return false;
+        return Advance::SourceChanged;
+    };
+    let native = binding.output_path == output_path;
+    let start = if native {
+        binding.last_offset
+    } else {
+        binding.relay_last_offset()
+    };
+    if last_offset == start {
+        return Advance::AlreadyAdvanced;
+    }
+    #[cfg(unix)]
+    let legacy = legacy && native && codex_restore_observed_end(tmux_session_name).is_none();
+    #[cfg(not(unix))]
+    let legacy = {
+        let _ = legacy;
+        false
+    };
+    if expected.is_some_and(|expected| start != expected)
+        || (binding.runtime_kind == RuntimeHandoffKind::CodexTui && last_offset < start && !legacy)
+    {
+        return Advance::StartMismatch;
+    }
+    let source = if binding.runtime_kind == RuntimeHandoffKind::CodexTui && cfg!(unix) {
+        match Source::open(
+            tmux_session_name,
+            Path::new(output_path),
+            binding.session_id.clone(),
+        ) {
+            Ok((source, file))
+                if at(Path::new(output_path), last_offset).ok() == Some(last_offset) =>
+            {
+                (
+                    Some(source),
+                    crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                        &file,
+                    ),
+                )
+            }
+            _ => return Advance::SourceChanged,
+        }
+    } else {
+        (
+            None,
+            crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable,
+        )
     };
     if binding.output_path == output_path {
         binding.last_offset = last_offset;
@@ -266,20 +426,192 @@ pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
     } else if binding.relay_output_path.as_deref() == Some(output_path) {
         binding.relay_last_offset = Some(last_offset);
     } else {
-        return false;
+        return Advance::SourceChanged;
     }
     if persist(authority, &binding).is_err() {
-        return false;
+        return Advance::PersistFailed;
+    }
+    if source
+        .0
+        .as_ref()
+        .is_some_and(|source| source.check(tmux_session_name).is_err())
+    {
+        return Advance::SourceChanged;
     }
     with_runtime_binding_state_under_source_authority(authority, |state| {
         let Some(entry) = state.runtime_by_tmux.get_mut(tmux_session_name) else {
-            return false;
+            return Advance::SourceChanged;
         };
         if Some(&entry.value) != previous.as_ref() {
-            return false;
+            return Advance::StartMismatch;
         }
         entry.value = binding;
         entry.recorded_at = Instant::now();
-        true
+        Advance::Advanced {
+            source: source.1,
+            start,
+            end: last_offset,
+        }
     })
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<u64> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let scope = state.codex_restore_by_tmux.get(tmux)?;
+    (scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
+        .then_some(scope.input_start)
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_checkpoint(tmux: &str, path: &Path) -> Option<u64> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let scope = state.codex_restore_by_tmux.get(tmux)?;
+    (scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
+        .then_some(scope.source.complete_end)
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_observed_end(tmux: &str) -> Option<u64> {
+    STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .codex_restore_by_tmux
+        .get(tmux)
+        .map(|scope| scope.observed_end)
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_source_current(tmux: &str, path: &Path) -> bool {
+    STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .codex_restore_by_tmux
+        .get(tmux)
+        .is_none_or(|scope| scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
+}
+
+#[cfg(unix)]
+pub(crate) fn record_codex_unknown_span(
+    tmux: &str,
+    start: u64,
+    end: u64,
+    stats: crate::services::codex_tui::session::checkpoint::ScanStats,
+    kind: crate::services::codex_tui::session::checkpoint::ObservationKind,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) {
+        scope.record_unknown(tmux, start, end, stats, kind);
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn codex_restore_observation_for_tests(
+    tmux: &str,
+) -> Option<(
+    u64,
+    u64,
+    Option<u64>,
+    crate::services::codex_tui::session::checkpoint::ScanStats,
+)> {
+    STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .codex_restore_by_tmux
+        .get(tmux)
+        .map(|scope| {
+            (
+                scope.source.complete_end,
+                scope.input_start,
+                scope.replay_from,
+                scope.unknown,
+            )
+        })
+}
+
+/// Links one restored parked record to the existing captured bridge episode.
+#[cfg(unix)]
+pub(crate) fn link_codex_parked_owner(
+    tmux: &str,
+    turn: &str,
+    prompt: &str,
+    owner: crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+) {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let generation = state
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .map(|entry| entry.value.generation);
+    let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) else {
+        return;
+    };
+    let Some(held) = &scope.held else {
+        return;
+    };
+    if generation.is_some_and(|generation| generation != held.generation)
+        || owner.5 > scope.source.complete_end
+    {
+        return;
+    }
+    let Ok(json) = scope.source.record(tmux, owner.5) else {
+        return;
+    };
+    let Some((text, entry, evidence)) = extract_codex_rollout_user_prompt_with_evidence(&json)
+    else {
+        return;
+    };
+    if evidence
+        .turn_id
+        .as_deref()
+        .is_some_and(|native| native != turn)
+        || !prompts_match(&text, prompt)
+        || !evidence.created_since(held.reserved_wall)
+        || !held.parked.iter().any(|input| {
+            prompts_match(&input.prompt, prompt)
+                && input
+                    .native_turn
+                    .as_deref()
+                    .is_none_or(|native| native == turn)
+                && (input.entry_ids.is_empty()
+                    || entry
+                        .as_deref()
+                        .is_none_or(|id| input.entry_ids.iter().any(|own| own == id)))
+        })
+    {
+        return;
+    }
+    scope.owners.entry(turn.to_owned()).or_insert(owner);
+}
+
+#[cfg(unix)]
+pub(crate) fn codex_parked_owner_source(
+    tmux: &str,
+    turn: &str,
+    owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+) -> Option<crate::services::codex_tui::session::checkpoint::Source> {
+    let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let scope = state.codex_restore_by_tmux.get(tmux)?;
+    (scope.owners.get(turn) == Some(owner) && scope.source.check(tmux).is_ok())
+        .then(|| scope.source.clone())
+}
+
+#[cfg(unix)]
+pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
+    state: &TuiPromptDedupeState,
+    tmux: &str,
+    current: &super::super::handoff::CodexRestore,
+    source: &crate::services::codex_tui::session::checkpoint::Source,
+) -> bool {
+    current.held.is_none()
+        && !current.source.matches_path(&source.path)
+        && source.session_id.is_some()
+        && state
+            .handoff_by_tmux
+            .get(&PromptKey::new("codex", tmux))
+            .is_none_or(|entry| entry.value.parked.is_empty())
+        && crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux).is_some_and(
+            |marker| {
+                source.matches_path(&marker.rollout_path) && marker.session_id == source.session_id
+            },
+        )
 }

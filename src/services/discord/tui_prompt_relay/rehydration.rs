@@ -25,7 +25,7 @@ use crate::services::tui_prompt_dedupe::pane_registration::{
 use std::collections::HashMap;
 
 #[cfg(unix)]
-mod codex_marker;
+pub(super) mod codex_marker;
 #[cfg(unix)]
 use codex_marker::{CodexTuiMarkerRehydrateDecision, codex_tui_marker_rehydrate_decision};
 #[cfg(unix)]
@@ -602,6 +602,7 @@ fn rehydrate_codex_tui_binding_transaction(
         channel_id,
         observe_before_register,
         |authority, existing| {
+            let existing = codex_marker::normalize_existing(authority, existing)?;
             if let Some(existing) = existing
                 && existing.runtime_kind == RuntimeHandoffKind::CodexTui
                 && Path::new(&existing.output_path).exists()
@@ -704,7 +705,6 @@ pub(crate) fn rehydrate_codex_tui_binding_for_tests(
 }
 
 #[cfg(unix)]
-
 fn tmux_session_is_codex_tui(tmux_session_name: &str) -> bool {
     if crate::services::tmux_common::resolve_tmux_runtime_kind_marker(tmux_session_name)
         == Some(RuntimeHandoffKind::CodexTui)
@@ -905,22 +905,20 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
     {
         return None;
     }
-    let relay_output_path =
-        crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
-    let relay_last_offset = std::fs::metadata(&relay_output_path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    let (relay_output_path, relay_last_offset) =
+        codex_marker::relay_checkpoint(tmux_session_name, rollout_path);
+    let linked = session_id.is_some();
+    let session_id = session_id.or_else(|| codex_rollout_session_id(rollout_path));
+    let input_start =
+        codex_marker::bootstrap(tmux_session_name, rollout_path, session_id.clone(), linked)?;
     Some(crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
         output_path: rollout_path.display().to_string(),
-        relay_output_path: Some(relay_output_path),
+        relay_output_path,
         input_fifo_path: None,
-        session_id: session_id.or_else(|| codex_rollout_session_id(rollout_path)),
-        last_offset: crate::services::tui_prompt_dedupe::codex_rehydrated_scan_offset(
-            tmux_session_name,
-            rollout_path,
-        ),
-        relay_last_offset: Some(relay_last_offset),
+        session_id,
+        last_offset: input_start,
+        relay_last_offset,
     })
 }
 

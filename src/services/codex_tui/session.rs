@@ -1,3 +1,4 @@
+pub(crate) mod checkpoint;
 pub(crate) mod source_observation;
 
 use serde_json::Value;
@@ -146,6 +147,7 @@ pub struct CodexTuiRolloutMarker {
     pub rollout_start_offset: Option<u64>,
 }
 
+#[cfg(test)]
 pub fn write_codex_tui_rollout_marker(
     tmux_session_name: &str,
     rollout_path: &Path,
@@ -274,6 +276,7 @@ fn hook_retired(
     crate::services::tui_prompt_dedupe::codex_tail_source_retired(authority, &claim)
 }
 
+#[cfg(test)]
 pub(crate) fn install_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
@@ -362,6 +365,7 @@ fn install_binding_under_source_authority(
     !verified || registered
 }
 
+#[cfg(test)]
 pub fn advance_codex_tui_rollout_marker_start_offset(
     tmux_session_name: &str,
     rollout_path: &Path,
@@ -397,18 +401,80 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
     rollout_path: &Path,
     offset: u64,
 ) {
+    #[cfg(unix)]
+    if crate::services::tui_prompt_dedupe::codex_restore_observed_end(tmux_session_name).is_none() {
+        let handled = crate::services::tmux_common::with_tmux_source_authority(
+            tmux_session_name,
+            |authority| {
+                let path = rollout_path.to_str().unwrap_or_default();
+                let legacy = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                .is_some_and(|binding| binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+                    && binding.output_path == path && offset < binding.last_offset);
+                // Existing unplanned input recovery resets its reader cursor, never bootstrap progress.
+                if legacy
+                    && checkpoint::at(rollout_path, offset).ok() == Some(offset)
+                    && advance_codex_tui_rollout_marker_start_offset_under_source_authority(
+                        authority,
+                        rollout_path,
+                        offset,
+                    )
+                    .is_ok()
+                {
+                    let _ = crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset_under_source_authority(authority, path, offset);
+                }
+                legacy
+            },
+        );
+        if handled {
+            return;
+        }
+    }
+    let _ = advance_codex_tui_checkpoint(tmux_session_name, rollout_path, None, offset);
+}
+
+pub(crate) fn advance_codex_tui_checkpoint(
+    tmux_session_name: &str,
+    rollout_path: &Path,
+    expected: Option<u64>,
+    offset: u64,
+) -> checkpoint::Advance {
+    use checkpoint::Advance;
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         let path = rollout_path.to_str().unwrap_or_default();
-        let eligible = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
+        let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
             authority,
-        )
-        .is_some_and(|binding| {
-            binding.runtime_kind
-                == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+        );
+        let eligible = binding.as_ref().is_some_and(|binding| {
+            binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
                 && binding.output_path == path
         });
         if !eligible {
-            return;
+            return Advance::SourceChanged;
+        }
+        #[cfg(unix)]
+        if !crate::services::tui_prompt_dedupe::codex_restore_source_current(
+            tmux_session_name,
+            rollout_path,
+        ) {
+            return Advance::SourceChanged;
+        }
+        let start = binding.as_ref().map_or(0, |binding| binding.last_offset);
+        if expected.is_some_and(|expected| expected != start) || offset < start {
+            return Advance::StartMismatch;
+        }
+        if offset == start {
+            return Advance::AlreadyAdvanced;
+        }
+        if checkpoint::at(rollout_path, offset).ok() != Some(offset) {
+            return Advance::SourceChanged;
+        }
+        if crate::services::tui_prompt_dedupe::migrate_codex_raw_marker(
+            authority,
+            binding.as_ref().expect("eligible binding"),
+        )
+        .is_err()
+        {
+            return Advance::PersistFailed;
         }
         if let Err(error) = advance_codex_tui_rollout_marker_start_offset_under_source_authority(
             authority,
@@ -420,14 +486,15 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
                 error,
                 "failed to advance Codex TUI source cursor; runtime binding unchanged"
             );
-            return;
+            return Advance::PersistFailed;
         }
-        let _ = crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset_under_source_authority(
+        crate::services::tui_prompt_dedupe::advance_codex_offset_checked(
             authority,
             path,
+            Some(start),
             offset,
-        );
-    });
+        )
+    })
 }
 
 fn preserved_rollout_start_offset_for_marker(

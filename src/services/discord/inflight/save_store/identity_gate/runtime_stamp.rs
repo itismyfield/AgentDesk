@@ -3,6 +3,8 @@ use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
+use crate::services::discord::{ChannelId, MessageId, SharedData};
+use captured_terminal_admission::{ParkedProof, captured_binding_matches};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(in crate::services::discord) struct TuiTerminalRange {
     pub(in crate::services::discord) identity: InflightTurnIdentity,
@@ -20,6 +22,8 @@ pub(in crate::services::discord) struct TuiTerminalRange {
     // serialized frames and live admissions cannot widen cursor authority.
     #[serde(skip)]
     retained_codex_terminal: bool,
+    #[serde(skip)]
+    parked: Option<Box<ParkedProof>>,
 }
 pub(in crate::services::discord) type CodexRange = TuiTerminalRange;
 
@@ -222,6 +226,7 @@ fn persist_terminal_range(
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {
         retained_codex_terminal: false,
+        parked: None,
         kind: NativeTerminalKind::Completed,
         identity: InflightTurnIdentity::from_state(&persisted),
         result: result.to_string(),
@@ -241,6 +246,12 @@ fn persist_terminal_range(
 }
 
 impl TuiTerminalRange {
+    pub(in crate::services::discord) async fn parked_current(&self, shared: &SharedData) -> bool {
+        match &self.parked {
+            Some(proof) => proof.matches(self) && proof.current_actor_matches(shared).await,
+            None => true,
+        }
+    }
     pub(in crate::services::discord) fn new(
         identity: InflightTurnIdentity,
         result: String,
@@ -257,6 +268,7 @@ impl TuiTerminalRange {
             source,
             source_file_identity,
             retained_codex_terminal: false,
+            parked: None,
             kind: NativeTerminalKind::Completed,
         }
     }
@@ -275,6 +287,7 @@ impl TuiTerminalRange {
         }
         let captured = Self {
             retained_codex_terminal: row.provider_kind() == Some(ProviderKind::Codex),
+            parked: None,
             // Pinned evidence was required above; an older pinned row reads as a completion.
             kind: row.tui_terminal_kind.unwrap_or_default(),
             identity: InflightTurnIdentity::from_state(row),
@@ -360,7 +373,7 @@ impl TuiTerminalRange {
         if self.source_file_identity.is_some() {
             return tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
                 && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
-                    .is_some_and(|binding| captured_binding_matches(&binding, &path, &self.session_id, source.range, receipt || self.retained_codex_terminal, if source.provider == ProviderKind::Codex.as_str() { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui }));
+                    .is_some_and(|binding| captured_binding_matches(&binding, &path, &self.session_id, source.range, receipt || self.retained_codex_terminal, if source.provider == ProviderKind::Codex.as_str() { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui }, self.parked.as_deref().filter(|proof| proof.matches(self))));
         }
         tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
             && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).is_some_and(|binding| {
@@ -458,6 +471,7 @@ impl TuiTerminalRange {
                             (start, end),
                             self.retained_codex_terminal,
                             fresh.runtime_kind.unwrap(),
+                            self.parked.as_deref().filter(|proof| proof.matches(self)),
                         )
                     })
                 } else {
@@ -1253,26 +1267,6 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
-fn captured_binding_matches(
-    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
-    path: &Path,
-    session: &str,
-    (start, end): (u64, u64),
-    receipt: bool,
-    runtime: RuntimeHandoffKind,
-) -> bool {
-    let (source_path, cursor) = if runtime == RuntimeHandoffKind::CodexTui {
-        (binding.output_path.as_str(), binding.last_offset)
-    } else {
-        (binding.relay_output_path(), binding.relay_last_offset())
-    };
-    binding.runtime_kind == runtime
-        && nonempty(binding.session_id.as_deref()) == nonempty(Some(session))
-        && canonical_regular_file(source_path).is_some_and(|(bound, _)| bound == path)
-        && (cursor >= start)
-        && (cursor <= end || receipt)
-}
-
 impl InflightTurnState {
     /// Captured native completions require the reader's file, generation and
     /// original actor. Invalid evidence never degrades to an unpinned Done;
@@ -1283,7 +1277,7 @@ impl InflightTurnState {
         expected: &InflightTurnIdentity,
         can_deliver_directly: bool,
         actor_authority: (
-            &crate::services::discord::SharedData,
+            &SharedData,
             &std::sync::Arc<crate::services::provider::CancelToken>,
         ),
         observed_response: &str,
