@@ -1282,6 +1282,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0140_channel_recovery_custody.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:28d07351d8c13efad92a222d4623c3b6abacbb1ac8968c789451d4676bb4b64e"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1296,7 +1305,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:ec3b39da2e2814d10835cc0cb964b479aa62cc52ca9da1405c6c29d27b82757b"
+      "fingerprint": "sha256:49301b9ebfdc7690206c7be2c6371d66a5e078633d34d582ca790d099e15079e"
     },
     {
       "root": "policies",
@@ -6346,6 +6355,33 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:f39f5965ad930861f4c6ca55dac2b029db8b22728410a0ce11244db830ac723f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/channel_recovery_custody.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:0934c6e5645cf41a7abf173ae0208e198242dd4dd5cde3d55e08c8a224a479f2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/channel_recovery_custody.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:95d49094c02a476390b5bc4e22a8320d027a3c209f65d5eaea43b5146dc4bc70"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/channel_recovery_custody.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:e124bec72bd85c9a146443fe030fcd208dc695c62aa3e3c696483a9289cf19c6"
     },
     {
       "root": "src",
@@ -11440,6 +11476,15 @@
       "symbol": "query",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:1dd81ec9a068ce9cf769d02272136175eee0af6895d0d586b9249af0ebd52db0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:26f81f075c047a697e9fb0bcbf7780d1f6fb366d2f4297e8e4d7653c8c418b45"
     },
     {
       "root": "src",
@@ -41059,6 +41104,249 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:ced309b5acb43049e80cea2c657737769df494851c24ea31b0d8f91405870eb0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:25a7587c799f76aa63b7abd1b45b7c39d0864ac95c30988b30ebefb6563f4166"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:3f81880688cdb6b900c112c15af97168a6b63880e9b76705201b6a1f8c5a1341"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5f9bfb8600ba158d1eb17a91e80522b731420ad1102643376abe892afcc5747c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6337f36686b927de963e7a706d8c7fc583f3f02d5b45582527e90a4e99d2e28a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6c0b692294a8cc1a8edf7fa790b38cc5386d73da744942b9015f6f40d65494c6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:799ec6e8135387e2d7bd070fa3e53c76985f66c09baff466bda12d403fccefc1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cf1f82fc307d5e40599fb41ccfc911e4421787a74a32d834c9b5e588c610a865"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d3740a2434ab990a9ef81ba2736481a88e81f80c491e18c36dca1ab4d2aeeeb4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ea9052b5343f0302bab72b07dd74f4738df04c757ed02ffedefcf8f1c6a38ac8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:05322c99bd46878aa17e6f14ae6f861a0034d34798906454540c8dbe7491b077"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:53756c2f85c3203fd6a1ea2646bac4d08f368a36064f33e623f9d4feb097d10f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:63f9ec40398643233393567d82b4df291241688569d12921676b22f40c758d40"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:92698fb2989c8266a4b724efad96a5236a937b603a3d879c722cfd0e422c0548"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:98805ff72433f02e3da0d25ba104b3a8fa5ca777835b5433b8535c836e538bb4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9faa4d9ab3b116097193a89c16c4b91d8b4c584dad1809237164a30132f68b99"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6da40878f9cd0153ecdc573039721fed7dd5af6d913629d130eec7f760806447"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:70d6138f4fa9343c7d02150656d5880078cb97afaf952f266129fee0a5343169"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:912481ece642d3e365a3b88c74614da12efe999ad50316e424aeff9e7f32df88"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:98483288a13713e8fb14882c10aea02af0cfb9d4d327ea473827185de02333e0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a40849fa41b991154437c54667655735c6f6576600ddcd3683d8a50588b5631e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b8e7a2fce09f7b1d2edcbdfe6731d06bece7d88b9d415f81dd8c661bd49a691b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d274730c30726b16159134b33252c0e81cd7ed298d9f8290ec5faa2437f8eaba"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e501e0510662aad6349493bc1e4821b51adf46dbb5df711f11919d88641bc6a2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e97fc0eb4714837f29fd93bf569233883391ee84afe86b3e07015b8ecb1d4152"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:468f67f4d822d0d25b5786c1e483492ce53bd9061f1232af3d69d457a061ab00"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:8fa6ed793fd415a4a9727a8e0af578a8434b47107c2ebd268d21860877ef9498"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a2b6b1fe6d6fb965c06b5bdc809c8cdca5e9ce9bea5a07436d63addbdbd15b2c"
     },
     {
       "root": "src",

@@ -126,7 +126,7 @@ class CliTests(unittest.TestCase):
         return result.stdout.decode()
 
     def test_non_push_events_always_run(self) -> None:
-        for event in ("merge_group", "workflow_dispatch"):
+        for event in ("schedule", "workflow_dispatch"):
             with self.subTest(event=event):
                 out = self.run_cli("--event", event, "--paths-from-stdin0", stdin="README.md\0")
                 self.assertEqual(out, "run=true\n")
