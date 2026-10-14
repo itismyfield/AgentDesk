@@ -9176,6 +9176,8 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_idle_prompt_preserves_unknown_prefix_statistics
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_idle_unknown_prefix_is_counted_once_and_leaves_partial_input
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_main_writer_first_rejects_completed_parked_answer
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_markerless_discovery_restores_saved_parked_input
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_markerless_discovery_without_custody_keeps_complete_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_matching_receipt_is_consumed_by_actual_retained_recovery
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_native_receipt_does_not_suppress_the_next_sealed_answer
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_parked_gate_keeps_nonbridge_authority_closed

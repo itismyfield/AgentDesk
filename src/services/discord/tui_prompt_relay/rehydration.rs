@@ -903,10 +903,8 @@ pub(in crate::services::discord) fn codex_tui_rehydrated_binding_from_rollout_pa
     }
     let (relay_output_path, relay_last_offset) =
         codex_marker::relay_checkpoint(tmux_session_name, rollout_path);
-    let linked = session_id.is_some();
     let session_id = session_id.or_else(|| codex_rollout_session_id(rollout_path));
-    let input_start =
-        codex_marker::bootstrap(tmux_session_name, rollout_path, session_id.clone(), linked)?;
+    let input_start = codex_marker::bootstrap(tmux_session_name, rollout_path, session_id.clone())?;
     Some(crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
         output_path: rollout_path.display().to_string(),
