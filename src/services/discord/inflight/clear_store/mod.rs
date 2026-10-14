@@ -53,6 +53,9 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
     if receipt_protected_path(&path) && !receipt_mutant("clear") {
         return false;
     }
+    if handoff_before_discard_locked(&_lock).is_err() {
+        return false;
+    }
     log_inflight_remove_for_path(provider, channel_id, "clear_inflight_state", &path);
     fs::remove_file(path).is_ok()
 }

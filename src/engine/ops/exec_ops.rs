@@ -14,6 +14,9 @@ use std::time::Duration;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
 #[cfg(test)]
+#[path = "exec_ops/circuit_evidence_tests.rs"]
+mod circuit_evidence_tests;
+#[cfg(test)]
 mod exec_allowlist_tests;
 #[cfg(test)]
 mod session_liveness_tests;
@@ -317,15 +320,7 @@ fn register_exec_ops_with_runner<'js>(
                         .join(&provider)
                         .join(format!("{channel_id}.json"));
                     if path.exists() {
-                        // #4104 (step 1): this policy op (`agentdesk.inflight.remove`)
-                        // unlinks the durable inflight row with NO identity guard and
-                        // NO lock — unlike every clear_inflight_state* path — so it is a
-                        // prime suspect for the "row vanishes mid-turn without a trace"
-                        // symptom. Emit the SAME standardized removal log an instrumented
-                        // repro greps for. This cross-module JS-op site holds raw strings
-                        // (no ProviderKind / user_msg_id in scope), so mirror the
-                        // log_inflight_remove field shape inline: parse channel_id to u64
-                        // and log user_msg_id=0 (unknown at the policy layer).
+                        // Preserve the removal trace; hold the row lock through handoff and unlink.
                         tracing::warn!(
                             target: "agentdesk::inflight_remove",
                             provider = %provider,
@@ -335,8 +330,24 @@ fn register_exec_ops_with_runner<'js>(
                             path = %path.display(),
                             "discord inflight state row removal"
                         );
-                        let _ = std::fs::remove_file(&path);
-                        return format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display());
+                        let valid_target =
+                            crate::services::provider::ProviderKind::from_str(&provider)
+                                .is_some_and(|kind| kind.as_str() == provider)
+                                && channel_id
+                                    .parse::<u64>()
+                                    .is_ok_and(|channel| channel.to_string() == channel_id);
+                        let removed = valid_target
+                            && crate::services::discord::lock_inflight_state_path(&path)
+                                .and_then(|guard| {
+                                    guard.handoff_circuit_evidence_before_discard()?;
+                                    std::fs::remove_file(&path).map_err(|error| error.to_string())
+                                })
+                                .is_ok();
+                        return if removed {
+                            format!(r#"{{"ok":true,"removed":"{}"}}"#, path.display())
+                        } else {
+                            r#"{"ok":false,"error":"inflight clear refused or failed"}"#.to_string()
+                        };
                     }
                 }
                 r#"{"ok":false,"error":"not found"}"#.to_string()

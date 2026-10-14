@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/engine/ops/exec_ops/circuit_evidence_tests.rs",
+        "src/services/discord/inflight/circuit_evidence_tests.rs",
+        "src/services/discord/relay_recovery_circuit_evidence_tests.rs",
         "src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs",
         "src/services/discord/queue_io/queued_head_inject_tests.rs",
         "src/services/discord/router/intake_dispatch/queued/transition_busy_tests/retry_tests.rs",

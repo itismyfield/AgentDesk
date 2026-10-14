@@ -47,9 +47,14 @@ impl InflightTurnState {
     }
 }
 
+#[cfg(test)]
+mod circuit_evidence_tests;
+mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
 mod store;
+pub(super) use circuit_removal::InflightDeleteRequest;
+use circuit_removal::handoff_before_discard_locked;
 
 // #3479: the FS path layout + advisory-lock guard moved to `store.rs`.
 // `inflight_state_path` / `lock_inflight_state_path` are re-exported at the module-tree visibility so
@@ -384,54 +389,11 @@ pub(super) fn load_inflight_states_for_sweep(
     out
 }
 
-/// Delete the inflight state file for a (provider, channel_id) pair if it
-/// still exists. Used by `placeholder_sweeper` to evict abandoned states
-/// after a final placeholder edit. Idempotent.
 pub(super) fn delete_inflight_state_file<'a>(
     request: impl Into<InflightDeleteRequest<'a>>,
     channel_id: u64,
 ) -> bool {
-    let request = request.into();
-    let provider = request.provider;
-    let channel = channel_id;
-    let outcome = 'decision: {
-        let Some(root) = inflight_runtime_root() else {
-            break 'decision InflightDeleteOutcome::Failed;
-        };
-        let path = inflight_state_path(&root, provider, channel);
-        let Ok(_lock) = lock_inflight_state_path(&path) else {
-            break 'decision InflightDeleteOutcome::Failed;
-        };
-        if receipt_protected_path(&path) && !receipt_mutant("delete") {
-            break 'decision InflightDeleteOutcome::ProtectedReceipt;
-        }
-        log_inflight_remove_for_path(provider, channel, "delete_inflight_state_file", &path);
-        match fs::remove_file(path) {
-            Ok(()) => InflightDeleteOutcome::Deleted,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                InflightDeleteOutcome::AlreadyAbsent
-            }
-            _ => InflightDeleteOutcome::Failed,
-        }
-    };
-    if let Some(result) = request.result {
-        result.set(outcome);
-    }
-    outcome == InflightDeleteOutcome::Deleted
-}
-
-// Preserve the bool API while returning its exact lock-held decision to cleanup callers.
-pub(super) struct InflightDeleteRequest<'a> {
-    provider: &'a ProviderKind,
-    result: Option<&'a std::cell::Cell<InflightDeleteOutcome>>,
-}
-impl<'a> From<&'a ProviderKind> for InflightDeleteRequest<'a> {
-    fn from(provider: &'a ProviderKind) -> Self {
-        Self {
-            provider,
-            result: None,
-        }
-    }
+    request.into().delete(channel_id)
 }
 
 fn now_string() -> String {
@@ -568,13 +530,25 @@ fn bump_save_generation_for_write(
     path: &Path,
     state: &mut InflightTurnState,
 ) -> Result<(), String> {
-    let content = fs::read_to_string(path).ok();
+    let content = match fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let existing = content
         .as_deref()
         .and_then(|content| serde_json::from_str::<InflightTurnState>(content).ok());
     if existing.is_none() && receipt_protected_path(path) {
         return Err("policy receipt row cannot be parsed".into());
     }
+    if existing.is_none()
+        && content
+            .as_deref()
+            .is_some_and(|raw| raw.contains("pending_circuit_evidence"))
+    {
+        return Err("circuit evidence row cannot be parsed".into());
+    }
+    super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing

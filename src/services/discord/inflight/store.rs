@@ -105,6 +105,10 @@ impl InflightStateFileLock {
     pub(in crate::services::discord::inflight) fn state_path(&self) -> &Path {
         &self.state_path
     }
+
+    pub(crate) fn handoff_circuit_evidence_before_discard(&self) -> Result<(), String> {
+        super::handoff_before_discard_locked(self)
+    }
 }
 
 impl Drop for InflightStateFileLock {

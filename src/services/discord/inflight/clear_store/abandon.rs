@@ -1,6 +1,7 @@
 use super::super::{
-    InflightEpisodePin, InflightTurnState, inflight_runtime_root, inflight_state_path,
-    lock_inflight_state_path, log_inflight_remove, parse_inflight_state_content,
+    InflightEpisodePin, InflightTurnState, handoff_before_discard_locked, inflight_runtime_root,
+    inflight_state_path, lock_inflight_state_path, log_inflight_remove,
+    parse_inflight_state_content,
 };
 use super::GuardedClearOutcome;
 use crate::services::discord::abandon_request_store;
@@ -183,7 +184,11 @@ fn request_inflight_abandon_matching_in_root(
         return GuardedClearOutcome::IoError;
     }
     let Ok(state) = parse_inflight_state_content(&data) else {
-        return GuardedClearOutcome::Missing;
+        return if data.contains("pending_circuit_evidence") {
+            GuardedClearOutcome::IoError
+        } else {
+            GuardedClearOutcome::Missing
+        };
     };
     if state.restart_mode.is_some() {
         return GuardedClearOutcome::PlannedRestartSkipped;
@@ -215,6 +220,9 @@ fn request_inflight_abandon_matching_in_root(
         if !expected.matches(&restate) || restate.restart_mode.is_some() || restate.rebind_origin {
             return GuardedClearOutcome::UserMsgMismatch;
         }
+    }
+    if handoff_before_discard_locked(&_lock).is_err() {
+        return GuardedClearOutcome::IoError;
     }
     // Enqueue BEFORE unlink (durable handoff). #3859 r5 (codex P1): if a
     // FINALIZABLE placeholder's record fails to persist, DO NOT delete the row —
