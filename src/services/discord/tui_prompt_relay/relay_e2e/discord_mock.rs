@@ -431,8 +431,10 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
         if content == "..." {
             let index = state.placeholder_posts.fetch_add(1, Ordering::SeqCst);
             if index == 0 && state.park_first_placeholder.load(Ordering::SeqCst) {
+                // Subscribe before announcing arrival so an immediate release is retained.
+                let released = state.release_first_placeholder.notified();
                 state.first_placeholder_arrived.notify_waiters();
-                state.release_first_placeholder.notified().await;
+                released.await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"message": "release A", "code": 0})),

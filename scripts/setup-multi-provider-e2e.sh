@@ -110,10 +110,12 @@ category_json="$(run_cli discord category-create --name "$CATEGORY_NAME" "${guil
 echo "$category_json"
 category_id="$(printf '%s' "$category_json" | extract_id)"
 
-# 2. Channels — 4 worker cells + 1 orchestrator
+# 2. Channels — 5 workers + 1 orchestrator. claude-tui uses its own tmux-hosted
+# worker; adk-claude-tui-e2e serves claude-herdr once its channel is mapped to Herdr.
 channels=(
   "adk-claude-pipe-e2e|Claude pipe runtime E2E worker"
   "adk-claude-tui-e2e|Claude tui runtime E2E worker"
+  "adk-claude-tui-2-e2e|Claude tui (tmux) runtime E2E worker"
   "adk-codex-pipe-e2e|Codex pipe runtime E2E worker"
   "adk-codex-tui-e2e|Codex tui runtime E2E worker"
   "adk-e2e-orchestrator|Multi-provider E2E orchestrator (전체 e2e 시작 등)"

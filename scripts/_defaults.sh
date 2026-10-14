@@ -774,16 +774,21 @@ from pathlib import Path
 
 repo, config, *cells = sys.argv[1:]
 sys.path.insert(0, str(Path(repo) / "scripts" / "e2e"))
+import run_tui_relay as cell_driver
 from post_deploy_relay_continuity import load_channel_id_from_config
 
 ids = []
 for cell in cells:
-    try:
-        channel_id = load_channel_id_from_config(Path(config), cell)
-    except Exception:
-        continue
-    if re.fullmatch(r"[0-9]+", channel_id) and channel_id not in ids:
-        ids.append(channel_id)
+    # A moved cell's previous agent keeps its reader exemption here only; the smoke never targets it.
+    replaced = cell_driver.cell_replaced_agent(cell)
+    owners = [c for c in cell_driver.SUPPORTED_CELLS if replaced and cell_driver.cell_default_agent(c) == replaced]
+    for resolved_cell in (cell, *owners):
+        try:
+            channel_id = load_channel_id_from_config(Path(config), resolved_cell)
+        except Exception:
+            continue
+        if re.fullmatch(r"[0-9]+", channel_id) and channel_id not in ids:
+            ids.append(channel_id)
 print("|".join(ids))
 PY
 }

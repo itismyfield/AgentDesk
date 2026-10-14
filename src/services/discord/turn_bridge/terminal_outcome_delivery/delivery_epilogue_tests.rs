@@ -236,6 +236,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             resume_failure_detected: false,
             claude_tui_followup_pre_submit_requeue_candidate: false,
             claude_tui_busy_requeue_pending: false,
+            busy_attempt_cost: std::time::Duration::ZERO,
             tui_error_classification: TuiErrorClassification::default(),
             #[cfg(unix)]
             bridge_tui_gate_outcome_early: Some(
@@ -715,6 +716,7 @@ impl TerminalDeliveryDriver {
                 had_prior_session_id_at_turn_start: false,
                 session_handshake_seen: true,
                 turn_start: std::time::Instant::now(),
+                busy_attempt_cost: std::time::Duration::ZERO,
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early: Some(
                     crate::services::discord::tmux::TuiCompletionGateOutcome::NotGated,
