@@ -132,3 +132,92 @@ fn transition_cleanup_round_trips_and_an_older_binary_rewrite_drops_it_but_stays
     };
     assert_eq!(fixture.open().cursor(&fixture.source), Some(&downgraded));
 }
+
+fn cursor_file(fixture: &Fixture) -> Option<Cursor> {
+    let name = format!("{}.json", source_key(&fixture.source));
+    let bytes = std::fs::read(fixture.channel_dir().join(CURSOR_DIR).join(name)).ok()?;
+    Some(serde_json::from_slice(&bytes).unwrap())
+}
+
+#[test]
+fn transition_retire_writes_retired_and_its_audit_in_one_cursor_over_the_expected_one_only() {
+    let fixture = Fixture::new();
+    let mut channel = fixture.open();
+    channel.attach_source(&fixture.source).unwrap();
+    let expected = channel.cursor(&fixture.source).unwrap().clone();
+    let changed = Cursor {
+        retired: true,
+        ..expected.clone()
+    };
+    let mut moved = record(&fixture.source);
+    moved.verified.offset = 1;
+    let refused = [
+        (changed, record(&fixture.source)),
+        (expected.clone(), moved),
+    ];
+    for (stale, audit) in refused {
+        let before = fixture.cursor_bytes();
+        let result = channel.retire_transition(&stale, audit);
+        assert!(matches!(result, Err(StoreError::Rejected(_))), "{result:?}");
+        assert_eq!(fixture.cursor_bytes(), before);
+        assert_eq!(channel.cursor(&fixture.source), Some(&expected));
+    }
+    channel
+        .retire_transition(&expected, record(&fixture.source))
+        .unwrap();
+    let retired = Cursor {
+        retired: true,
+        transition_cleanup: Some(record(&fixture.source)),
+        ..expected
+    };
+    assert_eq!(channel.cursor(&fixture.source), Some(&retired));
+    assert_eq!(cursor_file(&fixture).as_ref(), Some(&retired));
+    assert_eq!(fixture.open().cursor(&fixture.source), Some(&retired));
+}
+
+#[test]
+fn transition_retire_whose_directory_sync_fails_is_not_done_though_the_new_file_shows() {
+    use crate::services::tui_o::store::fault::{self, Step};
+    let fixture = Fixture::new();
+    let mut channel = fixture.open();
+    channel.attach_source(&fixture.source).unwrap();
+    let expected = channel.cursor(&fixture.source).unwrap().clone();
+    let kind = std::io::ErrorKind::Other;
+    let planted = fault::plant(&fixture.channel_dir(), Step::ReplaceDirSync, kind, Some(1));
+    let result = channel.retire_transition(&expected, record(&fixture.source));
+    drop(planted);
+    assert!(matches!(result, Err(StoreError::Io(_))), "{result:?}");
+    let on_disk = cursor_file(&fixture).unwrap();
+    assert!(on_disk.retired, "the rename published the new cursor");
+    assert_eq!(on_disk.transition_cleanup, Some(record(&fixture.source)));
+    assert_eq!(channel.cursor(&fixture.source), Some(&expected));
+    assert_eq!(channel.io_failure(), Some(kind));
+    assert!(channel.set_retired(&fixture.source, false).is_err());
+}
+
+#[test]
+fn transition_facts_keep_each_failed_read_an_error() {
+    use crate::services::tui_o::store::cleanup_witness::CLEANUP_DIR;
+    use crate::services::tui_o::store::rotation::{BOUNDARY_FILE, CHECKPOINT_FILE};
+    let fixture = Fixture::new();
+    let mut channel = fixture.open();
+    channel.attach_source(&fixture.source).unwrap();
+    let facts = channel.read_transition_facts([&fixture.source]);
+    assert_eq!(facts.rotation, Ok(Default::default()));
+    assert_eq!(facts.checkpoint, Ok(None));
+    assert_eq!(facts.witnesses[&source_key(&fixture.source)], Ok(None));
+    let dir = fixture.channel_dir();
+    std::fs::create_dir_all(dir.join(CLEANUP_DIR)).unwrap();
+    let witness = format!("{}.json", source_key(&fixture.source));
+    for file in [
+        dir.join(BOUNDARY_FILE),
+        dir.join(CHECKPOINT_FILE),
+        dir.join(CLEANUP_DIR).join(witness),
+    ] {
+        std::fs::write(file, b"{torn").unwrap();
+    }
+    assert!(channel.recorded_witness(&fixture.source).is_err());
+    let facts = channel.read_transition_facts([&fixture.source]);
+    assert!(facts.rotation.is_err() && facts.checkpoint.is_err());
+    assert!(facts.witnesses[&source_key(&fixture.source)].is_err());
+}

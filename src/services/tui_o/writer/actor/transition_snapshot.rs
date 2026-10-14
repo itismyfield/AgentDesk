@@ -55,6 +55,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         gate: &OwnershipGate,
         probes: &BTreeMap<String, Probe>,
     ) -> Result<(Snapshot, Common), String> {
+        #[cfg(test)]
+        super::transition::test_hooks::snapshot_built();
         let channel = self.writer.channel();
         let (rotation, checkpoint) = self.sources.transition_rotation();
         let (rotation, checkpoint) = (rotation.clone(), checkpoint);
@@ -169,7 +171,7 @@ fn home_now(channel: u64, gate: &OwnershipGate, expected: Option<i64>) -> Home {
 
 /// The pinned source and history of the pane's execution, read only while its spawn nonce is
 /// still the one the request was checked against.
-pub(super) fn execution_read(channel: u64, context: &Context) -> Execution {
+pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
     #[cfg(test)]
     if let Some(forced) = FORCED_EXECUTION.with(|forced| forced.borrow().clone()) {
         return forced;
@@ -184,7 +186,7 @@ pub(super) fn execution_read(channel: u64, context: &Context) -> Execution {
 
 /// The sources the execution holds by its history. A history not known whole, without a current
 /// session, or with an unpinned session a candidate may be is an error, never an empty set.
-pub(super) fn execution_sources(
+pub(crate) fn execution_sources(
     history: &SourceHistory,
     candidates: &BTreeSet<&str>,
 ) -> Result<Vec<SourceId>, String> {

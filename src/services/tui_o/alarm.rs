@@ -602,6 +602,33 @@ mod tests {
         assert_eq!(health.history(), history);
     }
 
+    // Growth of a source with a cleanup history notifies apart from earlier growth of the
+    // channel and from growth after another job's cleanup.
+    #[test]
+    fn regrowth_after_a_cleanup_notifies_once_per_job() {
+        let (router, recorder, _) = router(Some(ALERT));
+        let source = crate::services::tui_o::shadow::SourceId {
+            session_id: "s".into(),
+            path: "/t/s.jsonl".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let grew = |job: Option<&str>| WriterAlarm::RetiredSourceGrew {
+            source: source.clone(),
+            cleanup_history: job.map(str::to_owned),
+        };
+        for job in [None, None, Some("job-a"), Some("job-a"), Some("job-b")] {
+            router.raise(FAILING, grew(job));
+        }
+        let sent = sent(&recorder);
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        let named = |text: &str, job: &str| text.contains(&format!("Some(\"{job}\")"));
+        assert!(
+            named(&sent[1].1, "job-a") && named(&sent[2].1, "job-b"),
+            "{sent:?}"
+        );
+    }
+
     #[test]
     fn first_event_raises_health_and_one_operator_message() {
         let (router, recorder, health) = router(Some(ALERT));

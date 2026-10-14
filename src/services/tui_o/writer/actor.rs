@@ -954,6 +954,12 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
+#[cfg(test)]
+pub(crate) use transition::test_hooks as transition_hooks;
+#[cfg(test)]
+pub(crate) use transition_snapshot::{
+    execution_read, execution_sources, force_execution_for_tests,
+};
 
 #[cfg(test)]
 mod test_support {

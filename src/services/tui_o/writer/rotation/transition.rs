@@ -173,3 +173,7 @@ impl<B: BindingEvents> Sources<B> {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+#[path = "transition_tests.rs"]
+mod tests;

@@ -441,13 +441,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    //! Lets a test wait for the probe workers and look in just before a retirement is written.
-    use std::cell::RefCell;
+    //! Lets a test wait for the probe workers, count the snapshots, and look in just before a
+    //! retirement is written.
+    use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     thread_local! {
         static WORKERS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
+        static SNAPSHOTS: Cell<usize> = const { Cell::new(0) };
         static AT_RETIRE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     }
 
@@ -455,6 +457,11 @@ pub(crate) mod test_hooks {
         let done = Arc::new(AtomicBool::new(false));
         WORKERS.with(|workers| workers.borrow_mut().push(Arc::clone(&done)));
         done
+    }
+
+    /// Probe workers the actors on this thread started so far.
+    pub(crate) fn started() -> usize {
+        WORKERS.with(|workers| workers.borrow().len())
     }
 
     /// Blocks this thread until every probe worker its actors started has sent its probes.
@@ -465,12 +472,28 @@ pub(crate) mod test_hooks {
         }
     }
 
+    pub(in super::super) fn snapshot_built() {
+        SNAPSHOTS.with(|built| built.set(built.get() + 1));
+    }
+
+    /// Snapshots the actors on this thread built so far, each one a read of the store and history.
+    pub(crate) fn snapshots() -> usize {
+        SNAPSHOTS.with(Cell::get)
+    }
+
     pub(super) fn at_retire() {
         AT_RETIRE.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
     }
 
-    /// Runs `hook` just before each retirement write on this thread.
-    pub(crate) fn on_retire(hook: impl FnMut() + 'static) {
+    /// Runs `hook` just before each retirement write on this thread until the guard drops.
+    pub(crate) fn on_retire(hook: impl FnMut() + 'static) -> impl Drop {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                AT_RETIRE.with(|slot| slot.borrow_mut().take());
+            }
+        }
         AT_RETIRE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Clear
     }
 }
