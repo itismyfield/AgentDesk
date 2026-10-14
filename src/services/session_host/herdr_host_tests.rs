@@ -1723,7 +1723,6 @@ const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.r
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 /// The timeouts policy repair facade: the one production caller of the target guard.
 const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
-
 // Dormant guard: only the boot registry builds a Herdr host. Owners may name Herdr
 // items but never construct one; everything else may not name them.
 #[test]
@@ -1748,6 +1747,7 @@ fn herdr_items_have_no_production_caller() {
         // The input gate (its own `.host_kind` check) and the boot registry, the one place a
         // Herdr host is built.
         (INPUT_GATE, 1),
+        ("src/services/session_host/herdr_gate/legacy_return.rs", 0),
         (REGISTRY, 0),
         // Claude input: a Herdr target exists only through the registry and its gate.
         ("src/services/claude_tui/host_input.rs", 4),
