@@ -176,6 +176,7 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :243, `admit_command` :501 |
 | `src/services/session_forwarding/home_stop.rs` | 라우팅·admission | sender `read_home` :176, receiver `read_home` :335 → `registered` :368 |
 | `src/services/turn_host.rs` | admission·readiness | `home_refusal` :118, `for_turn` :130, `refusal_before_turn` :155 |
+| `src/services/turn_orchestrator/recovery_custody/mod.rs` | admission | `reserve`의 `read_home_in` :145. admission 트랜잭션 안에서 읽기만 한다. Scoped는 epoch·holder가 이 노드와 다르면 `HomeMismatch`로 거절하고, Legacy는 home epoch만 기록한다 |
 | `src/services/tui_o/cutover.rs` | admission | `delegated` → `registered` :121 |
 | `src/services/tui_o/cutover/intake_route.rs` | readiness·라우팅 | `home_availability::refusal` :39, `held_channels`·`intake_held_channels` :58–59, `any_registered` :88 |
 | `src/services/tui_o/repost/runner.rs` | admission·readiness | `registered_channel`·`home_availability::refusal` :37–38 |
