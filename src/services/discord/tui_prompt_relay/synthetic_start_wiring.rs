@@ -19,9 +19,9 @@ use super::*;
 
 /// Test pause between an inline claim and its relay-owner adopt, inside the channel lock.
 #[cfg(test)]
-pub(super) static ADOPT_PAUSE: Mutex<
-    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-> = Mutex::new(None);
+pub(super) static ADOPT_PAUSE: Mutex<AdoptPause> = Mutex::new(None);
+#[cfg(test)]
+type AdoptPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
 
 /// Post the neutral session note for an injection that does NOT claim the
 /// active-turn lifecycle, and nothing else — no anchor, no `⏳`, no external turn

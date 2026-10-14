@@ -44,7 +44,7 @@ fn run<F: std::future::Future<Output = ()>>(scenario: impl FnOnce(PathBuf) -> F)
 }
 
 fn arm(
-    slot: &Mutex<Option<(u64, Arc<Notify>, Arc<Notify>)>>,
+    slot: &synthetic_start::bridge_handoff::reown::PauseSlot,
     channel: ChannelId,
 ) -> (Arc<Notify>, Arc<Notify>) {
     let (entered, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
