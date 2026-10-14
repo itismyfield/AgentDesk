@@ -35,7 +35,8 @@ python3 scripts/e2e/post_deploy_relay_continuity.py \
   --deploy-command 'AGENTDESK_DEPLOY_ALLOW_NON_MAIN=1 scripts/deploy-release.sh --skip-review'
 ```
 
-The script resolves the `adk-<cell>-e2e` channel id from
+The script resolves the cell's worker agent channel id (`claude-tui`:
+`adk-claude-tui-2-e2e`) from
 `~/.adk/release/config/agentdesk.yaml` unless `--channel-id` is supplied.
 Dry run declares the planned live lane but reports `agent_mode_actual: none` and
 `real_provider_contacted: false`; it verifies wiring without contacting the TUI
