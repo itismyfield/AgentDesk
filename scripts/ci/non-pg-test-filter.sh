@@ -201,6 +201,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
+  --skip services::discord::turn_presence::activity::unbound::tests
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
   --skip services::dispatches::wait_queue::tests
@@ -761,6 +762,12 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_returns_marker_recorded_voice_channel
   services::discord::turn_bridge::voice_completion::voice_completion_tests::handoff_prompt_classification_requires_typed_marker
   services::discord::turn_bridge::voice_completion::voice_completion_tests::recognizes_voice_background_handoff_via_typed_marker
+  services::discord::turn_presence::activity::unbound::tests::u_absent_logs_and_read_failures
+  services::discord::turn_presence::activity::unbound::tests::u_candidate_conflicts
+  services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
+  services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
+  services::discord::turn_presence::activity::unbound::tests::u_old_unbound_none_adapter_is_idle
+  services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
   services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
   services::discord::voice_barge_in::tests::background_handoff_refuses_publish_when_pg_reservation_fails
   services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at
