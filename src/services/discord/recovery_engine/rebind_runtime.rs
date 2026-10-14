@@ -2115,12 +2115,28 @@ mod tests {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use test_support::codex_rebind_complete_for_tests;
 #[cfg(test)]
 pub(crate) use test_support::{REBIND_WRITER_SPAWNS, codex_rebind_spawn_for_tests};
 
 #[cfg(test)]
 mod test_support {
     use super::*;
+    #[cfg(unix)]
+    pub(crate) fn codex_rebind_complete_for_tests(tmux: &str, path: &str, start: u64) -> String {
+        spawn_codex_tui_rebind_relay_output(
+            tmux,
+            path,
+            start,
+            true,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Some("s-5704".to_string()),
+            String::new(),
+            Vec::new(),
+        )
+        .expect("recovery writer spawned")
+    }
     #[cfg(test)]
     thread_local! {
         pub(crate) static REBIND_WRITER_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

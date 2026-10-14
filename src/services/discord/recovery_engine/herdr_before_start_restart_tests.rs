@@ -273,7 +273,7 @@ async fn the_restart_scan_settles_a_marked_receipt_before_the_marker_hold() {
 /// sent, acked or cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn a_destination_restart_does_not_own_keeps_the_receipt() {
-    let cases: [(&str, Edit); 3] = [
+    let cases: [(&str, Edit); 4] = [
         ("O owns the body", |row| {
             row["runtime_kind"] = serde_json::to_value(RuntimeHandoffKind::ClaudeTui).unwrap()
         }),
@@ -281,6 +281,10 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             row["restart_mode"] = serde_json::to_value(InflightRestartMode::DrainRestart).unwrap()
         }),
         ("no message", |row| row["current_msg_id"] = 0.into()),
+        ("delivered without its message", |row| {
+            row["current_msg_id"] = 0.into();
+            row["herdr_before_start_stop"] = receipt("delivered");
+        }),
     ];
     for (case, edit) in cases {
         let fixture = Fixture::new("kept", false);
@@ -298,8 +302,17 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             matches!(outcome, BeforeStartRestartReport::Retained(_)),
             "{case}"
         );
+        if case.contains("message") {
+            let held = BeforeStartRestartReport::Retained("no message to show the stop on");
+            assert_eq!(outcome, held, "{case}: held before any later step");
+        }
         assert_eq!(fixture.bytes(), before, "{case}");
         assert!(discord.calls().is_empty(), "{case}: {:?}", discord.calls());
+        if case == "delivered without its message" {
+            let cleared = row.clear_before_start_receipt(CURRENT);
+            assert_ne!(cleared, inflight::GuardedClearOutcome::Cleared, "{case}");
+            assert_eq!(fixture.bytes(), before, "{case}: the clear refused it");
+        }
     }
     let fixture = Fixture::new("busy", false);
     let row = fixture.persist(&fixture.row);

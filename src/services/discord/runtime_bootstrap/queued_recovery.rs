@@ -264,6 +264,11 @@ pub(super) async fn restore_queued_and_inflight_work(
         stale_cards_to_delete.extend(uninstalled);
     }
 
+    // Inputs held by a person's draft get their pane protection and release watch back.
+    let mut live_queue_ids = collect_live_queue_message_ids(shared).await;
+    live_queue_ids.retain(|channel, _| !protected(*channel));
+    super::turn_bridge::followup_requeue::rewatch_draft_holds(shared, provider, &live_queue_ids);
+
     // P1-2: Warn about legacy queue files that cannot be restored
     warn_legacy_pending_queue_files(provider);
 
@@ -273,6 +278,10 @@ pub(super) async fn restore_queued_and_inflight_work(
 #[cfg(test)]
 #[path = "queued_recovery_fence_tests.rs"]
 mod fence_tests;
+
+#[cfg(all(test, unix))]
+#[path = "queued_recovery_draft_tests.rs"]
+mod draft_tests;
 
 #[cfg(all(test, unix))]
 use crate::services::cluster::channel_home_port::scoped_restore::{

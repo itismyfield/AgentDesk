@@ -62,6 +62,9 @@ impl BeforeStartReceipt {
     pub(in crate::services::discord) fn notice_pending(&self) -> bool {
         self.supported() && self.0["notice"].as_str() == Some(PENDING)
     }
+    pub(in crate::services::discord) fn notice_delivered(&self) -> bool {
+        self.supported() && self.0["notice"].as_str() == Some(DELIVERED)
+    }
     fn same_admission(&self, other: &Self) -> bool {
         [
             "protocol",
@@ -94,21 +97,29 @@ fn notice_delivered(sent: &Result<ReplaceLongMessageOutcome, String>) -> bool {
     )
 }
 
-/// Runs a lock-held transition on the blocking pool, so no inflight lock spans an await. Tests
-/// carry this thread's settlement switch over, since it is thread-local.
+/// Runs a lock-held transition on an input-effect worker with this task's permit, so no inflight
+/// lock spans an await. A worker panic or cancelled join is `None`, as is any refusal.
 async fn off_scheduler<T: Send + 'static>(
     transition: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
+    use futures::FutureExt;
+    // Tests carry this thread's settlement switch to the worker and restore the worker's own.
     #[cfg(all(test, unix))]
     let settlement =
         crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
             .with(std::cell::Cell::get);
-    tokio::task::spawn_blocking(move || {
+    let work = move || {
         #[cfg(all(test, unix))]
-        crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_OVERRIDE
-            .set(settlement);
+        let _settlement =
+            crate::services::turn_orchestrator::policy_close::test_hooks::Settlement::set(
+                settlement,
+            );
         transition()
-    })
+    };
+    std::panic::AssertUnwindSafe(crate::services::discord::input_runtime::fence::effect::io(
+        work,
+    ))
+    .catch_unwind()
     .await
     .ok()
     .flatten()
@@ -146,6 +157,7 @@ impl InflightTurnState {
                     && receipt.0["notice"].as_str() == Some(DELIVERED)
                     && receipt.admitted_generation() == generation
                     && generation != 0
+                    && fresh.current_msg_id != 0
                     && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
                     && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
                     && fresh.restart_mode.is_none()
@@ -253,8 +265,11 @@ impl InflightTurnState {
         {
             return None;
         }
+        // Only a readable receipt of the same admission is reused; any other refuses.
         match &fresh.herdr_before_start_stop {
-            Some(durable) if durable.same_admission(&receipt) => return Some(fresh.clone()),
+            Some(durable) if durable.supported() && durable.same_admission(&receipt) => {
+                return Some(fresh.clone());
+            }
             Some(_) => return None,
             None => {}
         }
@@ -292,9 +307,12 @@ impl InflightTurnState {
             .herdr_before_start_stop
             .as_ref()
             .filter(|durable| durable.supported() && durable.same_admission(expected))?;
+        // The notice was shown on this snapshot's message, so the row must still name it.
         if fresh.turn_nonce.as_deref() != Some(durable.turn_nonce())
             || fresh.tui_terminal_kind.is_some()
             || fresh.terminal_delivery_committed
+            || self.current_msg_id == 0
+            || fresh.current_msg_id != self.current_msg_id
         {
             return None;
         }
@@ -319,6 +337,7 @@ impl InflightTurnState {
         };
         receipt.supported()
             && receipt.0["notice"].as_str() == Some(DELIVERED)
+            && fresh.current_msg_id != 0
             && fresh.herdr_before_start_stop.as_ref() == Some(receipt)
             && fresh.turn_nonce.as_deref() == Some(receipt.turn_nonce())
             && receipt.admitted_generation() != 0
@@ -344,10 +363,16 @@ mod tests;
 #[cfg(all(test, unix))]
 mod fault {
     use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::runtime_store::rename_fault;
     use std::sync::Mutex;
 
-    /// Armed channels; `true` writes the temp file and fails its rename, `false` fails the write.
+    /// Armed channels; `true` makes the real rename of the synced temp file fail, `false` fails
+    /// the write before it.
     static FAULTS: Mutex<Vec<(u64, bool)>> = Mutex::new(Vec::new());
+    /// Rename faults handed to the atomic writer, kept until their evidence is read.
+    static RENAMES: Mutex<Vec<(u64, rename_fault::Armed)>> = Mutex::new(Vec::new());
+    /// Channels with a rename fault armed, each to be matched by one handed-over fault.
+    static RENAMES_ARMED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
     impl InflightTurnState {
         pub(in crate::services::discord) fn arm_before_start_receipt_fault(
@@ -355,17 +380,44 @@ mod fault {
             rename: bool,
         ) {
             FAULTS.lock().unwrap().push((channel_id, rename));
+            if rename {
+                RENAMES_ARMED.lock().unwrap().push(channel_id);
+            }
         }
 
-        /// Whether every armed fault of `channel_id` was consumed by a receipt write.
+        /// Whether every armed fault of `channel_id` was consumed by a receipt write, a rename
+        /// fault only by one real rename attempt that the OS refused.
         pub(in crate::services::discord) fn before_start_receipt_faults_consumed(
             channel_id: u64,
         ) -> bool {
-            !FAULTS
-                .lock()
-                .unwrap()
+            let mut renames = RENAMES.lock().unwrap();
+            let mut armed_here = RENAMES_ARMED.lock().unwrap();
+            let requested = armed_here
                 .iter()
-                .any(|(channel, _)| *channel == channel_id)
+                .filter(|channel| **channel == channel_id)
+                .count();
+            armed_here.retain(|channel| *channel != channel_id);
+            let handed = renames
+                .iter()
+                .filter(|(channel, _)| *channel == channel_id)
+                .count();
+            let mut renamed = handed == requested;
+            renames.retain(|(channel, armed)| {
+                if *channel != channel_id {
+                    return true;
+                }
+                let (attempts, errors) = armed.evidence();
+                renamed &= attempts == 1
+                    && errors.len() == 1
+                    && errors.iter().all(|error| error.contains("os error"));
+                false
+            });
+            renamed
+                && !FAULTS
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(channel, _)| *channel == channel_id)
         }
     }
 
@@ -390,9 +442,9 @@ mod fault {
                     &provider,
                     row.channel_id,
                 );
-                std::fs::write(path.with_extension("json.receipt.tmp"), b"{}")
-                    .map_err(|error| error.to_string())?;
-                Err(format!("{caller}: injected rename fault"))
+                let armed = rename_fault::Armed::new(&path);
+                RENAMES.lock().unwrap().push((row.channel_id, armed));
+                Ok(())
             }
         }
     }

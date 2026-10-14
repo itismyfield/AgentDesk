@@ -1,9 +1,7 @@
-//! Read-only shadow of TUI output: derives what O would post and diffs it against Legacy.
-//! Its only write target is `root::ShadowRoot`; `scripts/check_o_shadow_write_zero.py` enforces that.
+//! Shared transcript capture, identity and derivation support for the output track.
 
 pub mod binding_reader;
 pub mod capture;
-pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
 pub mod derive;
@@ -11,10 +9,7 @@ pub mod identity;
 pub mod seal;
 pub mod unit_plan;
 
-// Observe-side modules (tap, diff, report, metrics) are declared below.
-pub mod diff;
-pub mod metrics;
-pub mod report;
+// Retains the shared output-track settings and retired shadow keys.
 pub mod tap;
 
 use std::path::PathBuf;

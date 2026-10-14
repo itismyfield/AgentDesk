@@ -1,18 +1,18 @@
 //! The policy close's mailbox step clears its exact receipt before anything is released, so a
 //! successor never starts over a receipt row; a clear refused there releases nothing.
 use super::*;
-use crate::services::turn_orchestrator::policy_close::test_hooks as step;
+use crate::services::turn_orchestrator::policy_close::test_hooks::{self as step, Stage};
 
-/// What the close's mailbox step held when it reached its clear: the active count, the durable
-/// receipt and whether its actor still held the slot.
-type AtClear = std::rc::Rc<std::cell::RefCell<Vec<(usize, Option<bool>)>>>;
+/// What the close's mailbox step held when it reached its clear: the active count and whether
+/// the durable receipt's notice was still pending.
+type AtClear = Arc<std::sync::Mutex<Vec<(usize, Option<bool>)>>>;
 
-/// Observes the step's clear boundary; `bump` first saves the same episode's row again there.
+/// Observes the next request's clear boundary; `bump` first saves the same episode's row there.
 fn at_clear(close: &Close, bump: bool) -> AtClear {
     let seen = AtClear::default();
     let (slot, shared, row) = (seen.clone(), close.shared.clone(), close.row.clone());
-    step::observe(Some(Box::new(move |stage| {
-        if stage != "before_clear" {
+    step::arm(Box::new(move |stage| {
+        if stage != Stage::BeforeClear {
             return;
         }
         let durable =
@@ -26,8 +26,8 @@ fn at_clear(close: &Close, bump: bool) -> AtClear {
             .and_then(|row| row.herdr_before_start_stop)
             .map(|receipt| receipt.notice_pending());
         let active = shared.restart.global_active.load(Ordering::Relaxed);
-        slot.borrow_mut().push((active, pending));
-    })));
+        slot.lock().unwrap().push((active, pending));
+    }));
     seen
 }
 
@@ -39,9 +39,12 @@ async fn coldstop_policy_clear_precedes_release_and_frees_the_successor() {
     let seen = at_clear(&close, false);
     let submitted = test_hooks::submitted();
     let settled = close.consume(shown()).await;
-    step::observe(None);
     assert!(settled);
-    assert_eq!(*seen.borrow(), [(1, Some(false))], "cleared before release");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, Some(false))],
+        "cleared before release"
+    );
     assert_eq!(test_hooks::submitted(), submitted + 1);
     assert!(close.durable().is_none());
     assert_eq!(
@@ -79,9 +82,8 @@ async fn coldstop_policy_clear_refused_releases_nothing() {
             &close.shared,
         );
     let settled = close.consume(shown()).await;
-    step::observe(None);
     assert!(!settled);
-    assert_eq!(*seen.borrow(), [(1, Some(false))]);
+    assert_eq!(*seen.lock().unwrap(), [(1, Some(false))]);
     assert_eq!(
         test_hooks::submitted(),
         submitted + 1,

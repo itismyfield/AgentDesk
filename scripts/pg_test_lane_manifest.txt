@@ -118,6 +118,7 @@ src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs
+src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs
 src/services/cluster/machine_resources/store.rs
 src/services/discord/admin_host_guard_tests.rs
@@ -131,6 +132,7 @@ src/services/discord/commands/control/native_herdr_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
 src/services/discord/commands/control/native_tests.rs
 src/services/discord/commands/restart.rs
+src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs
 src/services/discord/commands/tui_passthrough.rs
 src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
@@ -430,6 +432,7 @@ services::cluster::intake_worker::home_accept_tests
 services::cluster::intake_worker::home_route_tests
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
 services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
@@ -447,6 +450,7 @@ services::discord::commands::control::native::herdr_tests::e2e::o_actor
 services::discord::commands::control::native::tests
 services::discord::commands::control::native::tests::policy_tests
 services::discord::commands::restart::host_guard_tests
+services::discord::commands::text_commands::clear_refusal_reply_tests
 services::discord::commands::tui_passthrough::host_guard_tests
 services::discord::health::recovery::live_agent_recovery::host_guard_tests
 services::discord::health::recovery::stall_alert::tests
@@ -1395,16 +1399,25 @@ services::cluster::intake_worker::home_accept_tests::a_home_moved_after_the_last
 services::cluster::intake_worker::home_route_tests::a_delegated_row_reaches_accept_only_on_the_holder_of_its_epoch_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_codex_unsealed_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_each_responsibility_blocks_leave_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_first_check_still_admits_delivery_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_last_post_blocks_cas_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_pending_bind_alone_blocks_reclaim_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_post_close_recheck_finds_tail_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_blocks_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_settles_not_found_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_settles_unresolved_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_releasing_tail_posts_before_release_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_running_post_blocks_leave_with_projection_zero_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_tail_posts_before_leave_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unknown_is_not_empty_pg
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_unreadable_post_count_blocks_leave_pg
+services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_waiting_boundary_alone_blocks_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force_live_target_then_reboot_orphan_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
+services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_candidate_is_not_home_authority_pg
@@ -1482,6 +1495,9 @@ services::discord::commands::control::native::tests::restart_admission_holds_und
 services::discord::commands::control::native::tests::restart_admission_settles_each_unresolved_native_clear_row_pg
 services::discord::commands::control::native::tests::switched_off_or_unowned_clear_keeps_the_managed_reset_pg
 services::discord::commands::restart::host_guard_tests::restart_keeps_the_turn_and_process_of_a_refused_session_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_herdr_refused_text_clear_answers_the_channel_with_its_reason_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_text_clear_that_runs_answers_only_the_cleared_notice_pg
+services::discord::commands::text_commands::clear_refusal_reply_tests::a_tmux_refused_text_clear_answers_the_channel_with_its_reason_pg
 services::discord::commands::tui_passthrough::host_guard_tests::passthrough_is_refused_before_probing_a_kept_session_pg
 services::discord::health::recovery::live_agent_recovery::host_guard_tests::recovery_fence_stops_only_a_found_legacy_row_and_keeps_the_intent_pg
 services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_alerts_and_dedupes_without_synthetic_owner_mentions
@@ -1542,8 +1558,10 @@ services::discord::inflight::receipt_boundary_tests::s3act_b3b_generic_store_can
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_rebind_gc_preserves_receipt_under_lock_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_commit_wins_concurrent_clear_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_free_reaper_results_and_logs_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_row_refuses_stream_loop_marker_and_backfill_write_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_receipt_survives_all_legacy_deletes_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_scoped_invalidation_preserves_receipt_pg
+services::discord::inflight::receipt_boundary_tests::s3act_b3b_status_writers_preserve_receipt_subtree_and_anchor_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unknown_receipt_json_shape_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_unparseable_receipt_row_preserved_pg
 services::discord::inflight::receipt_boundary_tests::s3act_b3b_writer_matrix_carries_raw_receipt_pg
@@ -1572,6 +1590,8 @@ services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finali
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placeholder_stops_before_mailbox_finish_pg
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
+services::discord::queue_io::queued_head_inject::tests::a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg
+services::discord::queue_io::queued_head_inject::tests::a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg

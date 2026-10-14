@@ -21,6 +21,8 @@ pub(crate) struct AdmittedQueuedIntake {
     submission: IntakeSubmission,
     local_permit: Option<LocalAdmissionPermit>,
     restore_owner: Option<QueuedRestoreOwner>,
+    #[cfg(test)]
+    ledger_admission: Option<IntakeAdmission>,
 }
 struct QueuedRestoreOwner {
     original: Intervention,
@@ -112,7 +114,32 @@ pub(crate) async fn admit_queued_intake(
         preloaded_uploads: intervention.pending_uploads.clone(),
         voice_announcement: None,
     };
-    let local_permit = match admit_text_intake(deps, &submission).await {
+    let admission = admit_text_intake(deps, &submission).await;
+    #[cfg(test)]
+    let admission = super::ledger::take_test_admission(admission);
+    let local_permit = match admission {
+        #[cfg(test)]
+        admission @ (IntakeAdmission::LedgerReceived(_) | IntakeAdmission::LedgerDeferred(_)) => {
+            let Some(dispatch_lease) = dispatch_lease else {
+                return QueuedAdmissionDisposition::RejectedRestore;
+            };
+            let mut original = intervention.clone();
+            if crate::services::discord::input_runtime::supervisor::mutant("c2c1_queued_ledger_drops_original") {
+                original.pending_uploads.clear();
+            }
+            let restore_owner = QueuedRestoreOwner {
+                original,
+                provider: submission.provider.clone(),
+                channel_id,
+                dispatch_lease,
+            };
+            return QueuedAdmissionDisposition::Admitted(AdmittedQueuedIntake {
+                submission,
+                local_permit: None,
+                restore_owner: Some(restore_owner),
+                ledger_admission: Some(admission),
+            });
+        }
         IntakeAdmission::ConsumedToHold => {
             tracing::warn!(
                 provider = submission.provider.as_str(),
@@ -213,13 +240,55 @@ pub(crate) async fn admit_queued_intake(
         submission,
         local_permit,
         restore_owner,
+        #[cfg(test)]
+        ledger_admission: None,
     })
 }
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(in crate::services::discord::router) struct QueuedLedgerOutcome {
+    pub(in crate::services::discord::router) admission: IntakeAdmission,
+    pub(in crate::services::discord::router) original: Intervention,
+    pub(in crate::services::discord::router) provider: ProviderKind,
+    pub(in crate::services::discord::router) channel_id: serenity::ChannelId,
+    pub(in crate::services::discord::router) dispatch_lease:
+        std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>,
+}
+#[cfg(test)]
+impl std::fmt::Display for QueuedLedgerOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("queued ledger admission retains its original and dispatch lease")
+    }
+}
+#[cfg(test)]
+impl std::error::Error for QueuedLedgerOutcome {}
 
 pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
+    #[cfg(test)]
+    if !crate::services::discord::input_runtime::supervisor::mutant(
+        "c2c1_queued_ledger_means_executed",
+    ) && let Some(admission) = admitted.ledger_admission
+    {
+        let owner = admitted
+            .restore_owner
+            .expect("queued ledger admission retains custody");
+        if crate::services::discord::input_runtime::supervisor::mutant(
+            "c2c1_queued_ledger_drops_lease",
+        ) {
+            return Err(Box::new(super::ledger::LedgerOutcome(admission)));
+        }
+        return Err(Box::new(QueuedLedgerOutcome {
+            admission,
+            original: owner.original,
+            provider: owner.provider,
+            channel_id: owner.channel_id,
+            dispatch_lease: owner.dispatch_lease,
+        }));
+    }
     let Some(permit) = admitted.local_permit else {
         return Ok(super::super::IntakeExecution::Executed);
     };

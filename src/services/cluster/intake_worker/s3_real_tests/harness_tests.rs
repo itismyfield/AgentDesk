@@ -26,7 +26,7 @@ use crate::services::cluster::intake_routing_config::{
 };
 use crate::services::tui_o::cutover::test_override;
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId, binding_reader::source_id_for};
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, BindingRecord};
@@ -339,6 +339,43 @@ impl Node {
         assert!(done.exists(), "node {} returned before its end", self.role);
     }
 
+    /// Waits for `name` from this node; its exit before the signal fails at once with its log.
+    pub(super) async fn wait_signal(&mut self, name: &str, within: Duration) {
+        eprintln!("[s3] waiting for signal {name} from {}", self.role);
+        let deadline = tokio::time::Instant::now() + within;
+        while !signalled(&self.dir, name) {
+            let exited = self.child.as_mut().expect("running").try_wait().unwrap();
+            if let Some(status) = exited.filter(|_| !signalled(&self.dir, name)) {
+                let tail = self.log_tail();
+                panic!(
+                    "node {} exited ({status}) before signal {name}\n{tail}",
+                    self.role
+                );
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "signal {name} never came from {}\n{}",
+                self.role,
+                self.log_tail()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// The spawn this node is, unique within the scene: a generation's identity across restarts.
+    pub(super) fn name(&self) -> &str {
+        &self.spawn
+    }
+
+    pub(super) fn role(&self) -> &'static str {
+        self.role
+    }
+
+    /// The child's process id, for a node that must be the same process across a phase.
+    pub(super) fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running").id()
+    }
+
     /// Ends the node at once, as a crash would.
     pub(super) fn kill(mut self) {
         if let Some(mut child) = self.child.take() {
@@ -370,6 +407,251 @@ pub(super) enum Seen {
     Dropped(String),
 }
 
+/// The scene file every recording node appends its POSTs' lifecycles to.
+pub(super) const POST_LIFECYCLE: &str = "post-lifecycle.jsonl";
+
+/// One line of [`POST_LIFECYCLE`]: a step of request `request` made by process `spawn` of `node`,
+/// with an epoch and where that epoch came from.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct PostEvent {
+    pub(super) node: String,
+    pub(super) spawn: String,
+    pub(super) request: String,
+    pub(super) step: PostStep,
+    pub(super) content: String,
+    pub(super) epoch: Option<i64>,
+    pub(super) epoch_source: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PostStep {
+    /// Written in the first poll before its first await, with the scene's fixed epoch.
+    Started,
+    /// The home epoch read just after the first poll, outside the admission lock.
+    Observed,
+    Accepted,
+    Ended,
+    Dropped,
+}
+
+/// Appends this process's POST steps to the scene file; request ids are `<spawn>/<n>`.
+struct PostRecorder {
+    file: PathBuf,
+    node: String,
+    spawn: String,
+    scene_epoch: Option<i64>,
+    next: AtomicU64,
+}
+
+impl PostRecorder {
+    fn write(&self, request: &str, step: PostStep, content: &str, epoch: (Option<i64>, &str)) {
+        use std::io::Write;
+        let line = PostEvent {
+            node: self.node.clone(),
+            spawn: self.spawn.clone(),
+            request: request.into(),
+            step,
+            content: content.into(),
+            epoch: epoch.0,
+            epoch_source: epoch.0.map(|_| epoch.1.to_string()),
+        };
+        let mut bytes = serde_json::to_vec(&line).unwrap();
+        bytes.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file)
+            .unwrap();
+        // The lock spans this one append only, never the request it records; closing releases it.
+        file.lock().unwrap();
+        file.write_all(&bytes).unwrap();
+    }
+
+    fn start(self: &Arc<Self>, content: &str) -> PostRecord {
+        let n = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let request = format!("{}/{n}", self.spawn);
+        let epoch = (self.scene_epoch, "scene");
+        self.write(&request, PostStep::Started, content, epoch);
+        PostRecord {
+            recorder: Arc::clone(self),
+            request,
+            content: content.into(),
+            accepted: false,
+        }
+    }
+}
+
+/// A recorded POST from its Started on; going, it writes Ended once accepted and Dropped before.
+struct PostRecord {
+    recorder: Arc<PostRecorder>,
+    request: String,
+    content: String,
+    accepted: bool,
+}
+
+impl PostRecord {
+    fn note(&self, step: PostStep, epoch: (Option<i64>, &str)) {
+        let recorder = &self.recorder;
+        recorder.write(&self.request, step, &self.content, epoch);
+    }
+}
+
+impl Drop for PostRecord {
+    fn drop(&mut self) {
+        let end = if self.accepted {
+            PostStep::Ended
+        } else {
+            PostStep::Dropped
+        };
+        self.note(end, (None, ""));
+    }
+}
+
+/// Every line of the scene's [`POST_LIFECYCLE`] in file order; no file is no POST.
+pub(super) fn post_lifecycle(dir: &Path) -> Vec<PostEvent> {
+    let text = std::fs::read_to_string(dir.join(POST_LIFECYCLE)).unwrap_or_default();
+    let lines = text.lines().map(|line| serde_json::from_str(line).unwrap());
+    lines.collect()
+}
+
+/// Requests started and not yet Ended or Dropped.
+pub(super) fn open_posts(events: &[PostEvent]) -> usize {
+    let started = events.iter().filter(|e| e.step == PostStep::Started);
+    let ended = events
+        .iter()
+        .filter(|e| matches!(e.step, PostStep::Ended | PostStep::Dropped));
+    started.count().saturating_sub(ended.count())
+}
+
+/// A request's span in the lifecycle file: the line of its Started and of its terminal step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PostSpan {
+    pub(super) node: String,
+    pub(super) spawn: String,
+    pub(super) content: String,
+    pub(super) started: usize,
+    pub(super) ended: usize,
+    pub(super) accepted: bool,
+    pub(super) observed: Option<i64>,
+}
+
+/// Pairs each request's steps in file order, failing on a missing, repeated or misordered step,
+/// and on any two requests of different processes whose spans overlap.
+pub(super) fn post_spans(events: &[PostEvent]) -> Result<Vec<PostSpan>, String> {
+    use PostStep::{Accepted, Dropped, Ended, Observed, Started};
+    let mut requests: BTreeMap<&str, Vec<(usize, &PostEvent)>> = BTreeMap::new();
+    for (line, event) in events.iter().enumerate() {
+        requests
+            .entry(&event.request)
+            .or_default()
+            .push((line, event));
+    }
+    let mut spans = Vec::new();
+    for (request, steps) in requests {
+        let order: Vec<PostStep> = steps.iter().map(|(_, event)| event.step).collect();
+        let whole = matches!(
+            order[..],
+            [Started, Observed, Accepted, Ended]
+                | [Started, Observed, Dropped]
+                | [Started, Dropped]
+        );
+        if !whole {
+            return Err(format!("{request}: steps {order:?}"));
+        }
+        let (first, last) = (steps[0], steps[steps.len() - 1]);
+        let same = |(_, event): &(usize, &PostEvent)| {
+            (&event.spawn, &event.content) == (&first.1.spawn, &first.1.content)
+        };
+        if !steps.iter().all(same) {
+            return Err(format!("{request}: steps from different requests"));
+        }
+        let observed = steps.iter().find(|(_, event)| event.step == Observed);
+        spans.push(PostSpan {
+            node: first.1.node.clone(),
+            spawn: first.1.spawn.clone(),
+            content: first.1.content.clone(),
+            started: first.0,
+            ended: last.0,
+            accepted: order.contains(&Accepted),
+            observed: observed.and_then(|(_, event)| event.epoch),
+        });
+    }
+    spans.sort_by_key(|span| span.started);
+    for (i, a) in spans.iter().enumerate() {
+        for b in spans[i + 1..].iter().filter(|b| b.spawn != a.spawn) {
+            if b.started < a.ended {
+                return Err(format!("{a:?} and {b:?} overlap"));
+            }
+        }
+    }
+    Ok(spans)
+}
+
+#[test]
+fn post_spans_pass_apart_and_name_each_broken_record() {
+    use PostStep::{Accepted, Dropped, Ended, Observed, Started};
+    let event = |request: &str, step| {
+        let spawn = request.split('/').next().unwrap().to_string();
+        let (node, content) = (spawn.clone(), format!("{request} payload"));
+        let (epoch, epoch_source) = (None, None);
+        let request = request.to_string();
+        PostEvent {
+            node,
+            spawn,
+            request,
+            step,
+            content,
+            epoch,
+            epoch_source,
+        }
+    };
+    let posted = |request| [Started, Observed, Accepted, Ended].map(|step| event(request, step));
+    let apart: Vec<_> = posted("a/1").into_iter().chain(posted("b/1")).collect();
+    assert_eq!(post_spans(&apart).map(|spans| spans.len()), Ok(2));
+    let crossed = [
+        event("a/1", Started),
+        event("b/1", Started),
+        event("a/1", Dropped),
+        event("b/1", Dropped),
+    ];
+    assert!(post_spans(&crossed).unwrap_err().contains("overlap"));
+    let same_process = [
+        event("a/1", Started),
+        event("a/2", Started),
+        event("a/1", Dropped),
+        event("a/2", Dropped),
+    ];
+    assert!(
+        post_spans(&same_process).is_ok(),
+        "overlap is judged across processes"
+    );
+    let open = [event("a/1", Started), event("a/1", Observed)];
+    assert_eq!(open_posts(&open), 1);
+    let broken: [&[PostEvent]; 4] = [
+        &open,
+        &[
+            event("a/1", Started),
+            event("a/1", Dropped),
+            event("a/1", Dropped),
+        ],
+        &[
+            event("a/1", Accepted),
+            event("a/1", Started),
+            event("a/1", Ended),
+        ],
+        &[
+            event("a/1", Started),
+            event("a/1", Observed),
+            event("a/1", Ended),
+        ],
+    ];
+    for events in broken {
+        let error = post_spans(events).unwrap_err();
+        assert!(error.contains("a/1: steps"), "{error}");
+    }
+}
+
 #[derive(Default)]
 struct DiscordState {
     created: Mutex<Vec<(u64, SeenMessage)>>,
@@ -380,19 +662,25 @@ struct DiscordState {
     kept: Vec<(u64, SeenMessage)>,
     /// Where each accepted message is also written, for the next generation's Discord to keep.
     file: Option<PathBuf>,
+    recorder: Option<Arc<PostRecorder>>,
 }
 
 /// A fake Discord that keeps each request's lifecycle and can hold requests open.
 pub(super) struct Discord {
     state: Arc<DiscordState>,
     valve: watch::Sender<bool>,
+    history_unavailable: bool,
 }
+
+/// What every history read of [`Discord::history_unavailable`] fails with.
+pub(super) const HISTORY_UNAVAILABLE: &str = "test history unavailable";
 
 impl Default for Discord {
     fn default() -> Self {
         Self {
             state: Arc::default(),
             valve: watch::channel(true).0,
+            history_unavailable: false,
         }
     }
 }
@@ -424,6 +712,26 @@ impl Discord {
             state: Arc::new(state),
             ..Self::default()
         }
+    }
+
+    /// As this Discord, with every history read failing as an outage would.
+    pub(super) fn history_unavailable(mut self) -> Self {
+        self.history_unavailable = true;
+        self
+    }
+
+    /// As this Discord, appending each POST's lifecycle to the scene's [`POST_LIFECYCLE`].
+    pub(super) fn recording(mut self, env: &Env) -> Self {
+        let recorder = PostRecorder {
+            file: env.dir.join(POST_LIFECYCLE),
+            node: env.role.clone(),
+            spawn: env.spawn.clone(),
+            scene_epoch: get(&env.dir, "epoch").map(|epoch| epoch.parse().unwrap()),
+            next: AtomicU64::new(0),
+        };
+        let state = Arc::get_mut(&mut self.state).expect("a Discord not yet shared");
+        state.recorder = Some(Arc::new(recorder));
+        self
     }
 
     /// What earlier generations accepted.
@@ -513,9 +821,14 @@ impl DiscordPort for Discord {
         let state = Arc::clone(&self.state);
         let mut valve = self.valve.subscribe();
         async move {
+            // Before the first await: a request dropped at its first yield still records its end.
+            let mut record = state.recorder.as_ref().map(|r| r.start(&content));
             // The first poll runs under the home gate's admission lock; read its epoch after it.
             tokio::task::yield_now().await;
             let home_epoch = home_epoch_now(channel);
+            if let Some(record) = &record {
+                record.note(PostStep::Observed, (home_epoch, "gate"));
+            }
             let started = Seen::Started {
                 content: content.clone(),
                 home_epoch,
@@ -553,6 +866,10 @@ impl DiscordPort for Discord {
             };
             locked(&state.seen).push(Seen::Accepted(content));
             request.accepted = true;
+            if let Some(record) = &mut record {
+                record.note(PostStep::Accepted, (None, ""));
+                record.accepted = true;
+            }
             PostOutcome::Created(message)
         }
     }
@@ -562,6 +879,9 @@ impl DiscordPort for Discord {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
+        if self.history_unavailable {
+            return std::future::ready(Err(HISTORY_UNAVAILABLE.into()));
+        }
         let created = locked(&self.state.created);
         let page = (self.state.kept.iter().chain(created.iter()))
             .filter(|(c, m)| *c == channel && m.id > after);
@@ -601,6 +921,8 @@ pub(super) struct EventLog {
     notice: watch::Sender<u64>,
     /// The highest seq any read returned.
     served: AtomicU64,
+    /// A seq whose publish waits a moment after it is stored, so a racing commit could pass it.
+    slow_publish: AtomicU64,
 }
 
 impl EventLog {
@@ -610,6 +932,7 @@ impl EventLog {
             events: Mutex::new(events),
             notice: watch::channel(latest).0,
             served: AtomicU64::new(0),
+            slow_publish: AtomicU64::new(0),
         }
     }
 
@@ -618,21 +941,22 @@ impl EventLog {
         locked(&self.events)[0].clone()
     }
 
-    /// Stores `record` as the next seq, then publishes it, so a notified reader finds it.
+    /// Stores `record` as the next seq and publishes it under the same lock, so a notified reader
+    /// finds it and the notice never moves back.
     pub(super) fn commit(&self, record: BindingRecord) -> u64 {
-        let seq = {
-            let mut events = locked(&self.events);
-            let first = events[0].clone();
-            let seq = events.last().unwrap().seq + 1;
-            let committed_at = chrono::Utc::now();
-            events.push(BindingEvent {
-                seq,
-                record,
-                committed_at,
-                ..first
-            });
-            seq
-        };
+        let mut events = locked(&self.events);
+        let first = events[0].clone();
+        let seq = events.last().unwrap().seq + 1;
+        let committed_at = chrono::Utc::now();
+        events.push(BindingEvent {
+            seq,
+            record,
+            committed_at,
+            ..first
+        });
+        if seq == self.slow_publish.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
         self.notice.send_replace(seq);
         seq
     }
@@ -660,12 +984,54 @@ impl BindingEvents for EventLog {
     }
 }
 
+/// The commits start together and seq 2's publish waits; outside the lock it would end on 2.
+#[test]
+fn racing_commits_publish_the_latest_seq_and_every_event() {
+    let source = SourceId {
+        session_id: "s1".into(),
+        path: PathBuf::from("/s1.jsonl"),
+        dev: 1,
+        ino: 1,
+    };
+    let startup = TestHost::new([(C, source)]).bindings(C, ShadowProvider::Claude);
+    let log = EventLog::new(startup.binding_events_since(C, 0).unwrap());
+    let rejected = |detail: &str| BindingRecord::Rejected {
+        detail: detail.into(),
+    };
+    log.slow_publish.store(2, Ordering::SeqCst);
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        for detail in ["a", "b"] {
+            let (log, start, rejected) = (&log, &start, &rejected);
+            scope.spawn(move || {
+                start.wait();
+                log.commit(rejected(detail))
+            });
+        }
+    });
+    assert_eq!(
+        *log.subscribe(C).borrow(),
+        3,
+        "the notice names the last commit"
+    );
+    let read = log.binding_events_since(C, 0).unwrap();
+    let seqs: Vec<_> = read.iter().map(|event| event.seq).collect();
+    assert_eq!(seqs, [1, 2, 3]);
+}
+
 /// The real writer host's gateway IO with the recording Discord in place of [`TestHost`]'s.
 pub(super) struct S3Host {
     inner: Arc<TestHost>,
     pub(super) discord: Arc<Discord>,
     pub(super) lease: Lease,
     logs: Mutex<BTreeMap<u64, Arc<EventLog>>>,
+}
+
+impl S3Host {
+    /// Whether the writer host asked for `channel`'s binding log, as it does once its store is open.
+    pub(super) fn bound(&self, channel: u64) -> bool {
+        locked(&self.logs).contains_key(&channel)
+    }
 }
 
 impl HostIo for S3Host {
@@ -741,10 +1107,10 @@ pub(super) fn append(path: &Path, bytes: &[u8]) {
 }
 
 /// The boot config a node reads: clustered, the gateway as O home, `C` selected for the writer.
-fn node_config(role: &str, provider: ShadowProvider) -> crate::config::Config {
+fn node_config(role: &str, provider: ShadowProvider, gateway: &str) -> crate::config::Config {
     serde_json::from_value(serde_json::json!({
         "server": {},
-        "cluster": {"enabled": true, "instance_id": role, "gateway_preferred_instance_id": GW},
+        "cluster": {"enabled": true, "instance_id": role, "gateway_preferred_instance_id": gateway},
         "runtime": {"channel_home_delegation_enabled": true},
         "tui_o": {"writer": {"channels": [C]}},
         "agents": [{"id": format!("writer-{C}"), "name": "Writer",
@@ -784,13 +1150,26 @@ impl Booted {
     /// As [`Booted::boot`], posting to `discord`.
     pub(super) async fn boot_on(env: &Env, discord: Discord) -> Self {
         let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        Self::boot_with_on(env, reads, discord, ShadowProvider::Claude).await
+        Self::boot_with_on(env, reads, discord, ShadowProvider::Claude, GW).await
+    }
+
+    /// As [`Booted::boot`], with `gateway` as the cluster's gateway role (and so the O home).
+    pub(super) async fn boot_with_gateway(env: &Env, gateway: &str) -> Self {
+        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+        Self::boot_with_on(
+            env,
+            reads,
+            Discord::default(),
+            ShadowProvider::Claude,
+            gateway,
+        )
+        .await
     }
 
     /// As [`Booted::boot`], with the config, boot and writer host on `provider`.
     pub(super) async fn boot_as(env: &Env, provider: ShadowProvider) -> Self {
         let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        Self::boot_with_on(env, reads, Discord::default(), provider).await
+        Self::boot_with_on(env, reads, Discord::default(), provider, GW).await
     }
 
     /// As [`Booted::boot`], with the drain reading through `reads`.
@@ -798,7 +1177,7 @@ impl Booted {
     where
         R: DrainPort + Send + Sync + 'static,
     {
-        Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude).await
+        Self::boot_with_on(env, reads, Discord::default(), ShadowProvider::Claude, GW).await
     }
 
     async fn boot_with_on<R>(
@@ -806,6 +1185,7 @@ impl Booted {
         reads: impl Fn(u64) -> R,
         discord: Discord,
         provider: ShadowProvider,
+        gateway: &str,
     ) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
@@ -813,7 +1193,7 @@ impl Booted {
         let role = env.role.clone();
         let root = crate::config::runtime_root().expect("node root");
         let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
-        let config = node_config(&role, provider);
+        let config = node_config(&role, provider, gateway);
         crate::services::tui_o::channel_policy::install(&config).expect("boot snapshot");
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);
@@ -870,6 +1250,9 @@ impl Booted {
         eprintln!("[s3] until posts {expected:?}");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         while self.discord().posts() != expected && tokio::time::Instant::now() < deadline {
+            if self.stopped_for_good() {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         if self.discord().posts() != expected {
@@ -877,8 +1260,9 @@ impl Booted {
             let owed = self.owed().await;
             let transcript = std::fs::read_to_string(&self.transcript).unwrap_or_default();
             panic!(
-                "posts {:?} != {expected:?}\nseen {:?}\nalarms {alarms:?}\nowed {owed:?}\n{transcript}",
+                "posts {:?} != {expected:?}\nhalted for good {}\nseen {:?}\nalarms {alarms:?}\nowed {owed:?}\n{transcript}",
                 self.discord().posts(),
+                self.stopped_for_good(),
                 self.discord().seen()
             );
         }
@@ -912,6 +1296,22 @@ impl Booted {
             *channel == C && matches!(alarm, WriterAlarm::Halted { .. })
         };
         raised.iter().any(|entry| halted(&entry))
+    }
+
+    /// A Halt with every writer host ended: no resume follows, so no later POST can come.
+    fn stopped_for_good(&self) -> bool {
+        self.halted()
+            && self
+                .writers
+                .iter()
+                .all(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// The writer alarms raised for `C`, in order, as the host's sink received them.
+    pub(super) fn raised(&self) -> Vec<WriterAlarm> {
+        let raised = locked(&self.host.inner.alarms.0);
+        let ours = raised.iter().filter(|(channel, _)| *channel == C);
+        ours.map(|(_, alarm)| alarm.clone()).collect()
     }
 
     /// What the drain waits on now, as health shows it.
@@ -1007,8 +1407,19 @@ pub(super) async fn seed_on(
     message: &str,
     home_epoch: Option<i64>,
 ) -> i64 {
+    seed_for(pool, channel, MINI, message, home_epoch).await
+}
+
+/// As [`seed_on`], routed to `target`.
+pub(super) async fn seed_for(
+    pool: &PgPool,
+    channel: u64,
+    target: &str,
+    message: &str,
+    home_epoch: Option<i64>,
+) -> i64 {
     let payload = crate::db::intake_outbox::InsertPendingPayload {
-        target_instance_id: MINI.into(),
+        target_instance_id: target.into(),
         forwarded_by_instance_id: GW.into(),
         required_labels: serde_json::json!([]),
         execution_requirements: serde_json::json!({}),

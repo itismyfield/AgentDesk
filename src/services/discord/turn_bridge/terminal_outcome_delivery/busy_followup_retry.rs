@@ -14,7 +14,7 @@ fn busy_requeue_delivery_policy(
     } else if outcome.retry_capped {
         (
             false,
-            "⚠ Claude TUI가 계속 사용 중이라 자동 재시도를 중단했습니다. 메시지는 큐에 보존되어 있습니다. 잠시 후 다시 시도하거나 메시지를 재전송해 주세요.",
+            "⚠ Claude TUI가 계속 사용 중이라 자동 재시도를 중단했습니다. 메시지는 큐에 보존되며 자동으로 다시 실행되지 않습니다. 새 메시지는 별도로 처리됩니다.",
         )
     } else {
         (
@@ -67,20 +67,17 @@ pub(super) async fn handle_empty_response_and_busy_requeue(
 /// released.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn apply_busy_requeue_if_pending(
-    claude_tui_busy_requeue_pending: bool,
+    pending: Option<followup_requeue::BusyAttempt<'_>>,
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
     dispatch_id: Option<&str>,
     adk_session_key: Option<&str>,
-    turn_id: &str,
     delivery_response: &mut String,
     preserve_inflight_for_cleanup_retry: &mut bool,
 ) -> Option<followup_requeue::FollowupRequeueOutcome> {
-    if !claude_tui_busy_requeue_pending {
-        return None;
-    }
+    let attempt = pending?;
     let outcome = followup_requeue::requeue_claude_tui_followup_pre_submit_timeout(
         shared_owned,
         provider,
@@ -88,7 +85,7 @@ pub(super) async fn apply_busy_requeue_if_pending(
         inflight_state,
         dispatch_id,
         adk_session_key,
-        turn_id,
+        attempt,
     )
     .await;
     let (preserve_inflight, response) = busy_requeue_delivery_policy(outcome);

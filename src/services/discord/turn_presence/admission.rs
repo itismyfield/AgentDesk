@@ -99,6 +99,7 @@ impl Incarnation {
         true
     }
 
+    #[cfg(test)]
     fn replace(&self, ticket: &Ticket, identity: Identity) -> bool {
         self.seat(ticket, identity).is_some()
     }
@@ -128,6 +129,7 @@ impl Incarnation {
                     owner,
                 });
                 current.as_ref()?;
+                registration.seated();
                 Some(ticket.successor(registration))
             })
             .flatten()
@@ -142,6 +144,7 @@ impl Incarnation {
     }
 
     /// Seats an approval on a Gateway witness the caller names, as a provider gate would.
+    #[cfg(test)]
     pub(super) fn seat_gateway_for_tests(
         &self,
         ticket: &Ticket,
@@ -272,4 +275,4 @@ impl Approval {
 
 #[cfg(all(test, unix))]
 #[path = "admission_tests.rs"]
-mod tests;
+pub(super) mod tests;

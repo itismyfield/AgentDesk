@@ -124,7 +124,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs` | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
@@ -159,7 +159,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
@@ -168,7 +168,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
-| `TMUX` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
-| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs` |  |

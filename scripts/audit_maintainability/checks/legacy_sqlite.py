@@ -55,7 +55,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="legacy_sqlite_refs",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"legacy SQLite reference: `{match.group(0)}`",
@@ -71,7 +71,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="legacy_sqlite_refs",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"operational script uses stale runtime SQLite path: `{match.group(0)}`",
