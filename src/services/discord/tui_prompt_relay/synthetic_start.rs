@@ -1,11 +1,11 @@
 use super::*;
-
 pub(super) mod bridge_handoff;
 pub(in crate::services::discord) mod claim;
+#[cfg(all(test, unix))]
+pub(super) mod non_bridge_claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
 pub(super) use claim::{claim_tui_direct_synthetic_turn, claim_tui_direct_synthetic_turn_inner};
-
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
     finish_tui_direct_synthetic_pre_save_failure,

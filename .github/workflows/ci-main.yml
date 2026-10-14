@@ -283,8 +283,8 @@ jobs:
 
       - name: just test-postgres-shard
         # Same budget as ci-pr.yml; shard 1 runs the rest of the PG selection and
-        # reached 39–41 min on 2026-10-11, so 40 min cut healthy runs.
-        timeout-minutes: 60
+        # ran past 60 min on a healthy 2026-10-14 main run, so 60 cut it.
+        timeout-minutes: 75
         run: just test-postgres-shard
         env:
           # #4245: see Full tests lane — keep test debuginfo off so the build
