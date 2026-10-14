@@ -244,6 +244,67 @@ async fn resolve_effective_provider_and_tmux_name(
     (effective_provider, tmux_name)
 }
 
+/// The two native pane writes a passthrough performs; tests substitute them to observe the effect.
+#[derive(Clone, Copy)]
+struct NativeSend {
+    selector: fn(&str, SelectorNavigation) -> Result<(), String>,
+    prompt: fn(&str, &str) -> Result<(), String>,
+}
+
+const TUI_SEND: NativeSend = NativeSend {
+    selector: |name, nav| {
+        crate::services::claude_tui::input::send_selector_followup(name, nav, None)
+    },
+    prompt: |name, prompt| {
+        crate::services::claude_tui::input::send_followup_prompt(name, prompt, None)
+    },
+};
+
+enum Delivery {
+    /// Nothing reached the pane; the notice says why.
+    Refused(String),
+    Sent(Result<(), String>),
+}
+
+/// Input admission comes before the host guard, the pane probe and the write. The permit moves
+/// into the blocking write, so a cancelled caller cannot end the effect while the pane is written.
+async fn deliver(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_name: &str,
+    command: ClaudeSlashPassthrough,
+    defer: impl std::future::Future<Output = Result<(), poise::serenity_prelude::Error>>,
+    send: NativeSend,
+) -> Result<Delivery, Error> {
+    use crate::services::discord::input_runtime::fence::effect;
+    let permit = match effect::admit(provider, channel_id) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            let name = command.slash_name();
+            let notice =
+                format!("{name}를 전달하지 않았어요: 입력 보호 중인 채널이에요 ({failure:?})");
+            return Ok(Delivery::Refused(notice));
+        }
+    };
+    let block = passthrough_block(shared, provider, channel_id, tmux_name, command);
+    if let Some(notice) = block.await {
+        return Ok(Delivery::Refused(notice));
+    }
+    defer.await?;
+    let name = tmux_name.to_string();
+    let write = move || {
+        effect::synchronous(permit, || match command.selector_navigation() {
+            Some(nav) => (send.selector)(&name, nav),
+            None => (send.prompt)(&name, &command.prompt()),
+        })
+    };
+    let result = tokio::task::spawn_blocking(write).await;
+    Ok(Delivery::Sent(result.unwrap_or_else(|error| {
+        Err(format!("join error: {error}"))
+    })))
+}
+
 async fn run_claude_passthrough(
     ctx: Context<'_>,
     command: ClaudeSlashPassthrough,
@@ -267,37 +328,21 @@ async fn run_claude_passthrough(
         return Ok(());
     };
     let (shared, channel_id) = (&ctx.data().shared, ctx.channel_id().get());
-    let block = passthrough_block(shared, &effective_provider, channel_id, &tmux_name, command);
-    if let Some(notice) = block.await {
-        ctx.say(notice).await?;
-        return Ok(());
-    }
-
-    ctx.defer().await?;
-
-    let tmux_name_for_send = tmux_name.clone();
-    let send_result = match command.selector_navigation() {
-        Some(nav) => tokio::task::spawn_blocking(move || {
-            crate::services::claude_tui::input::send_selector_followup(
-                &tmux_name_for_send,
-                nav,
-                None,
-            )
-        })
-        .await
-        .unwrap_or_else(|error| Err(format!("join error: {error}"))),
-        None => {
-            let prompt = command.prompt();
-            tokio::task::spawn_blocking(move || {
-                crate::services::claude_tui::input::send_followup_prompt(
-                    &tmux_name_for_send,
-                    &prompt,
-                    None,
-                )
-            })
-            .await
-            .unwrap_or_else(|error| Err(format!("join error: {error}")))
+    let delivery = deliver(
+        shared,
+        &effective_provider,
+        channel_id,
+        &tmux_name,
+        command,
+        ctx.defer(),
+        TUI_SEND,
+    );
+    let send_result = match delivery.await? {
+        Delivery::Refused(notice) => {
+            ctx.say(notice).await?;
+            return Ok(());
         }
+        Delivery::Sent(result) => result,
     };
 
     match send_result {
@@ -431,6 +476,10 @@ mod tests {
         assert!(!LOCAL_ONLY_SLASH_COMMANDS.contains(&"/model"));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "tui_passthrough_input_fence_tests.rs"]
+mod input_fence_tests;
 
 #[cfg(test)]
 #[cfg(unix)]

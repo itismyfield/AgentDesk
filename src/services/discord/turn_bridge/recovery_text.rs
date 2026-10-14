@@ -772,7 +772,38 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         tracing::warn!("  [{ts}] ⏭ auto-retry: protected request held for channel {channel_id}");
         return;
     }
+    // A protected channel's input belongs to its ledger, so a refused retry claims and writes nothing.
+    use crate::services::discord::input_runtime::fence::effect;
+    let permit = match effect::admit(provider, channel_id.get()) {
+        Ok(permit) => permit,
+        Err(failure) => {
+            tracing::warn!(
+                "  [{ts}] ⏭ auto-retry: input fence {failure:?} for channel {channel_id}"
+            );
+            return;
+        }
+    };
+    // The admitted retry keeps its permit until the follow-up is queued.
+    let retry = retry_with_history_admitted(
+        http,
+        shared,
+        provider,
+        channel_id,
+        user_message_id,
+        user_text,
+    );
+    effect::scope(permit, retry).await
+}
 
+async fn retry_with_history_admitted(
+    http: &serenity::http::Http,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_message_id: MessageId,
+    user_text: &str,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
     // Dedup guard: prevent turn_bridge + watcher from both firing
     // auto-retry for the same channel simultaneously.
     if !RETRY_PENDING.insert(channel_id.get()) {
@@ -905,6 +936,10 @@ pub(in crate::services::discord) async fn auto_retry_with_history(
         tracing::info!("  [{ts}] ⏭ auto-retry: follow-up deduped for channel {channel_id}");
     }
 }
+
+#[cfg(test)]
+#[path = "recovery_text_input_fence_tests.rs"]
+pub(in crate::services::discord) mod input_fence_tests;
 
 #[cfg(test)]
 mod retry_pending_tests {
