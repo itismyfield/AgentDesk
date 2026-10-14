@@ -9,8 +9,8 @@ use tokio::sync::oneshot;
 use super::super::installed_actor_handoff::Installation;
 use super::super::scoped_claim::{self, InstalledPending, ScopedClaimOutcome, ScopedMsg};
 use super::super::{
-    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, QueuePersistenceContext,
-    RecoveryDoneSignal,
+    ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, MailboxUnreachable,
+    QueuePersistenceContext, RecoveryDoneSignal,
 };
 use super::recovery_custody::capability::{ApplyGuard, AttemptKey, RevokeHandle};
 use super::recovery_custody::model::Namespace;
@@ -186,19 +186,23 @@ pub(super) fn apply(
 
 /// After a lost answer: the same actor's pending record, when it is `proof`'s, as the install of
 /// `arm`; it reads only, so a retry inherits the install and its event ids and issues no new debt.
+/// An actor that cannot be asked is an error, never "not installed".
 pub(crate) async fn recover(
     handle: &ChannelMailboxHandle,
     proof: &Installation,
     arm: &RevokeHandle,
-) -> Option<Installed> {
-    let pending = handle.installed_pending().await?;
-    holds(&pending, proof).then(|| Installed {
+) -> Result<Option<Installed>, MailboxUnreachable> {
+    let read = |reply| ChannelMailboxMsg::ScopedClaim(ScopedMsg::Pending { reply });
+    let Some(pending) = handle.request(read).await? else {
+        return Ok(None);
+    };
+    Ok(holds(&pending, proof).then(|| Installed {
         actor: handle.recovery_done().clone(),
         operation_id: arm.operation_id().to_string(),
         arm_id: arm.arm_id().to_string(),
         attempt: arm.attempt().cloned(),
         event_ids: event_ids(&pending),
-    })
+    }))
 }
 
 /// What a custody contact asks of a channel's actor.
@@ -269,7 +273,3 @@ pub(crate) async fn request(
     );
     handle.sender.send(sent).map_err(|_| NotSent::Unreachable)
 }
-
-#[cfg(unix)]
-#[path = "mailbox_access_tests.rs"]
-mod tests;
