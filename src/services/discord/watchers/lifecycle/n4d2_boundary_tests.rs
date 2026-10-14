@@ -97,7 +97,7 @@ async fn n4d2_terminal_invalidated_authority_self_exits_and_retains_custody() {
         let observed = observe(&fixture);
         let submitted = Scope::new(&fixture.shared);
         let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-        restore_tmux_watchers(&fixture.http, &fixture.shared).await;
+        assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
         let handle = fixture.handle();
         let ticket = watcher_completion::observe(&handle.cancel).unwrap();
         until(&observed, "initial EOF before invalidation", |s| {
@@ -223,7 +223,7 @@ async fn n4d2_terminal_temporary_source_busy_retries_then_consumes() {
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-    restore_tmux_watchers(&fixture.http, &fixture.shared).await;
+    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
     let handle = fixture.handle();
     until(&observed, "actual EOF", |s| s.event_count("outer_eof") > 0).await;
     append(&fixture, transcript(&fixture.provider, true).as_bytes());
@@ -317,7 +317,7 @@ async fn n4d2_codex_terminal_consumes_and_independent_o_writer_receipts_once() {
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, fixture.channel.get());
-    restore_tmux_watchers(&fixture.http, &fixture.shared).await;
+    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
     until(&observed, "actual Codex EOF", |s| {
         s.event_count("outer_eof") > 0
     })
