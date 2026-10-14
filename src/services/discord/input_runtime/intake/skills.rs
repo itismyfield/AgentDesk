@@ -659,7 +659,7 @@ mod c2b_skill_tests {
                     assert!(
                         refusal
                             .to_string()
-                            .starts_with("original pending unavailable:"),
+                            .starts_with("ledger admission retains responsibility for rescan"),
                         "the actual dispatcher must preserve the pending refusal: {refusal}"
                     );
                     assert_eq!(serde_json::to_value(&original).unwrap(), before);
