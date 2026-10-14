@@ -89,7 +89,7 @@ async fn g1a_real_loop_receipts_while_running_or_draft_held_and_finishes_after_r
                 .await
                 .unwrap();
             assert!(matches!(
-                response.await.unwrap(),
+                response.await.unwrap().responsibility,
                 Responsibility::Known { key: 10, .. }
             ));
             assert_eq!(screen.sent.lock().unwrap().len(), 0);

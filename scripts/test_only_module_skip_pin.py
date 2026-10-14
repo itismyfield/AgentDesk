@@ -185,6 +185,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_presence/admission_tests.rs",
         "src/services/discord/turn_presence/entrypoints_tests.rs",
         "src/services/discord/turn_presence/lifecycle_tests.rs",
+        "src/services/discord/turn_presence/strict_supervisor_tests.rs",
         "src/services/tui_prompt_dedupe/binding_events/admission_tests.rs",
         "src/services/tui_o/writer/codex_adoption/judge_tests.rs",
         "src/services/tui_o/writer/codex_adoption/plan_tests.rs",
@@ -612,6 +613,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/judged_stop_harness_tests.rs",
         "src/services/discord/router/intake_gate/ledger_io_tests.rs",
         "src/services/discord/router/intake_gate/ledger_tests.rs",
+        "src/services/discord/router/intake_dispatch/ledger_tests.rs",
         "src/services/discord/router/intake_gate/stale_turn_host_tests.rs",
         "src/cli/herdr_tests.rs",
         "src/services/discord/recovery_engine/herdr_reader_tests.rs",
@@ -715,6 +717,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
 PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
     {
         "src/services/discord/turn_bridge/replay_policy.rs",
+        "src/services/discord/router/intake_dispatch/ledger.rs",
         "src/services/discord/router/intake_dispatch/tests/final_guards.rs",
         "src/services/discord/router/intake_dispatch/tests/replay_hold.rs",
         "src/services/discord/queue_io/cancel_reclaim_support_test.rs",
@@ -774,6 +777,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/legacy_supervision/test_support.rs",
         "src/services/discord/turn_presence/admission.rs",
         "src/services/discord/turn_presence/lifecycle.rs",
+        "src/services/discord/turn_presence/strict_runtime.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
         "src/services/tui_o/gates_m1.rs",
