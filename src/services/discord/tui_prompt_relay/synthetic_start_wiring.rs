@@ -17,6 +17,12 @@
 
 use super::*;
 
+/// Test pause between an inline claim and its relay-owner adopt, inside the channel lock.
+#[cfg(test)]
+pub(super) static ADOPT_PAUSE: Mutex<
+    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+> = Mutex::new(None);
+
 /// Post the neutral session note for an injection that does NOT claim the
 /// active-turn lifecycle, and nothing else — no anchor, no `⏳`, no external turn
 /// owner, no synthetic inflight.
@@ -568,6 +574,9 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 .await;
             }
             if claim_should_adopt_relay_owner(claim.claimed, lease.relay_owner, claim.relay_owner) {
+                #[cfg(test)]
+                super::synthetic_start::bridge_handoff::pause_for_test(&ADOPT_PAUSE, channel_id)
+                    .await;
                 lease.relay_owner = claim.relay_owner;
                 // Re-record overwrites the lease with a FRESH generation; adopt it
                 // back into `lease` so the bridge-tail guard below captures the

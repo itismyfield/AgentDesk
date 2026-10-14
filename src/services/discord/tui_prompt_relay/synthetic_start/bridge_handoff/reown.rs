@@ -1,6 +1,7 @@
 //! Hand a refused delegation back to the bridge: this turn's undelivered Watcher or
 //! session-bound row ends in the state a BridgeAdapter claim would have left.
 use super::*;
+use crate::services::discord::TmuxWatcherHandle;
 
 #[cfg(test)]
 pub(in crate::services::discord::tui_prompt_relay::synthetic_start) mod reown_tests;
@@ -51,6 +52,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn reown_refused_delega
         .ok_or("observed source is not utf-8")?;
     let expected = std::fs::canonicalize(turn.expected_output)
         .map_err(|_| "observed source does not resolve")?;
+    let ended = stopped_watcher_ended(&shared.tmux_watchers, tmux, &expected).await?;
     // Ordered after the inline or pending claim that adopted this owner, and before any capture.
     let _serial = super::super::super::super::tui_direct_pending_start::channel_lock(
         provider.as_str(),
@@ -92,14 +94,14 @@ pub(in crate::services::discord::tui_prompt_relay) async fn reown_refused_delega
     {
         return Err("delegated actor is not the current mailbox turn");
     }
-    let live_lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+    let observed = crate::services::tui_prompt_dedupe::external_input_relay_lease(
         provider.as_str(),
         tmux,
         channel.get(),
     )
     .filter(|live| live.turn_id == row.external_turn_id && live.session_key == row.session_key)
     .ok_or("live lease names another turn")?;
-    let mut lease = live_lease;
+    let mut lease = observed.clone();
     lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
     let mut updated = row.clone();
     updated.set_relay_owner_kind(RelayOwnerKind::None);
@@ -119,29 +121,53 @@ pub(in crate::services::discord::tui_prompt_relay) async fn reown_refused_delega
     updated.restamp_external_turn_lease(&lease);
     #[cfg(test)]
     pause_for_test(&REOWN_PAUSE, channel).await;
-    {
+    let committed = {
         // Watcher inserts take this lock, so none can start reading `E` before the save.
         let _registry = super::super::super::super::lock_tmux_watcher_registry();
-        if live_watcher_may_read(&shared.tmux_watchers, tmux, &expected) {
-            return Err("a live watcher may read the observed source");
+        if let Some(reason) = watcher_may_send(&shared.tmux_watchers, tmux, &expected, &ended) {
+            return Err(reason);
         }
-        if locked.persist_verified_under_guard(&updated, "tui_direct_refused_delegation_reown")
-            != GuardedSaveOutcome::Saved
-        {
-            return Err("re-owned row was not saved");
-        }
-    }
-    if !record(locked.state(), Some(&actor), delegated.pg_pin.clone()) {
-        let _ = locked.persist_verified_under_guard(&row, "tui_direct_refused_delegation_reown");
-        return Err("bridge witness was refused");
-    }
-    (DELEGATED.lock().unwrap_or_else(|error| error.into_inner())).remove(&key);
+        // The row and the witness move only while the lease read above is still the stored one.
+        crate::services::tui_prompt_dedupe::replace_external_input_relay_lease_if_matches(
+            provider.as_str(),
+            tmux,
+            channel.get(),
+            &observed,
+            lease,
+            || {
+                let reown = "tui_direct_refused_delegation_reown";
+                if locked.persist_verified_under_guard(&updated, reown) != GuardedSaveOutcome::Saved
+                {
+                    return Err("re-owned row was not saved");
+                }
+                if record(locked.state(), Some(&actor), delegated.pg_pin.clone()) {
+                    (DELEGATED.lock().unwrap_or_else(|error| error.into_inner())).remove(&key);
+                    return Ok(());
+                }
+                if locked.persist_verified_under_guard(&row, reown) == GuardedSaveOutcome::Saved {
+                    return Err("bridge witness was refused");
+                }
+                Err(ROLLBACK_FAILED)
+            },
+        )
+    };
     drop(locked);
-    let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
-        provider.as_str(),
-        tmux,
-        lease,
-    );
+    let lease = match committed {
+        None => return Err("live lease changed before the re-own committed"),
+        Some(Err(reason)) => {
+            if reason == ROLLBACK_FAILED {
+                tracing::error!(
+                    provider = provider.as_str(),
+                    channel_id = channel.get(),
+                    tmux_session_name = tmux,
+                    turn_id,
+                    "a refused re-own left its row ownerless without a bridge witness"
+                );
+            }
+            return Err(reason);
+        }
+        Some(Ok(lease)) => lease,
+    };
     tracing::info!(
         provider = provider.as_str(),
         channel_id = channel.get(),
@@ -153,6 +179,63 @@ pub(in crate::services::discord::tui_prompt_relay) async fn reown_refused_delega
         "re-owned a refused TUI-direct delegation for the bridge; delivery still goes through capture"
     );
     Ok(lease)
+}
+
+const ROLLBACK_FAILED: &str = "re-own could not be rolled back";
+const SEND_UNKNOWN: &str = "a stopped watcher may still be sending the observed source";
+
+/// The stopped watcher that could read `expected`, once no task of it can still be sending.
+/// A handle with no completion record runs no task; a task still pending at the deadline, or
+/// one whose end is unknown, refuses: cancel and a stale heartbeat prove nothing about a send.
+async fn stopped_watcher_ended(
+    watchers: &super::super::super::super::TmuxWatcherRegistry,
+    tmux: &str,
+    expected: &Path,
+) -> Result<Option<Arc<AtomicBool>>, &'static str> {
+    use super::super::super::super::task_supervisor::watcher_completion::{Outcome, observe};
+    let stopped = (watchers.by_tmux_session.get(tmux))
+        .filter(|entry| may_read(entry.value(), expected) && !relay_live(entry.value()))
+        .map(|entry| entry.cancel.clone());
+    let Some(cancel) = stopped else {
+        return Ok(None);
+    };
+    let Some(ticket) = observe(&cancel) else {
+        return Ok(Some(cancel));
+    };
+    match tokio::time::timeout(TUI_DIRECT_SYNTHETIC_CLAIM_WAIT, ticket.wait()).await {
+        Ok(Outcome::Returned | Outcome::Panicked) => Ok(Some(cancel)),
+        _ => Err(SEND_UNKNOWN),
+    }
+}
+
+fn relay_live(watcher: &TmuxWatcherHandle) -> bool {
+    !watcher.cancel.load(Ordering::Relaxed) && !watcher.heartbeat_stale()
+}
+
+/// Whether the watcher's file is `expected`, or cannot be told apart from it.
+fn may_read(watcher: &TmuxWatcherHandle, expected: &Path) -> bool {
+    std::fs::canonicalize(&watcher.output_path).map_or(true, |watched| watched == expected)
+}
+
+/// Why the watcher registered on `tmux` may still send from `expected`: it is relay-live, or it
+/// stopped and is not the one whose task was seen to end.
+fn watcher_may_send(
+    watchers: &super::super::super::super::TmuxWatcherRegistry,
+    tmux: &str,
+    expected: &Path,
+    ended: &Option<Arc<AtomicBool>>,
+) -> Option<&'static str> {
+    let entry = watchers.by_tmux_session.get(tmux)?;
+    if !may_read(entry.value(), expected) {
+        return None;
+    }
+    if relay_live(entry.value()) {
+        return Some("a live watcher may read the observed source");
+    }
+    let seen = ended
+        .as_ref()
+        .is_some_and(|ended| Arc::ptr_eq(ended, &entry.cancel));
+    (!seen).then_some(SEND_UNKNOWN)
 }
 
 /// This turn's row, still delegated, with nothing of its body sent or committed.
@@ -201,17 +284,4 @@ fn body_committed(shared: &SharedData, row: &InflightTurnState) -> bool {
     );
     committed > row.turn_start_offset.unwrap_or(row.last_offset)
         && eof.is_none_or(|eof| committed >= eof)
-}
-
-/// A relay-live watcher on `tmux` whose file is `expected`, or cannot be told apart from it.
-fn live_watcher_may_read(
-    watchers: &super::super::super::super::TmuxWatcherRegistry,
-    tmux: &str,
-    expected: &Path,
-) -> bool {
-    watchers.by_tmux_session.get(tmux).is_some_and(|entry| {
-        !entry.cancel.load(Ordering::Relaxed)
-            && !entry.heartbeat_stale()
-            && std::fs::canonicalize(&entry.output_path).map_or(true, |watched| watched == expected)
-    })
 }

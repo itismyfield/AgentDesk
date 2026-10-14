@@ -1,7 +1,7 @@
 use super::*;
 pub(super) mod bridge_handoff;
 pub(in crate::services::discord) mod claim;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 pub(super) mod non_bridge_claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
@@ -2769,41 +2769,6 @@ pub(super) fn codex_ownerless_external_input_inflight_needs_rollout_recovery(
     // already points at the live rollout: an earlier deploy can interrupt after
     // repairing the path but before the bridge posts a response.
     true
-}
-
-#[cfg(unix)]
-pub(super) async fn wait_for_tui_direct_synthetic_non_bridge_claim(
-    watchers: &super::super::TmuxWatcherRegistry,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + TUI_DIRECT_SYNTHETIC_CLAIM_WAIT;
-    loop {
-        let state = super::super::inflight::load_inflight_state(provider, channel_id.get());
-        let output = state
-            .as_ref()
-            .and_then(|row| row.output_path.as_deref())
-            .map(Path::new);
-        // The sink only hears frames a live tmux watcher reading the row's output forwards.
-        let session_bound_relay_has_live_producer =
-            crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
-                .get_live_producer(tmux_session_name)
-                .is_some()
-                && claim::tui_direct_watcher_covers_output(watchers, tmux_session_name, output);
-        if tui_direct_synthetic_non_bridge_owner_matches(
-            state.as_ref(),
-            tmux_session_name,
-            session_bound_relay_has_live_producer,
-        ) {
-            return true;
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        tokio::time::sleep(TUI_DIRECT_SYNTHETIC_CLAIM_POLL.min(deadline - now)).await;
-    }
 }
 
 #[cfg(unix)]

@@ -679,6 +679,42 @@ pub(crate) fn with_external_input_relay_lease_if_matches<R, E>(
     Some(result)
 }
 
+/// Compare the whole stored lease, generation included, run `commit`, and only when it
+/// succeeds store `replacement` under a fresh generation. A mismatch (`None`) or a failed
+/// commit leaves the stored lease, or its absence, alone. `commit` holds STATE: no dedupe calls.
+pub(crate) fn replace_external_input_relay_lease_if_matches<E>(
+    provider: &str,
+    tmux_session_name: &str,
+    channel_id: u64,
+    expected: &ExternalInputRelayLease,
+    mut replacement: ExternalInputRelayLease,
+    commit: impl FnOnce() -> Result<(), E>,
+) -> Option<Result<ExternalInputRelayLease, E>> {
+    let provider = normalize_provider(provider);
+    let tmux_session_name = tmux_session_name.trim();
+    if provider.is_empty() || tmux_session_name.is_empty() || channel_id == 0 {
+        return None;
+    }
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    state.purge_expired();
+    let key = PromptKey::new(&provider, tmux_session_name);
+    let current = state.external_input_relay_lease_by_tmux.get(&key);
+    if current.is_none_or(|entry| {
+        &entry.value != expected || entry.value.channel_id.is_some_and(|id| id != channel_id)
+    }) {
+        return None;
+    }
+    if let Err(error) = commit() {
+        return Some(Err(error));
+    }
+    replacement.generation = next_external_input_relay_lease_generation();
+    Some(Ok(state.store_external_input_lease(
+        &provider,
+        tmux_session_name,
+        replacement,
+    )))
+}
+
 pub(crate) fn clear_external_input_relay_lease_if_matches(
     provider: &str,
     tmux_session_name: &str,

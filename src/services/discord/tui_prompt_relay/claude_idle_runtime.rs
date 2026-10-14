@@ -429,23 +429,22 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
                     runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
                     "Claude idle transcript relay selected external turn owner"
                 );
-                if wait_for_tui_direct_synthetic_non_bridge_claim(
-                    &shared.tmux_watchers,
+                let handoff = hand_off_observed_turn(
+                    &shared,
                     &ProviderKind::Claude,
                     channel_id,
                     &tmux_session_name,
+                    &transcript_path,
+                    line_end_offset,
+                    &lease,
                 )
-                .await
-                {
-                    tracing::info!(
-                        tmux_session_name = %tmux_session_name,
-                        channel_id = channel_id.get(),
-                        turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                        session_key = lease.session_key.as_deref().unwrap_or(""),
-                        "Claude idle transcript relay yielded to resolved TUI-direct synthetic non-bridge owner"
-                    );
-                    continue;
-                }
+                .await;
+                // A re-owned turn tails under the lease the re-own stored, not the observer's.
+                let lease = match handoff {
+                    NonBridgeHandoff::Yielded => continue,
+                    NonBridgeHandoff::Reowned(current) => current,
+                    NonBridgeHandoff::Fallback => lease,
+                };
                 if bridge_adapter_owns_external_turn(lease.relay_owner) {
                     let tail_spawned = spawn_claude_idle_response_tail_once(
                         shared.clone(),

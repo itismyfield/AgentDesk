@@ -207,15 +207,13 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                         anchor_id,
                                     );
                                 }
-                                let observed_at = chrono::Utc::now();
-                                let lease = record_external_turn_lease_for_output(
+                                let lease = resume_or_issue_repair_lease(
                                     &shared,
-                                    &ProviderKind::Codex,
                                     channel_id,
                                     &tmux_session_name,
                                     binding.runtime_kind,
                                     &rollout_path,
-                                    observed_at,
+                                    &inflight,
                                 );
                                 let expected = inflight::InflightTurnIdentity::from_state(&inflight);
                                 let mut repaired = inflight;
@@ -413,28 +411,29 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
                             "codex idle rollout relay selected external turn owner"
                         );
-                        if wait_for_tui_direct_synthetic_non_bridge_claim(
-                            &shared.tmux_watchers,
+                        let handoff = hand_off_observed_turn(
+                            &shared,
                             &ProviderKind::Codex,
                             channel_id,
                             &tmux_session_name,
+                            &rollout_path,
+                            line_end_offset,
+                            &lease,
                         )
-                        .await
-                        {
-                            advance_codex_tui_runtime_binding_and_marker_offset(
-                                &tmux_session_name,
-                                &rollout_path,
-                                line_end_offset,
-                            );
-                            tracing::info!(
-                                tmux_session_name = %tmux_session_name,
-                                channel_id = channel_id.get(),
-                                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                                session_key = lease.session_key.as_deref().unwrap_or(""),
-                                "codex idle rollout relay yielded to resolved TUI-direct synthetic non-bridge owner"
-                            );
-                            continue;
-                        }
+                        .await;
+                        // A re-owned turn tails under the lease the re-own stored, not the observer's.
+                        let lease = match handoff {
+                            NonBridgeHandoff::Yielded => {
+                                advance_codex_tui_runtime_binding_and_marker_offset(
+                                    &tmux_session_name,
+                                    &rollout_path,
+                                    line_end_offset,
+                                );
+                                continue;
+                            }
+                            NonBridgeHandoff::Reowned(current) => current,
+                            NonBridgeHandoff::Fallback => lease,
+                        };
                         if !bridge_adapter_owns_external_turn(lease.relay_owner) {
                             advance_codex_tui_runtime_binding_and_marker_offset(
                                 &tmux_session_name,
@@ -626,29 +625,29 @@ async fn run_codex_idle_response_tail(
     let (prefix, has_content, reader_rx) = match buffered {
         Ok(buffered) => buffered,
         Err(error) => {
+            // Nothing was published: the row, its actor and its turn stay for the ownerless repair.
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 rollout_path = %rollout_path.display(),
                 error = %error,
-                "codex idle rollout response tail buffering panicked"
+                "codex idle rollout response tail buffering panicked; undelivered turn preserved"
             );
-            finish_tui_direct_synthetic_turn_if_current(
-                &shared,
-                &ProviderKind::Codex,
-                channel_id,
-                &tmux_session_name,
-                lease.session_key.as_deref(),
-                "codex_tui_direct_tail_panicked",
-            )
-            .await;
             return;
         }
     };
 
     if !has_content {
         let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
-        // A read cursor without delivered terminal evidence cannot consume the range.
-        let _ = offset_rx.await;
+        // Only a reader that finished cleanly proves an empty terminal; a failed or lost one
+        // leaves the undelivered turn for the ownerless repair.
+        if !matches!(offset_rx.await, Ok(Ok(_))) {
+            tracing::warn!(
+                tmux_session_name = %tmux_session_name,
+                rollout_path = %rollout_path.display(),
+                "codex idle rollout reader failed before any content; undelivered turn preserved"
+            );
+            return;
+        }
         finish_tui_direct_synthetic_turn_if_current(
             &shared,
             &ProviderKind::Codex,
@@ -705,6 +704,47 @@ async fn run_codex_idle_response_tail(
         }
         _ => {}
     }
+}
+
+/// The lease an ownerless repair tails under: the row's own turn and session when it names
+/// one, so a resumed turn keeps its identity; a row naming none gets a newly issued turn.
+#[cfg(unix)]
+fn resume_or_issue_repair_lease(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    runtime_kind: RuntimeHandoffKind,
+    rollout_path: &Path,
+    row: &inflight::InflightTurnState,
+) -> ExternalInputRelayLease {
+    let Some(turn_id) = row.external_turn_id.clone().filter(|id| !id.is_empty()) else {
+        return record_external_turn_lease_for_output(
+            shared,
+            &ProviderKind::Codex,
+            channel_id,
+            tmux_session_name,
+            runtime_kind,
+            rollout_path,
+            chrono::Utc::now(),
+        );
+    };
+    crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        ProviderKind::Codex.as_str(),
+        tmux_session_name,
+        ExternalInputRelayLease {
+            channel_id: Some(channel_id.get()),
+            turn_id: Some(turn_id),
+            session_key: row.session_key.clone(),
+            relay_owner: super::relay_ownership::external_input_relay_owner_for_output(
+                shared,
+                tmux_session_name,
+                Some(rollout_path),
+            ),
+            runtime_kind: Some(runtime_kind),
+            generation:
+                crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+        },
+    )
 }
 
 #[cfg(unix)]

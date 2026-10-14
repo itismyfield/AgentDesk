@@ -34,6 +34,11 @@ pub(in crate::services::discord::tui_prompt_relay) enum NonBridgeHandoff {
 pub(in crate::services::discord::tui_prompt_relay) static REVALIDATE_PAUSE:
     super::bridge_handoff::reown::PauseSlot = Mutex::new(None);
 
+/// Test pause at the hand-off entry, which a caller reaches only past its own inflight check.
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static HANDOFF_PAUSE:
+    super::bridge_handoff::reown::PauseSlot = Mutex::new(None);
+
 /// The row fields a yield rests on. Progress (offsets, body, message rollover,
 /// native session) is left out so a live turn does not fail its own recheck.
 #[derive(PartialEq)]
@@ -168,16 +173,17 @@ async fn poll_once(
     poll.producer_live = owner == RelayOwnerKind::SessionBoundRelay && producer_live(tmux);
     poll.row_match = compare_source(expected, row.output_path.as_deref());
     poll.watcher_match = compare_source(expected, poll.watcher_source.as_deref());
-    poll.reason =
-        if poll.row_match != SourceMatch::Match || poll.watcher_match != SourceMatch::Match {
-            "owner does not read the expected source"
-        } else if !poll.watcher_live {
-            "watcher is not relay-live"
-        } else if owner == RelayOwnerKind::SessionBoundRelay && !poll.producer_live {
-            "session-bound owner has no live producer"
-        } else {
-            ""
-        };
+    poll.reason = if poll.row_match != SourceMatch::Match
+        || poll.watcher_match != SourceMatch::Match
+    {
+        "owner does not read the expected source"
+    } else if !poll.watcher_live {
+        "watcher is not relay-live"
+    } else if !tui_direct_synthetic_non_bridge_owner_matches(Some(&row), tmux, poll.producer_live) {
+        "session-bound owner has no live producer"
+    } else {
+        ""
+    };
     let Some((watched, cancel, _)) = seen.filter(|_| poll.reason.is_empty()) else {
         return poll;
     };
@@ -270,6 +276,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn hand_off_observed_tu
     prompt_end: u64,
     lease: &ExternalInputRelayLease,
 ) -> NonBridgeHandoff {
+    #[cfg(test)]
+    super::bridge_handoff::pause_for_test(&HANDOFF_PAUSE, channel).await;
     let turn_id = lease.turn_id.as_deref().unwrap_or_default();
     let wait = wait_for_source_bound_non_bridge_claim(
         &shared.tmux_watchers,

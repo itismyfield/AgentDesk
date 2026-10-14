@@ -145,6 +145,11 @@ async fn idle_observer_waits_out_a_session_bound_row_only_when_the_watcher_reads
     std::os::unix::fs::symlink(&rollout, &alias).expect("alias");
     let relay = crate::services::tmux_common::session_temp_path(tmux, "jsonl");
     let shared = crate::services::discord::make_shared_data_for_tests();
+    let turn_id = "external:codex:5704-wait";
+    let lease = ExternalInputRelayLease {
+        turn_id: Some(turn_id.to_string()),
+        ..ExternalInputRelayLease::unassigned(Some(channel.get()))
+    };
     let row = build_tui_direct_synthetic_inflight_state(
         ProviderKind::Codex,
         channel,
@@ -154,7 +159,7 @@ async fn idle_observer_waits_out_a_session_bound_row_only_when_the_watcher_reads
         tmux,
         Some(&rollout),
         0,
-        &ExternalInputRelayLease::unassigned(Some(channel.get())),
+        &lease,
         RelayOwnerKind::SessionBoundRelay,
     );
     inflight::save_inflight_state(&row).expect("session-bound row");
@@ -171,16 +176,25 @@ async fn idle_observer_waits_out_a_session_bound_row_only_when_the_watcher_reads
     let producers =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
     producers.register(tmux.to_string(), relay_handle.producer());
+    let (shared, rollout) = (&shared, &rollout);
     let waits = |watched: &str| {
         shared
             .tmux_watchers
             .insert(channel, live_watcher(tmux, watched));
-        synthetic_start::wait_for_tui_direct_synthetic_non_bridge_claim(
-            &shared.tmux_watchers,
-            &ProviderKind::Codex,
-            channel,
-            tmux,
-        )
+        async move {
+            use synthetic_start::non_bridge_claim::{
+                NonBridgeWait, wait_for_source_bound_non_bridge_claim,
+            };
+            let wait = wait_for_source_bound_non_bridge_claim(
+                &shared.tmux_watchers,
+                &ProviderKind::Codex,
+                channel,
+                tmux,
+                rollout,
+                turn_id,
+            );
+            matches!(wait.await, NonBridgeWait::Yielded)
+        }
     };
 
     assert!(

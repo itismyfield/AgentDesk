@@ -486,10 +486,10 @@ fn reown_takes_a_legacy_watcher_row_and_the_result_resumes_after_restart() {
     });
 }
 
-/// With S0 alone a delegated claim decides exactly as before: the existing wait yields to it,
-/// a re-claim cannot take it as the bridge, and neither capture nor dormant resume accepts it.
+/// A delegated claim stays fenced until it is re-owned: a re-claim cannot take it as the
+/// bridge, and neither capture nor dormant resume accepts it.
 #[test]
-fn a_delegated_claim_leaves_yield_reclaim_capture_and_dormant_as_before() {
+fn a_delegated_claim_is_refused_by_reclaim_capture_and_dormant() {
     isolated(|dir| async move {
         let (b, end) = transcript(&dir, "dormant-equal.jsonl", "");
         let turn = Turn::observe(110, &b, end, Some(&b), Some(&b));
@@ -497,15 +497,6 @@ fn a_delegated_claim_leaves_yield_reclaim_capture_and_dormant_as_before() {
         turn.stop_watcher();
         let before = turn.row_json();
 
-        assert!(
-            super::super::super::wait_for_tui_direct_synthetic_non_bridge_claim(
-                &turn.shared.tmux_watchers,
-                &ProviderKind::Claude,
-                turn.channel,
-                &turn.tmux,
-            )
-            .await
-        );
         let again = super::super::super::claim_tui_direct_synthetic_turn(
             &turn.shared,
             &ProviderKind::Claude,
