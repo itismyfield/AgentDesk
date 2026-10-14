@@ -867,6 +867,10 @@ fn a_debt_survives_every_outcome_of_a_reservation_past_a_parked_input() {
 
     block_on(async {
         let handle = ChannelMailboxRegistry::default().handle(channel);
+        // The actor absorbs the disk queue on this first claim, so the failed save below is the
+        // reservation's own write.
+        let tail = handle.claim_queued_head(QueueIdentity::of(&b), ctx()).await;
+        assert!(matches!(tail, QueuedHeadClaim::Contended));
         let before = bytes(channel);
         save_fault::fail_next(channel);
         let failed = handle.claim_queued_head(QueueIdentity::of(&h), ctx()).await;
