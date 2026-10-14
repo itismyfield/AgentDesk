@@ -74,5 +74,23 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([("id", path_param("Campaign ID."))])
         .with_example(json!({"path": {"id": "release-a"}}), json!({"revisions": [{"id": "release-a", "title": "Release A", "description": "", "status": "planned", "round": 1, "revision": 1, "nodes": [], "created_at": "2026-09-20T00:00:00Z", "updated_at": "2026-09-20T00:00:00Z"}]}))
         .with_curl("curl -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" \"$ADK_URL/api/campaigns/release-a/history\""),
+        ep(
+            "POST",
+            "/api/o/transition",
+            "sessions",
+            "Inspect the transition cleanup the channel's TUI-O writer actor would do for its Bound Claude Herdr row on this node: each old hop's judgment after two probes and the execution history it read. Writes no cleanup; `apply` is refused with 409 `apply_not_open`. Only a loopback peer sending one Origin that is a loopback URL on this server's port, with or without server.auth_token.",
+        )
+        .with_params([
+            ("operation", body_param("string", true, "`inspect`")),
+            ("channel", body_param("integer", true, "Discord channel id of the row")),
+            ("session_key", body_param("string", true, "The row's session key")),
+            ("execution_nonce", body_param("string", true, "Execution nonce the row must still record")),
+            ("cutoff", body_param("integer", true, "Last hop seq the transition covers")),
+            ("job_id", body_param("string", true, "Job ID; `agentdesk o transition inspect` makes a UUID")),
+            ("operator", body_param("string", true, "Operator name")),
+            ("reason", body_param("string", true, "Why the transition is cleaned up")),
+            ("termination", body_param("object", false, "`{\"Confirmed\": {host, pane, first_seq, last_seq, basis}}` or null")),
+        ])
+        .with_curl("curl -X POST http://127.0.0.1:8791/api/o/transition -H 'Origin: http://127.0.0.1:8791' -H 'Content-Type: application/json' -d '{\"operation\":\"inspect\",\"channel\":1,\"session_key\":\"<key>\",\"execution_nonce\":\"<nonce>\",\"cutoff\":3,\"job_id\":\"<uuid>\",\"operator\":\"<name>\",\"reason\":\"<why>\",\"termination\":null}'"),
     ]
 }

@@ -94,3 +94,41 @@ impl Readiness {
         consume(live.transition.as_ref().ok_or("actor_unavailable")?)
     }
 }
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    /// A channel [`Readiness::host_port_for_test`] registered; it leaves readiness on drop.
+    pub(crate) struct HostedForTest(Arc<Readiness>, u64);
+
+    impl Drop for HostedForTest {
+        fn drop(&mut self) {
+            locked(&self.0.live).remove(&self.1);
+            self.0.set(self.1, false);
+        }
+    }
+
+    impl Readiness {
+        /// Registers `port` for `channel` as a running run under `gate` would, readable while
+        /// `resumed` holds and `stopping` does not.
+        pub(crate) fn host_port_for_test(
+            self: &Arc<Self>,
+            channel: u64,
+            gate: &Arc<OwnershipGate>,
+            port: TransitionPort,
+            (resumed, stopping): (watch::Receiver<bool>, watch::Receiver<bool>),
+        ) -> HostedForTest {
+            let owing = Owing::default();
+            let owed = OwedView {
+                published: owing.published.subscribe(),
+                demand: owing.demand.clone(),
+            };
+            let watched = (resumed, watch::channel(None).1, owed, stopping);
+            self.track(channel, Arc::clone(gate), watched);
+            self.set(channel, true);
+            locked(&self.live).get_mut(&channel).unwrap().transition = Some(port);
+            HostedForTest(Arc::clone(self), channel)
+        }
+    }
+}

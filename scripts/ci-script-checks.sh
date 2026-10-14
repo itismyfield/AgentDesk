@@ -248,6 +248,11 @@ if run_check guards "N1 observation effect boundary"; then
 "$PYTHON" -m unittest tests.test_n1_observation_boundary
 fi
 
+if run_check guards "hrot transition sender surface"; then
+"$PYTHON" scripts/check_hrot_sender_surface.py
+"$PYTHON" -m unittest tests.test_hrot_sender_surface
+fi
+
 if run_check guards "N1 canary oracle input contracts"; then
 "$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
 "$PYTHON" tests/run_n1_canary_mutations.py

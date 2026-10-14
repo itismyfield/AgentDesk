@@ -66,44 +66,26 @@ fn owned_here(record: &HostedExecution, target: &Target) -> Result<(), String> {
     let root = crate::config::runtime_root().map(|root| root.display().to_string());
     let node = crate::config::session_hosts::local_node();
     let location = record.location.as_ref();
-    let checks = [
-        (
-            record.state == HostedState::Bound,
-            "the execution is not Bound",
-        ),
-        (
-            record.execution_nonce == target.nonce,
-            "the row records another execution",
-        ),
-        (
-            owner.channel_id == target.channel.to_string(),
-            "the row is another channel's",
-        ),
-        (
-            owner.provider == ProviderKind::Claude.as_str(),
-            "the row is not Claude's",
-        ),
-        (
-            node.as_deref() == Some(&owner.owner_node),
-            "another node owns the row",
-        ),
-        (
-            location.is_some_and(|l| l.execution_node == owner.owner_node),
-            "it runs elsewhere",
-        ),
-        (
-            root.as_deref() == Some(&owner.runtime_root),
-            "another runtime root owns the row",
-        ),
-        (
-            herdr_endpoints().view(record).is_some(),
-            "no endpoint registered here holds it",
-        ),
-    ];
-    match checks.into_iter().find(|(held, _)| !held) {
-        Some((_, refused)) => Err(refused.into()),
-        None => Ok(()),
-    }
+    let refused = if record.state != HostedState::Bound {
+        "the execution is not Bound"
+    } else if record.execution_nonce != target.nonce {
+        "the row records another execution"
+    } else if owner.channel_id != target.channel.to_string() {
+        "the row is another channel's"
+    } else if owner.provider != ProviderKind::Claude.as_str() {
+        "the row is not Claude's"
+    } else if node.as_deref() != Some(&owner.owner_node) {
+        "another node owns the row"
+    } else if location.is_none_or(|l| l.execution_node != owner.owner_node) {
+        "the execution runs on another node"
+    } else if root.as_deref() != Some(&owner.runtime_root) {
+        "another runtime root owns the row"
+    } else if herdr_endpoints().view(record).is_none() {
+        "no endpoint registered here holds the execution"
+    } else {
+        return Ok(());
+    };
+    Err(refused.into())
 }
 
 /// The launch context and the pane's spawn marker still name the row's execution.
