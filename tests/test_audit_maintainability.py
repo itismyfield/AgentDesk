@@ -37,6 +37,7 @@ _SPEC.loader.exec_module(HARNESS)
 import audit_maintainability.common as common  # noqa: E402
 from audit_maintainability.checks import (  # noqa: E402
     direct_discord_sends,
+    direct_discord_reactions,
     footer_view_writes,
     git_subprocess,
     legacy_sqlite,
@@ -189,7 +190,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
                 if expected_rc:
                     self.assertEqual(len(hits), 1)
                     self.assertEqual((hits[0].rule, hits[0].file, hits[0].severity),
-                                     ("giant_file_ratchet", path, "warn"))
+                                     ("giant_file_ratchet", path, "error"))
                     self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"]),
                                      (str(1001 + self._SLACK), "1000"))
                 else:
@@ -206,7 +207,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
         with _FakeSrcTree(
             {
                 "src/services/discord/tmux_watcher.rs": over,
-                "src/other_giant.rs": over,  # no baseline entry -> not ratcheted
+                "src/other_giant.rs": over,  # a new giant needs a frozen baseline
                 **self._HISTORY,
             }
         ) as root:
@@ -219,7 +220,7 @@ class GiantFileRatchetCheck(unittest.TestCase):
                 """,
             )
             hits = list(giant_file_ratchet.CHECK.runner(set()))
-        self.assertEqual(_files(hits), {"src/services/discord/tmux_watcher.rs"})
+        self.assertEqual(_files(hits), {"src/services/discord/tmux_watcher.rs", "src/other_giant.rs"})
 
     def test_at_or_under_baseline_passes(self) -> None:
         content = "fn x() {}\n" * (giant_files.THRESHOLD + 5)  # 1005 prod LoC
@@ -244,11 +245,11 @@ class GiantFileRatchetCheck(unittest.TestCase):
         }):
             return list(giant_file_ratchet.CHECK.runner(set()))
 
-    def test_growth_within_wiring_slack_passes(self) -> None:
-        self.assertEqual(self._SLACK, 30)
-        for loc in (1201, 1200 + self._SLACK):
+    def test_any_growth_fails(self) -> None:
+        self.assertEqual(self._SLACK, 0)
+        for loc in (1201, 1230):
             with self.subTest(loc=loc):
-                self.assertEqual(self._slack_hits(loc), [])
+                self.assertEqual(len(self._slack_hits(loc)), 1)
 
     def test_growth_past_wiring_slack_fails_naming_baseline_and_slack(self) -> None:
         loc = 1201 + self._SLACK
@@ -272,6 +273,26 @@ class GiantFileRatchetCheck(unittest.TestCase):
             )
             hits = list(giant_file_ratchet.CHECK.runner(set()))
         self.assertEqual(hits, [])
+
+    def test_inherited_overage_can_stay_or_shrink_but_cannot_grow(self) -> None:
+        import giant_file_progress as progress
+        from ratchet_admission import AdmissionAudit
+
+        path = "src/giant.rs"
+        for prior, current, expected in ((1250, 1250, 0), (1250, 1249, 0), (1250, 1251, 1), (999, 1000, 1)):
+            with self.subTest(prior=prior, current=current), _FakeSrcTree({
+                    path: "fn x() {}\n" * current,
+                    self._BASELINE: f'[giant_file_ratchet]\n"{path}" = 1200\n',
+                    **self._HISTORY,
+            }), mock.patch.object(giant_file_ratchet, "audit_repository_admissions",
+                                  return_value=AdmissionAudit((), (), "a" * 40)), \
+                    mock.patch.object(progress, "archive"), \
+                    mock.patch.object(giant_files._INVENTORY, "giant_file_snapshot",
+                                      return_value={"modules": {path: prior}}), \
+                    mock.patch.object(HARNESS, "load_check_specs", return_value=[giant_file_ratchet.CHECK]), \
+                    mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                    mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
+                self.assertEqual(HARNESS.main(["--check"]), expected)
 
     def test_allowlist_suppresses(self) -> None:
         over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)
@@ -369,7 +390,7 @@ class ParentTestResidueCheck(unittest.TestCase):
             hits = list(parent_test_residue.CHECK.runner(set()))
             gate = list(parent_test_residue.CHECK.baseline_gate(hits))
         self.assertEqual(_files(gate), {rel})
-        self.assertTrue(all(f.severity == "error" for f in gate))
+        self.assertTrue(all(f.severity == "warn" for f in gate))
 
     def test_baseline_gate_flags_grown_residue(self) -> None:
         body = _residue_body(120, 500)
@@ -388,7 +409,7 @@ class ParentTestResidueCheck(unittest.TestCase):
             hits = list(parent_test_residue.CHECK.runner(set()))
             gate = list(parent_test_residue.CHECK.baseline_gate(hits))
         self.assertEqual(_files(gate), {rel})
-        self.assertTrue(all(f.severity == "error" for f in gate))
+        self.assertTrue(all(f.severity == "warn" for f in gate))
 
 
 class NamespaceSizeCapsCheck(unittest.TestCase):
@@ -939,9 +960,7 @@ class HarnessCli(unittest.TestCase):
         self.assertEqual(
             hard_gated,
             {
-                "giant_files",
                 "giant_file_ratchet",
-                "namespace_size_caps",
                 "direct_discord_sends",
                 "direct_discord_reactions",
                 "footer_view_writes",
@@ -970,10 +989,10 @@ class HarnessCli(unittest.TestCase):
             yaml_text = HARNESS.render_yaml(specs, findings)
             json_payload = json.loads(HARNESS.render_json(specs, findings))
         self.assertIn("hard_gate_enabled: true", yaml_text)
-        self.assertIn("hard_gate_count: 10", yaml_text)
+        self.assertIn("hard_gate_count: 8", yaml_text)
         self.assertIn("baseline_gate_count: 3", yaml_text)
         self.assertIs(json_payload["hard_gate_enabled"], True)
-        self.assertEqual(json_payload["hard_gate_count"], 10)
+        self.assertEqual(json_payload["hard_gate_count"], 8)
         self.assertEqual(json_payload["baseline_gate_count"], 3)
 
     def test_check_mode_returns_zero_with_no_findings(self) -> None:
@@ -1001,7 +1020,7 @@ class HarnessCli(unittest.TestCase):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
         self.assertEqual(rc, 1)
 
-    def test_check_mode_fails_on_route_srp_baseline_regression(self) -> None:
+    def test_check_mode_warns_on_route_srp_baseline_regression(self) -> None:
         body = """
         use crate::services::auto_queue;
         async fn handler() {
@@ -1028,9 +1047,9 @@ class HarnessCli(unittest.TestCase):
                 sys, "stderr", new=mock.MagicMock()
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
 
-    def test_check_mode_fails_on_service_server_backflow_regression(self) -> None:
+    def test_check_mode_warns_on_service_server_backflow_regression(self) -> None:
         body = "use crate::server::routes::AppState;\n"
         with _FakeSrcTree({"src/services/new.rs": body}) as root:
             _write(
@@ -1051,7 +1070,7 @@ class HarnessCli(unittest.TestCase):
                 sys, "stderr", new=mock.MagicMock()
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
 
     def test_check_mode_fails_on_legacy_sqlite_regression(self) -> None:
         body = "use rusqlite::Connection;\n"
@@ -1088,6 +1107,71 @@ class HarnessCli(unittest.TestCase):
             ):
                 rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
         self.assertEqual(rc, 1)
+
+    def test_operational_guards_still_block_real_fixtures(self) -> None:
+        fixtures = ((direct_discord_sends.CHECK, 'ch.send_message(&http, payload);'),
+                    (direct_discord_reactions.CHECK, 'ch.create_reaction(&http, msg, reaction);'),
+                    (footer_view_writes.CHECK, 'register_completion_footer_target(target);'),
+                    (manual_json_mapping.CHECK, 'row.try_get::<serde_json::Value, _>("data")?;'),
+                    (legacy_sqlite.CHECK, 'use rusqlite::Connection;'),
+                    (git_subprocess.CHECK, 'std::process::Command::new("git");'),
+                    (source_of_truth_alias.CHECK, 'let path = repo_root.join("ARCHITECTURE.md"); std::fs::write(&path, contents)?;'))
+        for spec, source in fixtures:
+            with self.subTest(rule=spec.key), _FakeSrcTree({"src/services/fixture.rs": source}), \
+                    mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
+                    mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                    mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
+                self.assertEqual(HARNESS.main(["--check"]), 1)
+
+    def test_warning_gate_metadata_cannot_promote_warning_to_error(self) -> None:
+        finding = common.Finding("style", "warn", "src/style.rs", None, "style drift")
+        spec = HARNESS.CheckSpec("style", "Style", "Style", True, lambda _: [finding],
+                                 lambda _: [finding])
+        with mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
+                mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
+                mock.patch.object(sys, "stderr", new=mock.MagicMock()) as stderr:
+            self.assertEqual(HARNESS.main(["--check"]), 0)
+        self.assertIn("warning", " ".join(str(c) for c in stderr.write.call_args_list))
+
+    def test_error_blocks_even_when_check_is_report_only(self) -> None:
+        finding = common.Finding("scanner", "error", "src/error.rs", None, "scan failed")
+        spec = HARNESS.CheckSpec("scanner", "Scanner", "Scanner", False, lambda _: [finding])
+        with mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
+                mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
+                mock.patch.object(sys, "stderr", new=mock.MagicMock()):
+            self.assertEqual(HARNESS.main(["--check"]), 1)
+
+    def test_malformed_warning_baseline_still_blocks(self) -> None:
+        with _FakeSrcTree({"src/services/fixture.rs": "use crate::server::routes::AppState;",
+                           service_server_backflow.BASELINE_REL_PATH: "invalid json"}), \
+                mock.patch.object(HARNESS, "load_check_specs", return_value=[service_server_backflow.CHECK]), \
+                mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                mock.patch.object(sys, "stdout"), mock.patch.object(sys, "stderr"):
+            self.assertEqual(HARNESS.main(["--check"]), 1)
+
+    def test_scanner_exception_is_not_a_warning_pass(self) -> None:
+        spec = HARNESS.CheckSpec("scanner", "Scanner", "Scanner", False,
+                                 mock.Mock(side_effect=RuntimeError("scan failed")))
+        with mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]):
+            with self.assertRaisesRegex(RuntimeError, "scan failed"):
+                HARNESS.main(["--check"])
+
+    def test_size_style_fixtures_warn_without_blocking(self) -> None:
+        fixtures = ((giant_files.CHECK, {"src/giant.rs": "fn x() {}\n" * 1000}),
+                    (namespace_size_caps.CHECK, {"src/size.rs": "fn x() {}\n" * 3,
+                     "scripts/audit_maintainability_config.toml":
+                     '[namespace_size_caps]\n"src/size.rs" = 2\n'}),
+                    (parent_test_residue.CHECK, {"src/residue.rs": _residue_body(100, 450)}))
+        for spec, files in fixtures:
+            with self.subTest(rule=spec.key), _FakeSrcTree(files), \
+                    mock.patch.object(HARNESS, "load_check_specs", return_value=[spec]), \
+                    mock.patch.object(HARNESS, "load_allowlist", return_value={}), \
+                    mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
+                    mock.patch.object(sys, "stderr", new=mock.MagicMock()) as stderr:
+                self.assertEqual(HARNESS.main(["--check"]), 0)
+                self.assertIn("warning", " ".join(str(c) for c in stderr.write.call_args_list))
 
     def test_allowlist_loader_scopes_per_rule(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -20,6 +20,10 @@ use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, QueueIdentity, QueuedHeadClaim,
 };
 
+/// Heads the queued-head kickoff offered to the injector, in order.
+pub(super) static OFFERED_HEADS: std::sync::Mutex<Vec<MessageId>> =
+    std::sync::Mutex::new(Vec::new());
+
 struct Fixture {
     _db: TestPostgresDb,
     app: Router,
@@ -175,6 +179,12 @@ impl Fixture {
     }
 
     async fn enqueue(&self, text: &str) {
+        let body = self.deliver(text).await;
+        assert_eq!(body["delivery"], "queued", "{body}");
+    }
+
+    /// The route's answer to one external input.
+    async fn deliver(&self, text: &str) -> Value {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/agents/s2b-head-agent/turn/deliver")
@@ -191,7 +201,18 @@ impl Fixture {
             serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
                 .unwrap();
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["delivery"], "queued", "{body}");
+        body
+    }
+
+    /// Spends every listed input's busy-retry budget.
+    fn park(&self, ids: &[MessageId]) {
+        use crate::services::discord::busy_followup_retry_store as retries;
+        for id in ids {
+            for _ in 0..retries::MAX_BUSY_RETRY_COUNT {
+                retries::record_busy_retry(&ProviderKind::Claude, self.channel.get(), id.get(), 9)
+                    .unwrap();
+            }
+        }
     }
 
     async fn queue(&self) -> Vec<Intervention> {
@@ -1036,4 +1057,105 @@ async fn s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after
     )
     .unwrap();
     assert_eq!(row.user_msg_id, fixture.holder_message.get() + 1);
+}
+
+/// Through the real deliver route, a busy pane takes a new input past a backlog that is all
+/// parked, whether the live actor holds it or only the disk does; the parked inputs stay queued.
+#[tokio::test(flavor = "current_thread")]
+async fn a_deliver_passes_a_parked_only_backlog_and_leaves_it_queued_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    // The live actor holds the backlog in memory and on disk; one fixture runs at a time.
+    {
+        let fixture = Fixture::new(6_897_401, "all").await;
+        let queued: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
+        fixture.park(&queued[..1]);
+        let behind_ready = fixture.deliver("waits behind a ready input").await;
+        assert_eq!(behind_ready["delivery"], "queued", "{behind_ready}");
+        let queued: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
+        fixture.park(&queued);
+        let disk = fixture.bytes();
+        let body = fixture.deliver("C after parked").await;
+        assert_eq!(body["delivery"], "injected", "{body}");
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+        let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+        assert!(buffer.ends_with("\nC after parked"), "{buffer}");
+        let after: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
+        assert_eq!(after, queued);
+        assert_eq!(
+            payloads(items(fixture.disk())),
+            payloads(items(serde_json::from_slice(&disk).unwrap()))
+        );
+        let retries = crate::services::discord::busy_followup_retry_store::is_capped;
+        assert!(queued.iter().all(|id| retries(
+            &ProviderKind::Claude,
+            fixture.channel.get(),
+            id.get()
+        )));
+    }
+    // A fresh actor that has not loaded the disk queue.
+    let fresh = Fixture::new(6_897_402, "all").await;
+    let on_disk: Vec<MessageId> = fresh.queue().await.iter().map(|i| i.message_id).collect();
+    fresh.park(&on_disk);
+    fresh
+        .shared
+        .mailboxes
+        .remove_fixture_for_test(fresh.channel);
+    let actor = fresh.shared.mailbox(fresh.channel);
+    let holder = (fresh.holder.clone(), UserId::new(100), fresh.holder_message);
+    assert!(actor.try_start_turn(holder.0, holder.1, holder.2).await);
+    assert!(
+        fresh.queue().await.is_empty(),
+        "the fresh actor has not loaded the disk queue"
+    );
+    let body = fresh.deliver("D past a disk-only backlog").await;
+    assert_eq!(body["delivery"], "injected", "{body}");
+    assert_eq!(fresh.pane.keys(), ["paste-buffer", "send-keys"]);
+}
+
+/// A parked head is neither offered to the injector by the queued-head kickoff nor reserved by the
+/// actor, and a head already reserved holds later input back even when every input is parked.
+#[tokio::test(flavor = "current_thread")]
+async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(6_897_411, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let queue = fixture.queue().await;
+    let head = queue[0].clone();
+    fixture.park(&[head.message_id]);
+    let before = fixture.bytes();
+    fixture.kick().await;
+    assert!(!OFFERED_HEADS.lock().unwrap().contains(&head.message_id));
+    assert_eq!(fixture.pane.tmux_calls(), 0);
+    assert_eq!(fixture.bytes(), before);
+    let persistence = crate::services::discord::queue_persistence_context(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        fixture.channel,
+    );
+    let actor = fixture.shared.mailbox(fixture.channel);
+    let identity = QueueIdentity::of(&head);
+    let claimed = actor
+        .claim_queued_head(identity.clone(), persistence.clone())
+        .await;
+    assert!(matches!(claimed, QueuedHeadClaim::NotEligible));
+    assert_eq!(fixture.bytes(), before);
+    fixture.assert_holder_kept().await;
+
+    // Reserve the head while it is ready, then park every queued input behind the reservation.
+    let record = runtime_store::discord_busy_followup_retries_root()
+        .unwrap()
+        .join(format!(
+            "claude/{}/{}.json",
+            fixture.channel, head.message_id
+        ));
+    std::fs::remove_file(record).unwrap();
+    let QueuedHeadClaim::Reserved(_ticket) = actor.claim_queued_head(identity, persistence).await
+    else {
+        panic!("a ready head is reserved");
+    };
+    let ids: Vec<MessageId> = queue.iter().map(|i| i.message_id).collect();
+    fixture.park(&ids);
+    let body = fixture.deliver("C behind a reserved head").await;
+    assert_eq!(body["delivery"], "queued", "{body}");
+    assert_eq!(fixture.pane.tmux_calls(), 0);
 }

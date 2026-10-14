@@ -206,15 +206,19 @@ async fn a_clear_that_fails_is_not_replayed_by_catch_up() {
         (missed, "question the gateway dropped", false),
     ]);
 
-    let failure = harness
+    harness
         .deliver_user_message(clear, "!clear")
         .await
-        .expect_err("without PostgreSQL the clear handler fails");
+        .expect("a failed clear is answered in the channel, not returned to the event handler");
+    let failure = "postgres pool is required to persist a channel clear boundary";
+    let answered_failure = harness
+        .messages()
+        .iter()
+        .any(|(reply_to, text)| *reply_to == Some(clear) && text.contains(failure));
     assert!(
-        failure
-            .to_string()
-            .contains("postgres pool is required to persist a channel clear boundary"),
-        "{failure}"
+        answered_failure,
+        "without PostgreSQL the clear fails and says so: {:?}",
+        harness.messages()
     );
 
     harness.run_catch_up().await;

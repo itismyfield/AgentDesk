@@ -71,7 +71,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="direct_discord_reactions",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"direct Discord reaction call: `{match_text}`",

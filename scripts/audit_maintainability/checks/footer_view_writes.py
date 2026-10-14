@@ -219,7 +219,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="footer_view_writes",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"completion-footer registry access outside reconciler: `{match_text}`",
@@ -244,7 +244,7 @@ def _run(allowlist: set[str]) -> Iterable[Finding]:
             findings.append(
                 Finding(
                     rule="footer_view_writes",
-                    severity="warn",
+                    severity="error",
                     file=rel,
                     line=line,
                     message=f"live footer/status-panel Discord write pending S4-b2: `{match_text}`",

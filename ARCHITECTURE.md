@@ -78,7 +78,6 @@ src/
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── o.rs
-│   ├── o_shadow.rs
 │   ├── o_tests.rs
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
@@ -802,6 +801,7 @@ src/
 │   │   │   └── submission.rs
 │   │   ├── rollout_tail/
 │   │   │   ├── parser/
+│   │   │   │   ├── handoff_binding_tests.rs
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
@@ -828,6 +828,9 @@ src/
 │   ├── discord/
 │   │   ├── abandon_request_store/
 │   │   │   └── probe_contract_tests.rs
+│   │   ├── busy_followup_retry_store/
+│   │   │   ├── policy.rs
+│   │   │   └── policy_tests.rs
 │   │   ├── catch_up/
 │   │   │   ├── absorbed_active_tests.rs
 │   │   │   ├── api.rs
@@ -883,6 +886,8 @@ src/
 │   │   │   │   ├── render_recovery.rs
 │   │   │   │   ├── render_session.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── text_commands/
+│   │   │   │   └── clear_refusal_reply_tests.rs
 │   │   │   ├── voice/
 │   │   │   │   └── alert.rs
 │   │   │   ├── cancel_backstop_tests.rs
@@ -1039,6 +1044,7 @@ src/
 │   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
+│   │   │   │   ├── legacy_replay_coordinate.rs
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── o_seed_observation/
@@ -1074,6 +1080,9 @@ src/
 │   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
 │   │   │   │   ├── bridge_entry_guard_tests.rs
+│   │   │   │   ├── coordinate_merge_tests.rs
+│   │   │   │   ├── coordinate_replay.rs
+│   │   │   │   ├── coordinate_replay_tests.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
@@ -1307,6 +1316,8 @@ src/
 │   │   ├── queue_park_ledger/
 │   │   │   └── cancel_park_tests.rs
 │   │   ├── recovery_engine/
+│   │   │   ├── legacy_restart_replay/
+│   │   │   │   └── proof.rs
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── adoption_notice_pg_tests.rs
@@ -1348,6 +1359,8 @@ src/
 │   │   │   ├── host_reconcile_tests.rs
 │   │   │   ├── idle_captured_response.rs
 │   │   │   ├── jsonl_extract.rs
+│   │   │   ├── legacy_restart_replay.rs
+│   │   │   ├── legacy_restart_replay_tests.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── manual_rebind_override.rs
 │   │   │   ├── o_cut_recorder.rs
@@ -1415,6 +1428,8 @@ src/
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
+│   │   │   │   │   ├── transition_busy_tests/
+│   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
 │   │   │   │   │   ├── final_guards.rs
@@ -1555,6 +1570,7 @@ src/
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
+│   │   │   ├── queued_recovery_draft_tests.rs
 │   │   │   ├── queued_recovery_fence_tests.rs
 │   │   │   ├── queued_recovery_s2a_tests.rs
 │   │   │   ├── recovery_flush.rs
@@ -1811,6 +1827,7 @@ src/
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── cancel_backstop_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── cold_start_incident_e2e_tests.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
 │   │   │   │   ├── herdr_terminate_e2e_tests.rs
@@ -1837,6 +1854,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
 │   │   │   │   │   ├── boundary_tests/
+│   │   │   │   │   │   ├── handoff_tests.rs
 │   │   │   │   │   │   ├── loss_tests.rs
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   ├── boundary_tests.rs
@@ -1992,6 +2010,7 @@ src/
 │   │   │   ├── before_start_stop_clear_order_tests.rs
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_policy_tests.rs
+│   │   │   ├── before_start_stop_protected_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2067,6 +2086,9 @@ src/
 │   │   ├── turn_lease/
 │   │   │   └── registry.rs
 │   │   ├── turn_presence/
+│   │   │   ├── activity/
+│   │   │   │   ├── tail.rs
+│   │   │   │   └── tail_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── admission.rs
@@ -2666,8 +2688,11 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── matcher.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── pg_statements_tests.rs
 │   │   │   ├── probe.rs
 │   │   │   ├── probe_tests.rs
+│   │   │   ├── projection.rs
+│   │   │   ├── projection_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── rollback_rehearsal_tests.rs
 │   │   │   ├── runner.rs
@@ -2677,15 +2702,15 @@ src/
 │   │   │   ├── send.rs
 │   │   │   └── writer_activation_tests.rs
 │   │   ├── shadow/
+│   │   │   ├── capture/
+│   │   │   │   ├── observation/
+│   │   │   │   │   └── observation_tests.rs
+│   │   │   │   └── observation.rs
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
 │   │   │   ├── derive.rs
-│   │   │   ├── diff.rs
 │   │   │   ├── identity.rs
-│   │   │   ├── metrics.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── report.rs
-│   │   │   ├── root.rs
 │   │   │   ├── seal.rs
 │   │   │   ├── tap.rs
 │   │   │   └── unit_plan.rs
@@ -2721,6 +2746,7 @@ src/
 │   │   │   ├── host/
 │   │   │   │   └── recover.rs
 │   │   │   ├── input_facts/
+│   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
@@ -2850,6 +2876,8 @@ src/
 │   │   ├── binding_context.rs
 │   │   ├── binding_events.rs
 │   │   ├── extract.rs
+│   │   ├── handoff.rs
+│   │   ├── handoff_tests.rs
 │   │   ├── injected_steer.rs
 │   │   ├── injected_steer_tests.rs
 │   │   ├── native_clear.rs

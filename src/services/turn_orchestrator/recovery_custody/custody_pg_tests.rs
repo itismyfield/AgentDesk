@@ -838,6 +838,8 @@ async fn s3act_b3b4a1_owned_outcome_is_recorded_after_the_caller_leaves_pg() {
         )
         .await;
     drop((revoke, collector));
+    // Arming already moved the row past `revision`, so the wait below needs the armed revision.
+    let armed = fx.record(&ch).await.revision;
     let applier = tokio::spawn({
         let ch = ch.clone();
         async move {
@@ -853,7 +855,7 @@ async fn s3act_b3b4a1_owned_outcome_is_recorded_after_the_caller_leaves_pg() {
     let mut recorded = None;
     for _ in 0..500 {
         let row = fx.record(&ch).await;
-        if row.revision > revision {
+        if row.revision > armed {
             recorded = Some(row);
             break;
         }

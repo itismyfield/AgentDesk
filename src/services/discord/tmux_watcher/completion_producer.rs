@@ -25,8 +25,19 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
             shared, channel_id,
         );
 
+    // Managed queued intake needs the completed episode's row retired before the
+    // panel await; other sources retain their existing terminal cleanup order.
+    let clear_managed_inflight = crate::services::discord::inflight::load_inflight_state_read_only(
+        provider,
+        channel_id.get(),
+    )
+    .is_some_and(|row| row.turn_source == crate::services::discord::inflight::TurnSource::Managed);
     let finish = match crate::services::discord::turn_finalizer::claim_normal_episode(
-        shared, provider, key, false, None,
+        shared,
+        provider,
+        key,
+        clear_managed_inflight,
+        None,
     )
     .await
     {

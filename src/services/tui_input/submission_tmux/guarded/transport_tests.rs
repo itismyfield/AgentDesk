@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub(crate) struct Fixture {
-    _env: [Env; 2],
+    _env: [Env; 4],
     pub(crate) root: tempfile::TempDir,
     pub(crate) real: PathBuf,
     pub(crate) socket: String,
@@ -92,7 +92,14 @@ while True:
         let env = [
             Env::prepend_path_after_shared_test_env_lock(root.path()),
             Env::set_path_after_shared_test_env_lock("TMUX_TMPDIR", root.path()),
+            Env::capture_after_shared_test_env_lock("TMUX"),
+            Env::capture_after_shared_test_env_lock("TMUX_PANE"),
         ];
+        // Host admission must observe the fixture socket, even in an attached tmux lane.
+        unsafe {
+            std::env::remove_var("TMUX");
+            std::env::remove_var("TMUX_PANE");
+        }
         Self {
             _lock: lock,
             root,
