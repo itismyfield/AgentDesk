@@ -467,6 +467,7 @@ mod thread_guard_stale_pure_tests {
         let relay_stall_state =
             crate::services::discord::relay_health::RelayStallClassifier::classify(&relay_health);
         crate::services::discord::health::WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: provider.as_str().to_string(),
             attached,
             tmux_session: Some("stale-proof-tmux".to_string()),

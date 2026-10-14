@@ -16,3 +16,4 @@ services::turn_orchestrator::pending_queue_persistence::queue_exit_debt::read_ba
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::scan_fault | helper-module | #6813 | expires=2027-10-12 | injects read_dir and entry failures for queued recovery acceptance tests; owns no test function
 services::turn_orchestrator::policy_close::test_hooks | helper-module | #5340 | expires=2027-10-12 | lets the before-start policy close tests observe and panic at each mailbox step stage; it holds no test of its own
 services::turn_orchestrator::registry_purge::recovery_custody::commit_fault | helper-module | #5340 | expires=2027-10-14 | lets the custody PG tests run a change between a custody write and its commit; it holds no test of its own
+services::turn_orchestrator::registry_purge::recovery_custody::seam | helper-module | #5340 | expires=2027-10-14 | pause points and an effect count on the apply path for the registry PG tests; it holds no test of its own

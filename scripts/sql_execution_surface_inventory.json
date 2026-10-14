@@ -41778,6 +41778,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:73841d119c851dcf9494125c3a6c2bb36cce34c58587e53a31aea49551baae22"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:a2139364b105960996e51bd75db818995bd0ad81bd951c92e4d2c03f16953ad4"
     },
     {
