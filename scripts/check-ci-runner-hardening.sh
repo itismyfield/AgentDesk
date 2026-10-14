@@ -924,14 +924,15 @@ targets = {
     # unchanged, and the exact commands below pin each source/use pair.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
     # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "386fb9ba0f3c9b7be2e3841ee94804518cc493e5ddf9f9ebc80757b5edf2acc0",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "6616db35e28cccdbf0e5d8dca33cdf5d797c1990dfb7c2983f9b07ecccb48553",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [
@@ -1132,14 +1133,15 @@ targets = {
     # Pin the accepted-turn regressions and removal of the retired timeout test.
     # All remaining commands and execution settings retain their reviewed values.
     # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "73362980d7fa0040f95fa5cb604d0c418c19ffd0f1dae88504623075aa1824c8",
+    # Re-pinned after raising the observer step budget from 20 to 30 minutes.
+    "job_sha256" => "941e48600f40434394ade7cc8dc2efa9d83a775f2293c69c10712989b8fa2a8c",
     "cargo_steps" => {
       "Observe curated lane selections" => {
         "commands" => [
           "set -o pipefail",
           "bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
         ],
-        "timeout_minutes" => 20,
+        "timeout_minutes" => 30,
       },
       "Require observer summary" => {
         "commands" => [

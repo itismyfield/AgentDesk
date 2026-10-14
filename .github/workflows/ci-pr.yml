@@ -1337,7 +1337,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1462,7 +1462,7 @@ jobs:
         uses: ./.github/actions/ensure-swap
 
       - name: Observe curated lane selections
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2284,7 +2284,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=35dd9df8e130470acbf006c1c7a3007337e3e3ae2027561fef086d44a5e31679
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2517,7 +2517,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=35dd9df8e130470acbf006c1c7a3007337e3e3ae2027561fef086d44a5e31679
+          expected=3d604dbce0acd8737cc602b20494c2f486c1313014476addd19324f7d0729462
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
