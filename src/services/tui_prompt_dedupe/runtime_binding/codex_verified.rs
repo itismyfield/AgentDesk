@@ -286,6 +286,7 @@ fn commit(
         match native(context, claim) {
             Ok(source)
                 if context.launch_mode != "fresh"
+                    || previous.is_some()
                     || source
                         .created_at
                         .is_some_and(|time| time >= context.created_at) =>

@@ -111,7 +111,10 @@ impl Fixture {
             .join(format!("rollout-{id}.jsonl"))
     }
     fn header(&self, id: &str) {
-        let time = (self.context.created_at + Duration::seconds(1)).to_rfc3339();
+        self.header_at(id, self.time(1));
+    }
+    fn header_at(&self, id: &str, time: DateTime<Utc>) {
+        let time = time.to_rfc3339();
         let meta = json!({"type":"session_meta", "timestamp":time, "payload":{"id":id,"timestamp":time,"cwd":self.root.path(),"source":"cli","originator":"codex_cli_rs"}});
         fs::write(self.path(id), format!("{meta}\n")).unwrap();
     }
@@ -226,6 +229,93 @@ fn response(path: &Path, id: &str, text: &str) {
 }
 async fn polls() {
     tokio::time::sleep(actor::POLL_INTERVAL * 3).await;
+}
+
+async fn resume_older_native_header(delayed_descriptor: bool) {
+    let f = Fixture::new(true);
+    f.header(A);
+    f.send(A, "session-start", "startup", Some(f.time(2)), None);
+    assert_eq!(f.fold().verified.unwrap().source.session_id, A);
+    assert_eq!(f.current().session_id.as_deref(), Some(A));
+    append(&f.path(A), &unit("a", "initial A"));
+    let (store, opened) = f.store();
+    let (writer, port) = owed_writer(opened);
+    let (stop, stopped) = watch::channel(false);
+    let (_command_port, receiver) = actor::codex_submission::Port::new(1);
+    let task = actor::codex_submission::spawning(receiver, || {
+        actor::spawn_projecting(
+            &WriterConfig { enabled: true },
+            None,
+            writer,
+            ShadowProvider::Codex,
+            Arc::new(f.log()),
+            (
+                stopped,
+                watch::channel(false).0,
+                watch::channel(None).0,
+                actor::Owing::default(),
+            ),
+        )
+    })
+    .unwrap();
+    polls().await;
+    assert_eq!(port.posts(), vec!["initial A"]);
+    assert_eq!(posted(&f.reopened(&store)), 1);
+
+    let old_header = f.context.created_at - Duration::days(1);
+    if !delayed_descriptor {
+        f.header_at(B, old_header);
+    }
+    f.send(B, "session-start", "resume", Some(f.time(3)), None);
+    if delayed_descriptor {
+        assert_eq!(f.fold().pending.len(), 1);
+        assert!(dedupe::runtime_binding_for_tmux_session(&f.context.tmux_session).is_none());
+        f.header_at(B, old_header);
+        dedupe::codex_verified::resolve_registered_claims();
+    }
+    assert!(f.fold().pending.is_empty(), "older resume must resolve");
+    assert_eq!(f.fold().verified.unwrap().source.session_id, B);
+    assert_eq!(f.current().session_id.as_deref(), Some(B));
+    assert!(!dedupe::codex_verified_input_blocked(&f.context.tmux_session));
+    append(&f.path(B), &unit("b", "older B"));
+    polls().await;
+    assert_eq!(port.posts(), vec!["initial A", "older B"]);
+    assert_eq!(posted(&f.reopened(&store)), 2);
+
+    f.send(A, "session-start", "resume", Some(f.time(4)), None);
+    assert!(f.fold().pending.is_empty());
+    assert_eq!(f.fold().verified.unwrap().source.session_id, A);
+    assert_eq!(f.current().session_id.as_deref(), Some(A));
+    append(&f.path(A), &unit("a-resumed", "resumed A"));
+    polls().await;
+    assert_eq!(port.posts(), vec!["initial A", "older B", "resumed A"]);
+    assert_eq!(posted(&f.reopened(&store)), 3);
+    stop.send(true).unwrap();
+    assert!(task.await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn source_read_resume_older_native_header_posts_and_returns_to_a() {
+    resume_older_native_header(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn source_read_resume_older_native_header_pending_resolves_and_posts() {
+    resume_older_native_header(true).await;
+}
+
+#[test]
+fn source_read_initial_fresh_older_native_header_stays_pending() {
+    let f = Fixture::new(true);
+    f.header_at(B, f.context.created_at - Duration::days(1));
+    f.send(B, "session-start", "startup", Some(f.time(2)), None);
+    for _ in 0..2 {
+        assert!(f.fold().verified.is_none());
+        assert_eq!(f.fold().pending.len(), 1);
+        assert!(dedupe::runtime_binding_for_tmux_session(&f.context.tmux_session).is_none());
+        assert!(dedupe::codex_verified_input_blocked(&f.context.tmux_session));
+        dedupe::codex_verified::resolve_registered_claims();
+    }
 }
 
 #[tokio::test(start_paused = true)]
