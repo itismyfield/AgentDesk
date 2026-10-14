@@ -416,14 +416,15 @@ async fn return_lost(fx: &Fx, ch: &str) -> (i64, String) {
 #[tokio::test(flavor = "current_thread")]
 async fn s3act_b3b4a1_u03_source_return_row_pg() {
     let fx = Fx::create().await;
-    let ended: fn(&str) -> PriorExecution = |_| PriorExecution::Ended;
-    let other_process: fn(&str) -> PriorExecution = |id| {
+    type Prior = fn(&str) -> PriorExecution;
+    let ended: Prior = |_| PriorExecution::Ended;
+    let other_process: Prior = |id| {
         PriorExecution::SameOwnerLive(LiveOwner {
             process_incarnation: "incarnation-0".into(),
             ..live_owner(id)
         })
     };
-    let cases: [(CanonicalSeal, fn(&str) -> PriorExecution, Verdict); 5] = [
+    let cases: [(CanonicalSeal, Prior, Verdict); 5] = [
         (seal("q1-returned", None, None), ended, Verdict::Close),
         (
             seal("q1-returned", Some("m1"), None),
