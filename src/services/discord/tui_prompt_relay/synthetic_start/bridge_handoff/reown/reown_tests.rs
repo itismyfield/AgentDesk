@@ -761,7 +761,7 @@ fn reown_waits_for_a_stopped_watcher_task_to_end() {
             let stored = turn.wire().await;
             let watcher = turn.shared.tmux_watchers.by_tmux_session.get(&turn.tmux);
             let cancel = watcher.expect("registered watcher").cancel.clone();
-            // The watcher's supervised task outlives its cancel until `finish` lets it return.
+            // The watcher's supervised task outlives its stop until `finish` lets it return.
             let finish = Arc::new(Notify::new());
             let (released, channel, delivers) = (
                 finish.clone(),
@@ -786,7 +786,7 @@ fn reown_waits_for_a_stopped_watcher_task_to_end() {
                     }
                 },
             );
-            cancel.store(true, Ordering::Release);
+            turn.stop_watcher();
             let before = turn.stored();
             if case == "still sending" {
                 tokio::time::pause();
