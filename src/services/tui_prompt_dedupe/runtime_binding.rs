@@ -7,9 +7,18 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
+#[cfg(all(test, unix))]
+pub(crate) use codex_cursor::codex_restore_observation_for_tests;
+#[cfg(unix)]
+pub(crate) use codex_cursor::{
+    codex_restore_checkpoint, codex_restore_observed_end, codex_restore_scan_floor,
+    codex_restore_source_current, finish_codex_restore, prepare_codex_restore,
+};
 mod codex_policy;
 pub(crate) use codex_cursor::{
+    advance_checked as advance_codex_offset_checked,
     advance_tmux_runtime_binding_offset_under_source_authority,
+    migrate_raw_native_marker as migrate_codex_raw_marker,
     preservable_marker as codex_verified_preservable_marker,
 };
 pub(crate) use codex_policy::{
@@ -47,7 +56,21 @@ pub(crate) use codex_verified::{
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
-pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
+pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    provider: &str,
+    channel: u64,
+    binding: TuiRuntimeBinding,
+) -> bool {
+    if binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        && codex_cursor::migrate_raw_native_marker(authority, &binding).is_err()
+    {
+        return false;
+    }
+    pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority(
+        authority, provider, channel, binding,
+    )
+}
 
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -55,8 +78,14 @@ fn with_runtime_binding_state_under_source_authority<R>(
 ) -> R {
     let tmux_session_name = authority.session();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    #[cfg(unix)]
+    let had_runtime = state.runtime_by_tmux.contains_key(tmux_session_name);
     state.purge_expired();
     state.purge_expired_runtime_binding_under_authority(tmux_session_name);
+    #[cfg(unix)]
+    if had_runtime && !state.runtime_by_tmux.contains_key(tmux_session_name) {
+        state.codex_restore_by_tmux.remove(tmux_session_name);
+    }
     operation(&mut state)
 }
 
@@ -883,6 +912,8 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        #[cfg(unix)]
+        state.codex_restore_by_tmux.remove(tmux_session_name);
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
         removed_runtime || removed_provider_sessions
@@ -892,20 +923,8 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     removed
 }
 
-/// #3105 (codex P1 sub-case B): tombstone-evict every mirror mapping for a tmux
-/// session that has been determined dead/orphaned (pane gone AND no live watcher
-/// AND no authoritative owner). This removes BOTH the runtime binding (which the
-/// idle relay loop iterates) AND the best-effort channel mirror (which the
-/// drift-alert resolver reads), so subsequent relay-loop iterations no longer
-/// find a stale mapping and stop re-emitting the per-poll drift/skip WARN.
-///
-/// This is NOT a routing authority change: it only forgets a mirror entry whose
-/// session is genuinely gone. A later legitimate re-registration (launch script
-/// rehydrate or a fresh watcher) re-populates these maps normally, so a session
-/// that comes back relays again.
-///
-/// Returns `true` when at least one mirror entry was removed (so callers can
-/// emit a single bounded incident instead of per-poll spam).
+/// Forgets orphaned binding and channel mirrors so later registration can restore them.
+/// Returns whether a mirror changed, for one incident per eviction.
 pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
@@ -913,6 +932,8 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        #[cfg(unix)]
+        state.codex_restore_by_tmux.remove(tmux_session_name);
         let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);

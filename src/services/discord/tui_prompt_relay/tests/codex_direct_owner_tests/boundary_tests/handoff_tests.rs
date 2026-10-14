@@ -683,3 +683,202 @@ fn codex_held_input_restores_before_its_origin_record_is_written() {
         ))
     });
 }
+
+async fn actual_partial_watcher_restore(root: PathBuf, marker: bool) {
+    let _tmux = live_pane_tmux(&root);
+    let tmux = if marker {
+        "AgentDesk-codex-6903-watcher-marker-cdx"
+    } else {
+        "AgentDesk-codex-6903-watcher-markerless-cdx"
+    };
+    let mut fx = Fixture::start(&root, 6_903_301 + u64::from(marker), tmux).await;
+    let native = PathBuf::from(crate::services::tmux_common::session_temp_path(
+        tmux, "jsonl",
+    ));
+    std::fs::copy(&fx.codex.rollout, &native).unwrap();
+    fx.codex.rollout = native;
+    fx.append(&answer_for(&turn(10), "LEGACY_6903_WATCHER"));
+    let boundary = std::fs::metadata(&fx.codex.rollout).unwrap().len();
+    fx.append(user_record(STEER, &turn(2)).trim_end_matches('\n'));
+    let raw_end = std::fs::metadata(&fx.codex.rollout).unwrap().len();
+    fx.shared.tmux_watchers.remove(&fx.codex.channel);
+    dedupe::reset_state_for_tests();
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(
+        tmux,
+        RuntimeHandoffKind::CodexTui,
+    )
+    .unwrap();
+    crate::services::tmux_common::write_tmux_channel_binding(tmux, fx.codex.channel.get()).unwrap();
+    if marker {
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+            tmux,
+            &fx.codex.rollout,
+            Some("s-5704"),
+        )
+        .unwrap();
+    }
+    std::fs::write(root.join("fake-tmux/names"), format!("{tmux}\n")).unwrap();
+    {
+        let mut settings = fx.shared.settings.write().await;
+        settings.provider = ProviderKind::Codex;
+        settings.allowed_channel_ids = vec![fx.codex.channel.get()];
+    }
+    let submitted =
+        crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(&fx.shared);
+    crate::services::discord::restore_tmux_watchers(&fx.http, &fx.shared).await;
+    assert_eq!(
+        submitted.submissions(),
+        1,
+        "actual restore must claim and spawn a watcher"
+    );
+    assert_eq!(
+        crate::services::discord::tmux::n4d2_entry_support::reader_start(fx.codex.channel.get()),
+        Some(boundary),
+        "actual native constructor must start before the unsealed suffix"
+    );
+    assert!(boundary < raw_end);
+    let binding = super::super::super::super::codex_tui_rehydrated_binding_from_rollout_path(
+        tmux,
+        &fx.codex.rollout,
+        Some("s-5704".into()),
+    )
+    .unwrap();
+    dedupe::register_tmux_runtime_binding(tmux, binding);
+    fx.polls(3).await;
+    assert!(
+        fx.observed.try_recv().is_err(),
+        "partial user must not be admitted"
+    );
+    assert!(fx.sent(STEER_ANSWER).is_empty());
+    let sink = Arc::new(
+        crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink::new(
+            fx._registry.clone(),
+        ),
+    );
+    fx._registry
+        .register_http("codex".into(), fx.http.clone())
+        .await;
+    let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+        crate::services::cluster::session_matcher::MatchedChannel {
+            channel_id: fx.codex.channel.get().to_string(),
+            agent_id: "i6903".into(),
+            provider: ProviderKind::Codex,
+            expected_session_name: tmux.into(),
+            expected_rollout_path: fx.codex.rollout.to_string_lossy().into_owned(),
+        },
+        sink,
+    );
+    crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+        .register(tmux.into(), relay.producer());
+    fx.append("\n");
+    let mut events = events_for(&mut fx, STEER, Duration::from_secs(3)).await;
+    assert_eq!(events.len(), 1, "sealed prompt admits once");
+    super::super::super::super::relay_observed_prompt(&fx.shared, events.remove(0)).await;
+    fx.append(&answer_for(&turn(2), STEER_ANSWER));
+    assert!(
+        fx.delivered(STEER_ANSWER).await,
+        "suffix seal must preserve the complete prompt and its answer"
+    );
+    assert!(fx.sent("LEGACY_6903_WATCHER").is_empty());
+    assert_eq!(
+        fx.sent(STEER_ANSWER)
+            .iter()
+            .filter(|(method, _, _)| method == "POST")
+            .count(),
+        1
+    );
+    submitted.cancel_and_join_all().await;
+    fx.finish();
+}
+
+#[test]
+fn codex_6903_actual_marker_watcher_starts_before_the_partial_user() {
+    run(|root| Box::pin(actual_partial_watcher_restore(root, true)));
+}
+
+#[test]
+fn codex_6903_actual_markerless_watcher_starts_before_the_partial_user() {
+    run(|root| Box::pin(actual_partial_watcher_restore(root, false)));
+}
+
+/// A user record with the metadata codex-cli 0.160 writes: its turn and creation time.
+
+fn native_receipts(
+    channel: u64,
+) -> Vec<crate::services::discord::outbound::delivery_record::ConfirmedDeliveryReceipt> {
+    crate::services::discord::outbound::delivery_record::read_record(&ProviderKind::Codex, channel)
+        .map(|record| record.confirmed_deliveries)
+        .unwrap_or_default()
+}
+
+async fn rebind_complete_boundary(root: PathBuf) {
+    let writer_first = true;
+    let _tmux = live_pane_tmux(&root);
+    let tmux = if writer_first {
+        "AgentDesk-codex-6903-writer-first"
+    } else {
+        "AgentDesk-codex-6903-custody"
+    };
+    let fx = Fixture::start(&root, 6_903_901 + u64::from(writer_first), tmux).await;
+    discord_row(&fx, 6_903_201);
+    std::mem::forget(reserve(&fx));
+    send_captured_hook(&fx, STEER, &turn(2));
+    held(&fx, 1).await;
+    let old = user_record_at(
+        "legacy L0",
+        &turn(10),
+        chrono::Utc::now() - chrono::TimeDelta::minutes(10),
+    );
+    fx.append(&(old + &answer_for(&turn(10), "LEGACY_6903_L0")));
+    let origin_start = std::fs::metadata(&fx.codex.rollout).unwrap().len();
+    let records = opening_record(&turn(1), ORIGIN)
+        + &answer_for(&turn(1), DISCORD_ANSWER)
+        + &opening_record(&turn(11), "legacy L1")
+        + &answer_for(&turn(11), "LEGACY_6903_L1")
+        + &opening_record(&turn(2), STEER)
+        + &answer_for(&turn(2), STEER_ANSWER)
+        + &opening_record(&turn(12), "legacy L2")
+        + &answer_for(&turn(12), "LEGACY_6903_L2");
+    let boundary = fx.append(&records);
+    fx.append(user_record("partial writer boundary 6903", &turn(99)).trim_end_matches('\n'));
+    dedupe::reset_state_for_tests();
+    let restore = super::super::super::super::codex_tui_rehydrated_binding_from_rollout_path;
+    let binding = restore(tmux, &fx.codex.rollout, Some("s-5704".into())).unwrap();
+    assert!(
+        origin_start < binding.last_offset && binding.last_offset < boundary,
+        "handoff input floor: {binding:?}"
+    );
+    dedupe::register_tmux_runtime_binding(tmux, binding.clone());
+    assert!(boundary < std::fs::metadata(&fx.codex.rollout).unwrap().len());
+    if writer_first {
+        let relay = crate::services::discord::recovery_engine::codex_rebind_complete_for_tests(
+            tmux,
+            fx.codex.rollout.to_str().unwrap(),
+            origin_start,
+        );
+        assert!(
+            wait_for(Duration::from_secs(10), || {
+                dedupe::runtime_binding_for_tmux_session(tmux)
+                    .is_some_and(|binding| binding.last_offset == boundary)
+            })
+            .await,
+            "writer complete checkpoint must precede raw EOF"
+        );
+        assert!(
+            std::fs::read_to_string(relay)
+                .unwrap()
+                .contains(DISCORD_ANSWER)
+        );
+        assert!(
+            fx.sent(STEER_ANSWER).is_empty(),
+            "normalized writer is not Discord delivery"
+        );
+    }
+    assert!(native_receipts(fx.codex.channel.get()).is_empty());
+    fx.finish();
+}
+
+#[test]
+fn codex_6903_rebind_writer_stores_the_complete_record_end() {
+    run(|root| Box::pin(rebind_complete_boundary(root)));
+}

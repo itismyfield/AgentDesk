@@ -810,6 +810,7 @@ src/
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
 │   │   ├── session/
+│   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/

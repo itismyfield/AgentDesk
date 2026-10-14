@@ -275,6 +275,8 @@ struct TuiPromptDedupeState {
     injected_steer_by_tmux: HashMap<PromptKey, VecDeque<TimedValue<InjectedSteer>>>,
     // A Discord turn's reserved handoff and the inputs it holds until it names its turn.
     handoff_by_tmux: HashMap<PromptKey, TimedValue<handoff::HandoffReservation>>,
+    #[cfg(unix)]
+    codex_restore_by_tmux: HashMap<String, handoff::CodexRestore>,
     // Held inputs of expired reservations, relayed outside the lock by `drain_expired_handoffs`.
     handoff_expired: Vec<(PromptKey, Vec<handoff::ParkedObservation>)>,
 }
@@ -353,14 +355,14 @@ use extract::{
     take_or_record_recent_observed_prompt,
 };
 pub use handoff::RecordEvidence;
-#[cfg(unix)]
-pub(crate) use handoff::codex_replay_restored_handoff_inputs;
 #[cfg(test)]
 pub(crate) use handoff::tests::on_owning_publish;
 pub(crate) use handoff::{
-    BindOutcome, HandoffGuard, bind_discord_handoff_record, codex_rehydrated_scan_offset,
-    drain_expired_handoffs, reserve_discord_handoff,
+    BindOutcome, HandoffGuard, bind_discord_handoff_record, drain_expired_handoffs,
+    reserve_discord_handoff,
 };
+#[cfg(unix)]
+pub(crate) use handoff::{codex_replay_restored_handoff_inputs, codex_restore_has_custody};
 #[cfg(test)]
 pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
@@ -374,6 +376,8 @@ pub use prompt_identity::{
     record_announced_prompt_id, withdraw_unannounced_prompt_id,
 };
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
+#[cfg(all(test, unix))]
+pub(crate) use runtime_binding::codex_restore_observation_for_tests;
 pub use runtime_binding::*;
 
 #[cfg(test)]

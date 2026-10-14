@@ -569,6 +569,21 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
                 crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session_name)
             })
             .flatten();
+        #[cfg(unix)]
+        let initial_offset = if provider == ProviderKind::Codex {
+            let Some(offset) = codex_restore::native_initial_offset(
+                session_name,
+                &output_path,
+                initial_offset,
+                codex_source_binding.as_ref(),
+                restored_turn.is_some(),
+            ) else {
+                continue;
+            };
+            offset
+        } else {
+            initial_offset
+        };
         pending.push(PendingWatcher {
             channel_id: *channel_id,
             output_path,
@@ -692,6 +707,11 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
         );
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
+        #[cfg(all(test, unix))]
+        crate::services::discord::tmux::n4d2_entry_support::record_reader_start(
+            pw.channel_id.get(),
+            pw.initial_offset,
+        );
         super::super::super::task_supervisor::spawn_observed_tmux_watcher(
             "watchers_lifecycle_tmux_output_watcher_with_restore",
             shared.clone(),

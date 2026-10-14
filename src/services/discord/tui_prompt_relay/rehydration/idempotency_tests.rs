@@ -10,6 +10,16 @@ use std::sync::atomic::AtomicUsize;
 const SESSION: &str = "AgentDesk-codex-5755-idempotency";
 const CHANNEL: u64 = 5755;
 
+thread_local! { static BOOTSTRAP_PAUSE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+
+pub(super) fn bootstrap_pause(_tmux: &str) {
+    BOOTSTRAP_PAUSE.with(|pause| {
+        if let Some(action) = pause.borrow_mut().take() {
+            action();
+        }
+    });
+}
+
 fn fixture(test: impl FnOnce(&Path)) {
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -44,12 +54,55 @@ fn rehydrate(observe: impl FnOnce()) -> Option<dedupe::TuiRuntimeBinding> {
 }
 
 #[test]
+fn codex_restore_leaves_a_valid_partial_user_at_the_complete_boundary() {
+    fixture(|root| {
+        let path = rollout(root, "boundary");
+        let history = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"historical answer\"}]}}\n";
+        let partial = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next prompt\"}]}}";
+        let header = std::fs::read_to_string(&path).unwrap();
+        let boundary = (header.len() + history.len()) as u64;
+        std::fs::write(&path, format!("{header}{history}{partial}")).unwrap();
+        let binding = rehydrate(|| {}).expect("actual restore transaction");
+        assert_eq!(
+            binding.last_offset, boundary,
+            "restore sealed a partial record"
+        );
+        assert!(binding.last_offset < std::fs::metadata(&path).unwrap().len());
+    });
+}
+
+#[test]
+fn codex_idle_scanner_requires_the_user_record_newline() {
+    fixture(|root| {
+        let path = rollout(root, "partial");
+        let boundary = std::fs::metadata(&path).unwrap().len();
+        let partial = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next prompt\"}]}}";
+        let header = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{header}{partial}")).unwrap();
+        let scan =
+            super::super::idle_transcript_scan::scan_codex_idle_rollout_for_prompt(&path, boundary)
+                .unwrap();
+        assert!(
+            matches!(scan, CodexIdleRolloutScan::NoPrompt { offset, .. } if offset == boundary),
+            "unsealed prompt was admitted: {scan:?}"
+        );
+        std::fs::write(&path, format!("{header}{partial}\n")).unwrap();
+        let scan =
+            super::super::idle_transcript_scan::scan_codex_idle_rollout_for_prompt(&path, boundary)
+                .unwrap();
+        assert!(
+            matches!(scan, CodexIdleRolloutScan::Prompt { prompt, .. } if prompt == "next prompt")
+        );
+    });
+}
+
+#[test]
 fn second_rehydration_is_noop_and_preserves_stream_row_identity() {
     fixture(|root| {
         let path = rollout(root, "first");
         let first = rehydrate(|| {}).expect("initial restore");
         let mut progressed = first.clone();
-        progressed.last_offset = 17;
+        progressed.last_offset = std::fs::metadata(&path).unwrap().len();
         progressed.relay_last_offset = Some(11);
         dedupe::register_tmux_runtime_binding(SESSION, progressed.clone());
         let mut state = InflightTurnState::new(
@@ -64,7 +117,7 @@ fn second_rehydration_is_noop_and_preserves_stream_row_identity() {
             Some(SESSION.into()),
             Some(path.display().to_string()),
             None,
-            17,
+            progressed.last_offset,
         );
         state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
         state.full_response = "partial answer".into();
@@ -110,6 +163,85 @@ fn second_rehydration_is_noop_and_preserves_stream_row_identity() {
 }
 
 #[test]
+fn codex_6903_raw_marker_migrates_once_without_sealing_the_suffix() {
+    fixture(|root| {
+        let path = rollout(root, "raw-marker");
+        let boundary = std::fs::metadata(&path).unwrap().len();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"partial\"}]}}");
+        std::fs::write(&path, &bytes).unwrap();
+        crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
+            SESSION,
+            &path,
+            Some("raw-marker"),
+            Some(bytes.len() as u64),
+        )
+        .unwrap();
+        let binding = rehydrate(|| {}).unwrap();
+        assert_eq!(binding.last_offset, boundary);
+        assert_eq!(
+            crate::services::codex_tui::session::read_codex_tui_rollout_marker(SESSION)
+                .unwrap()
+                .rollout_start_offset,
+            Some(boundary)
+        );
+        let observed = dedupe::codex_restore_observation_for_tests(SESSION).unwrap();
+        assert_eq!(observed.3.source_bytes, boundary);
+        assert!(rehydrate(|| panic!("repeat publication")).is_none());
+        assert_eq!(
+            dedupe::codex_restore_observation_for_tests(SESSION)
+                .unwrap()
+                .3,
+            observed.3
+        );
+    });
+}
+
+#[test]
+fn codex_6903_source_replaced_during_bootstrap_stays_pending() {
+    fixture(|root| {
+        let path = rollout(root, "replace");
+        let replace = path.clone();
+        BOOTSTRAP_PAUSE.with(|pause| {
+            *pause.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&replace, replace.with_extension("old")).unwrap();
+                std::fs::write(
+                    &replace,
+                    "{\"type\":\"session_meta\",\"payload\":{\"id\":\"replace\"}}\n",
+                )
+                .unwrap();
+            }))
+        });
+        assert!(rehydrate(|| {}).is_none());
+        assert!(dedupe::runtime_binding_for_tmux_session(SESSION).is_none());
+        assert!(dedupe::codex_restore_observation_for_tests(SESSION).is_none());
+    });
+}
+
+#[test]
+fn codex_6903_bootstrap_measures_complete_utf8_records_and_not_partial_bytes() {
+    fixture(|root| {
+        let path = rollout(root, "counts");
+        let header = std::fs::read_to_string(&path).unwrap();
+        let assistant = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"한🙂\"}]}}\n";
+        let event = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"한🙂\"}}\n";
+        let tool = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"role\":\"assistant\",\"content\":[{\"text\":\"tool payload\"}]}}\n";
+        let full = format!("{header}{assistant}{event}{tool}malformed\n");
+        std::fs::write(&path, format!("{full}{{\"type\":\"response_item\"}}")).unwrap();
+        let binding = rehydrate(|| {}).unwrap();
+        assert_eq!(binding.last_offset, full.len() as u64);
+        let stats = dedupe::codex_restore_observation_for_tests(SESSION)
+            .unwrap()
+            .3;
+        assert_eq!(stats.records, 5);
+        assert_eq!(stats.assistant_records, 2);
+        assert_eq!(stats.assistant_bytes, 2 * "한🙂".len() as u64);
+        assert_eq!(stats.source_bytes, full.len() as u64);
+        assert_eq!(stats.malformed, 1);
+    });
+}
+
+#[test]
 fn live_marker_rotation_replaces_even_when_old_rollout_still_exists() {
     fixture(|root| {
         let old = rollout(root, "old");
@@ -133,12 +265,12 @@ fn namespace_change_repairs_relay_path_without_rewinding_rollout() {
     fixture(|root| {
         rollout(root, "same-session");
         let mut previous = rehydrate(|| {}).unwrap();
-        previous.last_offset = 13;
+        let expected_offset = previous.last_offset;
         previous.relay_output_path =
             Some(root.join("previous-namespace.jsonl").display().to_string());
         dedupe::register_tmux_runtime_binding(SESSION, previous);
         let repaired = rehydrate(|| {}).expect("namespace repair");
-        assert_eq!(repaired.last_offset, 13);
+        assert_eq!(repaired.last_offset, expected_offset);
         assert_eq!(
             repaired.relay_output_path,
             Some(crate::services::tmux_common::session_temp_path(
@@ -238,6 +370,14 @@ fn rollout_alias_and_channel_mirror_repair_preserve_binding() {
     fixture(|root| {
         let path = rollout(root, "aliased");
         let existing = rehydrate(|| {}).unwrap();
+        let observed = dedupe::codex_restore_observation_for_tests(SESSION).unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"padding\"}\n")
+            .unwrap();
         let alias = root.join("alias.jsonl");
         std::os::unix::fs::symlink(path, &alias).unwrap();
         crate::services::codex_tui::session::write_codex_tui_rollout_marker(
@@ -259,6 +399,11 @@ fn rollout_alias_and_channel_mirror_repair_preserve_binding() {
             dedupe::runtime_binding_for_tmux_session(SESSION),
             Some(existing)
         );
+        assert_eq!(
+            dedupe::codex_restore_observation_for_tests(SESSION).unwrap(),
+            observed,
+            "an alias repair must preserve the same source bootstrap boundary and observation"
+        );
     });
 }
 
@@ -268,7 +413,6 @@ fn incomplete_session_metadata_does_not_reset_a_valid_rollout_cursor() {
         rollout(root, "metadata");
         let mut existing = rehydrate(|| {}).unwrap();
         existing.session_id = None;
-        existing.last_offset = 13;
         dedupe::register_tmux_runtime_binding(SESSION, existing.clone());
         assert!(
             rehydrate(|| panic!("learning optional metadata must not reset the source")).is_none()
@@ -370,7 +514,7 @@ fn periodic_entry_pass_reports_one_recovery_then_settles() {
         let mut progressed =
             dedupe::runtime_binding_for_tmux_session(session).expect("restored binding");
         assert_eq!(progressed.output_path, path.display().to_string());
-        progressed.last_offset = 17;
+        progressed.last_offset = std::fs::metadata(&path).unwrap().len();
         progressed.relay_last_offset = Some(11);
         dedupe::register_tmux_runtime_binding(session, progressed.clone());
         let written = dedupe::runtime_binding_recorded_at_for_tests(session);

@@ -1,6 +1,7 @@
 //! A Discord turn reserves its Codex handoff before submit; an input seen before the handoff
 //! names its native turn is held until the handoff binds, ends or expires.
 use super::*;
+use crate::services::codex_tui::session::checkpoint::first_user_record_created_since;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -42,7 +43,7 @@ impl RecordEvidence {
         Some((self.turn_id.as_deref()?, self.create_time?))
     }
 
-    fn created_since(&self, since: DateTime<Utc>) -> bool {
+    pub(crate) fn created_since(&self, since: DateTime<Utc>) -> bool {
         self.create_time
             .is_some_and(|created| created >= since - EVIDENCE_SKEW)
     }
@@ -68,15 +69,15 @@ pub(super) struct ParkedObservation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct HandoffReservation {
-    generation: u64,
+pub(crate) struct HandoffReservation {
+    pub(super) generation: u64,
     origin: String,
-    reserved_wall: DateTime<Utc>,
+    pub(super) reserved_wall: DateTime<Utc>,
     bound: Option<String>,
-    parked: Vec<ParkedObservation>,
+    pub(super) parked: Vec<ParkedObservation>,
     #[cfg(unix)]
     #[serde(skip)]
-    replay_from: Option<u64>,
+    pub(super) replay_from: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,7 +518,10 @@ pub(super) fn sync_durable(provider: &str, tmux: &str) {
 /// since a reservation that held inputs across the restart, which is restored too.
 pub(crate) fn codex_rehydrated_scan_offset(tmux: &str, rollout_path: &Path) -> u64 {
     let eof = std::fs::metadata(rollout_path)
-        .map(|metadata| metadata.len())
+        .ok()
+        .and_then(|metadata| {
+            crate::services::codex_tui::session::checkpoint::at(rollout_path, metadata.len()).ok()
+        })
         .unwrap_or(0);
     let provider = normalize_provider("codex");
     let tmux = tmux.trim();
@@ -663,30 +667,6 @@ pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Pa
     }
 }
 
-fn first_user_record_created_since(rollout_path: &Path, since: DateTime<Utc>) -> Option<u64> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(rollout_path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let (mut offset, mut line) = (0_u64, String::new());
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).ok()?;
-        if read == 0 || !line.ends_with('\n') {
-            return None;
-        }
-        let start = offset;
-        offset += read as u64;
-        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        if extract_codex_rollout_user_prompt_with_entry_id(&json).is_some()
-            && RecordEvidence::from_record(&json).created_since(since)
-        {
-            return Some(start);
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn held_handoff_inputs_for_tests(provider: &str, tmux: &str) -> Option<usize> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -704,3 +684,33 @@ pub(crate) fn durable_handoff_present_for_tests(provider: &str, tmux: &str) -> b
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 pub(super) mod tests;
+
+#[cfg(unix)]
+pub(crate) fn codex_restore_has_custody(tmux: &str) -> std::io::Result<bool> {
+    if STATE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .handoff_by_tmux
+        .get(&PromptKey::new("codex", tmux))
+        .is_some_and(|entry| !entry.value.parked.is_empty())
+    {
+        return Ok(true);
+    }
+    Ok(saved_handoff(tmux)?.is_some_and(|saved| !saved.reservation.parked.is_empty()))
+}
+
+#[cfg(unix)]
+pub(crate) type CodexRestore = crate::services::codex_tui::session::checkpoint::RestorePlan<u64>;
+
+fn saved_handoff(tmux: &str) -> std::io::Result<Option<DurableHandoff>> {
+    let Some(path) = durable_path("codex", tmux) else {
+        return Ok(None);
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
