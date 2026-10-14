@@ -350,9 +350,8 @@ impl CustodyStore {
         result
     }
 
-    /// A busy transition lock before any effect: a root that applied nothing ends with no
-    /// responsibility; one that already applied a stage only records that this stage did not run.
-    /// It never lifts a hold: only a reconcile, with its evidence, does.
+    /// A busy transition lock before any effect ends a root that applied nothing, or records that
+    /// this stage did not run; it never lifts a hold, which only an evidenced reconcile does.
     pub(crate) async fn settle_busy(
         &self,
         channel_id: &str,

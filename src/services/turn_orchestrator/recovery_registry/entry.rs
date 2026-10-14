@@ -278,7 +278,7 @@ impl AttemptHandle {
 
     /// Keeps a just-issued arm's lifetime with the attempt, under its own arm id. An attempt
     /// closed meanwhile still counts the arm and revokes it at once.
-    pub(crate) fn adopt(&self, armed: &Armed) -> Result<(), RegistryRefusal> {
+    pub(crate) fn keep_arm(&self, armed: &Armed) -> Result<(), RegistryRefusal> {
         let mut state = self.slot.state();
         let attempt = state.attempt.as_mut();
         let Some(attempt) = attempt.filter(|attempt| attempt.identity == self.identity) else {

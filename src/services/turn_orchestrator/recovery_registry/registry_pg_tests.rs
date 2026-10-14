@@ -236,7 +236,7 @@ async fn s3act_b3b4a2a_r03_a_successor_waits_for_every_worker_apply_and_capabili
             Some("debt-1"),
         )
         .await;
-    attempt.adopt(&first).expect("adopted");
+    attempt.keep_arm(&first).expect("adopted");
     let entered_a = fx.index.admit_write(&ch, Some(&first.capability));
     let entered_a = entered_a.expect("entered while armed");
     first.report.send(StepOutcome::Applied {
@@ -249,7 +249,7 @@ async fn s3act_b3b4a2a_r03_a_successor_waits_for_every_worker_apply_and_capabili
     let second = fx
         .arm(&ch, revision, &op, Stage::ActorInstall, installed, None)
         .await;
-    attempt.adopt(&second).expect("adopted");
+    attempt.keep_arm(&second).expect("adopted");
     let entered_b = fx.index.admit_write(&ch, Some(&second.capability));
     let entered_b = entered_b.expect("entered while armed");
     // revoke: off closes the attempt to a new apply, worker and arm; entered applies go on.
@@ -358,7 +358,7 @@ async fn s3act_b3b4a2a_a00_an_undecided_row_settles_first_and_no_lock_crosses_an
         grant,
     );
     let armed = armed.await.expect("armed");
-    attempt.adopt(&armed).expect("adopted");
+    attempt.keep_arm(&armed).expect("adopted");
     // The applier is lost: everything ended, yet the outcome is undecided.
     let Armed {
         capability,
@@ -547,7 +547,7 @@ async fn s3act_b3b4a2a_rehydrate_shows_a_row_undecided_and_tells_a_live_owner_fr
     let grant = grant.map(str::to_string);
     let armed = custody.arm(&own, revision, &op, stage, after, grant).await;
     let armed = armed.expect("armed");
-    attempt.adopt(&armed).expect("adopted");
+    attempt.keep_arm(&armed).expect("adopted");
     let Armed {
         capability,
         report,
