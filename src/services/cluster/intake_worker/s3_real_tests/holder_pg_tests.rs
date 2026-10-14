@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use super::harness::*;
 use super::route_pg::{lock_home_row, owner, replies, replies_tagged, routed, tick};
-use crate::db::o_channel_homes::HomeState;
+use crate::db::o_channel_homes::{self, HomeState};
 use crate::services::cluster::channel_home::HomeOwnership;
 use crate::services::cluster::channel_home_drain::Owed;
+use crate::services::cluster::channel_home_port::ChannelHomePort;
 use crate::services::cluster::intake_router_hook::IntakeRouterDecision;
 use crate::services::cluster::intake_worker::TickOutcome;
 use crate::services::tui_o::channel_policy::{self, Site};
@@ -19,6 +20,7 @@ use crate::services::tui_o::store::spool::{Cursor, source_key};
 use crate::services::tui_o::store::{CURSOR_DIR, OStore, SPOOL_DIR, STORE_DIR_NAME, StoreConfig};
 use crate::services::tui_o::writer::DiscordPort;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+use crate::services::tui_o::writer::host;
 
 const WITHIN: Duration = Duration::from_secs(60);
 const HISTORY: &str = "discord-history.jsonl";
@@ -371,12 +373,10 @@ async fn th6_both_restart_only_one_owner_pg() {
             );
             eprintln!("[s3] {} window: {}", node.name(), seen.unwrap());
         }
-        let events = post_lifecycle(scene.dir());
-        assert_eq!(
-            open_posts(&events),
-            0,
-            "a POST open before the kill: {events:#?}"
-        );
+        let events = lifecycle(scene.dir()).unwrap();
+        if let Err(error) = post_spans(&events) {
+            panic!("a POST open or broken before the kill: {error}\n{events:#?}");
+        }
         assert_eq!(
             home_row(&scene).await,
             held,
@@ -390,7 +390,7 @@ async fn th6_both_restart_only_one_owner_pg() {
             gw.finish(WITHIN).await;
         }
     }
-    let events = post_lifecycle(scene.dir());
+    let events = lifecycle(scene.dir()).unwrap();
     for event in &events {
         eprintln!("[s3] lifecycle {}", serde_json::to_string(event).unwrap());
     }
@@ -406,14 +406,14 @@ async fn th6_both_restart_only_one_owner_pg() {
     for span in &spans {
         assert_eq!(
             span.observed,
-            Some(epoch),
+            Some((Some(epoch), EpochSource::Gate)),
             "{span:?} posted outside the held epoch"
         );
     }
-    let started = events.iter().filter(|e| e.step == PostStep::Started);
+    let started = events.iter().filter(|e| e.step == LifeStep::Started);
     for event in started {
-        let fixed = (event.epoch, event.epoch_source.as_deref());
-        assert_eq!(fixed, (Some(epoch), Some("scene")));
+        let fixed = (event.epoch, event.epoch_source);
+        assert_eq!(fixed, (Some(epoch), Some(EpochSource::Scene)));
     }
     scene.drop_db().await;
 }
@@ -534,30 +534,30 @@ pub(super) async fn both_gateway_node(env: &Env) {
     finish_generation(env, node).await;
 }
 
-/// Samples `holds` every 100 ms for [`TWO_ROUNDS`]; the first sample it failed sticks. The count
-/// and largest gap go to the parent.
+/// Samples `holds` every 100 ms through [`TWO_ROUNDS`], the last sample at or after its end; the
+/// first failed sample sticks, and so does too thin a watch. The samples go to the parent.
 async fn watch_window(env: &Env, holds: impl Fn() -> bool) -> Option<String> {
     let start = tokio::time::Instant::now();
-    let (mut samples, mut gap, mut last, mut failed) = (0, Duration::ZERO, start, None);
-    while start.elapsed() < TWO_ROUNDS {
-        samples += 1;
+    let (mut offsets, mut failed) = (Vec::new(), None);
+    loop {
+        let at = start.elapsed();
+        offsets.push(at);
         if !holds() && failed.is_none() {
-            failed = Some(format!("sample {samples} at {:?}", start.elapsed()));
+            failed = Some(format!("sample {} at {at:?}", offsets.len()));
+        }
+        if at >= TWO_ROUNDS {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        gap = gap.max(last.elapsed());
-        last = tokio::time::Instant::now();
     }
-    let seen = format!(
-        "{samples} samples over {:?}, largest gap {gap:?}",
-        start.elapsed()
-    );
+    let watched = observed_throughout(&offsets, TWO_ROUNDS);
+    let seen = format!("{watched:?}: {} samples", offsets.len());
     put(
         &env.dir,
         &format!("window.g{}.{}", generation_of(env), env.role),
         seen,
     );
-    failed
+    failed.or(watched.err())
 }
 
 /// Generation 1 waits to be killed; generation 2 stops and ends.
@@ -566,4 +566,189 @@ async fn finish_generation(env: &Env, node: Booted) {
         std::future::pending::<()>().await;
     }
     node.stop().await;
+}
+
+/// T-H6 releasing restart: the GW holder dies inside its reset call; the next generation leaves only
+/// after an allowed retry. Applied is the injected callback's `Ok(())`, not a real session reset.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_releasing_holder_restart_retries_reset_pg() {
+    let scene = Scene::new().await;
+    seed_outbox_samples(&scene.pool).await;
+    let samples = outbox_samples(&scene.pool).await;
+    let channel = C.to_string();
+    let home = applied(o_channel_homes::delegate(&scene.pool, &channel, "claude", GW, MINI).await);
+    put(scene.dir(), "epoch", home.epoch);
+    let releasing = home_facts(&scene.pool).await.expect("the home row");
+    assert_eq!(
+        (releasing.state, releasing.detail.as_deref()),
+        (HomeState::Releasing, None)
+    );
+    let mut first = Node::spawn(&scene, "th6_release_first", GW);
+    let tag = first.name().to_string();
+    let (dir, entered) = (scene.dir(), format!("reset.{tag}.1.entered"));
+    // The child judges its own readiness; here its exit before the call fails with its log.
+    let alive = || {
+        first.alive_before(&entered);
+        false
+    };
+    until_reset_entered(&scene.pool, dir, (&tag, 1), &releasing, alive).await;
+    // The call's entry alone is not the child's verdict; it signals once its own checks passed.
+    first
+        .wait_signal(&format!("checked.{tag}"), Duration::from_secs(180))
+        .await;
+    quiet_at_reset(&scene.pool, &samples).await;
+    first.kill();
+    assert_eq!(reset_returned(dir, &tag, 1), None, "killed inside the call");
+    let kept = home_facts(&scene.pool).await;
+    assert_eq!(kept.as_ref(), Some(&releasing), "the crash moved the row");
+    let second = Node::spawn(&scene, "th6_release_second", GW);
+    let again = second.name().to_string();
+    second.finish(Duration::from_secs(180)).await;
+    let left = home_facts(&scene.pool).await.expect("the home row");
+    assert_eq!(released_from(&releasing, &left), Ok(()), "{left:?}");
+    assert_eq!(
+        reset_calls(dir, &tag),
+        1,
+        "the first generation called once"
+    );
+    let calls: Vec<_> = (1..=reset_calls(dir, &again))
+        .map(|n| reset_returned(dir, &again, n))
+        .collect();
+    let refused = Some(format!("refused: {REFUSAL}"));
+    assert_eq!(calls, [refused, Some("applied".into())], "{again}");
+    assert_eq!(outbox_samples(&scene.pool).await, samples);
+    scene.drop_db().await;
+}
+
+/// What the second generation's first reset call refuses with.
+const REFUSAL: &str = "the gateway session is busy";
+
+/// `left` is `releasing` after its drain's leave: Released, no holder, the same target, channel,
+/// provider and detail, at a later epoch from the shared sequence.
+pub(super) fn released_from(releasing: &HomeFacts, left: &HomeFacts) -> Result<(), String> {
+    let kept = HomeFacts {
+        state: HomeState::Released,
+        holder: None,
+        epoch: left.epoch,
+        ..releasing.clone()
+    };
+    if *left != kept || left.epoch <= releasing.epoch {
+        return Err(format!("{releasing:?} did not leave as released"));
+    }
+    Ok(())
+}
+
+/// A node holding the Releasing row through a lease at its epoch, with its writer taking work.
+fn holding(node: &Booted, epoch: i64) -> bool {
+    node.home_epoch() == Some(epoch) && node.accepts()
+}
+
+/// First generation: it holds the channel, then its reset holds inside call 1 until the parent
+/// kills it; it fails if it stays holding without a break and tries no reset.
+pub(super) async fn release_first_node(env: &Env) {
+    let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
+    let reset = ScriptedReset::in_child(env, vec![ResetAnswer::Apply]);
+    let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+    let node = Booted::boot_with_reset(env, reads, reset).await;
+    let releasing = home_facts(&node.pool).await.expect("the home row");
+    assert_eq!(
+        (releasing.state, releasing.epoch),
+        (HomeState::Releasing, epoch)
+    );
+    until("the holder takes the channel", WITHIN, || {
+        holding(&node, epoch)
+    })
+    .await;
+    let held = || holding(&node, epoch);
+    until_reset_entered(&node.pool, dir, (tag, 1), &releasing, held).await;
+    signal(dir, &format!("checked.{tag}"));
+    std::future::pending::<()>().await;
+}
+
+/// Second generation on the same root: its boot drains the row again, call 1 refuses with the row
+/// unmoved, and call 2's `Ok(())` lets the drain write the leave.
+pub(super) async fn release_second_node(env: &Env) {
+    let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
+    let script = vec![ResetAnswer::Refuse(REFUSAL), ResetAnswer::Apply];
+    let reset = ScriptedReset::in_child(env, script);
+    let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+    let node = Booted::boot_with_reset(env, reads, reset).await;
+    let pool = &node.pool;
+    let releasing = home_facts(pool).await.expect("the home row");
+    assert_eq!(
+        (releasing.state, releasing.epoch),
+        (HomeState::Releasing, epoch)
+    );
+    let samples = outbox_samples(pool).await;
+    until("the holder takes the channel", WITHIN, || {
+        holding(&node, epoch)
+    })
+    .await;
+    until_reset_entered(pool, dir, (tag, 1), &releasing, || holding(&node, epoch)).await;
+    let gate = node.gate().expect("registered");
+    assert!(
+        !gate.final_closed(epoch),
+        "closed before the reset answered"
+    );
+    quiet_at_reset(pool, &samples).await;
+    refused_unmoved(&node, (dir, tag), REFUSAL, &releasing).await;
+    until_reset_entered(pool, dir, (tag, 2), &releasing, || holding(&node, epoch)).await;
+    quiet_at_reset(pool, &samples).await;
+    applied_then_released(&node, dir, tag, &releasing).await;
+    assert_eq!(outbox_samples(pool).await, samples);
+    node.stop().await;
+}
+
+/// Lets call 1 refuse with `why`; the drain then waits on `source_reset` with the row unmoved.
+pub(super) async fn refused_unmoved(
+    node: &Booted,
+    (dir, tag): (&Path, &str),
+    why: &str,
+    releasing: &HomeFacts,
+) {
+    reset_go(dir, tag, 1);
+    until("call 1 answers", WITHIN, || {
+        reset_returned(dir, tag, 1).is_some()
+    })
+    .await;
+    assert_eq!(reset_returned(dir, tag, 1), Some(format!("refused: {why}")));
+    let shown = || async {
+        let row = home_facts(&node.pool).await;
+        node.drain_blocker().as_deref() == Some("source_reset") || row.as_ref() != Some(releasing)
+    };
+    until_async("the refusal shows or the row moves", WITHIN, shown).await;
+    let row = home_facts(&node.pool).await;
+    assert_eq!(
+        row.as_ref(),
+        Some(releasing),
+        "a refused reset moved the row"
+    );
+    assert_eq!(node.drain_blocker().as_deref(), Some("source_reset"));
+}
+
+/// Holds call 2 before it returns `Ok(())`: still Releasing and not finally closed; once it
+/// returns the drain leaves as released, and no third call came.
+pub(super) async fn applied_then_released(
+    node: &Booted,
+    dir: &Path,
+    tag: &str,
+    releasing: &HomeFacts,
+) {
+    let gate = node.gate().expect("registered");
+    assert!(
+        !gate.final_closed(releasing.epoch),
+        "closed before the reset applied"
+    );
+    assert_eq!(node.state().await, Some(HomeState::Releasing));
+    reset_go(dir, tag, 2);
+    let left = || async { node.state().await == Some(HomeState::Released) };
+    until_async("the release lands", WITHIN, left).await;
+    assert_eq!(reset_returned(dir, tag, 2).as_deref(), Some("applied"));
+    let row = home_facts(&node.pool).await.expect("the home row");
+    assert_eq!(released_from(releasing, &row), Ok(()), "{row:?}");
+    assert!(
+        gate.final_closed(releasing.epoch),
+        "left without the final close"
+    );
+    assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }

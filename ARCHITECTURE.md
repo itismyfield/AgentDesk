@@ -1015,6 +1015,7 @@ src/
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
+│   │   │   ├── probe_runtime.rs
 │   │   │   ├── provider_probe.rs
 │   │   │   ├── reachability.rs
 │   │   │   ├── rebind_request.rs
@@ -2134,7 +2135,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   └── pcm_harness_tests.rs
+│   │   │   │   ├── pcm_harness_tests.rs
+│   │   │   │   └── retired_text_reply_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
@@ -2471,6 +2473,7 @@ src/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
 │   │   │   ├── availability.rs
+│   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
@@ -2930,6 +2933,9 @@ src/
 │   ├── tui_turn_state/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
+│   │   ├── dispatch_reservation/
+│   │   │   └── tests/
+│   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queue_exit_debt.rs
 │   │   │   ├── queue_exit_debt_tests.rs
