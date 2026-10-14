@@ -205,6 +205,7 @@ impl CustodyStore {
                 expected_after: None,
                 handoffs: Vec::new(),
                 reuse: None,
+                arm_id: None,
             }),
             canonical_seal: request.before,
             ever_scoped,
@@ -280,28 +281,27 @@ impl CustodyStore {
         grant: Option<String>,
     ) -> Result<Armed, CustodyError> {
         let open = || self.admission_open.load(Ordering::SeqCst);
-        let ((), revision) = self
-            .rewrite(channel_id, Some(expected_revision), true, |record| {
-                let arm = (operation_id, stage, expected_after, grant);
-                Ok((armed_record(record, arm, open())?, ()))
-            })
-            .await?;
+        let arm_id = uuid::Uuid::new_v4().to_string();
+        self.rewrite(channel_id, Some(expected_revision), true, |record| {
+            let arm = (operation_id, stage, expected_after, grant);
+            Ok((armed_record(record, arm, &arm_id, open())?, ()))
+        })
+        .await?;
         self.index.publish(CommittedArm {
             channel_id,
             operation_id,
             stage,
+            arm_id: &arm_id,
         });
-        let (capability, revoke) = ApplyCapability::issue(channel_id, operation_id, stage);
+        let (capability, revoke) = ApplyCapability::issue(channel_id, operation_id, stage, &arm_id);
         let (report, receiver) = OutcomeReport::pair();
         let collector = tokio::spawn({
             let (custody, revoke) = (self.clone(), revoke.clone());
-            let (channel_id, operation_id) = (channel_id.to_string(), operation_id.to_string());
+            let channel_id = channel_id.to_string();
             async move {
                 let outcome = operation::await_report(receiver).await;
                 revoke.revoke();
-                custody
-                    .record_outcome(&channel_id, &operation_id, stage, revision, outcome)
-                    .await
+                custody.record_outcome(&channel_id, &arm_id, outcome).await
             }
         });
         Ok(Armed {
@@ -312,25 +312,22 @@ impl CustodyStore {
         })
     }
 
-    /// Records the stage armed at `armed_revision`, also after a reconcile held it while its applier
-    /// still ran; an indeterminate result holds the row and blocks the index.
-    pub(crate) async fn record_outcome(
+    /// Records the outcome of arm `arm_id` only, also after a reconcile held it while its applier
+    /// still ran; it ends that arm's index entry and never another arm's.
+    async fn record_outcome(
         &self,
         channel_id: &str,
-        operation_id: &str,
-        stage: Stage,
-        armed_revision: i64,
+        arm_id: &str,
         outcome: StepOutcome,
     ) -> Result<i64, CustodyError> {
         let result = self
             .rewrite(channel_id, None, false, |record| {
                 let armed = record.active_operation.as_ref().is_some_and(|op| {
-                    (op.operation_id.as_str(), op.stage) == (operation_id, stage)
-                        && match op.status {
-                            StageStatus::ApplyArmed => record.revision == armed_revision,
-                            StageStatus::Indeterminate => record.phase == Phase::Held,
-                            _ => false,
-                        }
+                    op.arm_id.as_deref() == Some(arm_id)
+                        && matches!(
+                            op.status,
+                            StageStatus::ApplyArmed | StageStatus::Indeterminate
+                        )
                 });
                 let next = armed
                     .then(|| reconcile::settled_record(record, &outcome))
@@ -340,7 +337,7 @@ impl CustodyStore {
             })
             .await
             .map(|((), revision)| revision);
-        self.index.block(channel_id);
+        self.index.block_arm(channel_id, arm_id);
         result
     }
 
@@ -445,6 +442,7 @@ impl CustodyStore {
 fn armed_record(
     record: &CustodyRecord,
     (operation_id, stage, expected_after, grant): (&str, Stage, CanonicalSeal, Option<String>),
+    arm_id: &str,
     issuing_open: bool,
 ) -> Result<CustodyRecord, CustodyError> {
     if !issuing_open {
@@ -475,13 +473,14 @@ fn armed_record(
             return Err(refused(Refusal::Unfit("a resumed stage reuses its grant")));
         }
         // A debt the stage will issue is recorded once, before it can be published.
-        (None, Some(grant)) if !op.handoffs.contains(&grant) => op.handoffs.push(grant),
+        (None, Some(grant)) => op.record_handoff(&grant),
         _ => {}
     }
     op.stage = stage;
     op.status = StageStatus::ApplyArmed;
     op.before = record.canonical_seal.clone();
     op.expected_after = Some(expected_after);
+    op.arm_id = Some(arm_id.to_string());
     Ok(CustodyRecord {
         active_operation: Some(op),
         ..record.clone()

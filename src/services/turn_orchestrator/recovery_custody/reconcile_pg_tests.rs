@@ -650,6 +650,20 @@ async fn s3act_b3b4a1_u03_legacy_results_end_only_with_their_evidence_pg() {
     }
     let owned = fx.record(&channel(603)).await;
     assert_eq!(op(&owned).handoffs, ["actor-1"]);
+    // The same claim reported again binds the same owner once.
+    let again = LegacyResult::LocalClaim {
+        bound_to: Some("actor-1".into()),
+    };
+    fx.custody
+        .record_legacy_result(
+            &channel(603),
+            owned.revision,
+            &op(&owned).operation_id,
+            &again,
+        )
+        .await
+        .unwrap();
+    assert_eq!(op(&fx.record(&channel(603)).await).handoffs, ["actor-1"]);
     // After an applied stage, "nothing applied" cannot be true and holds.
     let ch = channel(620);
     let (revision, id) = fx.reserve(legacy(&ch, seal("q1", None, None))).await;
@@ -985,5 +999,79 @@ async fn s3act_b3b4a1_f7_a_held_known_outcome_resolves_through_a_verified_return
     )
     .await;
     assert!(is_closed(&fx.record(&ch).await));
+    fx.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f7_a_settled_hold_returns_to_work_once_its_seal_is_seen_again_pg() {
+    let fx = Fx::create().await;
+    let exit = seal("q0", None, None);
+    // Scoped: the exit applied and the install reported not applied (a known, unapplied stage).
+    let unapplied = channel(741);
+    fx.home(&unapplied, NODE, EPOCH).await;
+    let request = scoped(&unapplied, seal("q1", None, None), EPOCH);
+    let (revision, id) = fx.reserve(request).await;
+    let revision = fx
+        .apply(&unapplied, revision, &id, Stage::QueueCommit, exit.clone())
+        .await;
+    let install = seal("q0", None, Some("i1"));
+    let armed = fx
+        .arm(
+            &unapplied,
+            revision,
+            &id,
+            Stage::ActorInstall,
+            install,
+            None,
+        )
+        .await;
+    armed.report.send(StepOutcome::NotApplied);
+    armed.collector.await.unwrap().expect("recorded");
+    // The exit confirmed and the install named with its debt to reuse (an unarmed later stage).
+    let named = channel(742);
+    let revision = exit_lost(&fx, &named, Root::Scoped).await;
+    let found = Evidence {
+        debt: Some("debt-1".into()),
+        ..evidence(exit.clone(), PriorExecution::Ended)
+    };
+    let (verdict, _) = reconcile(&fx, &named, revision, Action::RevalidateInstall, &found).await;
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    let unread = Evidence {
+        observed: None,
+        ..evidence(exit.clone(), PriorExecution::Ended)
+    };
+    let seen = evidence(exit.clone(), PriorExecution::Ended);
+    let undecided = [
+        evidence(seal("q2", None, None), PriorExecution::Ended),
+        evidence(exit.clone(), PriorExecution::Unknown),
+    ];
+    for ch in [&unapplied, &named] {
+        let settled = fx.record(ch).await;
+        let action = Action::RevalidateInstall;
+        let (verdict, row) = reconcile(&fx, ch, settled.revision, action, &unread).await;
+        assert!(matches!(verdict, Verdict::Held { .. }), "{ch}: {verdict:?}");
+        assert_eq!(row.phase, Phase::Held, "{ch}");
+        let (verdict, row) = reconcile(&fx, ch, row.revision, action, &seen).await;
+        assert_eq!(verdict, Verdict::Restored, "{ch}");
+        assert_eq!((row.phase, op(&row)), (settled.phase, op(&settled)), "{ch}");
+        // Changed stores or an unknown earlier execution keep it held, unchanged.
+        let (_, mut row) = reconcile(&fx, ch, row.revision, action, &unread).await;
+        for case in &undecided {
+            let (verdict, next) = reconcile(&fx, ch, row.revision, action, case).await;
+            assert!(matches!(verdict, Verdict::Held { .. }), "{ch}: {verdict:?}");
+            assert_eq!((next.phase, op(&next)), (Phase::Held, op(&settled)), "{ch}");
+            row = next;
+        }
+    }
+    let kept = op(&fx.record(&named).await).clone();
+    assert_eq!(
+        (kept.stage, kept.reuse, kept.applied, kept.handoffs),
+        (
+            Stage::ActorInstall,
+            Some("debt-1".into()),
+            vec![Stage::QueueCommit],
+            vec!["debt-1".to_string()]
+        )
+    );
     fx.close().await;
 }

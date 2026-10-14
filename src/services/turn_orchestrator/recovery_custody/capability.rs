@@ -21,6 +21,7 @@ pub(crate) struct ApplyCapability {
     channel_id: String,
     operation_id: String,
     stage: Stage,
+    arm_id: String,
     revocation: Arc<Revocation>,
 }
 
@@ -38,12 +39,14 @@ impl ApplyCapability {
         channel_id: &str,
         operation_id: &str,
         stage: Stage,
+        arm_id: &str,
     ) -> (Self, RevokeHandle) {
         let revocation = Arc::new(Revocation::default());
         let capability = Self {
             channel_id: channel_id.to_string(),
             operation_id: operation_id.to_string(),
             stage,
+            arm_id: arm_id.to_string(),
             revocation: revocation.clone(),
         };
         (capability, RevokeHandle(revocation))
@@ -55,6 +58,11 @@ impl ApplyCapability {
 
     pub(crate) fn stage(&self) -> Stage {
         self.stage
+    }
+
+    /// The arm that issued it; another arm of the same operation and stage is another target.
+    pub(crate) fn arm_id(&self) -> &str {
+        &self.arm_id
     }
 
     /// Admits the apply only for its own channel, operation and stage while not revoked.

@@ -690,11 +690,13 @@ async fn s3act_b3b4a1_f04_exact_operation_is_published_only_after_the_arm_commit
         fx.index.state(&ch),
         IndexState::ExactOperation {
             operation_id: op.clone(),
-            stage: Stage::MarkerPublish
+            stage: Stage::MarkerPublish,
+            arm_id: armed.capability.arm_id().into(),
         }
     );
     assert_eq!(fx.index.admit_write(&ch, Some(&armed.capability)), Ok(()));
-    let (other_stage, _) = ApplyCapability::issue(&ch, &op, Stage::QueueCommit);
+    let arm_id = armed.capability.arm_id();
+    let (other_stage, _) = ApplyCapability::issue(&ch, &op, Stage::QueueCommit, arm_id);
     assert!(fx.index.admit_write(&ch, Some(&other_stage)).is_err());
     assert!(fx.index.admit_write(&ch, None).is_err());
     assert_eq!(
@@ -930,11 +932,61 @@ async fn s3act_b3b4a1_f3_arm_issues_each_stage_and_grant_once_and_only_while_ope
         matches!(other, Err(CustodyError::Refused(Refusal::Unfit(_)))),
         "{other:?}"
     );
-    let _armed = fx
-        .arm(&ch, revision, &id, Stage::QueueCommit, exit, Some("debt-1"))
+    let armed = fx
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::QueueCommit,
+            exit.clone(),
+            Some("debt-1"),
+        )
         .await;
     let kept = fx.record(&ch).await.active_operation.unwrap();
     assert_eq!(kept.handoffs, ["debt-1"]);
+    // The exit reports the debt its arm recorded: still recorded once.
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit.clone()),
+        handoff: Some("debt-1".into()),
+    });
+    armed.collector.await.unwrap().expect("recorded");
+    let mut row = fx.record(&ch).await;
+    assert_eq!(row.active_operation.as_ref().unwrap().handoffs, ["debt-1"]);
+    // At the bound, a granted id armed and reported again settles without growing the list.
+    row.active_operation.as_mut().unwrap().handoffs =
+        (1..=8).map(|i| format!("debt-{i}")).collect();
+    let mut conn = fx.pool.acquire().await.unwrap();
+    let written = crate::db::channel_recovery_custody::replace(
+        &mut conn,
+        row.revision,
+        &row.encode().unwrap(),
+    )
+    .await
+    .unwrap();
+    let CasWrite::Applied { revision } = written else {
+        panic!("{written:?}")
+    };
+    let armed = fx
+        .arm(
+            &ch,
+            revision,
+            &id,
+            Stage::ActorInstall,
+            exit.clone(),
+            Some("debt-8"),
+        )
+        .await;
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit.clone()),
+        handoff: Some("debt-3".into()),
+    });
+    armed
+        .collector
+        .await
+        .unwrap()
+        .expect("recorded at the bound");
+    let kept = fx.record(&ch).await.active_operation.unwrap();
+    assert_eq!(kept.handoffs.len(), 8);
     // Off refuses a first arm and the next stage's arm alike.
     let (first, next) = (channel(93), channel(94));
     let (first_revision, first_id) = fx.reserve(legacy(&first, seal("q1", None, None))).await;
@@ -1004,30 +1056,51 @@ async fn s3act_b3b4a1_f3_an_off_before_the_arm_commits_refuses_the_arm_pg() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn s3act_b3b4a1_f4_legacy_no_apply_never_ends_an_armed_stage_pg() {
+async fn s3act_b3b4a1_f4_legacy_results_never_overwrite_an_armed_stage_pg() {
     let fx = Fx::create().await;
     let ch = channel(96);
     let (revision, id) = fx.reserve(legacy(&ch, seal("q1", None, None))).await;
-    let marker = seal("q1", Some("m1"), None);
+    let exit = seal("q0", None, None);
     let armed = fx
-        .arm(&ch, revision, &id, Stage::MarkerPublish, marker, None)
+        .arm(&ch, revision, &id, Stage::QueueCommit, exit.clone(), None)
         .await;
     let raw = fx.raw(&ch).await;
-    for reason in [
-        NoApplyReason::Empty,
-        NoApplyReason::StaleSelection,
-        NoApplyReason::TransitionBusy,
-    ] {
-        let result = fx
+    let results = [
+        LegacyResult::NoApply(NoApplyReason::Empty),
+        LegacyResult::NoApply(NoApplyReason::StaleSelection),
+        LegacyResult::NoApply(NoApplyReason::TransitionBusy),
+        LegacyResult::ReturnRequired,
+        LegacyResult::LocalClaim {
+            bound_to: Some("actor-1".into()),
+        },
+        LegacyResult::Forwarded {
+            receipt: Some("receipt-1".into()),
+        },
+        LegacyResult::Unknown,
+    ];
+    for result in &results {
+        let refused = fx
             .custody
-            .record_legacy_result(&ch, revision + 1, &id, &LegacyResult::NoApply(reason))
+            .record_legacy_result(&ch, revision + 1, &id, result)
             .await;
         assert!(
-            matches!(result, Err(CustodyError::Refused(Refusal::Unfit(_)))),
-            "{reason:?}: {result:?}"
+            matches!(refused, Err(CustodyError::Refused(Refusal::Unfit(_)))),
+            "{result:?}: {refused:?}"
         );
-        assert_eq!(fx.raw(&ch).await, raw, "{reason:?}");
+        assert_eq!(fx.raw(&ch).await, raw, "{result:?}");
+        assert_eq!(
+            fx.index.admit_write(&ch, Some(&armed.capability)),
+            Ok(()),
+            "{result:?}"
+        );
     }
+    let busy = fx.custody.settle_busy(&ch, revision + 1, &id).await;
+    assert!(
+        matches!(busy, Err(CustodyError::Refused(Refusal::Unfit(_)))),
+        "{busy:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    assert_eq!(fx.index.admit_write(&ch, Some(&armed.capability)), Ok(()));
     let busy = fx
         .custody
         .reserve(fx.admit(&ch).await, legacy(&ch, seal("q1", None, None)))
@@ -1039,9 +1112,26 @@ async fn s3act_b3b4a1_f4_legacy_no_apply_never_ends_an_armed_stage_pg() {
         ),
         "{busy:?}"
     );
+    // Settled through its own report first, the return keeps the applied exit.
+    armed.report.send(StepOutcome::Applied {
+        after: Box::new(exit),
+        handoff: None,
+    });
+    let revision = armed.collector.await.unwrap().expect("recorded");
+    let (verdict, _) = fx
+        .custody
+        .record_legacy_result(&ch, revision, &id, &LegacyResult::ReturnRequired)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Return { .. }), "{verdict:?}");
+    let kept = fx.record(&ch).await.active_operation.unwrap();
     assert_eq!(
-        armed.capability.check(&ch, &id, Stage::MarkerPublish),
-        Ok(())
+        (kept.stage, kept.status, kept.applied),
+        (
+            Stage::SourceReturn,
+            StageStatus::ReservedNotArmed,
+            vec![Stage::QueueCommit]
+        )
     );
     fx.close().await;
 }
@@ -1066,16 +1156,17 @@ async fn s3act_b3b4a1_f6_a_writer_needs_the_live_capability_pg() {
     assert_eq!(fx.index.admit_write(&ch, Some(&first.capability)), Ok(()));
     // Revoked: refused at once, while the index still names the operation and nothing is recorded.
     first.revoke.revoke();
-    let exact = IndexState::ExactOperation {
+    let exact = |armed: &Armed| IndexState::ExactOperation {
         operation_id: id.clone(),
         stage: Stage::MarkerPublish,
+        arm_id: armed.capability.arm_id().into(),
     };
     assert_eq!(
         fx.index.admit_write(&ch, Some(&first.capability)),
-        Err(Denial(exact.clone()))
+        Err(Denial(exact(&first)))
     );
     assert_eq!(fx.record(&ch).await.revision, revision + 1);
-    // Re-armed after its applier was lost: the old capability names the same operation and stage.
+    // Re-armed after its applier was lost: the old capability is the same stage's earlier arm.
     drop(first.report);
     let revision = first.collector.await.unwrap().expect("recorded");
     let (verdict, revision) = fx
@@ -1092,12 +1183,97 @@ async fn s3act_b3b4a1_f6_a_writer_needs_the_live_capability_pg() {
     let second = fx
         .arm(&ch, revision, &id, Stage::MarkerPublish, marker, None)
         .await;
-    assert_eq!(fx.index.state(&ch), exact);
+    assert_eq!(fx.index.state(&ch), exact(&second));
     assert_eq!(
         fx.index.admit_write(&ch, Some(&first.capability)),
-        Err(Denial(exact))
+        Err(Denial(exact(&second)))
     );
     assert_eq!(fx.index.admit_write(&ch, Some(&second.capability)), Ok(()));
+    fx.close().await;
+}
+
+/// Arms A, revokes it, resumes the stage with the stores as before and arms B in its place.
+async fn rearmed(fx: &Fx, ch: &str) -> (Armed, Armed) {
+    let before = seal("q1", None, None);
+    let marker = seal("q1", Some("m1"), None);
+    let (revision, id) = fx.reserve(legacy(ch, before.clone())).await;
+    let first = fx
+        .arm(
+            ch,
+            revision,
+            &id,
+            Stage::MarkerPublish,
+            marker.clone(),
+            None,
+        )
+        .await;
+    first.revoke.revoke();
+    let ended = evidence(before, PriorExecution::Ended);
+    let (verdict, revision) = fx
+        .custody
+        .reconcile(ch, revision + 1, Action::RecheckApply, &ended)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Resume { .. }), "{verdict:?}");
+    let second = fx
+        .arm(ch, revision, &id, Stage::MarkerPublish, marker, None)
+        .await;
+    (first, second)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b4a1_f5_a_late_report_settles_only_its_own_arm_pg() {
+    let fx = Fx::create().await;
+    let marker = seal("q1", Some("m1"), None);
+    // B still armed: A's late report is stale and B's writer keeps its index entry.
+    let ch = channel(98);
+    let (first, second) = rearmed(&fx, &ch).await;
+    let raw = fx.raw(&ch).await;
+    first.report.send(StepOutcome::NotApplied);
+    let late = first.collector.await.unwrap();
+    assert!(
+        matches!(late, Err(CustodyError::Refused(Refusal::Stale))),
+        "{late:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    assert_eq!(fx.index.admit_write(&ch, Some(&second.capability)), Ok(()));
+    // B held while its applier runs: A's report still records nothing; B's own report settles it.
+    let ch = channel(99);
+    let (first, second) = rearmed(&fx, &ch).await;
+    let unread = Evidence {
+        observed: None,
+        ..evidence(marker.clone(), PriorExecution::Ended)
+    };
+    let revision = fx.record(&ch).await.revision;
+    let (verdict, _) = fx
+        .custody
+        .reconcile(&ch, revision, Action::RecheckApply, &unread)
+        .await
+        .unwrap();
+    assert!(matches!(verdict, Verdict::Held { .. }), "{verdict:?}");
+    let raw = fx.raw(&ch).await;
+    first.report.send(StepOutcome::NotApplied);
+    let late = first.collector.await.unwrap();
+    assert!(
+        matches!(late, Err(CustodyError::Refused(Refusal::Stale))),
+        "{late:?}"
+    );
+    assert_eq!(fx.raw(&ch).await, raw);
+    second.report.send(StepOutcome::Applied {
+        after: Box::new(marker),
+        handoff: None,
+    });
+    second.collector.await.unwrap().expect("recorded");
+    let row = fx.record(&ch).await;
+    let kept = row.active_operation.unwrap();
+    assert_eq!(
+        (row.phase, kept.status, kept.applied),
+        (
+            Phase::LegacyReserved,
+            StageStatus::KnownOutcome,
+            vec![Stage::MarkerPublish]
+        )
+    );
     fx.close().await;
 }
 
@@ -1269,15 +1445,33 @@ async fn s3act_b3b4a1_bounds_admit_up_to_their_limit_and_refuse_past_it_pg() {
                 size,
                 "{column}"
             );
+            let raw = fx.raw(&ch).await;
             let mut conn = fx.pool.acquire().await.unwrap();
             let written =
                 crate::db::channel_recovery_custody::replace(&mut conn, row.revision, &stored)
                     .await;
-            assert_eq!(
-                matches!(written, Ok(CasWrite::Applied { .. })),
-                size <= limit,
-                "{column} {size}: {written:?}"
-            );
+            drop(conn);
+            // Within the limit the padded value is stored; past it the bound's CHECK refuses it.
+            match written {
+                Ok(CasWrite::Applied { revision }) if size <= limit => {
+                    let kept = fx.record(&ch).await;
+                    assert_eq!(revision, row.revision + 1, "{column} {size}");
+                    assert_eq!(
+                        kept,
+                        CustodyRecord { revision, ..padded },
+                        "{column} {size}"
+                    );
+                }
+                Err(sqlx::Error::Database(error)) if size > limit => {
+                    assert_eq!(
+                        (error.code().as_deref(), error.constraint()),
+                        (Some("23514"), Some("channel_recovery_custody_bounded")),
+                        "{column} {size}"
+                    );
+                    assert_eq!(fx.raw(&ch).await, raw, "{column} {size}");
+                }
+                other => panic!("{column} {size}: {other:?}"),
+            }
         }
         // Back to the unpadded row for the next column.
         let row = fx.record(&ch).await;

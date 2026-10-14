@@ -69,6 +69,10 @@ pub(crate) struct ActiveOperation {
     /// The grant a resumed stage must reuse; arming it with any other grant is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reuse: Option<String>,
+    /// The current arm's identity: a hold keeps it, only the next arm replaces it, and only its
+    /// own report records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arm_id: Option<String>,
 }
 
 impl ActiveOperation {
@@ -77,6 +81,13 @@ impl ActiveOperation {
             return Err("operation exceeds its bounded progress".into());
         }
         Ok(())
+    }
+
+    /// Records a granted follow-up once; a re-reported id never grows the bounded list.
+    pub(crate) fn record_handoff(&mut self, id: &str) {
+        if !self.handoffs.iter().any(|known| known == id) {
+            self.handoffs.push(id.to_string());
+        }
     }
 
     pub(crate) fn has_applied(&self) -> bool {

@@ -13,8 +13,12 @@ pub(crate) enum IndexState {
     Unknown,
     /// Undecided or owned elsewhere: general changes are refused.
     Blocked,
-    /// Only this durably armed operation's stage may apply.
-    ExactOperation { operation_id: String, stage: Stage },
+    /// Only this durably armed operation's stage, under this arm, may apply.
+    ExactOperation {
+        operation_id: String,
+        stage: Stage,
+        arm_id: String,
+    },
 }
 
 /// A commit-confirmed arm; only the core builds one, after the arm transaction committed.
@@ -22,6 +26,7 @@ pub(super) struct CommittedArm<'a> {
     pub(super) channel_id: &'a str,
     pub(super) operation_id: &'a str,
     pub(super) stage: Stage,
+    pub(super) arm_id: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -52,18 +57,29 @@ impl DenialIndex {
             .insert(channel_id.to_string(), IndexState::Blocked);
     }
 
+    /// Ends one arm's entry; an entry another arm published since is left as it is.
+    pub(super) fn block_arm(&self, channel_id: &str, arm_id: &str) {
+        let mut states = self.states();
+        if matches!(states.get(channel_id),
+            Some(IndexState::ExactOperation { arm_id: current, .. }) if current == arm_id)
+        {
+            states.insert(channel_id.to_string(), IndexState::Blocked);
+        }
+    }
+
     pub(super) fn publish(&self, arm: CommittedArm<'_>) {
         self.states().insert(
             arm.channel_id.to_string(),
             IndexState::ExactOperation {
                 operation_id: arm.operation_id.to_string(),
                 stage: arm.stage,
+                arm_id: arm.arm_id.to_string(),
             },
         );
     }
 
-    /// A sync writer's check: it passes only with an unrevoked capability for the published exact
-    /// operation's stage; copied identifiers are not a capability.
+    /// A sync writer's check: it passes only with an unrevoked capability of the published arm;
+    /// copied identifiers are not a capability.
     pub(crate) fn admit_write(
         &self,
         channel_id: &str,
@@ -73,8 +89,10 @@ impl DenialIndex {
             IndexState::ExactOperation {
                 operation_id,
                 stage,
-            } if capability
-                .is_some_and(|cap| cap.check(channel_id, &operation_id, stage).is_ok()) =>
+                arm_id,
+            } if capability.is_some_and(|cap| {
+                cap.arm_id() == arm_id && cap.check(channel_id, &operation_id, stage).is_ok()
+            }) =>
             {
                 Ok(())
             }

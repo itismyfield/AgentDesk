@@ -88,6 +88,8 @@ pub(crate) enum Verdict {
     },
     /// Responsibility ended with evidence.
     Close,
+    /// A hold over a settled stage lifts with its stored seal seen again; nothing new is confirmed.
+    Restored,
     Held {
         missing: &'static str,
     },
@@ -130,20 +132,31 @@ fn last_debt(op: &ActiveOperation) -> Option<String> {
     op.handoffs.last().cloned()
 }
 
+fn unsettled(op: &ActiveOperation) -> Option<Verdict> {
+    matches!(
+        op.status,
+        StageStatus::ApplyArmed | StageStatus::Indeterminate
+    )
+    .then_some(Verdict::Refused {
+        reason: "an armed stage settles through its outcome",
+    })
+}
+
 /// A "nothing ran" claim ends only an unarmed reservation that applied nothing; an armed stage
 /// settles through its own outcome. `None` leaves the claim to the caller.
 pub(crate) fn not_run_verdict(op: &ActiveOperation) -> Option<Verdict> {
-    match op.status {
-        StageStatus::ApplyArmed | StageStatus::Indeterminate => Some(Verdict::Refused {
-            reason: "an armed stage settles through its outcome",
-        }),
-        StageStatus::ReservedNotArmed if !op.has_applied() => Some(Verdict::NoApply),
-        _ => None,
-    }
+    unsettled(op).or_else(|| {
+        (op.status == StageStatus::ReservedNotArmed && !op.has_applied())
+            .then_some(Verdict::NoApply)
+    })
 }
 
-/// A legacy result ends the responsibility only with the evidence its kind names.
+/// A legacy result ends the responsibility only with the evidence its kind names, and never
+/// while an armed stage's outcome is still unsettled.
 pub(crate) fn legacy_verdict(op: &ActiveOperation, result: &LegacyResult) -> Verdict {
+    if let Some(refused) = unsettled(op) {
+        return refused;
+    }
     match result {
         LegacyResult::NoApply(_) => not_run_verdict(op).unwrap_or(Verdict::Held {
             missing: "proof that nothing was applied",
@@ -195,6 +208,25 @@ pub(crate) fn decide(record: &CustodyRecord, action: Action, evidence: &Evidence
     let held_known = record.phase == Phase::Held
         && op.status == StageStatus::KnownOutcome
         && op.applied.contains(&op.stage);
+    // A held stage with nothing undecided (unapplied known outcome, unarmed later stage) only
+    // returns to work, keeping its stage, grant and applied stages.
+    let held_settled = record.phase == Phase::Held
+        && match op.status {
+            StageStatus::KnownOutcome => !op.applied.contains(&op.stage),
+            StageStatus::ReservedNotArmed => op.has_applied(),
+            _ => false,
+        };
+    if held_settled {
+        return match (*seen == record.canonical_seal, ended || same_live) {
+            (true, true) => Verdict::Restored,
+            (true, false) => Verdict::Held {
+                missing: "the end of the earlier execution",
+            },
+            (false, _) => Verdict::Held {
+                missing: "stores that still match the stored seal",
+            },
+        };
+    }
     match op.status {
         StageStatus::ReservedNotArmed if !op.has_applied() => {
             if action != Action::RecheckApply {
@@ -456,6 +488,7 @@ pub(crate) fn next_record(
     match verdict {
         Verdict::Refused { .. } => return None,
         Verdict::NoApply | Verdict::Close => return Some(closed(record)),
+        Verdict::Restored => {}
         Verdict::Held { .. } => {
             if op.status == StageStatus::ApplyArmed {
                 op.status = StageStatus::Indeterminate;
@@ -490,7 +523,7 @@ pub(crate) fn next_record(
         }
         Verdict::Owned { by } => {
             note_applied(&mut op, Stage::ActorInstall);
-            op.handoffs.push(by.clone());
+            op.record_handoff(by);
             op.status = StageStatus::KnownOutcome;
         }
         Verdict::Return { confirmed, .. } => {
@@ -529,7 +562,9 @@ pub(crate) fn settled_record(
             if !op.applied.contains(&op.stage) {
                 op.applied.push(op.stage);
             }
-            op.handoffs.extend(handoff.iter().cloned());
+            if let Some(handoff) = handoff {
+                op.record_handoff(handoff);
+            }
             op.status = StageStatus::KnownOutcome;
             Some(CustodyRecord {
                 phase: working_phase(&op),
