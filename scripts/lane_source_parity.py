@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Label cargo-test commands with the CI context that runs them, and require every
-explicit justfile filter to be selected by explicit required-PR filters or an exception."""
+"""Label cargo-test commands with the CI context that runs them, and require every explicit
+justfile filter to be selected by required-PR or main lane filters, or an exception."""
 
 from __future__ import annotations
 
@@ -100,8 +100,15 @@ class Sources:
         return tuple(s for s in self.sources if s.origin in origins and s.runs and not s.guard)
 
     @property
+    def required(self) -> tuple[LaneSource, ...]:
+        """Required PR runs plus main's lanes: a PR runs only the plan's PostgreSQL and sweep
+        tests, so main's literal full lanes, which a deploy needs green, prove coverage."""
+        return self.of("pr-required") + tuple(s for s in self.of("main") if s.lane)
+
+    @property
     def required_test_jobs(self) -> str:
-        return ", ".join(sorted({s.owner for s in self.of("pr-required")})) or "none proven"
+        return ", ".join(sorted({f"{'main:' * (s.origin == 'main')}{s.owner}"
+                                 for s in self.required})) or "none proven"
 
 
 @dataclass(frozen=True)
@@ -548,9 +555,9 @@ def _sample(ids) -> str:
 def judge_parity(
     sources: Sources, test_ids: frozenset[str], exceptions, pg_tests=frozenset(), pg_only=()
 ) -> ParityResult:
-    """Explicit justfile filters need explicit required-PR selection or a proven exception;
-    the required sweep and its replay never count as explicit, the PG lane only for PG ids."""
-    required = sources.of("pr-required")
+    """Explicit justfile filters need required-PR or main selection or a proven exception;
+    the sweep and its replay never count as explicit, the PG lane only for PG ids."""
+    required = sources.required
     ordered = sorted(test_ids)
 
     def selected(lanes) -> set[str]:

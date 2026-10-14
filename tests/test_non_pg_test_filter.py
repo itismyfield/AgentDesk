@@ -21,6 +21,13 @@ FILTER = ROOT / "scripts/ci/non-pg-test-filter.sh"
 MEMBERSHIP = ROOT / "scripts/check_pg_test_lane_membership.py"
 
 
+def load_selector():
+    spec = importlib.util.spec_from_file_location("non_pg_filter_selector", ROOT / "scripts/ci/test-selection.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_membership_module():
     spec = importlib.util.spec_from_file_location("non_pg_filter_membership", MEMBERSHIP)
     assert spec and spec.loader
@@ -115,7 +122,13 @@ bash -euo pipefail -c "$PROGRAM"
             self.assertEqual(jobs[job_id]["strategy"], {
                 "fail-fast": False, "matrix": "${{ fromJSON(needs.pg_shards.outputs.matrix) }}"})
             self.assertEqual(jobs[job_id]["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
-            self.assertIn("--pg-shard-matrix", jobs["pg_shards"]["steps"][1]["run"])
+            plan = jobs["pg_shards"]["steps"][1]["run"]
+            # The PR plan's full matrix is main's: every shard of the shared partition.
+            self.assertIn("--pg-shard-matrix" if filename == "ci-main.yml" else "test-selection.py plan", plan)
+        result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
+                                check=True, capture_output=True, text=True)
+        import json
+        self.assertEqual({"shard": load_selector().shards([], True)}, json.loads(result.stdout))
         mirror = jobs["fast_targeted_tests_required_context"]
         self.assertEqual(mirror["name"], "Fast targeted tests (ubuntu-latest)")
         self.assertEqual(mirror["steps"][1]["env"]["UPSTREAM_RESULT"], "${{ needs.test_fast.result }}")

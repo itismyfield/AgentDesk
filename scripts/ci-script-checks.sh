@@ -490,6 +490,10 @@ fi
 "$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
 fi
 
+if run_check contracts "PR test selection plan (main runs every lane in full)"; then
+"$PYTHON" -m unittest tests.test_test_selection
+fi
+
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 # Zero-match cargo is green; verify selectors and the shared compiled oracle.
 # Mutation tests retain the static/compiled and artifact fallback contracts.
