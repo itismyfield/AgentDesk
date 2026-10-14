@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "uses": [
+    ["collect_and_clear_thread_parents", "src/services/discord/turn_finalizer/cleanup.rs", "collect_and_clear_thread_parents", "definition", 1],
+    ["collect_and_clear_thread_parents", "src/services/discord/turn_finalizer/cleanup.rs", "kick_thread_parents_after_turn_release", "direct_call", 1],
+    ["collect_and_clear_thread_parents", "src/services/discord/router/intake_gate/stale_turn.rs", "thread_guard_force_clean_stale_thread", "direct_call", 1],
+    ["collect_and_clear_thread_parents", "src/services/discord/router/intake_gate/stale_turn.rs", "release_queue_blocked_stale_active_turn", "direct_call", 1],
+    ["collect_and_clear_thread_parents", "src/services/discord/relay_recovery/apply.rs", "apply_relay_recovery_decision_admitted", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/turn_finalizer/cleanup.rs", "kick_thread_parents_after_turn_release", "definition", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/turn_finalizer/cleanup.rs", "already_finalized_active_state", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/turn_finalizer/finalize.rs", "do_finalize_with_release", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/turn_finalizer/guarded_finish_residue.rs", "release", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/tmux_watcher/completion_producer.rs", "release_restored_watcher_active_turn_before_panel_edit", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/health/recovery.rs", "apply_runtime_hard_stop_cleanup", "direct_call", 1],
+    ["kick_thread_parents_after_turn_release", "src/services/discord/health/recovery.rs", "apply_runtime_hard_stop_finalizer_cleanup_pre_release", "direct_call", 1],
+    ["submit_slash", "src/services/discord/input_runtime/intake/admit.rs", "submit_slash", "definition", 1],
+    ["submit_slash", "src/services/discord/input_runtime/intake/skills.rs", "hold_slash_skill", "import", 1],
+    ["submit_slash", "src/services/discord/input_runtime/intake/skills.rs", "hold_slash_skill", "direct_call", 1],
+    ["submit_slash", "src/services/discord/input_runtime/intake/admit_tests.rs", "c2b_borrowed_slash_submit_survives_cancellation_with_whole_source_and_one_receipt", "test_only/direct_call", 1],
+    ["submit_slash", "src/services/discord/input_runtime/intake/admit_tests.rs", "c2b_slash_helper_rejects_message_material_before_mailbox_and_off_lookup_stays_legacy", "test_only/direct_call", 1]
+  ],
+  "cases": [
+    {
+      "id": "K2-C27-SLASH-RECEIVED-ACK",
+      "definition": ["src/services/discord/input_runtime/intake/admit.rs", "submit_slash"],
+      "route": ["src/services/discord/input_runtime/intake/skills.rs", "hold_slash_skill"],
+      "entrypoint": ["src/services/discord/commands/skill.rs", "run_skill_slash_command"],
+      "receipt_tests": [
+        ["src/services/discord/input_runtime/intake/admit_tests.rs", "c2b_borrowed_slash_submit_survives_cancellation_with_whole_source_and_one_receipt"],
+        ["src/services/discord/input_runtime/intake/admit_tests.rs", "c2b_slash_helper_rejects_message_material_before_mailbox_and_off_lookup_stays_legacy"]
+      ]
+    }
+  ]
+}
