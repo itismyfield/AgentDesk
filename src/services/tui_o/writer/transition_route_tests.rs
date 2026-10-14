@@ -91,9 +91,8 @@ fn moved_from(current: &SourceId, left: &[&SourceId]) -> impl Drop + use<> {
     force_execution_for_tests(Ok((pin, history)))
 }
 
-// Inspect through the route reaches the actor once, writes no store file though both old hops
-// judge eligible, and reports the execution the judgment read with the request's nonce and the
-// identity and pane of each old source.
+// Inspect through the route reaches the actor once and writes nothing though both hops judge
+// eligible; it reports the judged execution, nonce, and each old source's identity and pane.
 #[tokio::test(start_paused = true)]
 async fn transition_route_inspect_writes_nothing_and_reports_the_execution_it_judged() {
     let chain = chain(2);
