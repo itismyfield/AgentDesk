@@ -2697,6 +2697,11 @@ services::cluster::session_routing::tests::enrich_session_owner_routing_handles_
 services::cluster::session_routing::tests::env_api_base_url_fallback_is_published_when_config_is_empty
 services::cluster::session_routing::tests::session_owner_routing_status_distinguishes_local_routable_and_stale
 services::cluster::session_routing::tests::session_owner_summary_counts_stale_and_missing_owners
+services::cluster::stream_relay::source_read_proof::tests::s2a1_codex_marker_only_mutation_invalidates_before_publication
+services::cluster::stream_relay::source_read_proof::tests::s2a1_original_fd_prefix_append_and_cursor_are_preserved
+services::cluster::stream_relay::source_read_proof::tests::s2a1_overflow_is_sticky_and_never_changes_writer_result
+services::cluster::stream_relay::source_read_proof::tests::s2a1_read_versions_holes_and_restored_mtime_are_unmeasured
+services::cluster::stream_relay::source_read_proof::tests::s2a1_source_revision_survives_weak_recreation_and_read_only_observation
 services::cluster::stream_relay::tests::a0_characterization_tests::a0_frame_accepted_is_not_any_terminal_class
 services::cluster::stream_relay::tests::a0_characterization_tests::a0_fresh_delivered_preserves_confirmation_metadata
 services::cluster::stream_relay::tests::a0_characterization_tests::a0_only_terminal_delivered_is_a_delegation_success
@@ -7979,6 +7984,8 @@ services::discord::tmux::tmux_session_files::tests::generation_failure_nonce_suc
 services::discord::tmux::tmux_session_files::tests::generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce
 services::discord::tmux::tmux_session_files::tests::orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264
 services::discord::tmux::tmux_session_files::tests::respawn_inside_one_filesystem_tick_bumps_the_generation_key_5437
+services::discord::tmux::tmux_session_files::tests::s2a1_managed_generation_spawn_nonce_rewrite_binding_cleanup_entry_matrix
+services::discord::tmux::tmux_session_files::tests::s2a1_two_real_reset_entries_pair_generation_and_keep_admission_policy
 services::discord::tmux::tmux_session_files::tests::spawn_markers_stamp_generation_before_nonce
 services::discord::tmux::tmux_session_files::tests::spawn_stamp_replaces_the_inode
 services::discord::tmux::tmux_session_files::tests::stamp_spawn_markers_returns_nonce_result_verbatim
@@ -8049,6 +8056,7 @@ services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backst
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::a_sticky_realignment_retries_on_a_tick_that_is_not_a_rotation_tick
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::an_ordinary_rotation_does_not_arm_the_sticky_retry
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::crossing_both_rungs_at_once_reports_only_the_error
+services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced
 services::discord::tmux::tmux_watcher::jsonl_rotation::backstop::rotation_backstop_tests::the_refusal_ladder_reports_the_sticky_term_at_each_rung
 services::discord::tmux::tmux_watcher::jsonl_rotation::foreign_rotation_ban_tests::a_concurrent_instances_staging_file_is_neither_reused_nor_removed
 services::discord::tmux::tmux_watcher::jsonl_rotation::foreign_rotation_ban_tests::a_target_relinked_after_the_verdict_is_refused
@@ -8295,6 +8303,10 @@ services::discord::tmux::tmux_watcher::tests::relay_emission_timeout_rewinds_and
 services::discord::tmux::tmux_watcher::tests::relay_emission_timeout_wiring_source_assertion_4194
 services::discord::tmux::tmux_watcher::tests::restored_response_seed_is_kept_for_managed_inflight
 services::discord::tmux::tmux_watcher::tests::rollback_sender_marks_serenity_5xx_html_decode_failure_transient_4154
+services::discord::tmux::tmux_watcher::tests::s2a1_actor_commit_entry_preserves_outcomes_and_invalidates_only_delivered_movement
+services::discord::tmux::tmux_watcher::tests::s2a1_frontier_tests::s2a1_late_small_equal_untyped_and_reversed_completion_have_distinct_outcomes
+services::discord::tmux::tmux_watcher::tests::s2a1_frontier_tests::s2a1_sink_ordered_idle_entry_commits_durably_preserves_noop_and_refuses_old_generation
+services::discord::tmux::tmux_watcher::tests::s2a1_frontier_tests::s2a1_watcher_entry_invalidates_movement_preserves_noop_and_generation_tuple
 services::discord::tmux::tmux_watcher::tests::stale_normal_completion_does_not_release_newer_active_turn
 services::discord::tmux::tmux_watcher::tests::status_panel_v2_watcher_streaming_edit_moves_processing_footer_to_response_message
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_on_a_restored_placeholder_keeps_it_when_the_session_moves_to_herdr
@@ -9819,6 +9831,8 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::prepare_bridge_lease_decision_table_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::controller_bridge_acquire_sites_mint_fresh_attempts
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
+services::discord::turn_bridge::terminal_delivery::s2a1_bridge_tests::s2a1_bridge_optional_session_noop_movement_and_heartbeat_are_preserved
+services::discord::turn_bridge::terminal_delivery::s2a1_bridge_tests::s2a1_bridge_real_lease_outcomes_preserve_delivery_policy_without_certificate
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit
 services::discord::turn_bridge::terminal_delivery::tests::a0_i2_advance_characterization_tests::a0_i2_only_delivered_advances_the_committed_offset
@@ -13254,6 +13268,8 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::s2b1b_p2_sna
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::same_native_hook_retries_with_optional_path_hints_do_not_append
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::unresolved_two_native_parents_and_stop_do_not_publish_a_winner
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::verified_source_less_equal_command_initial_ups_uses_exact_utf8
+services::tui_prompt_dedupe::runtime_binding::s2a1_binding_tests::s2a1_common_and_lock_held_expiry_invalidate_actual_removal_only
+services::tui_prompt_dedupe::runtime_binding::s2a1_binding_tests::s2a1_runtime_publish_read_offset_noop_clear_and_rehydrate_fence_identity
 services::tui_prompt_dedupe::runtime_binding::shadow_session_tests::observer_discovery_lists_live_sessions_without_changing_relay_state
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript

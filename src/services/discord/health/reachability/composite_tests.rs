@@ -783,7 +783,6 @@ fn section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_health
         row_path_missing_while_registry_live,
         RowCoordinateDivergence::RowPathUnresolvableWhileRegistryLive
     );
-
     let case = Case {
         divergence: row_path_missing_while_registry_live,
         ..Case::default()

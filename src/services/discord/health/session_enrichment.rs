@@ -328,9 +328,7 @@ pub(super) struct SessionEnrichment {
     pub tail_observation: super::TailObservation,
     pub relay_stale: bool,
     pub capture_lagged: bool,
-    /// #5071 relay-tail S1 (I-4): which witnesses produced the frontier fields
-    /// above. Descriptive — no field on this struct changed source or polarity
-    /// because of it, and nothing but the health detail reads it.
+    /// Descriptive witnesses for health detail; frontier sources and polarity stay unchanged.
     pub frontier_provenance: FrontierProvenance,
 }
 

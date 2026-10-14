@@ -637,7 +637,6 @@ mod tests {
         relay.mailbox_has_cancel_token = true;
         relay.tmux_alive = Some(true);
         relay.last_relay_ts_ms = None;
-
         let assessment =
             classify_runtime_signals_lossy(&relay, true, true, false, false, false, false, false)
                 .expect("applicable #4423 runtime signals");
@@ -771,14 +770,12 @@ mod tests {
             StallWatchdogLivenessAction::ProceedNoEvidence,
             StallWatchdogLivenessEvidence::default(),
         );
-
         let (verdict, reasons) = judgment_log_fields(
             &snapshot,
             Some(&decision),
             super::super::stall_liveness::STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
             false,
         );
-
         assert_eq!(verdict, "control_plane_desync");
         assert_eq!(reasons, "desynced");
     }

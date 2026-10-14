@@ -321,7 +321,6 @@ fn relay_active_turn_from_inflight(
     if ownerless_external_input_inflight_is_idle(inflight) {
         return RelayActiveTurn::None;
     }
-
     if inflight.is_some_and(|state| {
         state.long_running_placeholder_active || state.task_notification_kind.is_some()
     }) {
@@ -338,7 +337,6 @@ fn last_outbound_activity_ms(
     if last_relay_ts_ms > 0 {
         return Some(last_relay_ts_ms);
     }
-
     let inflight = inflight?;
     let has_discord_write_evidence = inflight.current_msg_len > 0
         || inflight.response_sent_offset > 0

@@ -822,7 +822,6 @@ mod tests {
                 reason: VouchDenial::Stale
             }
         );
-
         let mut mismatch = inflight.clone();
         mismatch.user_msg_id += 1;
         assert_eq!(

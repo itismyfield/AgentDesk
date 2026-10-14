@@ -941,7 +941,6 @@ mod tests {
         let channel = ChannelId::new(4_181_002);
         let tmux_session = "AgentDesk-codex-4181-mono-grace";
         super::super::clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
-
         let snap = frozen_backlog_snapshot(channel.get(), tmux_session, 10, 301_613);
         assert!(
             live_undelivered_backlog(&snap),

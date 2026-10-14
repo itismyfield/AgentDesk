@@ -278,7 +278,6 @@ async fn run_relay_recovery_at(
         ),
         None => None,
     };
-
     let observed_before = std::time::Instant::now();
     let snapshot = match parsed_provider.as_ref() {
         Some(provider) => {
@@ -292,7 +291,6 @@ async fn run_relay_recovery_at(
         channel_id,
         provider: provider_filter.map(str::to_string),
     })?;
-
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
     decision.evidence.tail_observation = snapshot.tail_observation;
@@ -300,7 +298,6 @@ async fn run_relay_recovery_at(
     decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
     decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, apply);
-
     if !apply {
         return Ok(RelayRecoveryResponse {
             ok: true,

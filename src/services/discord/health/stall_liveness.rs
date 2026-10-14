@@ -1185,7 +1185,6 @@ mod tests {
         snap.unread_bytes = Some(0);
         snap.relay_health.unread_bytes = Some(0);
         let now = chrono::Utc::now().timestamp();
-
         let decision = evaluate_stall_watchdog_liveness(
             &provider,
             channel,

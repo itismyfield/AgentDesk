@@ -1246,7 +1246,6 @@ mod tests {
             channel_id,
             Some(tmux_session),
         );
-
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);
