@@ -109,8 +109,6 @@ pub(crate) use turn_presence::entrypoints::{
     Lease as PresenceLease, withdraw_target as presence_withdraw_target,
     withdraw_unmounted as presence_withdraw_unmounted,
 };
-#[cfg(all(test, unix))]
-pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.

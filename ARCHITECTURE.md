@@ -2097,15 +2097,8 @@ src/
 │   │   │   │   └── tail_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
-│   │   │   ├── admission.rs
-│   │   │   ├── admission_tests.rs
 │   │   │   ├── entrypoints.rs
-│   │   │   ├── entrypoints_tests.rs
-│   │   │   ├── lifecycle.rs
-│   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── strict_runtime.rs
-│   │   │   ├── strict_supervisor_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/

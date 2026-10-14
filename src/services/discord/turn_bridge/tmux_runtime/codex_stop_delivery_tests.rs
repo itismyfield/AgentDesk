@@ -1329,33 +1329,3 @@ mod home_stop;
 
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;
-
-#[test]
-fn b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval() {
-    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
-    with_cases(|case, fx, runtime| {
-        let probe = Probe::install(&case.shared);
-        let ticket = probe.arm(case.channel.get());
-        case.screen(false);
-        assert_eq!(
-            runtime.block_on(case.delivery("/stop")),
-            HerdrDelivery::NotSent(HerdrNotSent::Idle)
-        );
-        assert!(
-            Probe::current(&ticket),
-            "an intent that sent nothing withdraws nothing"
-        );
-        case.screen(true);
-        let pool = case.shared.pg_pool.as_ref().unwrap();
-        assert_eq!(
-            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
-            HerdrDelivery::Sent
-        );
-        assert_eq!(case.escapes(), 1);
-        assert!(
-            !Probe::current(&ticket),
-            "the Escape withdrew the turn's approval"
-        );
-        assert!(fx.take_calls().is_empty());
-    });
-}
