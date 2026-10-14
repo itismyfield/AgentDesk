@@ -885,6 +885,10 @@ fn codex_6903_rebind_writer_stores_the_complete_record_end() {
 
 async fn markerless_saved_custody(root: PathBuf, custody: bool) {
     let _tmux = live_pane_tmux(&root);
+    assert!(matches!(
+        crate::config::shared_test_env_lock().try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    ));
     let _home =
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("CODEX_HOME", &root);
     let tmux = "AgentDesk-codex-6903-markerless-custody-cdx";
