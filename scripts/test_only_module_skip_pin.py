@@ -150,7 +150,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_dispatch/input_effect_tests.rs",
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
-        "src/services/discord/input_runtime/effects_tests.rs",
         "src/services/discord/input_runtime/ordering_tests.rs",
         "src/services/discord/input_runtime/fence/g1b_modes_tests.rs",
         "src/services/discord/input_runtime/g1b_command_tests.rs",
