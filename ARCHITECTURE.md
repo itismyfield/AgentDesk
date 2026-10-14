@@ -199,6 +199,7 @@ src/
 │   ├── calendar_sync.rs
 │   ├── campaigns.rs
 │   ├── cancel_tombstones.rs
+│   ├── channel_recovery_custody.rs
 │   ├── dispatch_semaphores.rs
 │   ├── dispatched_sessions.rs
 │   ├── fixture_target.rs
@@ -709,6 +710,7 @@ src/
 │   │   │   │   ├── drain_pg_tests.rs
 │   │   │   │   ├── force_pg_tests.rs
 │   │   │   │   ├── harness_tests.rs
+│   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   └── route_pg_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
@@ -1424,6 +1426,12 @@ src/
 │   │   │       ├── mod.rs
 │   │   │       ├── phase.rs
 │   │   │       └── values.rs
+│   │   ├── restart_report/
+│   │   │   ├── model/
+│   │   │   │   ├── entry_tests.rs
+│   │   │   │   └── tests.rs
+│   │   │   ├── capacity.rs
+│   │   │   └── model.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
@@ -1435,6 +1443,8 @@ src/
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
+│   │   │   │   ├── ledger.rs
+│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -2105,6 +2115,8 @@ src/
 │   │   │   ├── lifecycle.rs
 │   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── strict_runtime.rs
+│   │   │   ├── strict_supervisor_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
@@ -2511,6 +2523,9 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
 │   │   └── session_lifecycle.rs
+│   ├── recovery_defer/
+│   │   ├── cursor.rs
+│   │   └── tests.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -2908,6 +2923,15 @@ src/
 │   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
+│   │   ├── recovery_custody/
+│   │   │   ├── capability.rs
+│   │   │   ├── custody_pg_tests.rs
+│   │   │   ├── denial_index.rs
+│   │   │   ├── mod.rs
+│   │   │   ├── model.rs
+│   │   │   ├── operation.rs
+│   │   │   ├── reconcile.rs
+│   │   │   └── reconcile_pg_tests.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
 │   │   ├── active_source_dedup.rs
@@ -3026,6 +3050,7 @@ src/
 │   ├── queue.rs
 │   ├── qwen.rs
 │   ├── qwen_tmux_wrapper.rs
+│   ├── recovery_defer.rs
 │   ├── release_source.rs
 │   ├── remote_stub.rs
 │   ├── retrospectives.rs
