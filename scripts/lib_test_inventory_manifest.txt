@@ -10280,6 +10280,13 @@ services::discord::turn_lease::tests::restart_mode_row_still_refuses_operator_in
 services::discord::turn_lease::tests::successor_normal_complete_preserves_negative_admission_after_operator_release_r2
 services::discord::turn_lease::tests::unbound_message_id_lease_is_inspectable_and_refuses_release_without_effects
 services::discord::turn_lease::tests::unbound_message_id_lease_with_its_own_row_is_inspectable
+services::discord::turn_presence::activity::tail::tests::s0o_anonymous_boundary_invalidates_closed_before_repeated_a_close
+services::discord::turn_presence::activity::tail::tests::s0o_closed_resume_waits_and_parse_errors_discard_proof
+services::discord::turn_presence::activity::tail::tests::s0o_codex_lifetime_across_worker_installed_and_typed_resume
+services::discord::turn_presence::activity::tail::tests::s0o_limits_and_dormant_activity_source_are_unchanged
+services::discord::turn_presence::activity::tail::tests::s0o_resume_mismatch_and_new_source_discard_evidence
+services::discord::turn_presence::activity::tail::tests::s0o_safety_open_empty_metadata_and_partial_eof
+services::discord::turn_presence::activity::tail::tests::s0o_snapshot_budget_counts_alignment_and_resume_rereads
 services::discord::turn_presence::activity::tests::a_bound_transcript_gone_missing_reads_unknown_until_it_is_back
 services::discord::turn_presence::activity::tests::a_channel_outside_turn_mode_never_reaches_the_probe
 services::discord::turn_presence::activity::tests::a_finished_rebuild_is_kept_for_its_key
@@ -12412,6 +12419,14 @@ services::tui_o::repost::runner_tests::f5_t09_t23_t24_a_turn_waits_for_the_chann
 services::tui_o::repost::runner_tests::f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg
 services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
 services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
+services::tui_o::shadow::capture::io_trace::s0o_read_range_probe_records_actual_seek_reads
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_alignment_preserves_complete_first_and_partial_last
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_complete_large_records_keep_existing_partial_limit
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_file_errors_are_sticky_and_partial_is_revalidated
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_guard_revalidates_consumed_bytes_without_a_partial
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_io_ranges_stream_actual_32mib_without_prefix_hash
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_observation_rejects_volume_renumber_without_prefix_proof
+services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_races_reject_rotation_and_truncation_during_read
 services::tui_o::shadow::capture::tests::capture_emits_complete_lines_only_and_tracks_the_prefix_hash
 services::tui_o::shadow::capture::tests::capture_halts_instead_of_buffering_an_oversized_partial_record
 services::tui_o::shadow::capture::tests::capture_halts_on_shrink_rewrite_and_replacement
@@ -12560,6 +12575,8 @@ services::tui_o::writer::codex_adoption::probe_tests::a_probe_counts_n_k_u_per_d
 services::tui_o::writer::codex_adoption::probe_tests::a_probe_fails_instead_of_shrinking_its_input
 services::tui_o::writer::codex_adoption::probe_tests::a_wrapper_without_its_read_cursor_is_never_counted_adoptable
 services::tui_o::writer::host::claim_tests::an_old_claim_drop_leaves_a_replacement_ready_and_hosted
+services::tui_o::writer::input_facts::observation_tests::s0o_full_equivalence_includes_events_resume_and_durable_prefix
+services::tui_o::writer::input_facts::observation_tests::s0o_observation_records_filtered_native_boundaries_even_before_block
 services::tui_o::writer::input_facts::resume_tests::a_broken_json_record_halts_without_a_resume_point
 services::tui_o::writer::input_facts::resume_tests::a_mixed_user_row_with_an_untyped_tool_result_stays_unknown
 services::tui_o::writer::input_facts::resume_tests::a_repeated_blocked_record_keeps_the_first_carried_turn
