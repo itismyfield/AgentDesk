@@ -46,15 +46,46 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
             .unwrap(),
         HostedCasOutcome::Written
     );
-    // These are the real GC and disconnected cleanup implementations, with only tmux presence injected.
-    assert!(
+    let thread_control: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (session_key, provider, hosted_execution, status, thread_channel_id, last_heartbeat, active_dispatch_id, active_children)
+         VALUES ('legacy-return-gc-control', 'claude', NULL, 'idle', 'gc-control-thread', NOW() - INTERVAL '2 hours', NULL, 0)
+         RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    let disconnected_control: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (session_key, provider, hosted_execution, status, thread_channel_id, last_heartbeat, active_dispatch_id, active_children)
+         VALUES ('legacy-return-disconnected-control', 'claude', NULL, 'disconnected', 'disconnected-control-thread', clock_timestamp(), NULL, 0)
+         RETURNING id",
+    ).fetch_one(&pool).await.unwrap();
+    // Real deletion controls distinguish a surviving return from cleanup that does nothing.
+    assert_eq!(
         crate::db::dispatched_sessions::gc_stale_thread_sessions_with_probe_pg(&pool, |_| async {
             crate::services::platform::tmux::SessionPresence::Missing
         })
-        .await
-        .is_empty()
+        .await,
+        vec!["legacy-return-gc-control".to_owned()]
     );
-    assert_eq!(delete_disconnected_sessions_pg(&pool).await.unwrap(), 0);
+    let thread_gone: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM sessions WHERE id = $1)")
+            .bind(thread_control)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(thread_gone);
+    let disconnected_survives: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE id = $1)")
+            .bind(disconnected_control)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(disconnected_survives);
+    assert_eq!(delete_disconnected_sessions_pg(&pool).await.unwrap(), 1);
+    let disconnected_gone: bool =
+        sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM sessions WHERE id = $1)")
+            .bind(disconnected_control)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(disconnected_gone);
     let after = snapshot(&pool, observed.session_id).await;
     for field in [
         "id",
