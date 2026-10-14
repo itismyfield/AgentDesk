@@ -1422,6 +1422,12 @@ src/
 │   │   │       ├── mod.rs
 │   │   │       ├── phase.rs
 │   │   │       └── values.rs
+│   │   ├── restart_report/
+│   │   │   ├── model/
+│   │   │   │   ├── entry_tests.rs
+│   │   │   │   └── tests.rs
+│   │   │   ├── capacity.rs
+│   │   │   └── model.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── queued/
@@ -2494,6 +2500,9 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
 │   │   └── session_lifecycle.rs
+│   ├── recovery_defer/
+│   │   ├── cursor.rs
+│   │   └── tests.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -3008,6 +3017,7 @@ src/
 │   ├── queue.rs
 │   ├── qwen.rs
 │   ├── qwen_tmux_wrapper.rs
+│   ├── recovery_defer.rs
 │   ├── release_source.rs
 │   ├── remote_stub.rs
 │   ├── retrospectives.rs

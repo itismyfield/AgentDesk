@@ -700,6 +700,9 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/handoff_tests.rs",
         "src/services/tui_o/repost/projection_tests.rs",
         "src/services/tui_o/repost/pg_statements_tests.rs",
+        "src/services/discord/restart_report/model/tests.rs",
+        "src/services/discord/restart_report/model/entry_tests.rs",
+        "src/services/recovery_defer/tests.rs",
     }
 )
 
@@ -788,6 +791,10 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
+        "src/services/discord/restart_report/model.rs",
+        "src/services/discord/restart_report/capacity.rs",
+        "src/services/recovery_defer.rs",
+        "src/services/recovery_defer/cursor.rs",
     }
 )
 
