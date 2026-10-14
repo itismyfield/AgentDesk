@@ -1,5 +1,8 @@
 use super::*;
-use crate::services::turn_orchestrator::policy_close::{PolicyClear, PolicyReceipt};
+use crate::services::discord::input_runtime::fence::Failure;
+use crate::services::turn_orchestrator::policy_close::{
+    PolicyAuthority, PolicyClear, PolicyReceipt,
+};
 
 #[path = "operator_disposition.rs"]
 mod operator_disposition;
@@ -349,10 +352,16 @@ impl InflightTurnState {
         &self,
         current_generation: u64,
     ) -> GuardedClearOutcome {
-        self.clear_before_start_receipt_matching(true, |fresh| {
+        let (Some(root), Some(provider)) = (inflight_runtime_root(), self.provider_kind()) else {
+            return GuardedClearOutcome::Missing;
+        };
+        let path = inflight_state_path(&root, &provider, self.channel_id);
+        let Ok(_lock) = lock_inflight_state_path(&path) else {
+            return GuardedClearOutcome::IoError;
+        };
+        self.clear_before_start_receipt_locked(&path, &provider, |fresh| {
             self.before_start_receipt_clearable(fresh, current_generation)
         })
-        .unwrap_or(GuardedClearOutcome::IoError)
     }
 
     /// Hands the row the shown notice's ACK returned to the policy close's mailbox step, the
@@ -367,51 +376,37 @@ impl InflightTurnState {
         })
     }
 
-    /// `None` only when `wait` is false and another handle holds the row lock.
-    fn clear_before_start_receipt_matching(
+    /// The fresh read, receipt checks and exact unlink, for a caller already holding the row.
+    fn clear_before_start_receipt_locked(
         &self,
-        wait: bool,
+        path: &std::path::Path,
+        provider: &ProviderKind,
         clearable: impl FnOnce(&InflightTurnState) -> bool,
-    ) -> Option<GuardedClearOutcome> {
-        let (Some(root), Some(provider)) = (inflight_runtime_root(), self.provider_kind()) else {
-            return Some(GuardedClearOutcome::Missing);
-        };
-        let path = inflight_state_path(&root, &provider, self.channel_id);
-        use super::super::store::TryLockRefusal;
-        let lock = if wait {
-            lock_inflight_state_path(&path).map_err(TryLockRefusal::Failed)
-        } else {
-            super::super::store::try_lock_inflight_state_path_typed(&path)
-        };
-        let _lock = match lock {
-            Ok(lock) => lock,
-            Err(TryLockRefusal::Contended) => return None,
-            Err(TryLockRefusal::Failed(_)) => return Some(GuardedClearOutcome::IoError),
-        };
-        let Some(fresh) = fs::read_to_string(&path)
+    ) -> GuardedClearOutcome {
+        let Some(fresh) = fs::read_to_string(path)
             .ok()
             .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
         else {
-            return Some(GuardedClearOutcome::Missing);
+            return GuardedClearOutcome::Missing;
         };
         if !clearable(&fresh) {
-            return Some(GuardedClearOutcome::UserMsgMismatch);
+            return GuardedClearOutcome::UserMsgMismatch;
         }
         let expected = InflightTurnIdentity::from_state(self);
         let outcome = guarded_identity_clear_outcome(&fresh, &expected, self.turn_nonce.as_deref());
         if outcome != GuardedClearOutcome::Cleared {
-            return Some(outcome);
+            return outcome;
         }
         let reason = "clear_before_start_receipt";
-        let removed = remove_identity_matched_state_unchecked(
-            &path,
-            &provider,
+        remove_identity_matched_state_unchecked(
+            path,
+            provider,
             self.channel_id,
             &expected,
             fresh,
             reason,
-        );
-        Some(removed.0)
+        )
+        .0
     }
 }
 
@@ -426,19 +421,43 @@ impl PolicyReceipt for AckedPolicyReceipt {
         self.acked.channel_id
     }
 
-    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue.
-    fn try_clear(&self) -> PolicyClear {
-        let outcome = self.acked.clear_before_start_receipt_matching(false, |fresh| {
-            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-                && self.acked.before_start_policy_receipt_clearable(fresh, self.generation)
-        });
+    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue. A
+    /// protected step clears under its own held scope, which must name exactly this row.
+    fn try_clear(&self, authority: &PolicyAuthority<'_>) -> PolicyClear {
+        let acked = &self.acked;
+        let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
+            return PolicyClear::Missing;
+        };
+        let path = inflight_state_path(&root, &provider, acked.channel_id);
+        let clear = || {
+            acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
+                crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                    && acked.before_start_policy_receipt_clearable(fresh, self.generation)
+            })
+        };
+        let outcome = if authority.is_protected() {
+            let Some(population) = root.parent() else {
+                return PolicyClear::InputFence(Failure::Persistence);
+            };
+            match authority.borrowed(population, &provider, acked.channel_id, || Ok(clear())) {
+                Ok(outcome) => outcome,
+                Err(_) => return PolicyClear::InputFence(Failure::StalePermit),
+            }
+        } else {
+            use super::super::store::{TryLockRefusal, try_lock_unfenced_inflight_state_path};
+            match try_lock_unfenced_inflight_state_path(&path) {
+                Ok(_lock) => clear(),
+                Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
+                Err(TryLockRefusal::Fenced) => return PolicyClear::InputFence(Failure::Busy),
+                Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
+            }
+        };
         match outcome {
-            None => PolicyClear::LockBusy,
-            Some(GuardedClearOutcome::Cleared) => PolicyClear::Cleared,
-            Some(GuardedClearOutcome::Missing) => PolicyClear::Missing,
-            Some(GuardedClearOutcome::UserMsgMismatch) => PolicyClear::Mismatch,
-            Some(GuardedClearOutcome::IoError) => PolicyClear::Io,
-            Some(_) => PolicyClear::Skipped,
+            GuardedClearOutcome::Cleared => PolicyClear::Cleared,
+            GuardedClearOutcome::Missing => PolicyClear::Missing,
+            GuardedClearOutcome::UserMsgMismatch => PolicyClear::Mismatch,
+            GuardedClearOutcome::IoError => PolicyClear::Io,
+            _ => PolicyClear::Skipped,
         }
     }
 }
