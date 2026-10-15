@@ -187,6 +187,7 @@ impl Fixture {
             receipt: Box::new(Receipt(self.channel.get(), clear)),
             active: Arc::new(AtomicUsize::new(1)),
             persistence: ctx(),
+            release_reconcile_allowed: false,
             trace: Default::default(),
         };
         // The request carries this thread's armed hook, if any, on its own probe.

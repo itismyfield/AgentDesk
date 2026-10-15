@@ -100,6 +100,8 @@ pub(crate) enum PolicyStage {
 pub(crate) enum PolicyMailboxOutcome {
     Committed(FinishTurnResult),
     Duplicate,
+    /// The episode was already released exactly; only its receipt was cleared.
+    Reconciled,
     Superseded,
     Retained(PolicyRetain),
 }
@@ -113,6 +115,8 @@ pub(crate) struct PolicyCloseRequest {
     pub(crate) receipt: Box<dyn PolicyReceipt>,
     pub(crate) active: Arc<AtomicUsize>,
     pub(crate) persistence: QueuePersistenceContext,
+    /// Set only by the finalizer, when its ledger already holds this exact episode as finalized.
+    pub(crate) release_reconcile_allowed: bool,
     pub(crate) trace: Trace,
 }
 
@@ -187,6 +191,15 @@ impl PolicyCloseRequest {
                 .turn_started_instant
                 .is_some_and(|started| started < self.observed_before)
     }
+
+    /// Only the receipt may go: the finalizer finalized this exact episode and the shared fence,
+    /// which notes every start into an empty slot, saw it released. A closed actor admits no more.
+    pub(super) fn reconciles(&self, state: &ChannelMailboxState, channel_id: ChannelId) -> bool {
+        self.release_reconcile_allowed
+            && !self.turn_nonce.is_empty()
+            && self.receipt.channel() == channel_id.get()
+            && (state.remint_fence).refuses(self.user_message_id, Some(&self.turn_nonce))
+    }
 }
 
 /// The mailbox arm of one close: runs the step under the guard's own authority and answers.
@@ -253,7 +266,7 @@ fn close(
     request.trace.note_started(state.turn_started_instant);
     at!(request, BeforeClaim);
     if !request.claims(state, channel_id) {
-        return PolicyMailboxOutcome::Superseded;
+        return reconcile(state, channel_id, request, authority);
     }
     // Built before the clear, so after it the guard only moves this value into the state.
     let witness = PolicyWitness {
@@ -306,6 +319,26 @@ fn close(
     );
     super::mark_turn_finished_signal_done(channel_id);
     PolicyMailboxOutcome::Committed(finish)
+}
+
+/// The receipt-only arm: no token, count, queue, marker, witness or signal is touched.
+fn reconcile(
+    state: &ChannelMailboxState,
+    channel_id: ChannelId,
+    request: &PolicyCloseRequest,
+    authority: &PolicyAuthority<'_>,
+) -> PolicyMailboxOutcome {
+    if !request.reconciles(state, channel_id) {
+        return PolicyMailboxOutcome::Superseded;
+    }
+    // A row already gone is this receipt already cleared; any other answer keeps the hold.
+    match request.receipt.try_clear(authority) {
+        PolicyClear::Cleared | PolicyClear::Missing => PolicyMailboxOutcome::Reconciled,
+        PolicyClear::InputFence(failure) => {
+            PolicyMailboxOutcome::Retained(PolicyRetain::InputFence(failure))
+        }
+        refused => PolicyMailboxOutcome::Retained(PolicyRetain::Clear(refused)),
+    }
 }
 
 /// Armed once the receipt row is gone: whichever stage a panic interrupts, dropping it finishes

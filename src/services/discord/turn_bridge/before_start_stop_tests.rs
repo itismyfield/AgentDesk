@@ -836,6 +836,9 @@ mod clear_order;
 #[path = "before_start_stop_policy_tests.rs"]
 mod policy;
 
+#[path = "before_start_stop_reconcile_tests.rs"]
+mod reconcile;
+
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,

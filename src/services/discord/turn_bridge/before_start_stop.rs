@@ -200,6 +200,7 @@ fn policy_intent(
             &shared.provider,
             channel,
         ),
+        release_reconcile_allowed: false,
         trace: Default::default(),
     };
     // Tests bind the request's own probe and settlement switch to it here.

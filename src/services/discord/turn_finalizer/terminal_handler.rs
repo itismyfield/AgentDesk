@@ -241,9 +241,10 @@ impl LedgerEntry {
 
 /// The finalizer half of a policy close: it owns the exact ledger entry while the captured
 /// mailbox commits. Anything short of a commit restores the entry, so the close stays retryable.
+/// Only an entry this ledger already finalized lets the mailbox clear the receipt alone.
 pub(super) async fn handle_policy_close(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
-    intent: super::episode::PolicyCloseIntent,
+    mut intent: super::episode::PolicyCloseIntent,
     shared: &Arc<SharedData>,
 ) -> PolicyCloseOutcome {
     let key = intent.key;
@@ -255,6 +256,11 @@ pub(super) async fn handle_policy_close(
         .entry(exact)
         .or_insert_with(|| LedgerEntry::orphan(key, intent.provider.clone()));
     let prior = std::mem::replace(&mut entry.phase, Phase::Finalizing);
+    // The fence alone refuses any episode but the latest, so the grant also binds the exact key.
+    let request = &intent.request;
+    let named = key.user_msg_id == request.user_message_id.get()
+        && key.matches_episode_nonce(Some(&request.turn_nonce));
+    intent.request.release_reconcile_allowed = named && prior == Phase::Finalized;
     let settled = AssertUnwindSafe(settle_policy_close(intent, shared))
         .catch_unwind()
         .await;
@@ -267,8 +273,11 @@ pub(super) async fn handle_policy_close(
             outcome,
             PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed
         ) {
+            // A finalized entry keeps its age, so a confirmation never widens the reconcile window.
+            if prior != Phase::Finalized {
+                entry.finalized_at = Some(Instant::now());
+            }
             entry.phase = Phase::Finalized;
-            entry.finalized_at = Some(Instant::now());
             entry.terminal_deadline = None;
         } else {
             entry.phase = prior;
@@ -314,7 +323,10 @@ async fn settle_policy_close(
     }
     let finish = match captured {
         Err(stage) => return (PolicyCloseOutcome::Unconfirmed(stage), None),
-        Ok(Mailbox::Duplicate) => return (PolicyCloseOutcome::DuplicateConfirmed, None),
+        // An exactly released episode with its receipt now gone is a release already confirmed.
+        Ok(Mailbox::Duplicate | Mailbox::Reconciled) => {
+            return (PolicyCloseOutcome::DuplicateConfirmed, None);
+        }
         Ok(Mailbox::Superseded) => return (PolicyCloseOutcome::Superseded, None),
         Ok(Mailbox::Retained(reason)) => return (PolicyCloseOutcome::Retained(reason), None),
         Ok(Mailbox::Committed(finish)) => finish,

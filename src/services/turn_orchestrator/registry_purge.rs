@@ -30,8 +30,8 @@
 //! about to be severed from the registry. Refused callers recover through the
 //! `*_with_closed_retry` registry helpers below, which re-resolve a FRESH
 //! actor (the unlink runs right after the verdict) and replay the request.
-//! The gate is exhaustive: a closed actor's channel-keyed state is the successor's, so every non-read
-//! arm is refused; restitution and user commands replay through [`retry_while_closed`].
+//! The gate is exhaustive: a closed actor's channel-keyed state is the successor's, so it refuses
+//! each non-read arm but a receipt-only policy reconcile; commands replay via [`retry_while_closed`].
 
 use std::future::Future;
 use std::sync::Arc;
@@ -83,8 +83,8 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     Ok(())
 }
 
-/// Tombstone gate run before the actor's arm match: on a closed actor reads pass, every other arm is
-/// refused here and `None` skips the match. Exhaustive, so a new arm must be classified here.
+/// Tombstone gate run before the actor's arm match: a closed actor passes reads and a receipt-only
+/// policy reconcile, refuses the rest (`None` skips the match) and never retries a policy close.
 pub(super) fn gate_closed_arm(
     state: &ChannelMailboxState,
     channel_id: ChannelId,
@@ -151,7 +151,7 @@ pub(super) fn gate_closed_arm(
             });
             "RequeueFront"
         }
-        // A policy close commits only on its captured actor; the successor is never retried.
+        M::PolicyClose { ref request, .. } if request.reconciles(state, channel_id) => return Some(msg),
         M::PolicyClose { reply, .. } => {
             let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
             "PolicyClose"
