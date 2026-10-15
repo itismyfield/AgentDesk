@@ -70,7 +70,13 @@ fn claude(record: &Value) -> Vec<RecordFact> {
 fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
     #[cfg(test)]
-    if V3_RULE.get() && message.get("content").and_then(Value::as_array).map(Vec::len) != Some(1) {
+    if V3_RULE.get()
+        && message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(1)
+    {
         return vec![blocked("assistant row without exactly one content block")];
     }
     let blocks = match message.get("content").and_then(Value::as_array) {

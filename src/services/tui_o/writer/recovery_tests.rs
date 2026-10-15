@@ -763,9 +763,8 @@ async fn a_v2_codex_spool_resumes_under_the_current_version_without_reposting_a_
     assert_eq!(current, u64::from(IDENTITY_VERSION));
 }
 
-/// A store left by a v3 writer that really stopped on a whole-message row resumes under the
-/// current rule: the stopped rows and the tail post once, earlier posts never repeat, and new
-/// frames go to a current-version segment.
+/// A store a v3 writer really stopped on a whole-message row resumes under v4: rows past the stop
+/// post once, earlier posts never repeat, and new frames go to a current-version segment.
 #[tokio::test(start_paused = true)]
 async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
     let (harness, path, _) = switched_over(&row("m0", "before the switch"));
@@ -774,11 +773,17 @@ async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
     let (_stop, task) = spawn(harness.writer());
     append(&path, &row("m1", "first"));
     polls(3).await;
-    append(&path, &[thinking_then_tool("m2"), row("m3", "after")].concat());
+    append(
+        &path,
+        &[thinking_then_tool("m2"), row("m3", "after")].concat(),
+    );
     let cause = task.await.unwrap().unwrap();
     drop(v3);
     assert!(matches!(cause.alarm, WriterAlarm::SchemaBlocked { .. }));
-    assert!(matches!(harness.alarms.taken()[..], [WriterAlarm::SchemaBlocked { .. }]));
+    assert!(matches!(
+        harness.alarms.taken()[..],
+        [WriterAlarm::SchemaBlocked { .. }]
+    ));
     assert_eq!(harness.port.posts(), ["first"]);
     assert!(excluded_keys(&harness).is_empty());
     // As in the stopped production store, the cursor has captured every row the writer stopped on.
@@ -798,7 +803,10 @@ async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
     assert_eq!(harness.port.posts(), posts);
     assert_eq!(excluded_keys(&harness), ["m2:2"]);
     let current = segments(&harness).pop().unwrap();
-    assert!(!stopped.contains(&current), "new frames roll past the v3 segments");
+    assert!(
+        !stopped.contains(&current),
+        "new frames roll past the v3 segments"
+    );
     assert_eq!(header_version(&current, None), u64::from(IDENTITY_VERSION));
     halt(stop, task).await;
     let (stop, task) = spawn(harness.writer());

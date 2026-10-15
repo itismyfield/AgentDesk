@@ -454,7 +454,7 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
                 "repeat recovery after rollover must post nothing"
             );
             drop(reopened);
-            for unknown in [1, 4] {
+            for unknown in [1, u64::from(IDENTITY_VERSION) + 1] {
                 set_version(&segments[1], unknown);
                 assert_eq!(
                     fixture
