@@ -1,6 +1,8 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::owner_fence_pg_tests::{move_owner, owners, seed, snapshot};
+use crate::services::discord::input_runtime::fence::{Closing, Gate, test_health};
+use crate::services::provider::ProviderKind;
 use serde_json::Value;
 use std::sync::Mutex;
 use test_executor::Checkpoint;
@@ -81,14 +83,22 @@ async fn owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg() {
     let (_registry, shared) =
         crate::services::discord::health::owner_runtime_for_tests::registered("claude").await;
     for stamp in [false, true] {
-        for mode in 0..3 {
+        for mode in 0..4 {
             let channel = 47_770_200 + u64::from(stamp) * 10 + mode;
             let id = seed(&pool, &channel.to_string(), "pending", stamp).await;
+            let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
+            let _health = test_health::Clear::new(&gate);
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let shutdown_requested = cancelled.clone();
+            let close = Arc::new(Mutex::new(None::<Closing>));
+            let (shutdown_requested, closed) = (cancelled.clone(), close.clone());
             let _hook = test_executor::hook(Box::new(move |point| {
-                if point == Checkpoint::AfterClaim && mode == 2 {
-                    shutdown_requested.store(true, Ordering::SeqCst);
+                if point == Checkpoint::AfterClaim {
+                    if mode == 2 {
+                        shutdown_requested.store(true, Ordering::SeqCst);
+                    }
+                    if mode == 3 {
+                        *closed.lock().unwrap() = Some(gate.close().unwrap());
+                    }
                 }
                 Box::pin(async {})
             }));
@@ -114,6 +124,7 @@ async fn owner_fence_tick_legacy_and_current_success_failure_restart_hold_pg() {
                 result,
                 match mode {
                     2 => TickOutcome::Cancelled,
+                    3 => TickOutcome::Held,
                     _ => TickOutcome::Processed,
                 }
             );
