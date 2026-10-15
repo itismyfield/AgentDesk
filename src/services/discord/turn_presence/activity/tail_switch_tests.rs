@@ -259,6 +259,8 @@ fn s1e_tail_io_ranges_are_bounded_at_each_handoff() {
 
 #[test]
 fn s1_tail_off_preserves_real_unbound_absence_and_live_holds_pg() {
+    // Keep sibling PATH stubs out of both isolated entrypoint processes.
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     for test in [
         "services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_real_missing_namespace_reaches_selected_tmux_start_pg",
         "services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg",
