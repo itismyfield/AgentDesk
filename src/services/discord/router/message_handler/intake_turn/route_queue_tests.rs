@@ -275,9 +275,8 @@ fn codex_runs(thread: ChannelId, message: MessageId) -> bool {
     row.is_some_and(|row| row.user_msg_id == message.get())
 }
 
-/// C follows up in the thread with A's role and parent edge, and stops before its claim; A's tail
-/// is granted and releases both. C's claim publishes them again, and D, queued behind C, takes the
-/// role channel's provider.
+/// C inherits A's role and parent edge, and A's granted tail releases both before C claims; C's
+/// claim publishes them again, and D, queued behind C, takes the role channel's provider.
 #[tokio::test]
 async fn s2f_inherited_route_is_republished_by_its_claim() {
     if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
