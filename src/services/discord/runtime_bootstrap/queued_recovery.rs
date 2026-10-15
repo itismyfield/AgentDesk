@@ -1,5 +1,9 @@
-//! Persisted turn and queue recovery shared by Gateway and REST worker runtimes.
+//! Persisted turn and queue recovery shared by Gateway and REST worker runtimes, and a standby
+//! holder's single-channel boot restore.
 use super::*;
+use crate::services::turn_orchestrator::{
+    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
+};
 
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
@@ -273,6 +277,153 @@ pub(super) async fn restore_queued_and_inflight_work(
     warn_legacy_pending_queue_files(provider);
 
     stale_cards_to_delete
+}
+
+type Restore = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+type StandbyRestore = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<dyn Fn() -> Option<bool> + Send + Sync>,
+    Arc<dyn Fn() -> Restore + Send + Sync>,
+);
+
+/// A standby holder's port parts: its own restored flag, which the provider reconcile never sets,
+/// a read of the channel's persisted queue and marker, and the channel's boot restore.
+pub(super) fn standby_restore(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> StandbyRestore {
+    let restored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(test)]
+    let restored = match super::restore_mutant("reconcile_as_channel_restored") {
+        true => Arc::clone(&shared.restart.reconcile_done),
+        false => restored,
+    };
+    let (owner, token_hash) = (provider.clone(), shared.token_hash.clone());
+    let persisted = Arc::new(move || {
+        let channel = (channel != 0).then(|| ChannelId::new(channel))?;
+        persisted_input(&owner, &token_hash, channel)
+    });
+    let (shared, owner) = (Arc::clone(shared), provider.clone());
+    let run = Arc::new(move || -> Restore {
+        let (shared, provider) = (Arc::clone(&shared), owner.clone());
+        Box::pin(async move { restore_standby_channel(&shared, &provider, channel).await })
+    });
+    (restored, persisted, run)
+}
+
+/// Whether the channel's persisted queue or dispatch marker still holds input; `None` unreadable.
+fn persisted_input(provider: &ProviderKind, token_hash: &str, channel: ChannelId) -> Option<bool> {
+    let (queue, _) = load_channel_pending_queue_checked(provider, token_hash, channel).ok()?;
+    let marker =
+        load_channel_pending_dispatch_marker_checked(provider, token_hash, channel).ok()?;
+    Some(!queue.is_empty() || marker.is_some())
+}
+
+/// Restores one held channel's persisted input in the boot order: queue, inflight turn, marker,
+/// placeholders. `false` when a read, merge or install fails, or a restored row is left unrun.
+async fn restore_standby_channel(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> bool {
+    use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
+    use crate::services::discord::mailbox_finish::try_restitution;
+    if channel == 0
+        || !super::herdr_runs_here(channel)
+        || boot_skip(BootTarget::Channel(provider, channel))
+    {
+        return false;
+    }
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return false;
+    };
+    let (channel_id, token) = (ChannelId::new(channel), shared.token_hash.as_str());
+    let queue = load_channel_pending_queue_checked(provider, token, channel_id);
+    let marker = load_channel_pending_dispatch_marker_checked(provider, token, channel_id);
+    let placeholders = super::queued_placeholders_store::load_channel_queued_placeholders_checked(
+        provider, token, channel_id,
+    );
+    let row = super::inflight::load_channel_inflight_for_probe(provider, channel);
+    let (Ok((queue, queue_override)), Ok(marker), Ok(placeholders), Ok(row)) =
+        (queue, marker, placeholders, row)
+    else {
+        return false;
+    };
+    if !matches!(
+        resolve_runtime_channel_binding_status(&http, channel_id).await,
+        RuntimeChannelBindingStatus::Owned
+    ) {
+        return false;
+    }
+    let marker_override = marker.as_ref().and_then(|(_, alt)| *alt);
+    for alt in queue_override.into_iter().chain(marker_override) {
+        shared.dispatch.role_overrides.insert(channel_id, alt);
+    }
+    let allowed_bot_ids = shared.settings.read().await.allowed_bot_ids.clone();
+    let announce = super::resolve_announce_bot_user_id(shared).await;
+    let allowed = |item: &Intervention| {
+        let (author, bot) = (item.author_id.get(), item.author_is_bot);
+        super::is_allowed_turn_sender(&allowed_bot_ids, announce, author, bot, &item.text)
+    };
+    let persistence =
+        crate::services::discord::queue_persistence_context(shared, provider, channel_id);
+    let items: Vec<Intervention> = queue.into_iter().filter(|item| allowed(item)).collect();
+    if !items.is_empty() {
+        let merged = try_restitution(shared, channel_id, |h| {
+            let (items, p) = (items.clone(), persistence.clone());
+            async move { h.merge_restored_queue_items_or_refused(items, p).await }
+        });
+        if !matches!(merged.await, Ok(result) if result.persistence_error.is_none()) {
+            return false;
+        }
+    }
+    let Ok(before) = shared.mailbox(channel_id).try_snapshot().await else {
+        return false;
+    };
+    // A live turn of this process owns the row now; only a row left by the last process restores.
+    if let Some(state) = row.filter(|_| before.cancel_token.is_none()) {
+        let states = vec![state];
+        let restore = crate::services::discord::recovery_engine::restore_inflight_states(
+            &http, shared, provider, states,
+        );
+        Box::pin(restore).await;
+    }
+    let left = super::inflight::load_channel_inflight_for_probe(provider, channel);
+    let Ok(after) = shared.mailbox(channel_id).try_snapshot().await else {
+        return false;
+    };
+    // A held or unverified row left without a running turn is not restored.
+    let unrun = match left {
+        Ok(None) => false,
+        Ok(Some(_)) => after.cancel_token.is_none(),
+        Err(_) => true,
+    };
+    if unrun {
+        return false;
+    }
+    if let Some((marker, alt)) = marker.filter(|(item, _)| allowed(item)) {
+        let merged = try_restitution(shared, channel_id, |h| {
+            let (marker, p) = (marker.clone(), persistence.clone());
+            async move {
+                h.merge_restored_dispatch_marker_or_refused(marker, alt, p)
+                    .await
+            }
+        });
+        if !matches!(merged.await, Ok(result) if result.persistence_error.is_none()) {
+            return false;
+        }
+    }
+    let installed = super::queued_placeholders::install_channel_queued_placeholders_checked(
+        shared,
+        channel_id,
+        placeholders,
+    );
+    let Ok(stale) = installed.await else {
+        return false;
+    };
+    delete_stale_queued_placeholder_cards(&http, shared, &stale).await;
+    true
 }
 
 #[cfg(test)]
