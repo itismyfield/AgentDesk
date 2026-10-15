@@ -42,9 +42,7 @@ mod input_effect_tests {
         let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
         let body = source.split_once(handler_marker.as_str()).unwrap().1;
         let start = body
-            .find(
-                "    let Some((route, bootstrapped_fresh_thread_session, redirected_permit))",
-            )
+            .find("    let Some((route, bootstrapped_fresh_thread_session, redirected_permit))")
             .unwrap();
         let end = body[start..]
             .find("    let (mut session_id, mut memento_context_loaded")
