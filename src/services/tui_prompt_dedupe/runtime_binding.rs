@@ -78,21 +78,91 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     )
 }
 
+fn same_runtime_source(
+    left: Option<&TuiRuntimeBinding>,
+    right: Option<&TuiRuntimeBinding>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            left.runtime_kind == right.runtime_kind
+                && left.output_path == right.output_path
+                && left.relay_output_path == right.relay_output_path
+                && left.input_fifo_path == right.input_fifo_path
+                && left.session_id == right.session_id
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+struct RuntimeBindingPublication<'a, 'b> {
+    target: &'a mut TuiPromptDedupeState,
+    staged: TuiPromptDedupeState,
+    previous: Option<TuiRuntimeBinding>,
+    providers: std::collections::HashSet<PromptKey>,
+    authority: &'a crate::services::tmux_common::TmuxSourceAuthority<'b>,
+}
+
+impl Drop for RuntimeBindingPublication<'_, '_> {
+    fn drop(&mut self) {
+        let session = self.authority.session();
+        let current = self
+            .staged
+            .runtime_by_tmux
+            .get(session)
+            .map(|entry| &entry.value);
+        let providers = self
+            .staged
+            .tmux_by_provider_session
+            .iter()
+            .filter(|(_, entry)| entry.value == session);
+        let changed_providers = providers.clone().count() != self.providers.len()
+            || providers
+                .into_iter()
+                .any(|(key, _)| !self.providers.contains(key));
+        if changed_providers || !same_runtime_source(self.previous.as_ref(), current) {
+            self.authority.invalidate();
+        }
+        std::mem::swap(self.target, &mut self.staged);
+    }
+}
+
 fn with_runtime_binding_state_under_source_authority<R>(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
 ) -> R {
     let tmux_session_name = authority.session();
+    #[cfg(test)]
+    let _publication = super::state::BindingPublicationHeld::enter();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     #[cfg(unix)]
     let had_runtime = state.runtime_by_tmux.contains_key(tmux_session_name);
     state.purge_expired();
-    state.purge_expired_runtime_binding_under_authority(tmux_session_name);
+    state.purge_expired_runtime_binding_under_authority(authority);
     #[cfg(unix)]
     if had_runtime && !state.runtime_by_tmux.contains_key(tmux_session_name) {
         state.codex_restore_by_tmux.remove(tmux_session_name);
     }
-    operation(&mut state)
+    let previous = state
+        .runtime_by_tmux
+        .get(tmux_session_name)
+        .map(|entry| entry.value.clone());
+    let providers = state
+        .tmux_by_provider_session
+        .iter()
+        .filter(|(_, entry)| entry.value == tmux_session_name)
+        .map(|(key, _)| key.clone())
+        .collect();
+    let staged = std::mem::take(&mut *state);
+    // The cache lock hides staged edits; Drop fences publication, including unwinding.
+    let mut publication = RuntimeBindingPublication {
+        target: &mut state,
+        staged,
+        previous,
+        providers,
+        authority,
+    };
+    operation(&mut publication.staged)
 }
 
 fn with_runtime_binding_authority<R>(
@@ -108,17 +178,8 @@ pub fn subscribe_observed_prompts() -> broadcast::Receiver<ObservedTuiPrompt> {
     OBSERVED_PROMPTS.subscribe()
 }
 
-/// Reverse lookup: resolve the provider session id that maps to `tmux_session_name`
-/// for `provider`, if one was registered. `register_provider_session` records
-/// the forward `provider_session_id -> tmux_session_name` mapping at launch;
-/// this scans it for the entry whose value matches the tmux session.
-///
-/// #tui-hook-ttl-buffer key-match fix: the Claude hook relay buffers under the
-/// PROVIDER session UUID (`config.session_id`), but the readiness layer only
-/// knows the tmux session name. Callers use this to claim the SAME key the hooks
-/// buffered under instead of the tmux fallback (which the buffer never used for a
-/// hosted Claude launch). Returns `None` when no mapping is known, in which case
-/// the caller should fall back to the tmux session name.
+/// Find the newest provider-session mapping for this tmux pane without expiring that bridge.
+/// Hook buffers use this provider key; callers fall back to the tmux name when absent.
 pub fn provider_session_for_tmux(provider: &str, tmux_session_name: &str) -> Option<String> {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
@@ -166,7 +227,9 @@ pub(crate) fn register_tmux_channel_under_source_authority(
     }
     if tmux_session_name.contains("-dm-") {
         if let Err(error) =
-            crate::services::tmux_common::write_tmux_channel_binding(tmux_session_name, channel_id)
+            crate::services::tmux_common::write_tmux_channel_binding_under_source_authority(
+                authority, channel_id,
+            )
         {
             tracing::warn!(
                 tmux_session_name,
@@ -178,6 +241,14 @@ pub(crate) fn register_tmux_channel_under_source_authority(
     }
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
+    if state
+        .channel_by_tmux
+        .get(tmux_session_name)
+        .map(|entry| entry.value)
+        != Some(channel_id)
+    {
+        authority.invalidate();
+    }
     state.channel_by_tmux.insert(
         tmux_session_name.to_string(),
         TimedValue {
@@ -259,6 +330,9 @@ fn publish_runtime_binding(
             .map(|e| &e.value);
         let proposal =
             Proposal::for_binding(channel_id, tmux_session_name, &binding, replaced, cause);
+        if !same_runtime_source(replaced, Some(&binding)) {
+            authority.invalidate();
+        }
         let persisted = match proposal.map(|proposal| record.persist(&proposal)) {
             Some(Err(error)) => {
                 tracing::error!(
@@ -381,15 +455,8 @@ pub(crate) fn reconcile_rehydrated_tmux_runtime_binding_with_authority(
     })
 }
 
-/// #3018: DIAGNOSTIC / MIRROR USE ONLY.
-///
-/// This expiry-based cache is NOT the authority for tmux-session→channel
-/// resolution. The authoritative source is the `tmux_watchers` registry
-/// (`SharedData::tmux_watchers`), which holds the 1:1 routing invariant. This
-/// lookup may only be used for best-effort diagnostics / rehydration hints — it
-/// must never be used as a reverse authority to route relays, or drift between
-/// the two sources will silently mis-route. See
-/// `tui_prompt_relay::owner_channel_for_tmux_session`.
+/// Return the expiry-based channel mirror for diagnostics and rehydration hints.
+/// Relay routing uses the authoritative watcher registry instead of this cache.
 pub fn owner_channel_for_tmux_session(tmux_session_name: &str) -> Option<u64> {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
@@ -539,36 +606,8 @@ pub(crate) fn clear_prompt_anchor_for_response(
     removed
 }
 
-/// #3956: re-stamp an EXISTING submit prompt anchor's `recorded_at` to "now" on
-/// observed streaming activity for `(provider, tmux, channel)`. A turn that
-/// streams continuously longer than [`PROMPT_ANCHOR_SUBMIT_TTL`] (4h) would
-/// otherwise have its anchor expire mid-stream, so the #3885 same-input
-/// follow-up-requeue correlation peek ([`prompt_anchor_for_response`]) resolves
-/// `None`, `same_input` reads false, and the no-response requeue re-fires
-/// duplicate prose. The tmux watcher's per-pane streaming-observation path calls
-/// this on every observed output chunk so the anchor stays live for the whole
-/// turn, making the correlation TTL-independent (the issue #3956 full fix).
-///
-/// This is a REFRESH-on-activity, NOT a new lifecycle, and a SINGLE-MAP op:
-///   * it only advances an anchor that ALREADY exists for the MATCHING channel —
-///     it never resurrects a different channel's anchor and never CREATES one, so
-///     a genuinely-unsubmitted pane stays anchor-less and the bridge still
-///     requeues it;
-///   * it reads/writes ONLY `prompt_anchor_by_tmux`. Crucially it does NOT call
-///     [`TuiPromptDedupeState::purge_expired`]: this fires on EVERY watcher
-///     chunk-drain (a #3016 hot path), so a global multi-map purge under the lock
-///     would scan/mutate the #3459/#3303 `relayed_entry_ids_by_tmux` ledger and
-///     every other dedupe map on each chunk. Leaving the ledger entirely untouched
-///     is what makes the #3459/#3303 non-regression REAL, not merely benign — and
-///     keeps the hot-path op cheap.
-///
-/// No-resurrection WITHOUT the global purge: the matching anchor's age is checked
-/// INLINE against the 4h ceiling. A still-live anchor (< 4h) is re-stamped; a
-/// matching anchor already past 4h belongs to a long-dead turn, so it is NOT
-/// refreshed (and is evicted from this one map so it cannot linger). The peek path
-/// [`prompt_anchor_for_response`] runs its OWN `purge_expired`, so anchor expiry is
-/// still enforced there independently of this path.
-/// Returns `true` iff a live matching-channel anchor was present and re-stamped.
+/// Refresh only a live matching-channel submit anchor, without creating an anchor or purging other maps.
+/// An expired matching anchor is removed; unrelated relay ledgers remain untouched on this hot path.
 pub(crate) fn touch_prompt_anchor_on_activity(
     provider: &str,
     tmux_session_name: &str,
@@ -599,26 +638,8 @@ pub(crate) fn touch_prompt_anchor_on_activity(
     false
 }
 
-/// #3174: record a deferred ⏳-completion marker for `(provider, tmux, channel)`,
-/// stamped with the TURN IDENTITY `turn_lease_generation`.
-///
-/// Called by the watcher's lease-gated completion path when the gate fired (the
-/// external-input lease for THIS turn was present before relay) but the prompt
-/// anchor for this turn has not been recorded yet — the provider committed
-/// terminal output inside the sub-second `notify-post + ⏳-add` window. Without
-/// this marker the anchor-less completion is a silent no-op and the ⏳ is
-/// stranded (the lease is cleared after this delivery, so no later pass
-/// reconciles it). The SAME turn's [`record_prompt_anchor`] drains this marker
-/// (via [`take_deferred_anchor_completion`]) and the relay finishes the ⏳ → ✅
-/// swap against the just-recorded anchor.
-///
-/// `turn_lease_generation` is the `generation` of the external-input lease the
-/// completion was gated on (see [`ExternalInputRelayLease::generation`]) — a
-/// unique monotonic per-record nonce that identifies the turn. The drain only
-/// consumes a marker whose generation MATCHES the draining turn's, so within the
-/// marker TTL a NEWER same-(provider,tmux) turn can never complete the previous
-/// turn's ⏳. A marker stamped with the `UNRECORDED` sentinel (0) is never
-/// recorded — it carries no turn identity, so it cannot be safely drained.
+/// Remember completion until the matching submitted anchor appears, scoped to the nonzero turn generation.
+/// A later turn cannot drain an older completion; recording the matching anchor drains it.
 pub(crate) fn record_deferred_anchor_completion(
     provider: &str,
     tmux_session_name: &str,
@@ -929,8 +950,8 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     removed
 }
 
-/// Forgets orphaned binding and channel mirrors so later registration can restore them.
-/// Returns whether a mirror changed, for one incident per eviction.
+/// Forget both runtime and channel mirrors for an independently judged dead pane.
+/// Return whether anything was removed; legitimate later registration can recreate the mirrors.
 pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
@@ -1131,5 +1152,101 @@ mod shadow_session_tests {
             (11, &before),
             "discovery must not touch relay state"
         );
+    }
+}
+
+#[cfg(test)]
+mod s2a1_binding_tests {
+    use super::*;
+    use crate::services::tmux_common as tc;
+
+    fn pin(session: &str) -> crate::services::cluster::stream_relay::source_read_proof::SourcePin {
+        tc::with_tmux_source_authority(session, |authority| authority.pin()).expect("pin")
+    }
+    fn binding(path: &str) -> TuiRuntimeBinding {
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.into(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        }
+    }
+    #[test]
+    fn s2a1_runtime_publish_read_offset_noop_clear_and_rehydrate_fence_identity() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        reset_state_for_tests();
+        let session = "s2a1-runtime-binding";
+        let before = pin(session);
+        register_tmux_runtime_binding(session, binding("/s2a1-first"));
+        assert!(!before.is_current());
+        let same = pin(session);
+        register_tmux_runtime_binding(session, binding("/s2a1-first"));
+        assert!(same.is_current());
+        assert!(runtime_binding_for_tmux_session(session).is_some());
+        assert!(tc::with_tmux_source_authority(session, |authority| {
+            advance_tmux_runtime_binding_offset_under_source_authority(authority, "/s2a1-first", 9)
+        }));
+        assert_eq!(
+            runtime_binding_for_tmux_session(session)
+                .expect("binding")
+                .last_offset,
+            9
+        );
+        assert!(same.is_current());
+        register_tmux_runtime_binding(session, binding("/s2a1-next"));
+        assert!(!same.is_current());
+        let current = pin(session);
+        assert!(clear_tmux_runtime_binding(session));
+        assert!(!current.is_current());
+        let cleared = pin(session);
+        assert!(!clear_tmux_runtime_binding(session));
+        assert!(cleared.is_current());
+        assert!(register_rehydrated_tmux_runtime_binding(
+            "claude",
+            session,
+            59_960_301,
+            binding("/s2a1-next")
+        ));
+        assert!(!cleared.is_current());
+        reset_state_for_tests();
+    }
+    #[test]
+    fn s2a1_common_and_lock_held_expiry_invalidate_actual_removal_only() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for under_authority in [false, true] {
+            reset_state_for_tests();
+            let session = if under_authority {
+                "s2a1-expiry-held"
+            } else {
+                "s2a1-expiry-common"
+            };
+            register_tmux_runtime_binding(session, binding("/s2a1-expiry"));
+            let before = pin(session);
+            {
+                let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+                let stamp =
+                    state.aged_stamp_for_tests(SESSION_MAPPING_TTL + Duration::from_secs(1));
+                state
+                    .runtime_by_tmux
+                    .get_mut(session)
+                    .expect("binding")
+                    .recorded_at = stamp;
+            }
+            if under_authority {
+                assert!(runtime_binding_for_tmux_session(session).is_none());
+            } else {
+                assert!(runtime_bindings_for_kind(RuntimeHandoffKind::ClaudeTui).is_empty());
+            }
+            assert!(!before.is_current());
+            let after = pin(session);
+            assert!(runtime_binding_for_tmux_session(session).is_none());
+            assert!(after.is_current());
+        }
+        reset_state_for_tests();
     }
 }

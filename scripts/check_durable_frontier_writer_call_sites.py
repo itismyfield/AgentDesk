@@ -350,7 +350,13 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     },
     # Qualified key: this is a receiver-including TmuxRelayCoord method.
     "TmuxRelayCoord::reset_confirmed_frontier": {
+    },
+    "TmuxRelayCoord::reset_confirmed_frontier_with_generation": {
         "src/services/discord/tmux_session_files.rs": 2,
+    },
+    "TmuxRelayCoord::advance_untyped_frontier": {
+        "src/services/discord/tmux.rs": 1,
+        "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
 }
 
@@ -364,9 +370,7 @@ EXPECTED_DEFINITION_FILE_COUNTS: dict[str, dict[str, int]] = {
 
 # Raw atomic pin by file; totals are derived from the map.
 EXPECTED_RAW_ATOMIC_MUTATIONS: dict[str, int] = {
-    "src/services/discord/tmux.rs": 1,
-    "src/services/discord/relay_health/frontier.rs": 1,
-    "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
+    "src/services/discord/relay_health/frontier.rs": 2,
 }
 
 # Bare-reference pin by symbol/file; current capture is the `record` binding.
@@ -958,6 +962,33 @@ def _definition_collision_problems(
     return problems
 
 
+def _reset_generation_argument_problems(root: Path, texts: dict[Path, str]) -> list[str]:
+    symbol = "TmuxRelayCoord::reset_confirmed_frontier_with_generation"
+    problems = []
+    for path, text in texts.items():
+        for match in CALL_RES[symbol].finditer(text):
+            start = match.end()
+            depth = 0
+            arguments = []
+            for index in range(start, len(text)):
+                char = text[index]
+                if char == ")" and depth == 0:
+                    if text[start:index].strip():
+                        arguments.append(text[start:index].strip())
+                    break
+                if char == "," and depth == 0:
+                    arguments.append(text[start:index].strip())
+                    start = index + 1
+                elif char in "([{":
+                    depth += 1
+                elif char in ")]}":
+                    depth -= 1
+            expected = 3 if "." in match.group() else 4
+            if len(arguments) != expected or arguments[-1] == "None":
+                problems.append(f"{path.relative_to(root).as_posix()}: reset requires the captured generation argument")
+    return problems
+
+
 def check(
     root: Path,
     *,
@@ -993,6 +1024,7 @@ def check(
     except RuntimeError as exc:
         return False, str(exc)
     problems: list[str] = []
+    problems.extend(_reset_generation_argument_problems(root, texts))
     for symbol, expected in EXPECTED_CALL_SITES.items():
         actual = found[symbol]
         if actual == expected:

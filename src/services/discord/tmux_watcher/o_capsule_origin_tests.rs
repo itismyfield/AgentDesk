@@ -3,7 +3,6 @@ use super::*;
 use crate::services::discord::health::legacy_supervision::test_support::tree_fingerprint;
 use crate::services::discord::health::legacy_supervision::{RetiredForTest, is_retired};
 use crate::services::discord::inflight::load_inflight_state_read_only_result;
-use crate::services::discord::tmux::OOnlyInstallOutcome;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn t6_d_clean_rowless_legacy_capsule_origin_prevents_o_adoption() {
@@ -93,7 +92,7 @@ async fn t6_d_clean_rowless_legacy_capsule_origin_prevents_o_adoption() {
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     seed_cases::until(
         &observed,
         "O successor initial EOF or forbidden custody adoption",

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::harness::*;
+use super::holder_pg::{applied_then_released, refused_unmoved, released_from};
 use crate::db::o_channel_activation;
 use crate::db::o_channel_homes::{self, HomeState};
 use crate::services::cluster::channel_home::{HomeIntake, HomeOwnership};
@@ -24,6 +25,7 @@ use crate::services::tui_o::store::{
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvidence, BindingRecord, BindingTarget,
 };
+use crate::services::tui_o::writer::confirm::{FIRST_LOOK, LAST_LOOK};
 use crate::services::tui_o::writer::deliver::{self, ChannelWriter, Step};
 use crate::services::tui_o::writer::host::test_io::Alarms;
 use crate::services::tui_o::writer::host::{self, HostIo};
@@ -558,7 +560,25 @@ async fn unsent_settles(scenario: &str) -> Scene {
 }
 
 pub(super) async fn settles_not_found_node(env: &Env) {
-    let node = settled_on_replay(env, Discord::kept_in(&env.dir.join(HISTORY))).await;
+    let discord = Discord::kept_in(&env.dir.join(HISTORY));
+    let (node, replayed) = settled_on_replay(env, discord).await;
+    let reads = node.discord().history_reads();
+    let after = reads.first().map(|r| r.after);
+    let answers: Vec<_> = (reads.iter())
+        .map(|r| (r.channel, Some(r.after), r.answer.clone()))
+        .collect();
+    assert_eq!(
+        answers,
+        [(C, after, Ok(0)), (C, after, Ok(0))],
+        "both looks, one anchor"
+    );
+    let first = reads[0].at.duration_since(replayed);
+    let last = reads[1].at.duration_since(reads[0].at);
+    assert!(first >= FIRST_LOOK, "first read {first:?} after the row");
+    assert!(
+        last >= LAST_LOOK - FIRST_LOOK,
+        "second read {last:?} after the first"
+    );
     assert_eq!(settled(&node), [LedgerEntry::NotFound { serial: 0 }]);
     assert_eq!(settle_alarms(&node), [WriterAlarm::NotFound { serial: 0 }]);
     node.stop().await;
@@ -566,7 +586,16 @@ pub(super) async fn settles_not_found_node(env: &Env) {
 
 pub(super) async fn settles_unresolved_node(env: &Env) {
     let discord = Discord::kept_in(&env.dir.join(HISTORY)).history_unavailable();
-    let node = settled_on_replay(env, discord).await;
+    let (node, replayed) = settled_on_replay(env, discord).await;
+    let reads = node.discord().history_reads();
+    let answers: Vec<_> = reads
+        .iter()
+        .map(|r| (r.channel, r.answer.clone()))
+        .collect();
+    let failed = (C, Err(HISTORY_UNAVAILABLE.to_string()));
+    assert_eq!(answers, [failed], "read again after an error");
+    let first = reads[0].at.duration_since(replayed);
+    assert!(first >= FIRST_LOOK, "first read {first:?} after the row");
     let outcomes = settled(&node);
     let [LedgerEntry::Unresolved { serial: 0, reason }] = &outcomes[..] else {
         panic!("settled {outcomes:?}");
@@ -580,13 +609,18 @@ pub(super) async fn settles_unresolved_node(env: &Env) {
     node.stop().await;
 }
 
-/// Holds on the unsent Prepared, then appends the row that derives its unit again, which is what
-/// starts the settlement; waits for it and the leave, with nothing posted.
-async fn settled_on_replay(env: &Env, discord: Discord) -> Booted {
+/// Holds on the unsent Prepared, then appends the row that derives its unit again, starting the
+/// settlement; waits for it and the leave, nothing posted, and returns when it appended the row.
+async fn settled_on_replay(env: &Env, discord: Discord) -> (Booted, std::time::Instant) {
     let node = holds_on_prepared(env, discord).await;
     assert_eq!(settled(&node), [], "settled before the row came again");
     assert_eq!(settle_alarms(&node), []);
-    let replayed = tokio::time::Instant::now();
+    let reads = node.discord().history_reads();
+    assert!(
+        reads.is_empty(),
+        "history read before the row came again: {reads:?}"
+    );
+    let replayed = std::time::Instant::now();
     append(&node.transcript, &row("m1", MAYBE_SENT));
     let clear = || async { node.owed().await == Some(Owed::default()) };
     until_async("the replayed row settles the Prepared", WITHIN, clear).await;
@@ -596,7 +630,7 @@ async fn settled_on_replay(env: &Env, discord: Discord) -> Booted {
     until_left(&node).await;
     assert_eq!(node.discord().seen(), Vec::<Seen>::new(), "no POST started");
     assert!(!node.halted(), "{:?}", node.raised());
-    node
+    (node, replayed)
 }
 
 /// The ledger's entries other than Prepared, read from its file while the actor holds the store.
@@ -1137,36 +1171,105 @@ pub(super) async fn unknown_node(env: &Env) {
     node.stop().await;
 }
 
-/// T-H7 releasing direction: the gateway holder posts its tail and leaves as `released`. Its drain
-/// needs the Legacy release reset, which the drain port does not reach yet.
+/// T-H7 releasing, one generation: the tail posts at the row's epoch before any reset, then a refusal
+/// and an allowed retry release the row. Applied is the injected `Ok(())`, not a real session reset.
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "BLOCKED: s3act D — releasing drain needs the gateway Legacy release reset; ChannelHomePort::reset_legacy_source is NotWired"]
 async fn th7_releasing_tail_posts_before_release_pg() {
     let scene = Scene::new().await;
+    seed_outbox_samples(&scene.pool).await;
+    let samples = outbox_samples(&scene.pool).await;
     let channel = C.to_string();
     let home = applied(o_channel_homes::delegate(&scene.pool, &channel, "claude", GW, MINI).await);
     put(scene.dir(), "epoch", home.epoch);
+    let releasing = home_facts(&scene.pool).await.expect("the home row");
     let node = Node::spawn(&scene, "th7_release", GW);
-    node.finish(Duration::from_secs(120)).await;
-    let row = scene.row().await.unwrap();
-    assert_eq!(
-        (row.state, row.holder.as_deref()),
-        (HomeState::Released, None)
-    );
+    let tag = node.name().to_string();
+    node.finish(Duration::from_secs(180)).await;
+    let left = home_facts(&scene.pool).await.expect("the home row");
+    assert_eq!(released_from(&releasing, &left), Ok(()), "{left:?}");
+    assert_eq!(reset_calls(scene.dir(), &tag), 2);
+    assert_eq!(outbox_samples(&scene.pool).await, samples);
     scene.drop_db().await;
 }
 
+/// What the release's first reset call refuses with.
+const RELEASE_REFUSAL: &str = "the gateway session is still attached";
+
 pub(super) async fn release_node(env: &Env) {
-    let epoch = epoch_of(env);
-    let node = Booted::boot(env).await;
+    let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
+    let (entered, go) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let latch = (Arc::clone(&entered), Arc::clone(&go));
+    let script = vec![ResetAnswer::Refuse(RELEASE_REFUSAL), ResetAnswer::Apply];
+    let reads = move |id| FirstCheck {
+        reads: ChannelHomePort::new(id, host::process_readiness(), worker_restored()),
+        entered: Arc::clone(&latch.0),
+        go: Arc::clone(&latch.1),
+    };
+    let node = Booted::boot_with_reset(env, reads, ScriptedReset::in_child(env, script)).await;
+    let pool = &node.pool;
+    let releasing = home_facts(pool).await.expect("the home row");
+    let samples = outbox_samples(pool).await;
     until("the lease opens the home", WITHIN, || {
         node.home_epoch() == Some(epoch)
     })
     .await;
-    append(&node.transcript, &row("m1", "tail-1"));
-    let released = || async { node.state().await == Some(HomeState::Released) };
-    until_async("the release lands", Duration::from_secs(90), released).await;
-    assert_eq!(node.discord().posts(), ["tail-1"]);
+    let checking = || entered.load(Ordering::SeqCst);
+    until("the drain's first owed check", WITHIN, checking).await;
+    let gate = node.gate().expect("registered");
+    let closed = matches!(gate.ownership(), HomeOwnership::Owned { home_epoch, intake: HomeIntake::Closed, .. }
+        if home_epoch == epoch);
+    assert!(closed, "intake closes first: {:?}", gate.ownership());
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    let clear = || async { node.owed().await == Some(Owed::default()) };
+    until_async("nothing owed before the tail", WITHIN, clear).await;
+    node.lease().withhold();
+    append(&node.transcript, &row("t1", "tail-1"));
+    let tail = Owed {
+        owed: 1,
+        ..Owed::default()
+    };
+    until_async("the actor owes the tail", WITHIN, || async {
+        node.owed().await == Some(tail)
+    })
+    .await;
+    go.store(true, Ordering::SeqCst);
+    let owed = || node.drain_blocker().as_deref() == Some("owed");
+    until("the drain waits on the tail", WITHIN, owed).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    assert_eq!(node.drain_blocker().as_deref(), Some("owed"));
+    assert_eq!(reset_calls(dir, tag), 0, "a reset while the tail was owed");
+    assert_eq!(node.state().await, Some(HomeState::Releasing));
+    node.lease().grant();
+    node.until_posts(&["tail-1"]).await;
+    let holding = || node.home_epoch() == Some(epoch) && node.accepts();
+    until_reset_entered(pool, dir, (tag, 1), &releasing, holding).await;
+    let once = [
+        Seen::Started {
+            content: "tail-1".into(),
+            home_epoch: Some(epoch),
+        },
+        Seen::Accepted("tail-1".into()),
+        Seen::Ended("tail-1".into()),
+    ];
+    assert_eq!(
+        node.discord().seen(),
+        once,
+        "the tail ended before the reset"
+    );
+    assert!(
+        !gate.final_closed(epoch),
+        "closed before the reset answered"
+    );
+    quiet_at_reset(pool, &samples).await;
+    refused_unmoved(&node, (dir, tag), RELEASE_REFUSAL, &releasing).await;
+    until_reset_entered(pool, dir, (tag, 2), &releasing, holding).await;
+    quiet_at_reset(pool, &samples).await;
+    applied_then_released(&node, dir, tag, &releasing).await;
+    assert_eq!(node.discord().seen(), once, "a POST after the final close");
+    assert_eq!(outbox_samples(pool).await, samples);
     node.stop().await;
 }
 

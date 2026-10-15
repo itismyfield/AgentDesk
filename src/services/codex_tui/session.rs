@@ -237,6 +237,10 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
             .filter(|value| !value.is_empty()),
         "rollout_start_offset": rollout_start_offset,
     });
+    let normalized_id = session_id.map(str::trim).filter(|id| !id.is_empty());
+    let changed = read_codex_tui_rollout_marker(tmux_session_name).is_none_or(|marker| {
+        marker.rollout_path != rollout_path || marker.session_id.as_deref() != normalized_id
+    });
     if let Some(ownership) = ownership {
         value["codex_ownership"] = ownership;
         if let Some(relay) = owned_marker.and_then(|marker| marker.get("codex_relay").cloned()) {
@@ -249,10 +253,20 @@ pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
         let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
         temp.write_all(format!("{value}\n").as_bytes())
             .map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        crate::services::tui_prompt_dedupe::assert_marker_publication_unlocked_for_tests();
         temp.as_file().sync_all().map_err(|e| e.to_string())?;
+        if changed {
+            authority.invalidate();
+        }
         temp.persist(&path).map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        crate::services::tui_prompt_dedupe::assert_marker_publication_unlocked_for_tests();
         return crate::services::discord::runtime_store::fsync_parent_dir(Path::new(&path))
             .map_err(|e| e.to_string());
+    }
+    if changed {
+        authority.invalidate();
     }
     std::fs::write(&path, format!("{value}\n"))
         .map_err(|error| format!("failed to write Codex TUI rollout marker: {error}"))

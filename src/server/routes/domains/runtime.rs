@@ -156,6 +156,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 delete(hooks::disconnect_session),
             )
             .route("/internal/node-probe", get(cluster::node_probe))
+            .route(
+                "/o/transition",
+                post(super::super::o_transition::transition),
+            )
             .merge(herdr_routes()),
         state,
     )

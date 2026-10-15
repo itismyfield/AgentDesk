@@ -1887,7 +1887,7 @@ mod after_string_brace {
             ), stderr="")
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"CARGO_PROFILE_TEST_DEBUG": "2", "I6184_SENTINEL": "kept"},
+            os.environ, {"ADK_LIB_TEST_ARTIFACT": "", "CARGO_PROFILE_TEST_DEBUG": "2", "I6184_SENTINEL": "kept"},
         ):
             root = Path(tmp)
             self._fixture(root)
@@ -2165,7 +2165,7 @@ mod after_string_brace {
         self.assertIn("entries=3", output.getvalue())
 
     def test_scanner_shrink_regeneration_is_rejected_by_cargo_backstop(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ADK_LIB_TEST_ARTIFACT=""):
             root = Path(tmp)
             (root / "src").mkdir()
             (root / "Cargo.toml").write_text(
@@ -2247,7 +2247,7 @@ mod after_string_brace {
         ])
 
     def test_sequential_git_merges_preserve_manifest_union(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ADK_LIB_TEST_ARTIFACT=""):
             fixture_root = Path(tmp)
             root = fixture_root / "repo"
             root.mkdir()

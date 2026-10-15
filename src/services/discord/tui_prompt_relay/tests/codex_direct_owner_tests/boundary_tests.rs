@@ -65,6 +65,8 @@ fn publish_stop(tmux: &str, turn: &str) {
 struct Fixture {
     shared: Arc<SharedData>,
     http: Arc<serenity::Http>,
+    automatic: bool,
+    hook_probe: Arc<super::super::super::hook_observer::HookObserverProbe>,
     codex: CodexChannel,
     requests: Requests,
     /// Message POSTs still to be rejected.
@@ -86,8 +88,26 @@ impl Fixture {
 
     /// `resume`: a restarted process — the rollout stays and the binding cursor sits at its end.
     async fn start_with(root: &Path, channel: u64, tmux: &str, resume: bool) -> Self {
+        Self::start_inner(
+            root,
+            channel,
+            tmux,
+            resume,
+            crate::services::discord::make_shared_data_for_tests(),
+            false,
+        )
+        .await
+    }
+
+    async fn start_inner(
+        root: &Path,
+        channel: u64,
+        tmux: &str,
+        resume: bool,
+        mut shared: Arc<SharedData>,
+        automatic: bool,
+    ) -> Self {
         enable_session_bound_delivery();
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
         // The observer announces direct input through the notify utility bot.
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         Arc::get_mut(&mut shared)
@@ -123,19 +143,30 @@ impl Fixture {
             .await;
         let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
         let observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-        // The production hook observer; the test relays each published event itself.
+        // The PG entry test uses production's callback; other scenarios relay observations explicitly.
         let (hooks, hook_rx) = tokio::sync::broadcast::channel(64);
+        let hook_probe = Arc::new(super::super::super::hook_observer::HookObserverProbe::default());
+        let relay_shared = shared.clone();
         super::super::super::hook_observer::spawn_tui_prompt_relay_observer_inner(
             "codex".to_string(),
             hook_rx,
-            |_| Box::pin(async {}),
-            None,
+            move |prompt| {
+                let shared = relay_shared.clone();
+                Box::pin(async move {
+                    if automatic {
+                        super::super::super::relay_observed_prompt(&shared, prompt).await;
+                    }
+                })
+            },
+            Some(hook_probe.clone()),
         );
         super::super::super::CODEX_IDLE_ROLLOUT_RELAY_STARTED.store(false, Ordering::Release);
         super::super::super::spawn_codex_idle_rollout_relay(shared.clone());
         Self {
             shared,
             http,
+            automatic,
+            hook_probe,
             codex,
             requests,
             failing_posts,

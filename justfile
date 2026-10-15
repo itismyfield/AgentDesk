@@ -201,22 +201,29 @@ test-postgres-shard:
     set -euo pipefail
     python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
     test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
-    source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+    source scripts/ci/non-pg-test-filter.sh && run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
     pg_selection_status=$?
     if [ "$pg_selection_status" != 0 ]; then exit "$pg_selection_status"; fi
     if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
     # The routing test keeps these targets identical to the unsharded recipe.
-    cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
-    cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
-    cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
-    cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
-    cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
-    cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
-    cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
 # The first command of test-postgres alone.
 test-postgres-selection:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
     source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
+# H9-W waits out the real H, POST timeout and F (over 200 s), so CI selection skips it; it runs
+# only by this exact name, forcing through the `agentdesk` binary built from the same tree.
+test-s3-h9w:
+    @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    cargo build --bin agentdesk
+    ADK_S3_AGENTDESK_BIN="${CARGO_TARGET_DIR:-target}/debug/agentdesk" cargo test --lib services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg -- --exact --ignored --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

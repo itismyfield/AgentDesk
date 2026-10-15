@@ -483,6 +483,13 @@ impl ChannelMailboxRegistry {
 mod closed_gate_tests;
 
 #[cfg(test)]
+#[path = "recovery_custody/mod.rs"]
+pub(crate) mod recovery_custody;
+#[cfg(test)]
+#[path = "recovery_registry/mod.rs"]
+pub(crate) mod recovery_registry;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::time::Instant;
