@@ -72,7 +72,7 @@ fn codex_o_replays_restored_parked_input_without_legacy_body() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed; 0 ignored"));
         return;
     }
-    let _env_lock = acquire_shared_test_env_lock();
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _state_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     dedupe::reset_state_for_tests();
