@@ -9,12 +9,6 @@ pub(in crate::services::discord) fn operator_disposition_remove_pinned(
 ) -> (GuardedClearOutcome, Option<InflightTurnState>) {
     remove_pinned_under_lock(guard.state_path(), expected)
 }
-pub(in crate::services::discord) fn operator_disposition_remove_borrowed(
-    guard: &crate::services::discord::inflight::BorrowedInflightRow<'_>,
-    expected: &InflightEpisodePin,
-) -> (GuardedClearOutcome, Option<InflightTurnState>) {
-    remove_pinned_under_lock(guard.state_path(), expected)
-}
 fn remove_pinned_under_lock(
     path: &std::path::Path,
     expected: &InflightEpisodePin,

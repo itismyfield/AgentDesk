@@ -158,7 +158,7 @@ async fn run_tail(
     let decision = match (commit.ticket.decision(), commit.actor()) {
         (Some(decided), _) => decided,
         (None, Some(actor)) => {
-            let voice = shared.voice_barge_in.deferred_drainable(provider, channel);
+            let voice = shared.voice_barge_in.deferred_drainable();
             let capture = commit.capture(shared, channel, voice);
             actor.claim_policy_tail(commit.ticket(), capture).await
         }

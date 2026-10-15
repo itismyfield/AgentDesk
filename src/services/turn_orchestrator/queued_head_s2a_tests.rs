@@ -231,8 +231,10 @@ fn s2a_adopted_actor_rechecks_a_corrupt_file_before_other_writes() {
     });
 }
 
+/// Purge refuses an unresolved head before any mutation; an explicit clear discards it with the
+/// queue and the active turn, and the held ticket's later settle revives neither.
 #[test]
-fn s2a_unresolved_head_refuses_clear_and_purge_before_any_mutation() {
+fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
     let _root = root();
     run(async {
         for (index, phase) in ["reserved", "may_have_sent", "unknown"]
@@ -290,20 +292,6 @@ fn s2a_unresolved_head_refuses_clear_and_purge_before_any_mutation() {
             .unwrap();
             let marker = path(channel).with_extension("dispatch");
             let marker_before = std::fs::read(&marker).unwrap();
-            let cleared = handle.clear(ctx()).await;
-            assert!(cleared.persistence_error.is_some(), "{phase}");
-            assert!(cleared.removed_token.is_none());
-            assert!(
-                cleared.queue_exit_events.is_empty() && cleared.discarded_message_ids.is_empty()
-            );
-            assert_eq!(queue(&handle).await, before_queue, "{phase}");
-            assert_eq!(bytes(channel), before, "{phase}");
-            assert!(
-                tokio::time::timeout(Duration::from_millis(10), signal.wait())
-                    .await
-                    .is_err(),
-                "a refused clear cannot signal the holder finished: {phase}"
-            );
             let purged = handle.purge_queue(ctx(), true).await;
             assert!(purged.input_refusal.is_some(), "{phase}");
             assert_eq!((purged.drained, purged.disk_files_removed), (0, 0));
@@ -311,12 +299,48 @@ fn s2a_unresolved_head_refuses_clear_and_purge_before_any_mutation() {
             assert_eq!(queue(&handle).await, before_queue, "{phase}");
             assert_eq!(bytes(channel), before, "{phase}");
             assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
-            assert_eq!(std::fs::read(&other).unwrap(), b"[]");
             let after = handle.snapshot().await;
             assert!(Arc::ptr_eq(after.cancel_token.as_ref().unwrap(), &token));
             assert_eq!(after.active_user_message_id, Some(MessageId::new(901)));
             assert_eq!(after.active_request_owner, Some(UserId::new(9)));
-            drop(held);
+
+            let cleared = handle.clear(ctx()).await;
+            assert_eq!(cleared.persistence_error, None, "{phase}");
+            assert!(cleared.removed_token.is_some());
+            let (head_id, behind) = (head.message_id, MessageId::new(230 + index as u64));
+            let reclaimed = MessageId::new(999);
+            for id in [head_id, behind, MessageId::new(901), reclaimed] {
+                assert!(cleared.discarded_message_ids.contains(&id), "{phase}: {id}");
+            }
+            let kinds: Vec<_> = cleared.queue_exit_events.iter().map(|e| e.kind).collect();
+            assert_eq!(kinds, [QueueExitKind::Superseded; 3], "{phase}");
+            assert!(
+                !marker.exists(),
+                "{phase}: the marker's input left with the queue"
+            );
+            assert_eq!(
+                bytes(channel),
+                b"[]",
+                "{phase}: the cleared snapshot is empty"
+            );
+            assert_eq!(std::fs::read(&other).unwrap(), b"[]");
+            tokio::time::timeout(Duration::from_millis(25), signal.wait())
+                .await
+                .expect("a clear signals the released holder finished");
+            if let Some(ticket) = held {
+                let outcome = match phase {
+                    "reserved" => HeadOutcome::MayHaveSent,
+                    _ => HeadOutcome::Injected,
+                };
+                let settled = handle.settle_queued_head(ticket, outcome, ctx()).await;
+                assert!(matches!(settled, HeadSettle::Stale), "{phase}");
+            }
+            assert!(queue(&handle).await.is_empty(), "{phase}");
+            assert_eq!(bytes(channel), b"[]", "{phase}");
+            let next = human(240 + index as u64, 8, "next");
+            assert!(handle.enqueue(next.clone(), ctx()).await.enqueued);
+            let taken = handle.take_next_soft(ctx()).await.intervention;
+            assert_eq!(taken.map(|item| item.message_id), Some(next.message_id));
         }
     });
 }
@@ -565,8 +589,10 @@ fn s2a_boot_loader_counts_quarantined_channels_even_without_restorable_items() {
     });
 }
 
+/// Metadata changed outside its owner refuses a queue write; an explicit clear replaces it with an
+/// empty queue that keeps the submitted sources.
 #[test]
-fn s2a_changed_terminal_metadata_is_not_overwritten_by_an_adopted_actor() {
+fn s2a_changed_metadata_refuses_a_queue_write_and_a_clear_replaces_it() {
     let _root = root();
     run(async {
         let channel = ChannelId::new(6_813_271);
@@ -588,8 +614,16 @@ fn s2a_changed_terminal_metadata_is_not_overwritten_by_an_adopted_actor() {
                 .is_some()
         );
         assert_eq!(bytes(channel), before);
-        assert!(handle.clear(ctx()).await.persistence_error.is_some());
-        assert_eq!(bytes(channel), before);
+        let cleared = handle.clear(ctx()).await;
+        assert_eq!(cleared.persistence_error, None);
+        assert!(cleared.discarded_message_ids.contains(&head.message_id));
+        let written = disk(channel);
+        assert_eq!(written["items"], serde_json::json!([]));
+        assert!(written["head_injection"].is_null());
+        assert_eq!(
+            written["terminal_identities"],
+            changed["terminal_identities"]
+        );
     });
 }
 

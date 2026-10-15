@@ -47,10 +47,8 @@ fn row(channel: u64, panel: bool) -> InflightTurnState {
     );
     if panel {
         row.status_message_id = Some(channel + 2);
-        row.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
-        row.claude_e_pid = Some(u32::MAX - 1);
-        row.claude_e_process_starttime = Some(1);
-        row.claude_e_macos_lstart_hash = Some(1);
+        row.runtime_kind = Some(RuntimeHandoffKind::LegacyTmuxWrapper);
+        row.tmux_session_name = Some(format!("u45-dead-owner-{channel}"));
     }
     row
 }
@@ -64,13 +62,31 @@ fn seed(row: &InflightTurnState, age: i64) -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inline_panel_rechecks_retirement_after_owner_probe() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let shared = crate::services::discord::make_shared_data_for_tests();
+async fn inline_panel_rechecks_retirement_after_owner_probe(
+    pool: &sqlx::PgPool,
+    shared: &Arc<SharedData>,
+) {
+    use crate::services::discord::host_teardown_gate::test_support::{
+        Stored, channel_key, seed as seed_host,
+    };
     let discord = MockDiscord::start().await;
     for (channel, retire) in [(6_325_502_001, true), (6_325_502_002, false)] {
         let row = row(channel, true);
+        let name = row.tmux_session_name.as_deref().unwrap();
+        seed_host(
+            pool,
+            &channel_key(shared, name),
+            name,
+            channel,
+            Stored::Legacy,
+        )
+        .await;
+        let _host = crate::services::session_host::test_support::InjectedLivenessGuard::set(
+            crate::services::session_host::HostSessionRef::tmux(
+                row.tmux_session_name.as_deref().unwrap(),
+            ),
+            crate::services::session_host::HostLiveness::DeadOrAbsent,
+        );
         let path = seed(&row, 3600);
         let before = fingerprint(&path);
         let barrier = Arc::new(ProbeBarrier::default());
@@ -263,6 +279,8 @@ async fn tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg() {
             );
         }
     }
+    #[cfg(unix)]
+    inline_panel_rechecks_retirement_after_owner_probe(&pool, &shared).await;
     pool.close().await;
     db.drop().await;
 }

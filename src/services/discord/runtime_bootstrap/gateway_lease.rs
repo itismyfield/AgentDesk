@@ -475,11 +475,8 @@ fn create_gateway_self_fence_restart_request(
 async fn self_fence_gateway(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    gate: &Arc<crate::services::tui_o::ownership::OwnershipGate>,
     shard_manager: &Arc<serenity::gateway::ShardManager>,
 ) {
-    // Yield and loss both land here after their gate transition; Home-owned approvals stay.
-    crate::services::discord::turn_presence::entrypoints::withdraw_gateway(gate, "gateway_lost");
     // A memory-only restart flag is insufficient in cluster mode: after the
     // gateway task returns, dcserver intentionally remains alive as a standby,
     // so launchd never gets an exit to restart. Publish the same durable marker
@@ -612,7 +609,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                                 let _ = release_gateway(&gate, lease.unlock()).await;
                             }
                             let (shared, provider) = (&shared_for_lease, &provider_for_lease);
-                            self_fence_gateway(shared, provider, &gate, &shard_manager).await;
+                            self_fence_gateway(shared, provider, &shard_manager).await;
                             return;
                         }
                     }
@@ -634,9 +631,6 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         );
                         gate.uncertain();
                         current_lease = None;
-                        let withdraw =
-                            crate::services::discord::turn_presence::entrypoints::withdraw_gateway;
-                        withdraw(&gate, "gateway_uncertain");
                     }
                 }
             }
@@ -683,7 +677,7 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                     );
                     let (shared, provider) = (&shared_for_lease, &provider_for_lease);
                     gate.lost();
-                    self_fence_gateway(shared, provider, &gate, &shard_manager).await;
+                    self_fence_gateway(shared, provider, &shard_manager).await;
                     return;
                 }
             }

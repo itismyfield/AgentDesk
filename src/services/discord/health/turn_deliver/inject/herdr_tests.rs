@@ -2,6 +2,7 @@
 //! the Bound execution on an in-process Herdr socket, a scripted tmux kept untouched, and PG.
 #![cfg(unix)]
 
+use std::io::Write;
 use std::sync::Arc;
 
 use poise::serenity_prelude::{self as serenity, ChannelId};
@@ -18,6 +19,7 @@ use crate::services::discord::{SharedData, router};
 use crate::services::herdr_admission::{Admission, force_for_test};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
+use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 
 const BORDER: &str = "────────────────────────────────────────────────────────────";
 const BUSY_SCREEN: &str = "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n\n";
@@ -123,6 +125,38 @@ async fn herdr_channel(
     pane
 }
 
+/// What Claude records in the channel transcript once a pasted frame's Enter reaches the pane.
+#[derive(Clone, Copy, Debug)]
+enum Logged {
+    Exact,
+    /// Another body under the frame's header, as a submit mixed with other keys.
+    OtherBody,
+}
+
+/// Claude logs each pasted frame as `logged` when its Enter arrives, as it records a queued prompt.
+fn claude_logs(rig: &HerdrRig, pane: &InjectPane, logged: Logged) {
+    let transcript = pane.path("transcript.jsonl");
+    let mut pasted = String::new();
+    rig.on_send(move |params| {
+        if let Some(text) = params["text"].as_str() {
+            let text = text.trim_start_matches("\u{1b}[200~");
+            pasted = text.trim_end_matches("\u{1b}[201~").to_string();
+            return;
+        }
+        if params["keys"] != json!(["enter"]) {
+            return;
+        }
+        let content = match logged {
+            Logged::Exact => pasted.clone(),
+            Logged::OtherBody => format!("{pasted}\nand more"),
+        };
+        let record = json!({"type": "queue-operation", "operation": "enqueue",
+            "content": content, "sessionId": "5340", "timestamp": "2026-10-15T00:00:00.000Z"});
+        let mut file = std::fs::OpenOptions::new().append(true).open(&transcript);
+        writeln!(file.as_mut().unwrap(), "{record}").unwrap();
+    });
+}
+
 fn request(channel: u64) -> HumanInputRequest {
     HumanInputRequest {
         channel_id: ChannelId::new(channel),
@@ -135,8 +169,8 @@ fn request(channel: u64) -> HumanInputRequest {
     }
 }
 
-/// A busy Herdr turn takes the input as one gated paste and Enter on its pane; no tmux command
-/// runs, and a channel without Herdr still pastes through its tmux session.
+/// A busy Herdr turn takes the input as one gated paste and Enter on its pane and Claude logs that
+/// frame; no tmux command runs, and a channel without Herdr still pastes through its tmux session.
 #[test]
 fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -150,6 +184,7 @@ fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
         let registry = HealthRegistry::new();
         let shared = register_inject_runtime(&registry, &[herdr, plain], Some(pool.clone())).await;
         let pane = herdr_channel(&rig, &pool, &shared.token_hash, herdr).await;
+        claude_logs(&rig, &pane, Logged::Exact);
         let delivered = deliver_human_input(&registry, request(herdr)).await;
         assert!(
             matches!(delivered, Ok(HumanInputDelivery::Injected { .. })),
@@ -175,6 +210,42 @@ fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
         );
         assert_eq!(tmux.keys(), ["paste-buffer", "send-keys"]);
         assert_eq!(rig.sends().len(), 2);
+    });
+}
+
+/// The server's ACK of the paste and Enter without the exact frame in the transcript stays
+/// unconfirmed under tmux's reason names; the input is neither queued nor sent again.
+#[test]
+fn herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (unlogged, mixed) = (5_340_813, 5_340_814);
+    let channels = [(unlogged, NODE), (mixed, NODE)];
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &channels);
+    runtime().block_on(async {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let registry = HealthRegistry::new();
+        let ids = [unlogged, mixed];
+        let shared = register_inject_runtime(&registry, &ids, Some(pool.clone())).await;
+        for (channel, logged, reason) in [
+            (unlogged, None, "not_observed"),
+            (mixed, Some(Logged::OtherBody), "contaminated_submit"),
+        ] {
+            let rig = HerdrRig::start();
+            let _registry = rig.registry_on_this_thread();
+            let pane = herdr_channel(&rig, &pool, &shared.token_hash, channel).await;
+            if let Some(logged) = logged {
+                claude_logs(&rig, &pane, logged);
+            }
+            let delivered = deliver_human_input(&registry, request(channel)).await;
+            match delivered {
+                Ok(HumanInputDelivery::Unconfirmed { detail, .. }) => assert_eq!(detail, reason),
+                other => panic!("{logged:?}: {other:?}"),
+            }
+            assert_eq!(rig.sends().len(), 2, "{:?}", rig.sends());
+            assert_eq!(pane.tmux_calls(), 0);
+            assert!(queue_texts(&shared, channel).await.is_empty());
+        }
     });
 }
 
@@ -261,8 +332,8 @@ async fn try_busy(shared: &Arc<SharedData>, channel: u64) -> bool {
     try_busy(&deps, &ProviderKind::Claude, channel, gate, "herdr_test").await
 }
 
-/// Live intake keeps passing over a Herdr channel, but the queued head there reaches the Bound
-/// pane once through the gate and only the head leaves the queue; a tmux channel types as before.
+/// Live intake passes over a Herdr channel, but its queued head reaches the Bound pane once and,
+/// logged by Claude, only the head leaves the queue; a tmux channel types as before.
 #[test]
 fn queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -276,6 +347,7 @@ fn queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg() {
         let registry = HealthRegistry::new();
         let shared = register_inject_runtime(&registry, &[herdr, plain], Some(pool.clone())).await;
         let pane = herdr_channel(&rig, &pool, &shared.token_hash, herdr).await;
+        claude_logs(&rig, &pane, Logged::Exact);
         let tmux = InjectPane::new(plain, "external");
         let _gates = [herdr, plain].map(router::busy_inject_support::open_gate);
         for (channel, live) in [(herdr, false), (plain, true)] {
@@ -350,5 +422,64 @@ fn queued_herdr_head_stays_queued_when_the_execution_changes_before_the_paste_pg
         assert!(rig.sends().is_empty(), "{:?}", rig.sends());
         assert_eq!(pane.tmux_calls(), 0);
         assert_eq!(queue_texts(&shared, channel).await, ["status?", "tail B"]);
+    });
+}
+
+/// The channel's persisted queue, as a restarted reader loads it.
+fn queue_file(shared: &SharedData, channel: u64) -> Value {
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("claude")
+        .join(&shared.token_hash)
+        .join(format!("{channel}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// A queued Herdr head whose ACKed paste and Enter Claude did not log exactly stays UNKNOWN at the
+/// front: it is never typed again and no reader, restarted or not, reaches the tail behind it.
+#[test]
+fn queued_herdr_head_without_the_exact_receipt_stays_unknown_and_holds_the_tail_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (unlogged, mixed) = (5_340_844, 5_340_845);
+    let channels = [(unlogged, NODE), (mixed, NODE)];
+    let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &channels);
+    runtime().block_on(async {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let registry = HealthRegistry::new();
+        let ids = [unlogged, mixed];
+        let shared = register_inject_runtime(&registry, &ids, Some(pool.clone())).await;
+        for (channel, logged) in [(unlogged, None), (mixed, Some(Logged::OtherBody))] {
+            let rig = HerdrRig::start();
+            let _registry = rig.registry_on_this_thread();
+            let pane = herdr_channel(&rig, &pool, &shared.token_hash, channel).await;
+            if let Some(logged) = logged {
+                claude_logs(&rig, &pane, logged);
+            }
+            let _gate = router::busy_inject_support::open_gate(channel);
+            test_hook::set_queued_head(channel, true);
+            enqueue(&registry, &shared, channel, &["status?", "tail B"]).await;
+
+            assert!(try_busy(&shared, channel).await, "{logged:?}");
+            assert_eq!(rig.sends().len(), 2, "{:?}", rig.sends());
+            let disk = queue_file(&shared, channel);
+            assert_eq!(disk["head_injection"]["phase"], "unknown", "{logged:?}");
+            assert_eq!(disk["terminal_identities"], json!([]), "{logged:?}");
+            assert_eq!(queue_texts(&shared, channel).await, ["status?", "tail B"]);
+
+            try_busy(&shared, channel).await;
+            assert_eq!(rig.sends().len(), 2, "UNKNOWN never types the head again");
+            assert_eq!(queue_file(&shared, channel), disk, "{logged:?}");
+            let persistence = crate::services::discord::queue_persistence_context(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(channel),
+            );
+            let restarted = ChannelMailboxRegistry::default().handle(ChannelId::new(channel));
+            let take = restarted.take_next_soft(persistence).await;
+            assert!(take.intervention.is_none(), "{logged:?} reached the tail");
+            assert_eq!(queue_texts(&shared, channel).await, ["status?", "tail B"]);
+            assert_eq!(pane.tmux_calls(), 0);
+        }
     });
 }

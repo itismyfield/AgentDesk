@@ -588,6 +588,9 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        let verified = crate::services::tui_prompt_dedupe::codex_verified::historical_source_proven(
+            event, &new,
+        );
         // A source an earlier event of this batch attached is the stored name of its file now.
         let mut stored = |source: &SourceId| self.names.bind_name(writer.store(), source);
         let old = old.map(&mut stored).transpose()?;
@@ -614,7 +617,11 @@ impl<B: BindingEvents> Sources<B> {
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
             let unread = past_bind::unread_before(log, event.seq, &new, attached);
-            let boundary = past_bind::first_boundary(cause, parent.is_some(), unread);
+            let boundary = if verified {
+                Boundary::Owed { from: 0 }
+            } else {
+                past_bind::first_boundary(cause, parent.is_some(), unread)
+            };
             if matches!(boundary, Boundary::Pending { .. }) {
                 let source = new.clone();
                 writer.alarm(WriterAlarm::BoundaryPending { source });
@@ -710,89 +717,6 @@ impl<B: BindingEvents> Sources<B> {
         self.flush(writer)?;
         if let Some(source) = self.stalled(deriver) {
             return Err(WriterAlarm::RotationStalled { source });
-        }
-        Ok(())
-    }
-
-    fn capture_one<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        deriver: &mut UnitDeriver,
-        owed: &mut impl Owe,
-        index: usize,
-    ) -> Result<(), WriterAlarm> {
-        if self.reader_config.is_some() && self.readers[index].watch_until.is_none() {
-            let reader = &self.readers[index];
-            if reader.capture.is_none() && (reader.drain_to.is_some() || reader.pending.is_some()) {
-                return Err(halt(
-                    "reader without an FD still holds a capture obligation",
-                ));
-            }
-        }
-        let reader = &mut self.readers[index];
-        let Some(capture) = reader
-            .capture
-            .as_mut()
-            .filter(|_| reader.watch_until.is_none())
-        else {
-            if self.reader_config.is_none() {
-                reader.drain_to = None;
-            }
-            return Ok(());
-        };
-        let retried = reader.pending.is_some();
-        let batch = match reader.pending.take() {
-            Some(batch) => batch,
-            None => match capture.poll(MAX_READ_BYTES) {
-                CaptureOutcome::Batch(batch) => batch,
-                CaptureOutcome::Anomaly(anomaly) => {
-                    let (kind, detail) = (anomaly.kind, anomaly.detail);
-                    if self.reader_config.is_some() && kind == SourceAnomalyKind::Missing {
-                        return self.cleanup_missing(writer, index, SystemTime::now());
-                    }
-                    return Err(halt(format!("source {kind:?}: {detail}")));
-                }
-            },
-        };
-        let read_through = capture.read_through();
-        let at_end = capture.file_len().ok() == Some(capture.captured_through());
-        let first_capture = !reader.captured_any && !batch.records.is_empty();
-        match writer.store().append_spool(&batch, &capture.prefix_hash()) {
-            Ok(()) => reader.captured_any |= !batch.records.is_empty(),
-            Err(StoreError::SpoolFull) => {
-                if !retried {
-                    writer.alarm(WriterAlarm::SpoolFull);
-                }
-                reader.pending = Some(batch);
-                return Ok(());
-            }
-            Err(error) => return Err(halt(format!("spool append: {error:?}"))),
-        }
-        if !reader.drain_to.is_some_and(|end| read_through < end) {
-            reader.drain_to = None;
-        }
-        if first_capture && self.reader_config.is_some() {
-            for old in &mut self.readers {
-                if self
-                    .rotation
-                    .successors
-                    .get(&source_key(&old.source))
-                    .is_some_and(|next| next.source == batch.source)
-                {
-                    old.quiet = None;
-                }
-            }
-        }
-        let key = source_key(&batch.source);
-        let store = writer.store();
-        self.sync_parent(&key, |parent| {
-            store.cursor(parent).map(|c| c.captured_through)
-        });
-        for record in &batch.records {
-            self.owe(deriver, owed, &batch.source, record);
-        }
-        if at_end {
-            self.pend_at_end(&key, batch.captured_through);
         }
         Ok(())
     }
@@ -982,3 +906,5 @@ pub(crate) mod probe {
             .map(|w| w.observed_at)
     }
 }
+
+mod retained_capture;

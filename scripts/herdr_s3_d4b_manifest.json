@@ -9,20 +9,26 @@
     "prepared_as_zero", "unsealed_as_zero", "binding_pending_as_zero", "drain_ignores_running_posts",
     "accepts_ignores_home", "orphan_read_opens_gate", "skip_post_abort_join", "posts_unreadable_as_zero",
     "release_ignores_reset_refusal", "release_skips_reset", "release_refused_changes_detail",
-    "release_before_reset", "boot_skips_releasing_drain"
+    "release_before_reset", "boot_skips_releasing_drain", "reconcile_as_channel_restored",
+    "restored_always_true", "standby_skips_persisted_restore", "standby_marks_restored_before_restore"
   ],
   "cases": [
     {"id": "H6-1", "profile": "now", "piece": 4, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg"],
      "what": "worker holder restart on the same root rehydrates its O store and posts each owed piece once"},
-    {"id": "H6-2a", "profile": "after", "piece": 6, "status": "blocked:B3b-4/5/6 standby persisted-turn restore not done", "tests": [],
-     "what": "reclaiming standby holder restores persisted turns before its drain leaves"},
+    {"id": "H6-2a", "profile": "after", "piece": 6, "status": "implemented",
+     "tests": ["services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg"],
+     "what": "a rebooted standby holder restores its channel's persisted input before its drain reads turns as known, and does not leave while turn, queue, owed or POST remain",
+     "evidence_scope": "one process through the production start_channel_homes(Standby) over real PG and a real runtime root: two reclaiming rows held by this node, one with a queue left on disk, one with a corrupt placeholder file; checks the drain blocker turn_unreadable, turn_running, owed_unreadable and the failed restore staying turn_unreadable with both rows Reclaiming. No writer actor runs, so owed stays unreadable and the Reclaimed CAS is not reached; that and an inflight-row restore are left to the s3fence acceptance step in s3_real"},
     {"id": "H6-2b", "profile": "now", "piece": 6, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg"],
      "what": "releasing gateway holder restarts and leaves only through an allowed reset",
      "evidence_scope": "two GW process generations: the first dies inside the reset call; checks the injected LegacyReset's refuse/apply/retry order through real PG, boot watch and drain; Applied is the callback's Ok(()) and shows no managed-session reset, provider-session delete, process cleanup or their idempotence"},
-    {"id": "H6-3a", "profile": "after", "piece": 6, "status": "blocked:B3b-6 released-target runtime adopt driver not wired", "tests": [],
-     "what": "released target adopts through the runtime driver, not a test-side DB adopt"},
+    {"id": "H6-3a", "profile": "after", "piece": 6, "status": "implemented",
+     "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg",
+               "services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg"],
+     "what": "released target adopts through the runtime driver, not a test-side DB adopt",
+     "evidence_scope": "the target's boot watch over real PG with the runtime's BootPort::reading port, and the REST worker's start_channel_homes; the release is seeded in PG, the adopt is the watch's; unrestored, two renewal periods leave the row released"},
     {"id": "H6-3b", "profile": "after", "piece": 6, "status": "blocked:B3b-6 reclaimed gateway writer/readiness/POST return not wired", "tests": [],
      "what": "reclaimed return brings the gateway writer, readiness and POST back"},
     {"id": "H6-4", "profile": "now", "piece": 4, "status": "implemented",
@@ -91,6 +97,14 @@
     {"name": "release_skips_reset", "cases": ["H6-2b", "H7-R"], "at": "cluster/channel_home_drain.rs releasing reset call removed"},
     {"name": "release_refused_changes_detail", "cases": ["H6-2b", "H7-R"], "at": "cluster/channel_home_drain.rs releasing reset Err writes detail"},
     {"name": "release_before_reset", "cases": ["H6-2b", "H7-R"], "at": "cluster/channel_home_drain.rs finish_release before the reset"},
-    {"name": "boot_skips_releasing_drain", "cases": ["H6-2b"], "at": "cluster/channel_home_boot.rs watch drains Reclaiming only"}
+    {"name": "boot_skips_releasing_drain", "cases": ["H6-2b"], "at": "cluster/channel_home_boot.rs watch drains Reclaiming only"},
+    {"name": "reconcile_as_channel_restored", "cases": ["H6-2a"], "at": "runtime_bootstrap/queued_recovery.rs standby port reads reconcile_done"},
+    {"name": "restored_always_true", "cases": ["H6-2a"], "at": "cluster/channel_home_boot.rs restore_settled installs nothing yet marks restored"},
+    {"name": "standby_skips_persisted_restore", "cases": ["H6-2a"], "at": "cluster/channel_home_boot.rs restore_settled skips the restore"},
+    {"name": "standby_marks_restored_before_restore", "cases": ["H6-2a"], "at": "cluster/channel_home_boot.rs restore_settled marks restored first"},
+    {"name": "target_skips_adopt", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch released-target adopt branch removed"},
+    {"name": "adopt_ignores_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch restored condition inverted"},
+    {"name": "reading_drops_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs BootPort::reading without restored_by"},
+    {"name": "bootstrap_port_ignores_role_flag", "cases": ["H6-3a"], "at": "discord/runtime_bootstrap.rs start_channel_homes port given a fresh flag"}
   ]
 }

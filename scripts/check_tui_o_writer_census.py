@@ -123,7 +123,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "commands/config.rs": {".say": 12, "send_long_message*": 1},
     "commands/control.rs": {".say": 14, "send_long_message*": 1},
     "commands/control/home_fence.rs": {".say": 1},
-    "commands/control/input_clear.rs": {".say": 1},
     "commands/diagnostics/mod.rs": {".say": 9, "send_long_message*": 7},
     "commands/fast_mode.rs": {".say": 2},
     "commands/goals.rs": {".say": 2},
@@ -234,7 +233,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "voice_barge_in/progress_playback.rs": {"send_channel_message*": 1},
     "voice_barge_in/routing.rs": {"send_channel_message*": 1},
     "voice_barge_in/runtime_lifecycle.rs": {".say": 1},
-    "voice_barge_in/utterance_pipeline.rs": {"send_channel_message*": 1},
 }
 # file (relative to PRIMITIVE_ROOT): (census rows, target[, gate file]).
 CENSUS: dict[str, tuple[str, ...]] = {
@@ -243,7 +241,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "commands/config.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control.rs": ("CMD", "KEEP_NONBODY"),
     "commands/control/home_fence.rs": ("CMD", "KEEP_NONBODY"),
-    "commands/control/input_clear.rs": ("CMD", "KEEP_NONBODY"),
     "commands/diagnostics/mod.rs": ("CMD", "KEEP_NONBODY"),
     "commands/fast_mode.rs": ("CMD", "KEEP_NONBODY"),
     "commands/goals.rs": ("CMD", "KEEP_NONBODY"),
@@ -362,7 +359,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/progress_playback.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/routing.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
-    "voice_barge_in/utterance_pipeline.rs": ("1-D-notice", "KEEP_NONBODY"),
 }
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.

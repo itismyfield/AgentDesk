@@ -162,19 +162,9 @@ pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
     if !provider_has_jsonl {
         return false;
     }
-    // Phase 1 of the claude-e rollout: `ClaudeEAdapter` is grouped with the
-    // non-JSONL runtimes because the adapter streams stream-json directly
-    // through `sender` (no on-disk transcript file — `output_path` stays
-    // empty on the `RuntimeHandoff::ClaudeEAdapter` variant). The TUI
-    // turn-state probes read JSONL from disk, so they have nothing to
-    // poll for this adapter. See `docs/claude-e-rollout/`.
     !matches!(
         runtime_kind,
-        Some(
-            RuntimeHandoffKind::LegacyTmuxWrapper
-                | RuntimeHandoffKind::ProcessBackend
-                | RuntimeHandoffKind::ClaudeEAdapter
-        )
+        Some(RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend)
     )
 }
 
@@ -254,18 +244,10 @@ pub(crate) fn runtime_binding_ready_for_input(
     if !provider_runtime_has_structured_jsonl_turn_state(provider, Some(binding.runtime_kind)) {
         return None;
     }
-    // Phase 1 of the claude-e rollout. The adapter streams JSONL
-    // through the in-memory `sender` channel and does NOT write a
-    // transcript file, so there is no on-disk path to probe.
-    // Phase 1.x may add a sidecar transcript for recovery-engine
-    // support; at that point this arm would return that path
-    // instead of falling through to `None`.
     let path = match binding.runtime_kind {
         RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
         RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),
-        RuntimeHandoffKind::LegacyTmuxWrapper
-        | RuntimeHandoffKind::ProcessBackend
-        | RuntimeHandoffKind::ClaudeEAdapter => return None,
+        RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
     };
     jsonl_ready_for_input(
         provider,
@@ -285,9 +267,7 @@ pub(crate) fn runtime_binding_turn_state(
     let path = match binding.runtime_kind {
         RuntimeHandoffKind::ClaudeTui => Path::new(binding.relay_output_path()),
         RuntimeHandoffKind::CodexTui => Path::new(&binding.output_path),
-        RuntimeHandoffKind::LegacyTmuxWrapper
-        | RuntimeHandoffKind::ProcessBackend
-        | RuntimeHandoffKind::ClaudeEAdapter => return None,
+        RuntimeHandoffKind::LegacyTmuxWrapper | RuntimeHandoffKind::ProcessBackend => return None,
     };
     Some(observe_provider_jsonl_turn_state(provider, path))
 }

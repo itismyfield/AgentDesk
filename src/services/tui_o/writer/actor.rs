@@ -252,35 +252,14 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let mut writer = writer.with_repost_stop(stop.clone());
+    let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
     let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel())
-        || (commands.is_some()
-            && provider == ShadowProvider::Codex
-            && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
-            && crate::services::tui_prompt_dedupe::codex_verified_channel_requires_proof(
-                writer.channel(),
-            )
-            && {
-                let channel = writer.channel();
-                let mut cursors = writer
-                    .store()
-                    .cursors()
-                    .filter(|cursor| !cursor.retired)
-                    .peekable();
-                cursors.peek().is_some()
-                    && cursors.all(|cursor| {
-                        crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
-                            channel,
-                            &cursor.source,
-                        )
-                    })
-            });
+    let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,

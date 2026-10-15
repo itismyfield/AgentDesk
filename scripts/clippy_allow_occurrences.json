@@ -113,22 +113,12 @@
       "count": 1
     },
     {
-      "path": "src/services/auto_queue/planning.rs",
-      "lint": "too_many_arguments",
-      "count": 2
-    },
-    {
       "path": "src/services/claude.rs",
       "lint": "too_many_arguments",
       "count": 6
     },
     {
       "path": "src/services/claude/tui_session_launch.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
-      "path": "src/services/claude_e/process.rs",
       "lint": "too_many_arguments",
       "count": 1
     },
@@ -170,11 +160,6 @@
     {
       "path": "src/services/cluster/stream_relay.rs",
       "lint": "large_enum_variant",
-      "count": 1
-    },
-    {
-      "path": "src/services/cluster/stream_relay.rs",
-      "lint": "too_many_arguments",
       "count": 1
     },
     {
@@ -338,11 +323,6 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/recovery_engine/rebind_runtime.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
       "path": "src/services/discord/recovery_engine/status_panel_completion_producer.rs",
       "lint": "too_many_arguments",
       "count": 1
@@ -425,7 +405,7 @@
     {
       "path": "src/services/discord/router/message_handler/watchdog.rs",
       "lint": "too_many_arguments",
-      "count": 3
+      "count": 2
     },
     {
       "path": "src/services/discord/router/response_format.rs",
@@ -509,11 +489,6 @@
     },
     {
       "path": "src/services/discord/tmux/monitor_auto_turn_inflight.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
-      "path": "src/services/discord/tmux_overload_retry.rs",
       "lint": "too_many_arguments",
       "count": 1
     },
@@ -635,7 +610,7 @@
     {
       "path": "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs",
       "lint": "too_many_arguments",
-      "count": 3
+      "count": 2
     },
     {
       "path": "src/services/discord/tui_prompt_relay/synthetic_start/claim.rs",
@@ -675,7 +650,7 @@
     {
       "path": "src/services/discord/turn_bridge/status_panel.rs",
       "lint": "too_many_arguments",
-      "count": 4
+      "count": 3
     },
     {
       "path": "src/services/discord/turn_bridge/terminal_controller_cutover.rs",

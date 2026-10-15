@@ -25,8 +25,6 @@ mod incarnation;
 mod injected_inputs;
 #[allow(dead_code)]
 pub(crate) mod input_fence;
-#[allow(dead_code)]
-pub(crate) mod input_handback;
 mod intervention;
 mod lease_release;
 mod mailbox_observation;
@@ -99,7 +97,6 @@ pub(crate) use pending_queue_persistence::{
 use pending_queue_persistence::{
     cleanup_stale_pending_queue_tmp_files_in_dir, cleanup_stale_pending_queue_tmp_files_under_root,
 };
-#[cfg(test)]
 pub(crate) use pending_queue_persistence::{
     load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };

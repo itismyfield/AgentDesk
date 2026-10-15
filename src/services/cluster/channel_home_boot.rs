@@ -15,6 +15,7 @@ use super::channel_home::{self, RENEW_EVERY};
 pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
+pub(crate) use super::channel_home_port::PersistedInput;
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
@@ -25,12 +26,26 @@ type ResetFuture = Pin<Box<dyn Future<Output = Result<(), ResetRefused>> + Send>
 /// The gateway side's existing session reset for a releasing drain, built by the runtime.
 pub(crate) type LegacyReset = Arc<dyn Fn() -> ResetFuture + Send + Sync>;
 
+type RestoreFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+/// A runtime's restore of one held channel's persisted input; `true` only once it is installed.
+pub(crate) type ChannelRestore = Arc<dyn Fn() -> RestoreFuture + Send + Sync>;
+
+/// The holder's one boot restore and the provider its recovery permit names.
+#[derive(Clone)]
+struct BootRestore {
+    provider: String,
+    run: ChannelRestore,
+    tried: Arc<AtomicBool>,
+}
+
 /// The drain's reads of the channel in this process, the reset its runtime supplies and the
 /// runtime's "persisted turns restored" flag a released channel's adoption waits on.
 pub(crate) struct BootPort<R = ChannelHomePort> {
     reads: Arc<R>,
     reset: LegacyReset,
     restored: Arc<AtomicBool>,
+    restore: Option<BootRestore>,
 }
 
 impl<R> Clone for BootPort<R> {
@@ -41,6 +56,7 @@ impl<R> Clone for BootPort<R> {
             reads,
             reset,
             restored,
+            restore: self.restore.clone(),
         }
     }
 }
@@ -54,6 +70,7 @@ impl<R> BootPort<R> {
             reads,
             reset,
             restored,
+            restore: None,
         }
     }
 
@@ -62,9 +79,55 @@ impl<R> BootPort<R> {
         self
     }
 
+    /// Restores the channel once this node holds it: `restored` turns true only if `run` says so.
+    pub(crate) fn restoring(mut self, provider: &str, run: ChannelRestore) -> Self {
+        let (provider, tried) = (provider.to_owned(), Arc::default());
+        self.restore = Some(BootRestore {
+            provider,
+            run,
+            tried,
+        });
+        self
+    }
+
     fn restored(&self) -> bool {
         self.restored.load(Ordering::Acquire)
     }
+
+    /// Whether the boot restore is settled for `epoch`: none to run, already tried, or run now under
+    /// a recovery permit once the renewal holds it. A failed restore leaves `restored` false.
+    async fn restore_settled(&self, home: &HomeGate, epoch: i64) -> bool {
+        let Some(restore) = &self.restore else {
+            return true;
+        };
+        if restore.tried.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(permit) = home.admit_at_epoch(&restore.provider, epoch, true) else {
+            return false;
+        };
+        restore.tried.store(true, Ordering::Release);
+        #[cfg(test)]
+        if restore_mutant("standby_marks_restored_before_restore") {
+            self.restored.store(true, Ordering::Release);
+        }
+        #[cfg(test)]
+        let installed = restore_mutant("restored_always_true")
+            || (!restore_mutant("standby_skips_persisted_restore") && (restore.run)().await);
+        #[cfg(not(test))]
+        let installed = (restore.run)().await;
+        if installed {
+            self.restored.store(true, Ordering::Release);
+        }
+        drop(permit);
+        true
+    }
+}
+
+/// Test-only mutants of the standby boot restore.
+#[cfg(test)]
+pub(crate) fn restore_mutant(name: &str) -> bool {
+    std::env::var("ADK_S3A_RESTORE_MUTANT").ok().as_deref() == Some(name)
 }
 
 impl BootPort {
@@ -73,6 +136,18 @@ impl BootPort {
         let readiness = crate::services::tui_o::writer::host::process_readiness();
         let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
         Self::new(reads, reset).restored_by(restored)
+    }
+
+    /// [`BootPort::reading`] that also counts the channel's persisted queue and marker as busy.
+    pub(crate) fn reading_persisted(
+        channel: u64,
+        restored: Arc<AtomicBool>,
+        persisted: PersistedInput,
+        reset: LegacyReset,
+    ) -> Self {
+        let readiness = crate::services::tui_o::writer::host::process_readiness();
+        let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
+        Self::new(reads.persisted_by(persisted), reset).restored_by(restored)
     }
 }
 
@@ -259,7 +334,13 @@ where
                     }
                 } else {
                     lease.renew_at(&pool, &home, row.epoch).await;
-                    if matches!(row.state, HomeState::Releasing | HomeState::Reclaiming) {
+                    // The boot restore runs before any drain round reads the channel's turns.
+                    let settled = port.restore_settled(&home, row.epoch).await;
+                    let draining =
+                        matches!(row.state, HomeState::Releasing | HomeState::Reclaiming);
+                    if draining && !settled {
+                        home.note_drain(Some(Blocker::TurnUnreadable.as_str()));
+                    } else if draining {
                         drain::run_drain(pool.clone(), Arc::clone(&home), port.clone()).await;
                     }
                 }

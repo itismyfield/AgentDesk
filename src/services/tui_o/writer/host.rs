@@ -10,11 +10,10 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::activation::{self, ActivationFacts};
+use super::activation::ActivationFacts;
 use super::actor::{self, Demand, Owing, Undelivered};
-use super::adoption::{self, LegacyView};
+use super::adoption::LegacyView;
 use super::binding::BindingEvents;
-use super::deferred;
 use super::deliver::{ChannelWriter, StopCause};
 use super::resume::{self, Backoff};
 use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
@@ -28,6 +27,7 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
+mod first_init;
 mod recover;
 mod transition;
 use recover::{Recovered, recover};
@@ -625,123 +625,20 @@ async fn host_channel<I: HostIo>(
         }
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
-            let log = bindings.insert(io.bindings(channel, provider));
-            if candidate.late_adopt_origin() {
-                let late = super::late_adopt::activate(
-                    &*io, channel, provider, &fresh, &**log, &candidate, &gate,
-                );
-                if unless_stopped(&stopping, late).await != Some(true) {
-                    return;
-                }
-            } else {
-                let held =
-                    provider == ShadowProvider::Claude && adoption::holds_output(&**log, channel);
-                let legacy = held.then(|| io.legacy());
-                if let Some(legacy) = &legacy
-                    && unless_stopped(&stopping, adoption::legacy_started(&**legacy)).await
-                        != Some(true)
-                {
-                    return release(
-                        &candidate,
-                        &alarms,
-                        channel,
-                        "legacy cursor not established",
-                    );
-                }
-                let facts = loop {
-                    if unless_stopped(&stopping, until_owned(&gate))
-                        .await
-                        .is_none()
-                    {
-                        return;
-                    }
-                    let Some(facts) =
-                        unless_stopped(&stopping, io.activation_facts(channel, provider)).await
-                    else {
-                        return;
-                    };
-                    // Facts read before a lost gate are not acted on; wait for Owned and read again.
-                    if owned_now(channel, &gate) {
-                        break facts;
-                    }
-                };
-                let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
-                let created = match legacy {
-                    None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
-                    Some(legacy) => 'held: {
-                        // Sessions on another node or an override end it before an open turn defers it.
-                        let last = facts.as_ref().ok().and_then(ActivationFacts::final_blocker);
-                        if let Some(detail) = last {
-                            return release(&candidate, &alarms, channel, &detail);
-                        }
-                        let events = log.binding_events_since(channel, 0);
-                        let events = events.map_err(|error| format!("binding log: {error}"));
-                        // O's own copy names each file once; the shared log keeps every dev it read.
-                        let events = events.map(super::renumbered::first_named);
-                        let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
-                        let current = events.as_deref().ok().and_then(adoption::current);
-                        let first = deferred::first(&*io, channel, provider, &legacy, events);
-                        let Some(first) = unless_stopped(&stopping, first).await else {
-                            return;
-                        };
-                        let snapshot = match first {
-                            deferred::First::Adopt(snapshot) => snapshot,
-                            deferred::First::Wait(refused) => {
-                                let detail = refused.to_string();
-                                let Some((source, _)) = current else {
-                                    return release(&candidate, &alarms, channel, &detail);
-                                };
-                                if !candidate.defer(channel) {
-                                    return release(&candidate, &alarms, channel, &detail);
-                                }
-                                tracing::info!(channel, %refused, "[tui_o] adoption waits for Legacy");
-                                let waiting = deferred::Waiting {
-                                    io: &*io,
-                                    channel,
-                                    provider,
-                                    candidate: &candidate,
-                                    gate: &*gate,
-                                    store: &fresh,
-                                    log: &**log,
-                                    legacy,
-                                    bound: (source, seq),
-                                    late: false,
-                                };
-                                let retried = deferred::retry(waiting, refused, seq);
-                                if unless_stopped(&stopping, retried).await != Some(true) {
-                                    return;
-                                }
-                                break 'held Ok(());
-                            }
-                            deferred::First::Leave(refused) => {
-                                return release(&candidate, &alarms, channel, &refused.to_string());
-                            }
-                        };
-                        let sources = || {
-                            snapshot
-                                .recheck(&*legacy, &**log, channel)
-                                .map_err(String::from)
-                        };
-                        activation::activate_with(
-                            &fresh, channel, facts, local, &candidate, sources,
-                        )
-                    }
-                };
-                if let Err(detail) = created {
-                    let detail = format!("first activation: {detail}");
-                    return stop(&candidate, &alarms, channel, &detail);
-                }
-            }
-            match recover(&runtime_root, channel, None) {
-                Ok(Recovered::Store(store)) => {
-                    io.adopted(channel, provider);
-                    store
-                }
-                Ok(Recovered::Fresh(_)) => {
-                    return hold(&alarms, channel, "init missing after activation");
-                }
-                Err(error) => return hold(&alarms, channel, &error.detail),
-            }
+            let ids = (channel, provider);
+            let started = first_init::start(
+                &io,
+                ids,
+                &runtime_root,
+                fresh,
+                &candidate,
+                (&gate, &stopping),
+            );
+            let Some(started) = started.await else {
+                return;
+            };
+            bindings = Some(started.bindings);
+            started.store
         }
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
