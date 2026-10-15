@@ -2642,7 +2642,9 @@ services::cluster::intake_worker::home_route_tests::s3_real::harness::scripted_r
 services::cluster::intake_worker::home_route_tests::s3_real::harness::two_processes_append_whole_steps_to_one_lifecycle
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_unregister_during_the_adopt_leaves_one_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg
@@ -7193,6 +7195,7 @@ services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_ar
 services::discord::runtime_bootstrap::bootstrap_tests::startup_doctor_barrier_arrive_handles_prestarted_release_once
 services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_map_includes_agent_voice_channel
 services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_returns_quickly_when_port_is_bound
+services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
 services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
