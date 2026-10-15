@@ -1,5 +1,6 @@
 //! Busy input on a Herdr-hosted Claude channel from the external deliver entry: the channel's
 //! Bound execution on an in-process Herdr socket, a scripted tmux that must stay untouched, and PG.
+#![cfg(unix)]
 
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};

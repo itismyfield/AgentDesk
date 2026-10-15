@@ -77,7 +77,7 @@ pub(super) fn run(
             InputRun::Applied => {
                 tracing::info!(
                     channel_id = input.channel,
-                    herdr_pane = pane.pane_id(),
+                    pane = pane.pane_id(),
                     nonce = %input.nonce,
                     "busy Herdr turn took the human input"
                 );
@@ -124,6 +124,6 @@ fn judge(pane: &HerdrTarget, session: &str, transcript: &Path) -> Result<(), Vet
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "herdr_tests.rs"]
 mod tests;
