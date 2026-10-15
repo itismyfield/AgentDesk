@@ -139,7 +139,7 @@ pub(super) fn buffer_idle_prefix(
 
 /// #3256: the stream-through path commits the runtime-binding offset whenever
 /// the single bridge turn delivered successfully, including empty-response guidance.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 pub(super) fn tui_idle_tail_stream_should_commit_runtime_binding_offset(
     discord_delivery_succeeded: bool,
 ) -> bool {
