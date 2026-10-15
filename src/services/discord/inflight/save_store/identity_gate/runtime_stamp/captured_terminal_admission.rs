@@ -122,6 +122,16 @@ impl CapturedTerminalAdmission {
                 return Err(mismatch);
             }
             binding.session_id = nonempty(Some(&session)).map(str::to_owned);
+            #[cfg(unix)]
+            let parked = ParkedProof::new(
+                &fresh,
+                &captured,
+                &canonical,
+                &session,
+                (source_start, complete_record_end),
+            );
+            #[cfg(not(unix))]
+            let parked: Option<ParkedProof> = None;
             if !can_deliver_directly
                 || local.provider_kind() != Some(provider.clone())
                 || local.runtime_kind != Some(runtime)
@@ -138,6 +148,7 @@ impl CapturedTerminalAdmission {
                     (source_start, complete_record_end),
                     false,
                     runtime,
+                    parked.as_ref(),
                 )
             {
                 return Err(mismatch);
@@ -162,7 +173,7 @@ impl CapturedTerminalAdmission {
             }
             let before_admission = InflightEpisodePin::from_state(&fresh);
             fresh.session_id.clone_from(&binding.session_id);
-            let range = persist_terminal_range(
+            let mut range = persist_terminal_range(
                 &root,
                 &path,
                 (local, &mut *baseline),
@@ -174,6 +185,10 @@ impl CapturedTerminalAdmission {
                     Some((source_file_dev, source_file_ino)),
                 ),
             )?;
+            range.parked = parked.map(|mut proof| {
+                proof.identity = range.identity.clone();
+                Box::new(proof)
+            });
             crate::services::discord::tui_prompt_relay::preserve_admitted_source(
                 &before_admission,
                 baseline,
@@ -186,5 +201,217 @@ impl CapturedTerminalAdmission {
                 true,
             ))
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ParkedProof {
+    source: crate::services::codex_tui::session::checkpoint::Source,
+    identity: InflightTurnIdentity,
+    exact: ExactJsonlSourceIdentity,
+    actor: std::sync::Weak<crate::services::provider::CancelToken>,
+    /// Owner and opening record read while the source was live, to settle after its receipt.
+    turn: String,
+    owner: crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    opening: Option<serde_json::Value>,
+}
+
+impl ParkedProof {
+    #[cfg(unix)]
+    fn new(
+        row: &InflightTurnState,
+        actor: &std::sync::Arc<crate::services::provider::CancelToken>,
+        path: &Path,
+        session: &str,
+        range: (u64, u64),
+    ) -> Option<Self> {
+        let tmux = row.tmux_session_name.as_deref()?;
+        let owner = (
+            row.channel_id,
+            row.turn_nonce.clone()?,
+            row.external_turn_id.clone()?,
+            row.session_key.clone()?,
+            row.user_msg_id,
+            range.0,
+        );
+        let turn = row.native_turn_id.as_deref()?;
+        let source =
+            crate::services::tui_prompt_dedupe::codex_parked_owner_source(tmux, turn, &owner)?;
+        if row.provider_kind() != Some(ProviderKind::Codex)
+            || source.session_id.as_deref() != Some(session)
+            || std::fs::canonicalize(&source.path).ok()?.as_path() != path
+            || range.0 >= range.1
+            || range.1 > source.complete_end
+        {
+            return None;
+        }
+        let terminal = source.record(tmux, range.1).ok()?;
+        if terminal["type"] != "event_msg"
+            || terminal["payload"]["type"] != "task_complete"
+            || terminal["payload"]["turn_id"].as_str() != Some(turn)
+        {
+            return None;
+        }
+        let opening = source.record(tmux, range.0).ok();
+        Some(Self {
+            source,
+            identity: InflightTurnIdentity::from_state(row),
+            actor: std::sync::Arc::downgrade(actor),
+            turn: turn.to_owned(),
+            opening,
+            owner: owner.clone(),
+            exact: ExactJsonlSourceIdentity {
+                provider: row.provider.clone(),
+                tmux_session_name: tmux.to_owned(),
+                turn_nonce: owner.1,
+                range,
+                generation_mtime_ns: tmux_generation_file_mtime_ns(tmux),
+                offset_authority_channel_id: row.delivery_record_owner_channel_id(),
+                delivery_channel_id: row.channel_id,
+            },
+        })
+    }
+
+    fn permits(&self, path: &Path, session: &str, range: (u64, u64)) -> bool {
+        self.exact.provider == ProviderKind::Codex.as_str()
+            && self.exact.range == range
+            && self.source.session_id.as_deref() == Some(session)
+            && std::fs::canonicalize(&self.source.path).ok().as_deref() == Some(path)
+            && self.source.check(&self.exact.tmux_session_name).is_ok()
+            && self.actor.upgrade().is_some_and(|actor| {
+                !actor.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                    && actor.turn_nonce() == Some(self.exact.turn_nonce.as_str())
+            })
+    }
+
+    pub(super) async fn current_actor_matches(&self, shared: &SharedData) -> bool {
+        let Some(actor) = self.actor.upgrade() else {
+            return false;
+        };
+        let Some(mailbox) = shared.mailbox_peek(ChannelId::new(self.exact.delivery_channel_id))
+        else {
+            return false;
+        };
+        let current = mailbox.snapshot().await;
+        current.active_user_message_id == Some(MessageId::new(self.identity.user_msg_id))
+            && current.active_turn_nonce.as_deref() == Some(self.exact.turn_nonce.as_str())
+            && current
+                .cancel_token
+                .as_ref()
+                .is_some_and(|now| std::sync::Arc::ptr_eq(now, &actor))
+            && !actor.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn matches(&self, range: &TuiTerminalRange) -> bool {
+        self.identity == range.identity
+            && self.exact == range.source
+            && self.permits(
+                Path::new(&range.rollout_path),
+                &range.session_id,
+                range.source.range,
+            )
+    }
+}
+
+pub(super) fn captured_binding_matches(
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    path: &Path,
+    session: &str,
+    (start, end): (u64, u64),
+    receipt: bool,
+    runtime: RuntimeHandoffKind,
+    parked: Option<&ParkedProof>,
+) -> bool {
+    let (source_path, cursor) = if runtime == RuntimeHandoffKind::CodexTui {
+        (binding.output_path.as_str(), binding.last_offset)
+    } else {
+        (binding.relay_output_path(), binding.relay_last_offset())
+    };
+    binding.runtime_kind == runtime
+        && nonempty(binding.session_id.as_deref()) == nonempty(Some(session))
+        && canonical_regular_file(source_path).is_some_and(|(bound, _)| bound == path)
+        && (cursor >= start)
+        && (cursor <= end
+            || receipt
+            || (runtime == RuntimeHandoffKind::CodexTui
+                && parked.is_some_and(|proof| proof.permits(path, session, (start, end)))))
+}
+
+impl TuiTerminalRange {
+    pub(in crate::services::discord) fn complete_parked_delivery(&self) {
+        #[cfg(unix)]
+        if self.source.provider == ProviderKind::Codex.as_str() {
+            // The admission proof settles without current liveness; a range admitted without one
+            // still looks up its receipt on the live source.
+            let settled = self.parked.as_deref().is_some_and(|proof| {
+                proof.exact == self.source
+                    && proof.opening.as_ref().is_some_and(|opening| {
+                        crate::services::tui_prompt_dedupe::settle_codex_parked_delivery(
+                            &self.source.tmux_session_name,
+                            &proof.turn,
+                            &proof.owner,
+                            &proof.source,
+                            opening,
+                            self.source.range.1,
+                        )
+                    })
+            });
+            if !settled {
+                crate::services::discord::tui_prompt_relay::rehydration::codex_marker::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
+            }
+        }
+    }
+    /// Consume an existing ACK after process-local bindings disappear. This
+    /// never returns publication authority or installs a replacement binding.
+    pub(in crate::services::discord) fn confirmed_receipt_for_captured_row(
+        &self,
+        local: &InflightTurnState,
+        message_id: u64,
+    ) -> bool {
+        use crate::services::{discord::outbound::delivery_record, tui_prompt_dedupe as dedupe};
+        let confirmed = self
+            .with_revalidated_row(local, |fresh| {
+                let source = &self.source;
+                if !source.is_authoritative()
+                    || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&self.session_id))
+                    || (self.source_file_identity.is_some()
+                        && fresh.tui_terminal_source_file_identity != self.source_file_identity)
+                {
+                    return false;
+                }
+                crate::services::tmux_common::with_tmux_source_authority(
+                    &source.tmux_session_name,
+                    |authority| {
+                        let Some(path) = self.receipt_source_path() else {
+                            return false;
+                        };
+                        if !self.matches_durable_terminal(fresh, &path)
+                            || tmux_generation_file_mtime_ns(&source.tmux_session_name)
+                                != source.generation_mtime_ns
+                        {
+                            return false;
+                        }
+                        if dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                            authority,
+                        )
+                        .is_some()
+                            && !self.source_receipt_is_live(authority)
+                        {
+                            return false;
+                        }
+                        delivery_record::confirmed_delivery_receipt_exists(
+                            &ProviderKind::from_str_or_unsupported(&source.provider),
+                            poise::serenity_prelude::ChannelId::new(fresh.channel_id),
+                            message_id,
+                            source,
+                        )
+                    },
+                )
+            })
+            .unwrap_or(false);
+        if confirmed {
+            self.complete_parked_delivery();
+        }
+        confirmed
     }
 }

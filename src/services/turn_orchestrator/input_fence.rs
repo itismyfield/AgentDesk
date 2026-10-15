@@ -200,9 +200,6 @@ fn persistence(msg: &ChannelMailboxMsg) -> Option<&QueuePersistenceContext> {
         M::Injection(injection) => injection.persistence(),
         #[cfg(test)]
         M::ReplaceQueue { persistence, .. } => Some(persistence),
-        // The claim names its own namespace; the actor's last one may be another.
-        #[cfg(test)]
-        M::ScopedClaim(scoped) => scoped.persistence(),
         _ => None,
     }
 }
@@ -243,15 +240,6 @@ pub(super) fn enter(
             | M::CommitCapturedReadyDelivery { .. }
             | M::ClaimPolicyTail(_)
     ) {
-        return Ok(StepGuard {
-            _population: None,
-            _effect: None,
-            _permit: None,
-        });
-    }
-    // A scoped claim is a mutation; only its pending read passes like the reads above.
-    #[cfg(test)]
-    if matches!(msg, M::ScopedClaim(scoped) if scoped.is_read()) {
         return Ok(StepGuard {
             _population: None,
             _effect: None,
@@ -317,18 +305,6 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
                 queue_exit_events: Vec::new(),
                 persistence_error: None,
             });
-        }
-        #[cfg(test)]
-        M::InstalledActorHandoff(request) => {
-            request.refuse(
-                crate::services::cluster::channel_home_port::RestoreFailure::Rejected(format!(
-                    "input fence: {failure:?}"
-                )),
-            );
-        }
-        #[cfg(test)]
-        M::ScopedClaim(scoped) => {
-            scoped.refuse(super::scoped_claim::ScopedClaimRefusal::InputFence(failure));
         }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(match failure {

@@ -4,6 +4,26 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 use std::collections::HashSet;
 
+/// Purges expired entries and drops the restore scope of a binding that just expired.
+pub(super) fn purge_expired_under_authority(
+    state: &mut TuiPromptDedupeState,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) {
+    let had_runtime = state.runtime_by_tmux.contains_key(authority.session());
+    state.purge_expired();
+    state.purge_expired_runtime_binding_under_authority(authority);
+    if had_runtime && !state.runtime_by_tmux.contains_key(authority.session()) {
+        forget_restore_scope(state, authority.session());
+    }
+}
+
+pub(super) fn forget_restore_scope(state: &mut TuiPromptDedupeState, tmux: &str) {
+    #[cfg(unix)]
+    state.codex_restore_by_tmux.remove(tmux);
+    #[cfg(not(unix))]
+    let _ = (state, tmux);
+}
+
 type Pane = (String, Option<String>);
 #[derive(Default)]
 struct UnreadyPane {
@@ -69,6 +89,11 @@ pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     channel_id: u64,
     binding: TuiRuntimeBinding,
 ) -> bool {
+    if binding.runtime_kind == RuntimeHandoffKind::CodexTui
+        && super::codex_cursor::migrate_raw_native_marker(authority, &binding).is_err()
+    {
+        return false;
+    }
     let record = Record::Stat;
     register_rehydrated_under_source_authority(
         authority,
