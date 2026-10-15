@@ -766,11 +766,12 @@ async fn th6_gateway_reclaim_roundtrip_restores_writer_pg() {
         .await;
     assert_eq!(scene.row().await, None, "the gateway booted with no row");
     applied(o_channel_homes::delegate(&scene.pool, &channel, "claude", GW, MINI).await);
-    let released = || async {
-        let row = scene.row().await;
-        row.is_some_and(|row| row.state == HomeState::Released)
-    };
-    until_async("the gateway's watch releases", WITHIN * 3, released).await;
+    // The worker starts only once the gateway has seen its writer end, not just the row released.
+    gateway
+        .wait_signal("return.released", Duration::from_secs(240))
+        .await;
+    let (state, ..) = home(&scene).await;
+    assert_eq!(state, HomeState::Released);
     let mut worker = Node::spawn(&scene, "th6_return_worker", MINI);
     worker
         .wait_signal("return.worker", Duration::from_secs(180))
@@ -819,6 +820,7 @@ pub(super) async fn return_gateway_node(env: &Env) {
         (false, false, None),
         "the released channel's writer ends"
     );
+    signal(dir, "return.released");
     let returned = || async { node.state().await.is_none() };
     until_async("the reclaimed row is gone", WITHIN * 4, returned).await;
     assert!(
