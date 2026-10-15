@@ -753,9 +753,8 @@ pub(super) async fn applied_then_released(
     assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }
 
-/// T-H6 released target: MINI boots through its runtime's `BootPort::reading` while the row names
-/// it target of a released channel. Unrestored, its watch leaves the row alone; restored, the watch
-/// adopts it and the lease opens the home. Nothing in the test adopts.
+/// T-H6 released target: booted through the runtime's `BootPort::reading`, MINI's watch leaves the
+/// released row alone until restored, then adopts it and the lease opens the home; no test adopt.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_released_target_adopts_through_its_boot_watch_pg() {
     let scene = Scene::new().await;
