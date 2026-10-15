@@ -272,9 +272,8 @@ impl Names {
         Ok(())
     }
 
-    /// Where a resume or seed starts: the checkpoint, 0 for an init with no source, else the last
-    /// bind of an attached source, whose name an empty session leaves compatible must still read
-    /// as stored to be taken.
+    /// Where a resume or seed starts: the checkpoint, else the last bind of an attached source,
+    /// whose name an empty session leaves compatible must still read as stored to be taken.
     pub(super) fn start(
         &self,
         store: &ChannelStore,
