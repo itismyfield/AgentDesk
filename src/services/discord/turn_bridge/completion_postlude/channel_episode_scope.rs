@@ -460,7 +460,6 @@ mod tests {
                 "services/discord/recovery_engine/restore_inflight.rs",
                 "services/discord/router/message_handler/headless_turn.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
-                "services/discord/tmux_watcher/injected_bridge_tests.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
                 "services/discord/turn_bridge/entry_abort_mailbox_tests.rs",

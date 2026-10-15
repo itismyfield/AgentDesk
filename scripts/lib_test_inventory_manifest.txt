@@ -8488,12 +8488,6 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_ent
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_status_tick_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::a_terminal_preflight_parked_at_cleanup_rereads_the_host_before_dropping_the_panel
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_bridge_tests::injected_bridge_actual_entry_terminal_matrix_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_bridge_tests::injected_bridge_without_receipt_main_equivalence_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_owner_retry_guard_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_retired_watcher_actual_terminal_matrix_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_watcher_actual_terminal_matrix_pg
-services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests::injected_watcher_without_receipt_main_equivalence_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::judged_stop_harness_tests::a_kept_stop_leaves_the_watcher_to_deliver_the_tail_once
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_collector_status_tick_cannot_recreate_confirmed_row
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::n1a_turn_mode_tests::n1a_post_terminal_prologue_cannot_recreate_confirmed_row

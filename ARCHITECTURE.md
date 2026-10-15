@@ -1442,8 +1442,6 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── replay_policy/
 │   │   │   ├── injected/
-│   │   │   │   └── test_support_tests.rs
-│   │   │   ├── injected.rs
 │   │   │   ├── live.rs
 │   │   │   ├── live_tests.rs
 │   │   │   ├── permit.rs
@@ -1769,8 +1767,6 @@ src/
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── inherited_fixture_tests.rs
-│   │   │   ├── injected_bridge_tests.rs
-│   │   │   ├── injected_watcher_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── legacy_state.rs
