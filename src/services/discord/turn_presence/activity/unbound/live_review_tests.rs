@@ -769,7 +769,7 @@ async fn s1e_marker_change_during_publication_db_await_pg() {
     assert_eq!(answer, observed(Activity::Idle, "no_session"));
     assert!(publish(&stamp, &watch).await.is_some());
     let pause = Arc::new(Pause {
-        at: 1,
+        at: 2,
         count: AtomicUsize::new(0),
         entered: Default::default(),
         resume: Default::default(),
