@@ -159,6 +159,17 @@ pub(crate) struct Observation {
     process: (u32, u32, Option<PathBuf>),
 }
 impl Observation {
+    pub(crate) fn diagnostics(&self) -> impl std::fmt::Debug + '_ {
+        self.context
+            .as_ref()
+            .map(|c| (&c.program, (c.uid, c.euid), &c.selectors, &c.explicit))
+    }
+    pub(crate) fn same_namespace(&self, other: &Self) -> bool {
+        self.context == other.context
+            && self.ambient == other.ambient
+            && self.production == other.production
+            && self.process == other.process
+    }
     pub(crate) fn current(&self) -> bool {
         if self.ambient != ambient() || self.process != process_context() {
             return false;
@@ -192,9 +203,10 @@ fn ambient() -> [Option<OsString>; 3] {
 pub(crate) fn observe_inventory(channel: u64) -> Observation {
     #[cfg(test)]
     {
-        tests::record_probe();
         tests::record_channel_probe(channel);
-        if let Some((command, socket)) = tests::take_command() {
+        if let Some((command, socket)) =
+            tests::take_command().or_else(|| tests::channel_command(channel))
+        {
             return observe_command(command, socket, Duration::from_secs(3), false);
         }
     }
@@ -211,10 +223,6 @@ pub(crate) fn observe_inventory(channel: u64) -> Observation {
             process,
         },
     }
-}
-#[cfg(test)]
-pub(crate) fn probe_session_inventory() -> Inventory {
-    observe_inventory(0).inventory
 }
 #[cfg(test)]
 fn probe_command(command: Command, socket: Option<PathBuf>, timeout: Duration) -> Inventory {

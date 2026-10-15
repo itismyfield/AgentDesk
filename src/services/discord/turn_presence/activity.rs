@@ -18,7 +18,7 @@ use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState}
 
 /// New bytes one effect-point poll may read before it answers `catching_up`.
 const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
-/// A larger transcript is never rebuilt; it reads Unknown until the session changes.
+/// Cold sources above this boundary use bounded observation when enabled.
 const MAX_TRANSCRIPT_BYTES: u64 = 256 * 1024 * 1024;
 /// An open turn whose transcript has not grown for this long needs the pane to read busy.
 const STALE_OPEN_AFTER: Duration = Duration::from_secs(600);
@@ -47,6 +47,7 @@ const fn observed(activity: Activity, reason: &'static str) -> Observed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Target {
     Bound(String),
+    #[cfg(all(test, unix))]
     Unbound(Option<String>),
 }
 
@@ -65,6 +66,7 @@ enum Outcome {
         facts: Box<InputFacts>,
         from_start: bool,
     },
+    Tail(Box<tail::TailReader>),
     NoSource,
     Pending,
     Unreadable {
@@ -108,6 +110,7 @@ trait Ports: Send + Sync + 'static {
         provider: ShadowProvider,
     ) -> Result<Vec<BindingEvent>, String>;
     /// Present unless tmux confirms the session is missing.
+    #[cfg(all(test, unix))]
     fn session_present(&self, session: &str) -> bool;
     fn final_ready(&self, session: &str) -> bool;
     fn pane_busy(&self, session: &str) -> bool;
@@ -150,6 +153,8 @@ pub(in crate::services::discord) struct Reading {
     pub observed: Observed,
     stamp: Option<Stamp>,
     watch: Option<Arc<Mutex<Watch>>>,
+    #[cfg(unix)]
+    unbound: Option<unbound::live::Stamp>,
 }
 
 impl Reading {
@@ -165,10 +170,14 @@ impl Reading {
 
     /// Runs `publish` inside the watch's lock only while its key, generation and revision are
     /// still the ones this judgment read; a reading made before any lock holds nothing to check.
-    pub(in crate::services::discord) fn publish_if_current<R>(
+    pub(in crate::services::discord) async fn publish_if_current<R>(
         &self,
         publish: impl FnOnce() -> R,
     ) -> Option<R> {
+        #[cfg(unix)]
+        if let (Some(stamp), Some(watch)) = (&self.unbound, &self.watch) {
+            return stamp.publish(watch, publish).await;
+        }
         let (Some(stamp), Some(watch)) = (&self.stamp, &self.watch) else {
             return Some(publish());
         };
@@ -202,6 +211,8 @@ impl Reading {
             observed,
             stamp,
             watch: None,
+            #[cfg(unix)]
+            unbound: None,
         }
     }
 
@@ -229,6 +240,8 @@ impl Reading {
             observed,
             stamp: Some(stamp),
             watch: Some(Arc::new(Mutex::new(watch))),
+            #[cfg(unix)]
+            unbound: None,
         }
     }
 }
@@ -239,6 +252,7 @@ type Answer = (Observed, Option<Stamp>);
 fn at(guard: &Watch, answer: Observed) -> Answer {
     let source = match &guard.outcome {
         Outcome::Source { facts, .. } => Some(facts.binding().source.path.display().to_string()),
+        Outcome::Tail(reader) => Some(reader.facts.binding().source.path.display().to_string()),
         _ => None,
     };
     let stamp = guard.key.clone().map(|key| Stamp {
@@ -265,6 +279,7 @@ async fn read_now(
     channel: ChannelId,
     host_checked: bool,
 ) -> Reading {
+    initialize_tail();
     let unstamped = |observed| {
         if host_checked {
             let watch = lock(&WATCHES).get(&channel.get()).cloned();
@@ -276,6 +291,8 @@ async fn read_now(
             observed,
             stamp: None,
             watch: None,
+            #[cfg(unix)]
+            unbound: None,
         }
     };
     let shadow = match provider {
@@ -288,12 +305,28 @@ async fn read_now(
             Target::Bound(watcher.tmux_session_name)
         }
         _ => {
-            let core = shared.core.lock().await;
-            let name = core
-                .sessions
-                .get(&channel)
-                .and_then(|s| s.channel_name.clone());
-            Target::Unbound(name.map(|name| provider.build_tmux_session_name(&name)))
+            let watch = lock(&WATCHES).entry(channel.get()).or_default().clone();
+            #[cfg(unix)]
+            {
+                let (observed, stamp) =
+                    unbound::live::read(shared, provider, channel, watch.clone()).await;
+                return Reading {
+                    observed,
+                    stamp: None,
+                    watch: Some(watch),
+                    unbound: Some(stamp),
+                };
+            }
+            #[cfg(not(unix))]
+            {
+                let mut guard = lock(&watch);
+                guard.key = None;
+                guard.outcome = Outcome::Rebuilding;
+                guard.generation += 1;
+                guard.revision += 1;
+                drop(guard);
+                return unstamped(observed(Activity::Unknown, "session_probe_failed"));
+            }
         }
     };
     let watch = lock(&WATCHES).entry(channel.get()).or_default().clone();
@@ -303,17 +336,28 @@ async fn read_now(
     });
     let held = watch.clone();
     let judged = tokio::task::spawn_blocking(move || {
-        if host_checked {
+        #[cfg(all(test, unix))]
+        crate::services::tui_o::shadow::capture::io_trace::take();
+        let answer = if host_checked {
             judge_presence(&held, &ports, shadow, channel.get(), target)
         } else {
             judge(&held, &ports, shadow, channel.get(), target)
-        }
+        };
+        #[cfg(all(test, unix))]
+        tests::record_io(
+            channel.get(),
+            "effect",
+            crate::services::tui_o::shadow::capture::io_trace::take(),
+        );
+        answer
     });
     match judged.await {
         Ok((observed, stamp)) => Reading {
             observed,
             stamp,
             watch: Some(watch),
+            #[cfg(unix)]
+            unbound: None,
         },
         Err(_) => unstamped(observed(Activity::Unknown, "probe_failed")),
     }
@@ -348,12 +392,22 @@ fn judge_with_policy(
     target: Target,
     strict: bool,
 ) -> Answer {
+    #[cfg(not(all(test, unix)))]
+    let Target::Bound(session) = target;
+    #[cfg(all(test, unix))]
     let session = match target {
         Target::Bound(session) => session,
+        #[cfg(test)]
         Target::Unbound(Some(session)) if ports.session_present(&session) => {
             return (observed(Activity::Unknown, "watcher_unbound"), None);
         }
-        Target::Unbound(_) => return (observed(Activity::Idle, "no_session"), None),
+        #[cfg(test)]
+        Target::Unbound(_) => {
+            return (
+                observed(Activity::Unknown, "session_identity_unresolved"),
+                None,
+            );
+        }
     };
     let seq = match ports.binding_seq(channel) {
         Ok(seq) => seq,
@@ -373,7 +427,7 @@ fn judge_with_policy(
         return rebuild(watch, guard, ports, channel, key, None);
     }
     let stored = |reason| observed(Activity::Unknown, reason);
-    let (facts, from_start) = match &mut guard.outcome {
+    let (polled, from_start, allows_idle) = match &mut guard.outcome {
         Outcome::Rebuilding => return at(&guard, stored("catching_up")),
         Outcome::NoSource => {
             return ask_pane(watch, guard, &key, strict, || {
@@ -384,25 +438,50 @@ fn judge_with_policy(
         Outcome::Unreadable { .. } => return at(&guard, stored("binding_unreadable")),
         Outcome::Halted => return at(&guard, stored("facts_halted")),
         Outcome::TooLarge => return at(&guard, stored("transcript_too_large")),
-        Outcome::Source { facts, from_start } => (facts, *from_start),
-    };
-    let polled = facts.poll(CHUNK_BUDGET).map(|fact| {
-        let caught_up = facts.caught_up().unwrap_or(false);
-        let flags = (facts.awaiting_boundary(), facts.saw_turn_evidence());
-        (fact, caught_up, flags)
-    });
-    let resume = polled.as_ref().err().and_then(|_| {
-        let resume = facts.resume_point().cloned()?;
-        Some((facts.binding().clone(), resume))
-    });
-    let (fact, caught_up, (awaiting, evidence)) = match (polled, resume) {
-        (Ok(polled), _) => polled,
-        (Err(_), Some(resume)) => {
-            let (_, stamp) = rebuild(watch, guard, ports, channel, key, Some(resume));
-            return (observed(Activity::Unknown, "facts_resumed"), stamp);
+        Outcome::Source { facts, from_start } => {
+            let result = facts.poll(CHUNK_BUDGET).map(|fact| {
+                (
+                    fact,
+                    facts.caught_up().unwrap_or(false),
+                    (facts.awaiting_boundary(), facts.saw_turn_evidence()),
+                )
+            });
+            (result, *from_start, true)
         }
-        (Err(_), _) => {
-            guard.outcome = Outcome::Halted;
+        Outcome::Tail(reader) => {
+            let result = reader.poll_installed().map(|fact| {
+                (
+                    fact,
+                    reader.facts.caught_up().unwrap_or(false),
+                    (
+                        reader.facts.awaiting_boundary(),
+                        reader.facts.saw_turn_evidence(),
+                    ),
+                )
+            });
+            let proof = result
+                .as_ref()
+                .is_ok_and(|(fact, caught, _)| reader.allows_idle(fact, *caught));
+            (result, false, proof)
+        }
+    };
+    let (fact, caught_up, (awaiting, evidence)) = match polled {
+        Ok(polled) => polled,
+        Err(_) => {
+            let resume = match std::mem::replace(&mut guard.outcome, Outcome::Halted) {
+                Outcome::Source { facts, .. } => facts
+                    .resume_point()
+                    .cloned()
+                    .map(|resume| Reload::Full(facts.binding().clone(), resume)),
+                Outcome::Tail(reader) if reader.facts.resume_point().is_some() => {
+                    Some(Reload::Tail(reader))
+                }
+                _ => None,
+            };
+            if let Some(resume) = resume {
+                let (_, stamp) = rebuild(watch, guard, ports, channel, key, Some(resume));
+                return (observed(Activity::Unknown, "facts_resumed"), stamp);
+            }
             guard.revision += 1;
             return at(&guard, observed(Activity::Unknown, "facts_halted"));
         }
@@ -419,7 +498,8 @@ fn judge_with_policy(
         return at(&guard, observed(Activity::Unknown, "catching_up"));
     }
     match fact.state {
-        TurnState::Idle => at(&guard, observed(Activity::Idle, "closed")),
+        TurnState::Idle if allows_idle => at(&guard, observed(Activity::Idle, "closed")),
+        TurnState::Idle => at(&guard, observed(Activity::Unknown, "no_turn_boundary")),
         TurnState::Open { .. } if guard.grew_at.elapsed() < STALE_OPEN_AFTER => {
             at(&guard, observed(Activity::Busy, "open"))
         }
@@ -512,6 +592,11 @@ fn no_turn_evidence(ports: &dyn Ports, key: &Key) -> Observed {
     }
 }
 
+enum Reload {
+    Full(SourceBinding, Resume),
+    Tail(Box<tail::TailReader>),
+}
+
 /// Starts a new generation and its worker after releasing the channel's lock.
 fn rebuild(
     watch: &Arc<Mutex<Watch>>,
@@ -519,7 +604,7 @@ fn rebuild(
     ports: &Arc<dyn Ports>,
     channel: u64,
     key: Key,
-    resume: Option<(SourceBinding, Resume)>,
+    resume: Option<Reload>,
 ) -> Answer {
     guard.generation += 1;
     guard.outcome = Outcome::Rebuilding;
@@ -528,10 +613,35 @@ fn rebuild(
     drop(guard);
     let (worker, worker_ports, failed) = (watch.clone(), ports.clone(), key.clone());
     let spawned = ports.spawn(Box::new(move || {
+        #[cfg(all(test, unix))]
+        let stage = if resume.is_some() {
+            "resume"
+        } else {
+            "initial"
+        };
+        #[cfg(all(test, unix))]
+        crate::services::tui_o::shadow::capture::io_trace::take();
         let (outcome, grown) = match resume {
-            Some((binding, resume)) => read_from(InputFacts::resume(binding, &resume), false),
+            Some(Reload::Full(binding, resume)) => {
+                read_from(InputFacts::resume(binding, &resume), false)
+            }
+            Some(Reload::Tail(mut reader)) => match reader.resume() {
+                Ok(()) => read_tail(*reader, &key),
+                Err(_) => (Outcome::Halted, None),
+            },
             None => locate(worker_ports.as_ref(), channel, &key),
         };
+        if let Outcome::Source { facts, .. } = &outcome {
+            tracing::debug!(source = %facts.binding().source.path.display(), channel_id = channel, seq = key.seq,
+                mode = "full", start = 0, through = facts.observation_progress().0,
+                size = ?facts.source_len(), "activity rebuild complete");
+        }
+        #[cfg(all(test, unix))]
+        tests::record_io(
+            channel,
+            stage,
+            crate::services::tui_o::shadow::capture::io_trace::take(),
+        );
         install(&worker, &key, generation, outcome, grown);
     }));
     if !spawned {
@@ -583,7 +693,20 @@ fn locate(ports: &dyn Ports, channel: u64, key: &Key) -> (Outcome, Grown) {
     };
     match std::fs::metadata(&source.path) {
         Err(_) => (unreadable(), None),
-        Ok(meta) if meta.len() > MAX_TRANSCRIPT_BYTES => (Outcome::TooLarge, None),
+        Ok(meta) if tail::limits(channel).tail_start(meta.len()).is_some() => {
+            if !tail::enabled() {
+                return (Outcome::TooLarge, None);
+            }
+            let binding = SourceBinding {
+                channel_id: channel,
+                provider: key.provider,
+                source,
+            };
+            match tail::TailReader::open(binding, tail::limits(channel)) {
+                Ok(reader) => read_tail(reader, key),
+                Err(_) => (unreadable(), None),
+            }
+        }
         Ok(_) => {
             let binding = SourceBinding {
                 channel_id: channel,
@@ -596,6 +719,22 @@ fn locate(ports: &dyn Ports, channel: u64, key: &Key) -> (Outcome, Grown) {
             }
         }
     }
+}
+
+fn read_tail(mut reader: tail::TailReader, key: &Key) -> (Outcome, Grown) {
+    let result = reader.bootstrap();
+    let (start, end, remaining, bytes) = reader.diagnostics();
+    tracing::debug!(source = %reader.facts.binding().source.path.display(), seq = key.seq, mode = "tail", start, end, remaining, forward_bytes = bytes, result = ?result, "activity rebuild");
+    if result.is_err() {
+        return (Outcome::Halted, None);
+    }
+    let through = reader.facts.observation_progress().0;
+    let grown = modified_at(&reader.facts).map(|at| (through, at));
+    (Outcome::Tail(Box::new(reader)), grown)
+}
+
+pub(super) fn initialize_tail() {
+    let _ = tail::enabled();
 }
 
 /// Reads to the end, resuming past each typed `Blocked` record; any other error halts.
@@ -696,6 +835,7 @@ impl Ports for LivePorts {
         self.scoped(|| log.binding_events_since(channel, 0))
     }
 
+    #[cfg(all(test, unix))]
     fn session_present(&self, session: &str) -> bool {
         use crate::services::platform::tmux::{SessionPresence, session_presence};
         session_presence(session) != SessionPresence::Missing
@@ -738,7 +878,6 @@ impl Ports for LivePorts {
 #[path = "activity_tests.rs"]
 pub(in crate::services::discord) mod tests;
 
-#[cfg(all(test, unix))]
 mod tail;
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 mod unbound;

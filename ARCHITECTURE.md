@@ -1516,6 +1516,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -2097,10 +2098,17 @@ src/
 │   │   │   ├── activity/
 │   │   │   │   ├── unbound/
 │   │   │   │   │   ├── dormancy_tests.rs
+│   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_review_tests.rs
+│   │   │   │   │   ├── live_tests.rs
 │   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
+│   │   │   │   ├── tail_switch_tests.rs
 │   │   │   │   ├── tail_tests.rs
 │   │   │   │   └── unbound.rs
+│   │   │   ├── activity_tests/
+│   │   │   │   ├── effect_tests.rs
+│   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── entrypoints.rs

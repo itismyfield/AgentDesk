@@ -49,7 +49,7 @@ async fn s1_unbound_invalidates_before_waiting_for_core() {
     drop(core);
     let (answer, stamp) = reading.await;
     assert_eq!(answer.activity, Activity::Unknown);
-    assert!(stamp.publish(&watch, || ()).is_some());
+    assert!(stamp.publish(&watch, || ()).await.is_some());
     assert!(
         lock(&watch).key.is_none(),
         "Unbound must not manufacture a Bound identity"
@@ -63,17 +63,17 @@ async fn s1_unbound_old_publication_is_rejected_after_a_new_read() {
     let channel = ChannelId::new(69_181_601);
     let watch = Arc::new(Mutex::new(Watch::default()));
     let (_, first) = read(&shared, &ProviderKind::Claude, channel, watch.clone()).await;
-    assert!(first.publish(&watch, || ()).is_some());
+    assert!(first.publish(&watch, || ()).await.is_some());
     let (_, second) = read(&shared, &ProviderKind::Claude, channel, watch.clone()).await;
-    assert!(first.publish(&watch, || ()).is_none());
-    assert!(second.publish(&watch, || ()).is_some());
+    assert!(first.publish(&watch, || ()).await.is_none());
+    assert!(second.publish(&watch, || ()).await.is_some());
     let core = shared.core.lock().await;
     assert!(
-        second.publish(&watch, || ()).is_none(),
+        second.publish(&watch, || ()).await.is_none(),
         "unverifiable core must fail closed"
     );
     drop(core);
-    assert!(second.publish(&watch, || ()).is_some());
+    assert!(second.publish(&watch, || ()).await.is_some());
 }
 
 #[test]

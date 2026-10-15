@@ -12,7 +12,7 @@ use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvidence, BindingRecord, BindingTarget,
 };
 
-#[path = "activity_tests/large.rs"]
+#[path = "activity_tests/large_tests.rs"]
 mod large;
 
 const CHANNEL: u64 = 6_100_001;
@@ -367,8 +367,8 @@ fn every_observation_maps_to_its_activity_and_reason() {
 
     #[rustfmt::skip]
     let expected = [
-        ("no watcher, no session", (Idle, "no_session")),
-        ("no watcher, session gone", (Idle, "no_session")),
+        ("no watcher, no session", (Unknown, "session_identity_unresolved")),
+        ("no watcher, session gone", (Unknown, "session_identity_unresolved")),
         ("no watcher, session live", (Unknown, "watcher_unbound")),
         ("seq unreadable", (Unknown, "binding_unreadable")),
         ("events unreadable", (Unknown, "binding_unreadable")),
@@ -389,7 +389,7 @@ fn every_observation_maps_to_its_activity_and_reason() {
         ("metadata then open", (Busy, "open")),
         ("evidence without a boundary", (Unknown, "no_turn_boundary")),
         ("codex metadata only", (Unknown, "no_turn_evidence")),
-        ("too large", (Unknown, "transcript_too_large")),
+        ("too large", (Unknown, "catching_up")),
         ("broken json", (Unknown, "facts_halted")),
     ];
     assert_eq!(observed, expected);
@@ -556,6 +556,7 @@ fn strict_reading(probe: &Probe) -> Reading {
         observed,
         stamp,
         watch: Some(probe.watch.clone()),
+        unbound: None,
     }
 }
 
@@ -565,13 +566,13 @@ fn b2_stamped_unknown_advances_revision_and_revokes_busy() {
     let (probe, _) = codex_probe(root.path(), &[codex("task_started", "A")]);
     assert_eq!(probe.settle(), (Activity::Busy, "open"));
     let busy = strict_reading(&probe);
-    assert_eq!(busy.publish_if_current(|| 1), Some(1));
+    assert_eq!(publish(&busy, || 1), Some(1));
     probe.age(STALE_OPEN_AFTER + Duration::from_secs(1));
     let unknown = strict_reading(&probe);
     assert_eq!(unknown.observed.activity, Activity::Unknown);
-    assert_eq!(unknown.publish_if_current(|| 2), Some(2));
+    assert_eq!(publish(&unknown, || 2), Some(2));
     assert!(unknown.stamp.as_ref().unwrap().revision > busy.stamp.as_ref().unwrap().revision);
-    assert_eq!(busy.publish_if_current(|| 3), None);
+    assert_eq!(publish(&busy, || 3), None);
 }
 
 #[test]
@@ -616,8 +617,8 @@ fn b2_superseded_host_read_cannot_borrow_successor_stamp() {
         release.send(()).unwrap();
         let old = old.join().unwrap();
         assert_eq!(old.observed.reason, "superseded");
-        assert_eq!(old.publish_if_current(|| 1), None);
-        assert_eq!(successor.publish_if_current(|| 2), Some(2));
+        assert_eq!(publish(&old, || 1), None);
+        assert_eq!(publish(&successor, || 2), Some(2));
     });
 }
 
@@ -636,8 +637,8 @@ fn b2_superseded_pane_read_cannot_borrow_successor_stamp() {
         release.send(()).unwrap();
         let old = old.join().unwrap();
         assert_eq!(old.observed.reason, "superseded");
-        assert_eq!(old.publish_if_current(|| 1), None);
-        assert_eq!(successor.publish_if_current(|| 2), Some(2));
+        assert_eq!(publish(&old, || 1), None);
+        assert_eq!(publish(&successor, || 2), Some(2));
     });
 }
 
@@ -681,7 +682,7 @@ fn a_finished_rebuild_is_kept_for_its_key() {
     for (probe, reason) in [
         (&pending, "binding_pending"),
         (&broken, "facts_halted"),
-        (&large, "transcript_too_large"),
+        (&large, "catching_up"),
     ] {
         assert_eq!(probe.settle(), (Activity::Unknown, reason));
         let before = probe.counts();
@@ -924,15 +925,16 @@ fn a_reading_publishes_only_while_its_watch_is_unmoved() {
             observed,
             stamp,
             watch,
+            unbound: None,
         }
     };
     let fresh = read();
     assert_eq!(fresh.session(), Some(SESSION));
-    assert_eq!(fresh.publish_if_current(|| "published"), Some("published"));
+    assert_eq!(publish(&fresh, || "published"), Some("published"));
     let stale = read();
     write(&path, &[prompt("a")]);
     assert_eq!(probe.ask(), (Activity::Busy, "open"));
-    assert_eq!(stale.publish_if_current(|| "published"), None);
+    assert_eq!(publish(&stale, || "published"), None);
     let stale = read();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -940,7 +942,7 @@ fn a_reading_publishes_only_while_its_watch_is_unmoved() {
         .unwrap();
     write!(file, "{}", end()).unwrap();
     assert_eq!(probe.ask(), (Activity::Unknown, "catching_up"));
-    assert_eq!(stale.publish_if_current(|| "published"), None);
+    assert_eq!(publish(&stale, || "published"), None);
 }
 
 /// A bound transcript gone missing reads unknown beside a ready pane, and the same file put back
@@ -1308,4 +1310,303 @@ async fn a_channel_outside_turn_mode_never_reaches_the_probe() {
     assert_eq!(held, None);
     assert!(taken.intervention.is_none());
     assert!(!lock(&WATCHES).contains_key(&channel), "the probe ran");
+}
+
+fn publish<R>(reading: &Reading, run: impl FnOnce() -> R) -> Option<R> {
+    futures::executor::block_on(reading.publish_if_current(run))
+}
+pub(crate) fn small_tail_limits(channel: u64) -> impl Drop {
+    tail::overrides::Guard::new(channel, 1, 4096, 4096, 37)
+}
+#[path = "activity_tests/effect_tests.rs"]
+mod effects;
+
+type Reads = Vec<(u64, u64, bool)>;
+type ReadStages = Arc<Mutex<Vec<(&'static str, Reads)>>>;
+static READ_TRACES: LazyLock<Mutex<HashMap<u64, ReadStages>>> = LazyLock::new(Default::default);
+struct ReadTrace(u64, ReadStages);
+impl ReadTrace {
+    fn new(channel: u64) -> Self {
+        let stages: ReadStages = Arc::default();
+        assert!(lock(&READ_TRACES).insert(channel, stages.clone()).is_none());
+        Self(channel, stages)
+    }
+    fn take(&self) -> Vec<(&'static str, Reads)> {
+        std::mem::take(&mut *lock(&self.1))
+    }
+}
+impl Drop for ReadTrace {
+    fn drop(&mut self) {
+        lock(&READ_TRACES).remove(&self.0);
+    }
+}
+pub(super) fn record_io(channel: u64, stage: &'static str, reads: Reads) {
+    if let Some(stages) = lock(&READ_TRACES).get(&channel) {
+        #[cfg(target_os = "linux")]
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+        #[cfg(not(target_os = "linux"))]
+        let tid = format!("{:?}", std::thread::current().id());
+        eprintln!("S1_IO_WORKER channel={channel} stage={stage} tid={tid}");
+        lock(stages).push((stage, reads));
+    }
+}
+async fn installed(watch: &Mutex<Watch>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !matches!(lock(watch).outcome, Outcome::Rebuilding) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test(flavor = "current_thread")]
+async fn s1_actual_tail_initial_resume_and_poll_have_bounded_hash_free_reads() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let root = tempfile::tempdir().unwrap();
+    let _binding = BindingRoot::enter(root.path());
+    let path = root.path().join("parent.jsonl");
+    let meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path(),"padding":"x".repeat(180)}});
+    for _ in 0..160 {
+        write(&path, std::slice::from_ref(&meta));
+    }
+    let start = codex("task_started", "A");
+    let close = codex("task_complete", "A");
+    let blocked = json!({"type":"response_item","payload":{"type":"unknown_item"}});
+    write(&path, &[start, blocked.clone(), close.clone()]);
+    let snapshot = std::fs::metadata(&path).unwrap().len();
+    let tail = 4096;
+    let start = snapshot - tail;
+    assert!(start > 4096);
+    let channel = 69_183_800;
+    let _limits = tail::overrides::Guard::new(channel, 1, tail, 4096, 4096);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let trace = ReadTrace::new(channel);
+    let _turn = bind_turn_mode_transcript(&shared, &ProviderKind::Codex, channel, "s1-io", &path);
+    let _ = activity_now(&shared, &ProviderKind::Codex, ChannelId::new(channel)).await;
+    let watch = lock(&WATCHES).get(&channel).unwrap().clone();
+    installed(&watch).await;
+    assert!(matches!(lock(&watch).outcome, Outcome::Tail(_)));
+    for _ in 0..8 {
+        if activity_now(&shared, &ProviderKind::Codex, ChannelId::new(channel))
+            .await
+            .activity
+            == Activity::Idle
+        {
+            break;
+        }
+        installed(&watch).await;
+    }
+    assert_eq!(
+        activity_now(&shared, &ProviderKind::Codex, ChannelId::new(channel))
+            .await
+            .activity,
+        Activity::Idle
+    );
+    let before = match &lock(&watch).outcome {
+        Outcome::Tail(reader) => reader.diagnostics().2,
+        _ => panic!("Tail mode lost"),
+    };
+    write(&path, &[blocked, close]);
+    assert_eq!(
+        activity_now(&shared, &ProviderKind::Codex, ChannelId::new(channel))
+            .await
+            .reason,
+        "facts_resumed"
+    );
+    installed(&watch).await;
+    assert_eq!(
+        match &lock(&watch).outcome {
+            Outcome::Tail(reader) => reader.diagnostics().2,
+            _ => panic!("resume changed mode"),
+        },
+        before,
+        "actual worker refilled bootstrap budget"
+    );
+    assert_eq!(
+        activity_now(&shared, &ProviderKind::Codex, ChannelId::new(channel))
+            .await
+            .activity,
+        Activity::Idle
+    );
+    let eof = std::fs::metadata(&path).unwrap().len();
+    let stages = trace.take();
+    for required in ["initial", "resume", "effect"] {
+        let reads: Vec<_> = stages
+            .iter()
+            .filter(|(stage, _)| *stage == required)
+            .flat_map(|(_, r)| r)
+            .collect();
+        assert!(
+            reads.iter().any(|(a, b, _)| b > a),
+            "{required}: real worker trace had no positive read: {stages:?}"
+        );
+        assert!(
+            reads.iter().all(|(_, _, hash)| !*hash),
+            "{required}: actual Tail hashed a prefix"
+        );
+        assert!(
+            reads
+                .iter()
+                .filter(|(a, b, _)| b > a)
+                .all(|(a, b, _)| *a >= start - 4096 && *b <= eof),
+            "{required}: actual read outside tail/guard/partial bounds: {reads:?}"
+        );
+    }
+    eprintln!(
+        "S1_ACTIVITY_IO window={start} snapshot={snapshot} eof={eof} stages={stages:?} skip=0"
+    );
+    let channel = 69_183_801;
+    let _limits = tail::overrides::Guard::new(channel, eof, 4096, 4096, 4096);
+    let full = ReadTrace::new(channel);
+    let _turn =
+        bind_turn_mode_transcript(&shared, &ProviderKind::Codex, channel, "s1-full-io", &path);
+    assert_eq!(
+        settled_reason(&shared, &ProviderKind::Codex, channel).await,
+        "closed"
+    );
+    assert!(
+        full.take()
+            .iter()
+            .flat_map(|(_, r)| r)
+            .any(|(a, b, hash)| *hash && b > a),
+        "same actual worker boundary never observed Full prefix hashing"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(69_183_600);
+    let probe = Probe::new(ShadowProvider::Claude, Vec::new());
+    let ports: Arc<dyn Ports> = probe.fake.clone();
+    let (observed, stamp) = judge(
+        &probe.watch,
+        &ports,
+        probe.provider,
+        channel.get(),
+        probe.target.clone(),
+    );
+    let old = Reading {
+        observed,
+        stamp,
+        watch: Some(probe.watch.clone()),
+        unbound: None,
+    };
+    assert_eq!(probe.fake.spawns.load(Ordering::SeqCst), 1);
+    lock(&WATCHES).insert(channel.get(), probe.watch.clone());
+    let core = shared.core.lock().await;
+    let read = reading_now(&shared, &ProviderKind::Claude, channel);
+    tokio::pin!(read);
+    tokio::select! {_=&mut read=>panic!("read escaped held core"),_=tokio::time::sleep(Duration::from_millis(20))=>{}}
+    assert!(
+        lock(&probe.watch).key.is_none(),
+        "Unbound allocated another watch or waited before invalidation"
+    );
+    assert!(old.publish_if_current(|| ()).await.is_none());
+    drop(core);
+    let unbound = read.await;
+    assert!(unbound.session().is_none() && unbound.source().is_none());
+    let (observed, stamp) = judge(
+        &probe.watch,
+        &ports,
+        probe.provider,
+        channel.get(),
+        probe.target.clone(),
+    );
+    let next = Reading {
+        observed,
+        stamp,
+        watch: Some(probe.watch.clone()),
+        unbound: None,
+    };
+    let jobs = std::mem::take(&mut *lock(&probe.fake.jobs));
+    assert_eq!(jobs.len(), 2);
+    let mut jobs = jobs.into_iter();
+    jobs.next().unwrap()();
+    assert!(
+        matches!(lock(&probe.watch).outcome, Outcome::Rebuilding),
+        "old Bound worker installed after Unbound and new Bound"
+    );
+    assert!(old.publish_if_current(|| ()).await.is_none());
+    assert!(unbound.publish_if_current(|| ()).await.is_none());
+    assert!(next.publish_if_current(|| ()).await.is_some());
+    jobs.next().unwrap()();
+}
+
+pub(crate) fn exercise_tail_switch_entry_order(expected: bool, supervisor_first: bool) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _runtime = crate::config::TestRuntimeRootGuard::new();
+            let root = tempfile::tempdir().unwrap();
+            let _binding = BindingRoot::enter(root.path());
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let provider = ProviderKind::Claude;
+            if supervisor_first {
+                super::super::supervisor::spawn(shared.clone(), provider.clone());
+            }
+            let unbound = ChannelId::new(69_183_700);
+            let watch = lock(&WATCHES).entry(unbound.get()).or_default().clone();
+            let generation = lock(&watch).generation;
+            let reading = reading_now(&shared, &provider, unbound).await;
+            assert_eq!(
+                lock(&watch).generation,
+                generation + 1,
+                "Tail off bypassed Unbound invalidation"
+            );
+            assert!(reading.session().is_none() && reading.source().is_none());
+            if !supervisor_first {
+                super::super::supervisor::spawn(shared.clone(), provider.clone());
+            }
+            assert_eq!(tail::enabled(), expected);
+            let channel = 69_183_701;
+            let _limits = tail::overrides::Guard::new(channel, 1, 4096, 4096, 59);
+            let path = root.path().join("cold.jsonl");
+            write(&path, &[prompt("A"), end()]);
+            let _turn =
+                bind_turn_mode_transcript(&shared, &provider, channel, "s1-switch-cold", &path);
+            assert_eq!(
+                settled_reason(&shared, &provider, channel).await,
+                if expected {
+                    "closed"
+                } else {
+                    "transcript_too_large"
+                }
+            );
+            let channel = 69_183_702;
+            let path = root.path().join("full.jsonl");
+            write(&path, &[prompt("B"), end()]);
+            let size = std::fs::metadata(&path).unwrap().len();
+            let _limits = tail::overrides::Guard::new(channel, size, 4096, 4096, 59);
+            let _turn =
+                bind_turn_mode_transcript(&shared, &provider, channel, "s1-switch-full", &path);
+            assert_eq!(settled_reason(&shared, &provider, channel).await, "closed");
+            write(&path, &[end()]);
+            assert!(std::fs::metadata(&path).unwrap().len() > size);
+            assert_eq!(
+                settled_reason(&shared, &provider, channel).await,
+                "closed",
+                "Tail off stopped installed Full growth"
+            );
+        });
+}
+
+pub(crate) struct HandoffMutation(tail::tests::HandoffHook);
+impl HandoffMutation {
+    pub(crate) fn new(
+        channel: u64,
+        bootstrap: Option<Box<dyn FnOnce() + Send>>,
+        resume: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Self {
+        Self(tail::tests::HandoffHook::new(channel, bootstrap, resume))
+    }
+    pub(crate) fn calls(&self) -> usize {
+        self.0.calls()
+    }
 }

@@ -6,7 +6,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-thread_local! { static PROBE_TRACE: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) }; }
 thread_local! { static COMMAND: RefCell<Option<(Command, Option<PathBuf>)>> = const { RefCell::new(None) }; }
 
 static CHANNEL_PROBES: std::sync::LazyLock<
@@ -69,51 +68,23 @@ async fn activation_inventory_counter_crosses_the_blocking_worker() {
         1,
         "worker probe was invisible to its positive counter"
     );
+    let selector = std::ffi::OsString::from(format!(
+        "{},4242,0",
+        root.path().join("inherited").display()
+    ));
+    let _tmux =
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock("TMUX", &selector);
+    let production = tmux_command().unwrap();
+    let snapshot = Namespace::capture(&production, None);
+    assert_eq!(
+        snapshot.selectors[0].as_ref(),
+        Some(&selector),
+        "production tmux command removed its inherited namespace selector"
+    );
 }
 pub(super) fn take_command() -> Option<(Command, Option<PathBuf>)> {
     COMMAND.with(|slot| slot.borrow_mut().take())
 }
-pub(crate) fn probe_in_namespace(path: &Path) -> Inventory {
-    let mut command = tmux_command().unwrap();
-    command
-        .arg("-S")
-        .arg(path)
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE");
-    COMMAND.with(|slot| {
-        assert!(
-            slot.replace(Some((command, Some(path.to_owned()))))
-                .is_none()
-        )
-    });
-    probe_session_inventory()
-}
-pub(crate) struct ProbeTrace(Arc<AtomicUsize>);
-impl ProbeTrace {
-    pub(crate) fn new() -> Self {
-        let count = Arc::new(AtomicUsize::new(0));
-        PROBE_TRACE.with(|slot| assert!(slot.replace(Some(count.clone())).is_none()));
-        Self(count)
-    }
-    pub(crate) fn calls(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-impl Drop for ProbeTrace {
-    fn drop(&mut self) {
-        PROBE_TRACE.with(|slot| {
-            slot.replace(None);
-        });
-    }
-}
-pub(super) fn record_probe() {
-    PROBE_TRACE.with(|slot| {
-        if let Some(count) = &*slot.borrow() {
-            count.fetch_add(1, Ordering::SeqCst);
-        }
-    });
-}
-
 fn context(path: &Path) -> Namespace {
     context_for_command(path, &tmux_command().unwrap())
 }
@@ -487,4 +458,68 @@ fn u_inventory_no_server_control() {
         );
     }
     failed(classify_output(&out, &ctx, |_| SocketState::Other));
+}
+static NAMESPACES: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<u64, PathBuf>>> =
+    std::sync::LazyLock::new(Default::default);
+pub(crate) struct ChannelNamespace(u64, PathBuf);
+impl ChannelNamespace {
+    pub(crate) fn new(channel: u64, socket: PathBuf) -> Self {
+        assert!(
+            NAMESPACES
+                .lock()
+                .unwrap()
+                .insert(channel, socket.clone())
+                .is_none()
+        );
+        Self(channel, socket)
+    }
+    pub(crate) fn start_command(&self) -> Command {
+        namespace_command(&self.1)
+    }
+}
+impl Drop for ChannelNamespace {
+    fn drop(&mut self) {
+        NAMESPACES.lock().unwrap().remove(&self.0);
+    }
+}
+fn namespace_command(socket: &Path) -> Command {
+    let mut command = tmux_command().unwrap();
+    command
+        .arg("-S")
+        .arg(socket)
+        .arg("-f")
+        .arg("/dev/null")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    command
+}
+pub(super) fn channel_command(channel: u64) -> Option<(Command, Option<PathBuf>)> {
+    let socket = NAMESPACES.lock().unwrap().get(&channel).cloned()?;
+    Some((namespace_command(&socket), Some(socket)))
+}
+pub(crate) fn assert_same_start_context(
+    observation: &Observation,
+    command: &Command,
+    socket: Option<PathBuf>,
+) {
+    assert!(observation.current());
+    let version = Command::new(command.get_program())
+        .arg("-V")
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    eprintln!(
+        "S1_START_CONTEXT program={} version={} context={:?} skip=0",
+        Path::new(command.get_program()).display(),
+        String::from_utf8(version.stdout).unwrap().trim(),
+        observation.diagnostics()
+    );
+    assert_eq!(
+        observation.context.as_ref(),
+        Some(&Namespace::capture(command, socket)),
+        "probe and selected start changed binary/uid/namespace"
+    );
+}
+pub(crate) fn production_start_command() -> Command {
+    tmux_command().unwrap()
 }

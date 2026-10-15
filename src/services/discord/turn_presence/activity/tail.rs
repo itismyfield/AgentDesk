@@ -134,6 +134,8 @@ impl TailReader {
         result
     }
     pub(super) fn resume(&mut self) -> Result<(), String> {
+        #[cfg(all(test, unix))]
+        tests::before_resume(self.facts.binding().channel_id);
         let resume = self
             .facts
             .resume_point()
@@ -145,6 +147,8 @@ impl TailReader {
         Ok(())
     }
     pub(super) fn bootstrap(&mut self) -> Result<(), String> {
+        #[cfg(all(test, unix))]
+        tests::before_bootstrap(self.facts.binding().channel_id);
         loop {
             let before = self.facts.observation_progress();
             let result = self.poll(
@@ -206,9 +210,9 @@ pub(super) fn limits(channel: u64) -> Limits {
     let _ = channel;
     Limits::default()
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "tail_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 pub(super) mod overrides {

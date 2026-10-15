@@ -154,7 +154,7 @@ fn decide(
     )
 }
 
-pub(super) fn legacy_unbound_adapter(
+pub(super) fn low_level_unbound_adapter(
     candidates: Result<Candidates, String>,
     _scope: HostScope,
     inventory: &Inventory,
@@ -214,7 +214,7 @@ pub(super) fn legacy_unbound_adapter(
 }
 
 #[test]
-fn u_old_unbound_none_adapter_is_idle() {
+fn u_unbound_none_requires_complete_adapter() {
     let c = candidates(
         None,
         &[fallback(CHANNEL, ProviderKind::Claude, "s0u-fallback")],
@@ -223,7 +223,7 @@ fn u_old_unbound_none_adapter_is_idle() {
     );
     let name = ProviderKind::Claude.build_tmux_session_name("s0u-fallback");
     assert_eq!(
-        legacy_unbound_adapter(
+        low_level_unbound_adapter(
             c,
             HostScope {
                 channel: CHANNEL,
@@ -234,7 +234,7 @@ fn u_old_unbound_none_adapter_is_idle() {
             &Inventory::Sessions(vec![name]),
             &BTreeMap::new()
         ),
-        Verdict::Absent(Absence::LocalInventory)
+        Verdict::Hold("watcher_unbound")
     );
 }
 

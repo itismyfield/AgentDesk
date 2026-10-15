@@ -45,7 +45,12 @@ unreadable sockets, ambiguous ownership, and contradictory host evidence hold
 the channel. Herdr first-create and Retired cases use their host evidence and
 retain related tmux/owner conflicts.
 
-Completed Unbound observations have a publication stamp. Superseded work
+Completed Unbound observations have a publication stamp. Before publication,
+the adapter rechecks its file/host inputs, exact and canonical DB reads, and a
+fresh inventory in the same namespace, then checks the Watch generation and
+revision. Runtime-kind restoration keeps canonical-first, legacy-on-NotFound
+reads; host-kind stays canonical-only. Historical Process, foreign host, or
+unreadable marker evidence remains a hold. Superseded work
 cannot publish or install an old result. An Unbound result supplies no source
 identity or Busy effect permission.
 
@@ -77,7 +82,7 @@ is not a passing result.
 | Actual tmux absolute path/version and `-N` support | pending | pending |
 | UID and default/explicit namespace match actual start | pending | pending |
 | C-locale missing socket and stale socket classifications | pending | pending |
-| Probe leaves an absent namespace uncreated | pending | pending |
+| Probe leaves an absent socket uncreated; no server starts | pending | pending |
 | Local first start reaches selected execution I/O exactly once | pending | pending |
 | Exact-local key, canonical row, marker, locator, host configuration agree | pending | pending |
 | Herdr first-create and Retired select Herdr I/O once, tmux I/O zero | pending | pending |
@@ -87,7 +92,22 @@ T11 must cover both an explicit isolated namespace and a fresh default namespace
 under an isolated `TMUX_TMPDIR`, with `TMUX` and `TMUX_PANE` unset for the default
 case. Observation and actual start must use the same binary, UID, namespace, and
 target name. Observe before and after the probe, then verify creation occurs
-only at the start boundary.
+only at the start boundary. The client may create the private parent directory;
+the socket and server are the creation witnesses.
+
+Run the local first-start proof with the pipeline skill installed on that host:
+
+```sh
+unset TMUX TMUX_PANE
+export CARGO_PROFILE_DEV_STRIP=none CARGO_PROFILE_TEST_STRIP=none
+bash "$PIPELINE_SKILL/scripts/pg_throwaway.sh" cargo test --lib \
+  s1_real_missing_namespace_reaches_selected_tmux_start_pg -- --nocapture
+```
+
+Require a nonzero selection and the selected driver I/O count, in addition to
+`Started`. The fixture uses a private socket and FIFO-controlled session lifetime;
+it sends no keys to an operational pane. Keep the full command, binary checksum,
+counts, environment, and raw log with the PR evidence.
 
 T16 uses actual queued kickoff, intake, and host selection. Human headless
 delivery has an existing configured-Herdr refusal, so it is not the Herdr

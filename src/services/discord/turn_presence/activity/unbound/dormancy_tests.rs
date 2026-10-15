@@ -3,7 +3,6 @@ use crate::services::discord::{
     health::{self as turn_deliver, HealthRegistry, HumanInputRequest},
     turn_presence::{activity, supervisor},
 };
-use crate::services::platform::tmux::session_inventory::tests::ProbeTrace;
 use poise::serenity_prelude::ChannelId;
 use std::sync::{
     Arc,
@@ -76,17 +75,24 @@ async fn activation_candidates_counter_crosses_the_blocking_worker() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn u_dormant_entrypoints() {
+async fn u_active_entrypoints_collect_real_unbound_evidence_pg() {
+    use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace;
     const CHANNEL: u64 = 69_180_099;
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let root = tempfile::tempdir().unwrap();
-    let _binding = activity::tests::BindingRoot::enter(root.path());
-    let shared = crate::services::discord::make_shared_data_for_tests();
+    let rig = super::live::review_tests::Rig::new(CHANNEL, false, false).await;
+    let shared = rig.shared.clone();
     let provider = ProviderKind::Claude;
     let channel = ChannelId::new(CHANNEL);
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get_mut(&channel)
+        .unwrap()
+        .channel_name = None;
     let _turn_mode = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
     let observer = Trace::new(CHANNEL);
-    let inventory = ProbeTrace::new();
+    let inventory = ChannelProbeTrace::new(CHANNEL);
     assert!(shared.tmux_watchers.channel_binding(&channel).is_none());
     assert_eq!(
         activity::activity_now(&shared, &provider, channel)
@@ -95,26 +101,31 @@ async fn u_dormant_entrypoints() {
         "no_session"
     );
     assert!(
-        crate::services::discord::input_runtime::fence::effect::admit(&provider, CHANNEL).is_ok(),
-        "the automatic entry must pass its admission gate"
+        observer.calls() > 0,
+        "actual adapter never collected candidates"
     );
-    let selected = crate::services::discord::mailbox_take_next_automatic_intervention(
-        &shared, &provider, channel,
-    )
-    .await;
-    assert!(selected.intervention.is_none());
+    assert!(
+        inventory.calls() > 0,
+        "worker inventory had no positive witness"
+    );
+    assert!(
+        crate::services::discord::mailbox_take_next_automatic_intervention(
+            &shared, &provider, channel
+        )
+        .await
+        .intervention
+        .is_none()
+    );
     let registry = HealthRegistry::new();
     turn_deliver::set_human_input_auth_for_tests(&shared, Some(1), vec![], false).await;
-    {
-        shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
-    }
+    shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
     registry.register("claude".into(), shared.clone()).await;
     let delivered = turn_deliver::deliver_human_input(
         &registry,
         HumanInputRequest {
             channel_id: channel,
             provider: provider.clone(),
-            text: "dormant fixture".into(),
+            text: "active fixture".into(),
             author_id: 1,
             source: "test".into(),
             metadata: None,
@@ -124,18 +135,19 @@ async fn u_dormant_entrypoints() {
     .await;
     assert!(
         matches!(delivered, Err(turn_deliver::HumanInputError::RuntimeUnavailable(ref detail)) if detail == "provider runtime is not ready"),
-        "the real external-hold read must precede the start refusal: {delivered:?}"
+        "{delivered:?}"
     );
     assert_eq!(
         turn_deliver::external_turn_hold_for_start(Some(&registry), &provider, CHANNEL).await,
         None
     );
+    let before = inventory.calls();
     supervisor::register(&provider, &[CHANNEL]);
     supervisor::spawn(shared.clone(), provider.clone());
     let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(status) = supervisor::status(CHANNEL) {
-                if status["reason"] == "no_session" {
+                if status["reason"] == "no_session" && inventory.calls() > before {
                     break status;
                 }
             }
@@ -143,34 +155,7 @@ async fn u_dormant_entrypoints() {
         }
     })
     .await
-    .expect("the real supervisor must publish its read_now result");
+    .expect("the real supervisor never published its active Unbound observation");
     assert_eq!(status["reason"], "no_session");
     assert!(!status["observed_at"].is_null());
-    assert_eq!(observer.calls(), 0);
-    assert_eq!(inventory.calls(), 0);
-    assert!(
-        unbound_candidates(
-            CHANNEL,
-            &provider,
-            Some("positive-control"),
-            &[],
-            Ok(vec![]),
-            &Ok(None)
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        observer.calls(),
-        1,
-        "the counter must observe its own positive control"
-    );
-    let result = crate::services::platform::tmux::session_inventory::tests::probe_in_namespace(
-        &root.path().join("never-created"),
-    );
-    assert!(matches!(result, Inventory::Empty(_)), "{result:?}");
-    assert_eq!(
-        inventory.calls(),
-        1,
-        "the inventory entry counter must be live"
-    );
 }

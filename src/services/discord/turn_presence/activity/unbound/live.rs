@@ -27,13 +27,25 @@ fn marker_path(name: &str, extension: &str) -> std::path::PathBuf {
     }
 }
 fn local_trace(name: &str) -> LocalTrace {
-    let path = marker_path(name, tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT);
-    let runtime = match std::fs::read_to_string(path) {
-        Ok(raw) => RuntimeHandoffKind::from_str(&raw)
-            .map(Some)
-            .ok_or_else(|| "unrecognized runtime marker".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+    let runtime = {
+        let extension = tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT;
+        let canonical = marker_path(name, extension);
+        let legacy =
+            std::path::PathBuf::from(tmux_common::legacy_tmp_session_path(name, extension));
+        let read = std::fs::read_to_string(&canonical).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound && canonical != legacy {
+                std::fs::read_to_string(&legacy)
+            } else {
+                Err(error)
+            }
+        });
+        match read {
+            Ok(raw) => RuntimeHandoffKind::from_str(&raw)
+                .map(Some)
+                .ok_or_else(|| "unrecognized runtime marker".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     };
     let marker = match std::fs::read_to_string(marker_path(name, "host_kind")) {
         Ok(raw) => match HostKind::from_persisted(raw.trim()) {
@@ -242,6 +254,7 @@ struct Snapshot {
     exact: HostedLookup,
     canonical: HostedLookup,
     owners: BTreeMap<String, Option<u64>>,
+    ports: Arc<LivePorts>,
 }
 impl Snapshot {
     async fn collect(
@@ -282,6 +295,8 @@ impl Snapshot {
         })
         .await
         .map_err(|e| e.to_string())??;
+        #[cfg(test)]
+        review_tests::after_files(channel.get()).await;
         let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
         let name = files
             .candidates
@@ -322,9 +337,10 @@ impl Snapshot {
             exact,
             canonical,
             owners: BTreeMap::new(),
+            ports,
         })
     }
-    fn current(&self) -> bool {
+    fn memory_current(&self) -> bool {
         let Some(shared) = self.shared.upgrade() else {
             return false;
         };
@@ -362,6 +378,48 @@ impl Snapshot {
                     == *owner
             })
     }
+    async fn revalidate(&self, namespace: &Observation) -> bool {
+        let Some(shared) = self.shared.upgrade() else {
+            return false;
+        };
+        if !self.memory_current() {
+            return false;
+        }
+        let Ok(next) =
+            Self::collect(&shared, &self.provider, self.channel, self.ports.clone()).await
+        else {
+            return false;
+        };
+        let channel = self.channel.get();
+        let Ok(fresh) = tokio::task::spawn_blocking(move || observe_inventory(channel)).await
+        else {
+            return false;
+        };
+        if !namespace.same_namespace(&fresh)
+            || namespace.inventory != fresh.inventory
+            || !fresh.current()
+        {
+            return false;
+        }
+        // Re-read files after the last DB/inventory await; final publication has no await.
+        let Ok(files) = Files::collect(
+            &self.provider,
+            self.channel.get(),
+            self.basis.as_deref(),
+            &self.config,
+            &self.ports,
+        ) else {
+            return false;
+        };
+        self.runtime_root == next.runtime_root
+            && self.basis == next.basis
+            && Arc::ptr_eq(&self.config, &next.config)
+            && self.files.same(&next.files)
+            && self.files.same(&files)
+            && self.exact == next.exact
+            && self.canonical == next.canonical
+            && self.memory_current()
+    }
     fn scope(&self, shared: &SharedData) -> HostScope {
         let candidates = self.files.candidates.as_ref().ok();
         let name = candidates.and_then(|c| c.current.as_deref());
@@ -391,6 +449,28 @@ impl Snapshot {
                 hold("identity_unresolved")
             };
         };
+        for (candidate, trace) in &self.files.traces {
+            if candidate == name {
+                continue;
+            }
+            if trace.runtime.is_err() || matches!(trace.marker, HostKindMarker::ReadFailed(_)) {
+                return hold("probe_failed");
+            }
+            if trace.process.is_some()
+                || !matches!(
+                    trace.marker,
+                    HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
+                )
+                || matches!(
+                    trace.runtime,
+                    Ok(Some(
+                        RuntimeHandoffKind::ProcessBackend | RuntimeHandoffKind::ClaudeEAdapter
+                    ))
+                )
+            {
+                return hold("identity_unresolved");
+            }
+        }
         let Some(trace) = self.files.traces.get(name) else {
             return hold("probe_failed");
         };
@@ -408,7 +488,9 @@ impl Snapshot {
             channel_id: self.channel.to_string(),
             logical_key: name.into(),
             owner_node: boot.local_node().unwrap_or_default().into(),
-            runtime_root: crate::config::runtime_root()
+            runtime_root: self
+                .runtime_root
+                .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
         };
@@ -448,11 +530,20 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     namespace: Option<Observation>,
 }
 impl Stamp {
-    pub(in crate::services::discord::turn_presence::activity) fn publish<R>(
+    pub(in crate::services::discord::turn_presence::activity) async fn publish<R>(
         &self,
         watch: &Mutex<Watch>,
         publish: impl FnOnce() -> R,
     ) -> Option<R> {
+        self.publish_checked(watch, || ())?;
+        if let Some(snapshot) = &self.snapshot {
+            if !snapshot.revalidate(self.namespace.as_ref()?).await {
+                return None;
+            }
+        }
+        self.publish_checked(watch, publish)
+    }
+    fn publish_checked<R>(&self, watch: &Mutex<Watch>, publish: impl FnOnce() -> R) -> Option<R> {
         let guard = lock(watch);
         let shared = self.shared.upgrade()?;
         if shared
@@ -483,7 +574,7 @@ impl Stamp {
         }
         (guard.key.is_none()
             && (guard.generation, guard.revision) == (self.generation, self.revision)
-            && self.snapshot.as_ref().is_none_or(Snapshot::current)
+            && self.snapshot.as_ref().is_none_or(Snapshot::memory_current)
             && self.namespace.as_ref().is_none_or(Observation::current))
         .then(publish)
     }
@@ -537,9 +628,14 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
         snapshot,
         namespace,
     };
-    if stamp.publish(&watch, || ()).is_none() {
+    if stamp.publish(&watch, || ()).await.is_none() {
         answer = observed(Activity::Unknown, "superseded");
     }
+    let inputs = stamp
+        .snapshot
+        .as_ref()
+        .map(|s| (&s.files.candidates, s.scope(shared).result));
+    tracing::debug!(channel_id = channel.get(), ?inputs, namespace = ?stamp.namespace.as_ref().map(|n| n.diagnostics()), inventory = ?stamp.namespace.as_ref().map(|n| &n.inventory), result = ?answer, "unbound activity observation");
     (answer, stamp)
 }
 async fn collect(
@@ -575,7 +671,6 @@ async fn collect(
         .collect();
     let scope = snapshot.scope(shared);
     let verdict = decide_unbound(candidates, scope, &namespace.inventory, &snapshot.owners);
-    tracing::debug!(channel = channel.get(), candidates = ?snapshot.files.candidates, inventory = ?namespace.inventory, ?verdict, "unbound activity observation");
     let next = Snapshot::collect(shared, provider, channel, ports).await?;
     if snapshot.runtime_root != next.runtime_root
         || snapshot.basis != next.basis
@@ -602,3 +697,7 @@ async fn collect(
 #[cfg(test)]
 #[path = "live_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "live_review_tests.rs"]
+pub(super) mod review_tests;
