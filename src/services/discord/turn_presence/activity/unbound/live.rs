@@ -494,12 +494,7 @@ impl Snapshot {
                     trace.marker,
                     HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
                 )
-                || matches!(
-                    trace.runtime,
-                    Ok(Some(
-                        RuntimeHandoffKind::ProcessBackend | RuntimeHandoffKind::ClaudeEAdapter
-                    ))
-                )
+                || matches!(trace.runtime, Ok(Some(RuntimeHandoffKind::ProcessBackend)))
             {
                 return hold("identity_unresolved");
             }
