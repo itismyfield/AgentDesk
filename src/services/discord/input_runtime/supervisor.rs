@@ -994,6 +994,3 @@ fn boundary(at: transition::Boundary) -> &'static str {
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "supervisor_tests.rs"]
 mod tests;
-
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-pub(in crate::services::discord) use tests::{ScanFixtureEvidence, run_scan_fixture};
