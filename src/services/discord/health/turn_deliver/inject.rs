@@ -23,7 +23,7 @@ use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
     BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
-use crate::services::discord::router::queued_head_inject_covers;
+use crate::services::discord::router::live_intake_inject_covers;
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::HerdrTarget;
@@ -151,7 +151,7 @@ fn codex_enabled(channel_id: u64) -> bool {
     if test_hook::codex_enabled(channel_id) {
         return true;
     }
-    CODEX_BUSY_INJECT_ENABLED && queued_head_inject_covers(ChannelId::new(channel_id), None)
+    CODEX_BUSY_INJECT_ENABLED && live_intake_inject_covers(ChannelId::new(channel_id), None)
 }
 
 /// Who holds the channel at one read: the mailbox claim and the durable row.
