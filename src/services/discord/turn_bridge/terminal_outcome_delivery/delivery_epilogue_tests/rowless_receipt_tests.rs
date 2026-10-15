@@ -387,7 +387,7 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
         // The original exact receipt stays in the same-generation bounded
         // record after another range becomes the latest frontier.
         let path = state.inflight_state.output_path.as_ref().unwrap();
-        std::fs::write(path, [b'x'; 128]).unwrap();
+        std::fs::write(path, [&[b'x'; 63][..], b"\n"].concat().repeat(2)).unwrap();
         let mut later = source.clone();
         later.range = (64, 128);
         later.turn_nonce.push_str("-later");
