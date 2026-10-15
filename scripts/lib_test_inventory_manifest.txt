@@ -4059,6 +4059,7 @@ services::discord::health::relay_auto_heal::orphan_token_tests::retirement_durin
 services::discord::health::relay_auto_heal::orphan_token_tests::unmeasured_orphan_token_keeps_anchor_and_queue_and_is_graded_once
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_nudge_outcome
 services::discord::health::relay_auto_heal::retired_redrive_tests::empty_retired_set_keeps_the_legacy_reattach_outcome
+services::discord::health::relay_auto_heal::retired_redrive_tests::redrive_tree_ignores_only_foreign_death_markers
 services::discord::health::relay_auto_heal::retired_redrive_tests::retired_redrive_key_never_moves_the_watcher_resume_offset
 services::discord::health::relay_auto_heal::retired_redrive_tests::retired_watcher_owner_key_stops_the_nudge_of_a_legacy_request
 services::discord::health::relay_auto_heal::retired_redrive_tests::retirement_before_reattach_promotion_spawns_no_watcher
