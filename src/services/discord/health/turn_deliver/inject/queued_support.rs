@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use super::{
-    HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name,
+    HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name, herdr,
     live_tui_session, observe, row_key,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -40,6 +40,21 @@ pub(super) async fn queued_target_matches(
             named,
         ) == Some((target.session.clone(), target.transcript.clone()))
         && (!before_effect || busy_turn(RuntimeHandoffKind::ClaudeTui, &target.transcript).is_ok())
+        && same_herdr_execution(shared, request, target).await
+}
+
+/// A Herdr target is still the channel's Bound execution: the same endpoint, pane and nonce.
+async fn same_herdr_execution(
+    shared: &SharedData,
+    request: &HumanInputRequest,
+    target: &Target,
+) -> bool {
+    let Some(pane) = &target.herdr else {
+        return true;
+    };
+    let channel = request.channel_id.get();
+    let now = herdr::bound_pane(shared, &request.provider, channel, &target.session).await;
+    now.as_ref() == Some(pane)
 }
 
 impl InjectAttempt {

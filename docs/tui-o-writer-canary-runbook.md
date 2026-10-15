@@ -4,8 +4,8 @@ This runbook covers the first O writer canary: one new channel moved to the O wr
 [`tui_o.writer.channels`](tui-o-writer-channels.md). It applies to a build whose `O_TUI_WRITER`
 switch is `true`, as this build is. With an empty list every channel stays on Legacy.
 
-The first N1 run uses Claude's completed warm-up and historical adoption path. Writer activation
-and N1 turn-mode confirmation are separate gates. Code coordinates below refer to
+The first run uses Claude's completed warm-up and historical adoption path. Writer activation
+and turn-mode confirmation are separate gates. Code coordinates below refer to
 `945aac2668ce010b92053fdb39f541ae51629e20`; recheck them for the deployed build.
 
 Managed drain and handback to Legacy are not implemented. The canary is one way: a canary channel
@@ -16,7 +16,7 @@ is never removed from the list and never added again. The next canary uses a dif
 Use a Discord channel created for the canary. On the gateway node all of these must hold, or the
 channel is not adopted:
 
-- The first N1 channel is registered in `agents[].channels` with a Claude TUI runtime.
+- The first canary channel is registered in `agents[].channels` with a Claude TUI runtime.
 - The gateway node is the O home: without clustering every node is; with clustering both
   `cluster.instance_id` and `cluster.gateway_preferred_instance_id` are set and equal on it. A
   clustered node with a non-empty list and either id unset refuses to boot.
@@ -33,12 +33,9 @@ channel is not adopted:
   transcript and no bind is pending. The Claude transcript may hold output under the checks of §3.1.
 - `<runtime_root>/o_store/<channel>` does not exist.
 
-Codex writer activation requires an already bound, unchanged 0-byte source, but its N1 native
-reader requires real session metadata. A normal native path providing both has not been verified.
-Do not create or truncate a transcript to manufacture that state; Codex is excluded from the first
-N1 run (P12: `src/services/tui_o/writer/activation.rs:244–276`,
-`src/services/tui_o/writer/input_facts.rs:87–100`,
-`src/services/codex_tui/rollout_index.rs:240–280`).
+Codex writer activation requires an already bound, unchanged 0-byte source. Its native
+reader requires real session metadata. Do not create or truncate a transcript to manufacture
+that state; use Claude's verified warm-up path for the first canary.
 
 The TUI writes its transcript and the binding log binds it only at the first prompt, so a Claude
 canary starts with a warm-up turn:
@@ -66,7 +63,7 @@ body take the channel for that process: it stays on Legacy until the next restar
    carry the same list. Saving the file only marks the change as restart-required.
    Separately select this channel in `tui_o.turn.channels`, keeping `tui_o.turn.all_owned: false`
    for the single-channel run. Its default is an empty list with `all_owned: false`, so writer
-   selection alone does not enable N1. Verify the effective boot selection on every producer
+   selection alone does not confirm turn mode. Verify the effective boot selection on every producer
    (`src/services/tui_o/turn_mode.rs:8–80`).
 2. Restart the gateway node through the managed restart path. The new list applies at boot only.
 3. Restart any standby or runner node the same way, so no node keeps the old list.
@@ -100,10 +97,10 @@ channel lost its TUI binding. Restore the binding; do not delete the store to ge
 
 ## 3. Confirm activation
 
-These checks establish writer activation. A failed or partial retirement of the channel's
-synthetic population leaves Legacy turn-mode active (`src/services/tui_o/turn_mode.rs:8–80`,
-`src/services/discord/tui_direct_pending_start/turn_retirement.rs:172–240`). Check the relayed
-output with the source-to-Discord comparison in §5.
+These checks establish writer activation. Turn mode also requires effective turn selection
+and successful retirement of the channel's synthetic population. A failed or partial
+retirement leaves Legacy turn mode active. Check the ordinary retirement logs and the
+channel's `turn_presence` status; an `init` alone does not confirm turn mode.
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
 - `<runtime_root>/o_store/o_era` exists (first canary only) and
@@ -183,7 +180,7 @@ Deferred adoption does not promise an unlimited wait. After 40 minutes without d
 (soft stall), or the 80-minute frontier-progress cap (hard stall), the guarded non-late path may
 handoff at EOF. The log is `Legacy delivered nothing through the stall; O starts at the source's
 end`. Preserve the stall kind, source, frontier and abandoned ranges. Do not approve that sample
-as a clean N1 baseline until the historical debt/abandon evidence is established; elapsed time or
+as a clean comparison baseline until the historical debt/abandon evidence is established; elapsed time or
 `deferred adoption committed` alone is insufficient (P31:
 `src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 

@@ -2262,7 +2262,7 @@ mod tests {
                 };
                 let g1 = stamp(1_700_526_400);
                 let rollout = root.path().join("rollout-a.jsonl");
-                std::fs::write(&rollout, [b'x'; 64]).unwrap();
+                std::fs::write(&rollout, [&[b'x'; 63][..], b"\n"].concat()).unwrap();
                 let binding = |path: &std::path::Path, session: &str| {
                     crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
                         runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,

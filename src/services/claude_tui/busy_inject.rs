@@ -1,10 +1,10 @@
 //! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
-mod screen;
+pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;
-mod stash;
+pub(in crate::services::claude_tui) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]
@@ -572,6 +572,15 @@ fn stash_channels_configured() -> &'static [u64] {
     CHANNELS.get_or_init(|| stash_channels(raw().as_deref()))
 }
 
+#[cfg(unix)]
+pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
+    #[cfg(test)]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return stash_channel_listed(channel, &stash_tests::configured_channels());
+    }
+    stash_channel_listed(channel, stash_channels_configured())
+}
+
 fn stash_channels(raw: Option<&str>) -> Vec<u64> {
     let ids = raw.unwrap_or_default().split(',');
     ids.filter_map(|id| id.trim().parse().ok()).collect()
@@ -873,28 +882,36 @@ impl Attempt<'_> {
             }
             Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
         }
-        // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
         let request = self.request;
-        loop {
-            if Instant::now() >= deadline {
-                return Outcome::Unconfirmed(Unconfirmed::NotObserved);
-            }
-            if let Some(exact) = transcript_submission(
-                request.transcript,
-                self.offset,
-                request.nonce,
-                Some(self.text),
-            ) && Instant::now() < deadline
-            {
-                return if exact {
-                    Outcome::Injected
-                } else {
-                    Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit)
-                };
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(self.timing.confirm_poll.min(left));
+        let receipt = (request.transcript, self.offset, request.nonce, self.text);
+        await_receipt(receipt, deadline, self.timing.confirm_poll)
+            .map_or_else(Outcome::Unconfirmed, |()| Outcome::Injected)
+    }
+}
+
+/// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:
+/// only the exact `text` is a receipt, another body under the nonce is contaminated.
+pub(crate) fn await_receipt(
+    (transcript, offset, nonce, text): (&Path, u64, &str, &str),
+    deadline: Instant,
+    poll: Duration,
+) -> Result<(), Unconfirmed> {
+    // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Unconfirmed::NotObserved);
         }
+        if let Some(exact) = transcript_submission(transcript, offset, nonce, Some(text))
+            && Instant::now() < deadline
+        {
+            return if exact {
+                Ok(())
+            } else {
+                Err(Unconfirmed::ContaminatedSubmit)
+            };
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(poll.min(left));
     }
 }
 

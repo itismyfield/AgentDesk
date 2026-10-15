@@ -379,12 +379,18 @@ impl Discord {
         RepostHttp::at(http, self.base.clone()).unwrap()
     }
 
-    /// Asserts every request was a GET and returns how many there were.
+    /// Asserts every probe request was a GET and returns how many there were. Only this
+    /// channel's routes count: a reused loopback port also receives other tests' requests.
     fn gets(&self) -> usize {
+        let route = format!("/channels/{CHANNEL}/");
         let seen = self.seen.lock().unwrap();
-        let posts = seen.iter().filter(|(method, _)| method != "GET").count();
+        let probe: Vec<_> = seen
+            .iter()
+            .filter(|(_, path)| path.contains(&route))
+            .collect();
+        let posts = probe.iter().filter(|(method, _)| method != "GET").count();
         assert_eq!(posts, 0, "a probe never POSTs: {seen:?}");
-        seen.len()
+        probe.len()
     }
 }
 

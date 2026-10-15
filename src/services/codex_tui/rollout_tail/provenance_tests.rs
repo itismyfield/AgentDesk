@@ -422,3 +422,46 @@ fn dev_only_renumber_retains_original_source_with_checked_prefix() {
         }))
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn dormant_closed_span_keeps_native_bounds_and_cancelled_tail_emits_nothing() {
+    use crate::services::tui_o::store::codex_provenance::submit_floor::tests as floor_fixture;
+    use crate::services::tui_o::store::spool::Cursor;
+    use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::construction::{
+        EpisodeEvidenceSnapshot, actual_submit, submitted_episode,
+    };
+    use sha2::{Digest, Sha256};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::new();
+    let launch = floor_fixture::launch(7, &f.source);
+    let cursor = Cursor {
+        source: f.source.clone(),
+        captured_through: f.header_end,
+        prefix_hash: hex::encode(Sha256::digest(std::fs::read(&f.source.path).unwrap())),
+        retired: false,
+        transition_cleanup: None,
+    };
+    let floor = floor_fixture::native_floor(launch.clone(), &cursor);
+    let token = std::sync::Arc::new(
+        crate::services::provider::CancelToken::from_persisted_turn_nonce(Some(
+            launch.episode.turn_nonce.clone(),
+        )),
+    );
+    let evidence = EpisodeEvidenceSnapshot::capture(token.clone(), launch.episode.clone()).unwrap();
+    let receipt = actual_submit(&evidence, &token, &launch.context, || Ok(())).unwrap();
+    let submitted = submitted_episode(&evidence, &token, &launch.context, &receipt).unwrap();
+    assert_eq!(submitted_native_span(&submitted, &floor).unwrap(), None);
+    f.event("task_started", Some("closed"));
+    f.event("task_complete", Some("closed"));
+    let end = f.len();
+    let span = submitted_native_span(&submitted, &floor).unwrap().unwrap();
+    assert_eq!((span.start, span.end), (f.header_end, Some(end)));
+    f.event("task_started", Some("later"));
+    token
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Release);
+    let (tx, rx) = std::sync::mpsc::channel();
+    tail_closed_episode(&span, "closed prompt", tx, token).unwrap();
+    assert_eq!(rx.try_iter().count(), 0);
+}

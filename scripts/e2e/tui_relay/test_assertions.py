@@ -1675,11 +1675,11 @@ class E35CurrentRunContract(unittest.TestCase):
         self.assertEqual(scenario, original)
 
 
-class RetiredCellAdmission(unittest.TestCase):
-    def test_direct_cli_rejects_retired_cell_before_side_effects(self):
+class UnknownCellAdmission(unittest.TestCase):
+    def test_direct_cli_rejects_unknown_cell_before_side_effects(self):
         stderr = io.StringIO()
         with (
-            patch.object(sys, "argv", ["driver", "--cell", "claude-e", "--channel-id", "333"]),
+            patch.object(sys, "argv", ["driver", "--cell", "obsolete-cell", "--channel-id", "333"]),
             patch.object(driver, "load_scenarios") as scenarios,
             patch("pathlib.Path.mkdir") as mkdir,
             patch("pathlib.Path.write_text") as report,
@@ -1692,12 +1692,12 @@ class RetiredCellAdmission(unittest.TestCase):
             with self.assertRaises(SystemExit) as error:
                 driver.main()
         self.assertEqual(error.exception.code, 2)
-        self.assertIn("invalid choice: 'claude-e'", stderr.getvalue())
+        self.assertIn("invalid choice: 'obsolete-cell'", stderr.getvalue())
         for side_effect in (scenarios, mkdir, report, client, child, acquire, run):
             side_effect.assert_not_called()
 
-    def test_matrix_cli_rejects_retired_cell_before_side_effects(self):
-        for cells in ("claude-e", "claude-tui,claude-e"):
+    def test_matrix_cli_rejects_unknown_cell_before_side_effects(self):
+        for cells in ("obsolete-cell", "claude-tui,obsolete-cell"):
             with (
                 self.subTest(cells=cells),
                 patch.object(sys, "argv", ["matrix", "--cells", cells, "--scenarios",
@@ -1711,7 +1711,7 @@ class RetiredCellAdmission(unittest.TestCase):
                 patch.object(matrix.subprocess, "run") as child,
                 patch.object(matrix, "run_cell") as run,
             ):
-                with self.assertRaisesRegex(ValueError, "claude-e"):
+                with self.assertRaisesRegex(ValueError, "obsolete-cell"):
                     matrix.main()
             for side_effect in (config, cross, restart, mkdir, report, client, child, run):
                 side_effect.assert_not_called()

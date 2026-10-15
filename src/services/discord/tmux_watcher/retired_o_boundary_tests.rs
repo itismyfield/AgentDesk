@@ -2,7 +2,6 @@ use super::o_seed_install_tests as seed_cases;
 use super::*;
 use crate::services::discord::health::legacy_supervision::RetiredForTest;
 use crate::services::discord::health::legacy_supervision::test_support::tree_fingerprint;
-use crate::services::discord::tmux::OOnlyInstallOutcome;
 
 fn child(test: &str) -> bool {
     isolated_in("retired_o_boundary_tests", test, &[])
@@ -42,7 +41,7 @@ async fn p2_i_retired_watcher_rejects_actual_restored_argument_before_seed() {
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     seed_cases::until(&observed, "installed predecessor EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -113,7 +112,7 @@ async fn p2_j_retired_monitor_initial_and_inner_candidates_do_not_start_legacy_t
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let before = tree_fingerprint(&root);
     let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     seed_cases::until(&observed, "installed monitor EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -168,7 +167,7 @@ async fn p2_h_actual_fresh_idle_preserves_partial_body_until_provider_parse() {
     let coord = fixture.shared.tmux_relay_coord(fixture.channel);
     let frontier = coord.confirmed_end_offset.load(Ordering::Acquire);
     let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     seed_cases::until(&observed, "fresh-idle initial EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -248,7 +247,7 @@ async fn p2_h_actual_post_work_idle_keeps_parsed_body_rowless_until_cancel() {
     let coord = fixture.shared.tmux_relay_coord(fixture.channel);
     let frontier = coord.confirmed_end_offset.load(Ordering::Acquire);
     let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     seed_cases::until(&observed, "post-work initial EOF", |s| {
         s.event_count("outer_eof") > 0

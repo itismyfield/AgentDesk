@@ -20,9 +20,17 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "e01b466ed919f384035c1762d80ce6422d1dd02a5803e68970715ffbf86965e7"
+    "6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+
+
+def load_selector():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_selection", REPO_ROOT / "scripts/ci/test-selection.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 MIRROR_IF = "${{ !cancelled() }}"
 MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
 _LINT_FILTER = (
@@ -478,7 +486,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         hardening = (REPO_ROOT / "scripts/check-ci-runner-hardening.sh").read_text()
         for job_id in ("test_fast", "high-risk-recovery", "library_sweep", "relay_authority_targets"):
             original = job_block(workflow, job_id)
-            changed = original.replace("lib-test-artifact.py run -- cargo test --lib", "lib-test-artifact.py run -- cargo test --lib missing_test", 1)
+            # The PR sweep's command lives in the selector; repointing its lane is the mutant.
+            old, new = ("run --lane sweep", "run --lane pg") if job_id == "library_sweep" else (
+                "lib-test-artifact.py run -- cargo test --lib", "lib-test-artifact.py run -- cargo test --lib missing_test")
+            changed = original.replace(old, new, 1)
             mutated = workflow.replace(original, changed, 1)
             with self.subTest(command=job_id):
                 self.assertNotEqual(changed, original)
@@ -489,6 +500,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mutated = workflow.replace(original, changed, 1)
         gate = self._repin_job_hash(hardening, mutated, "test_fast")
         self.assertNotEqual(self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate).returncode, 0)
+        # The gate pins the 60-minute library sweep budget on PR and main, even after a job re-pin.
+        sweep = job_block(workflow, "library_sweep")
+        mutated = workflow.replace(sweep, sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
+        self.assertNotEqual(mutated, workflow)
+        gate = self._repin_job_hash(hardening, mutated, "library_sweep")
+        result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"Library sweep (selection-set gated)" must retain exact timeout policy', result.stderr)
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        main_sweep = step_block(job_block(main, "full_non_pg"), "Library sweep (selection-set gated)")
+        main_mutated = main.replace(main_sweep, main_sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
+        self.assertNotEqual(main_mutated, main)
+        result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main_mutated})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("full_non_pg Library sweep (selection-set gated) must keep timeout-minutes: 60", result.stderr)
         download = step_block(original, "Download shared lib tests")
         changed = original.replace(download, download.replace("download-artifact@v4", "upload-artifact@v4"), 1)
         self.assertNotEqual(self.run_hardening_fixture(workflow.replace(original, changed, 1)).returncode, 0)
@@ -516,7 +542,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         test_job = job_block(workflow, "test_fast")
         self.assertRegex(
             test_job,
-            r"(?m)^    if: " + re.escape("${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}") + "$",
+            r"(?m)^    if: " + re.escape("${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}") + "$",
         )
         command = (
             "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
@@ -867,9 +893,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(len(shared_sweep), 1)
         shared = shared_sweep[0]
         self.assertEqual(shared["env"]["ADK_LIB_TEST_ARTIFACT"], "${{ runner.temp }}/lib-test-artifact")
+        self.assertEqual(shared["run"], "python3 scripts/ci/test-selection.py run --lane sweep")
+        # The PR's full mode runs the selector's copy of main's sweep, behind the shared-lib wrapper.
         wrapper = "python3 scripts/ci/lib-test-artifact.py run -- "
-        self.assertEqual(shared["run"].count(wrapper), 1)
-        normalized = {**shared, "env": {key: value for key, value in shared["env"].items() if key != "ADK_LIB_TEST_ARTIFACT"}, "run": shared["run"].replace(wrapper, "", 1)}
+        full_sweep = load_selector().FULL_SWEEP
+        self.assertEqual(full_sweep.count(wrapper), 1)
+        added = ("ADK_LIB_TEST_ARTIFACT", "ADK_TEST_SELECTION_PLAN")
+        normalized = {**shared, "env": {key: value for key, value in shared["env"].items() if key not in added}, "run": full_sweep.replace(wrapper, "", 1)}
         self.assertEqual(named(main_jobs["full_non_pg"], sweep_step), [normalized])
         self.assertEqual(len(named(main_jobs["full_non_pg"], sweep_step)), 1)
         recipe = just_recipe_commands(justfile, "test-non-pg")
