@@ -15,6 +15,7 @@ use super::channel_home::{self, RENEW_EVERY};
 pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
+pub(crate) use super::channel_home_port::PersistedInput;
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
@@ -135,6 +136,18 @@ impl BootPort {
         let readiness = crate::services::tui_o::writer::host::process_readiness();
         let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
         Self::new(reads, reset).restored_by(restored)
+    }
+
+    /// [`BootPort::reading`] that also counts the channel's persisted queue and marker as busy.
+    pub(crate) fn reading_persisted(
+        channel: u64,
+        restored: Arc<AtomicBool>,
+        persisted: PersistedInput,
+        reset: LegacyReset,
+    ) -> Self {
+        let readiness = crate::services::tui_o::writer::host::process_readiness();
+        let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
+        Self::new(reads.persisted_by(persisted), reset).restored_by(restored)
     }
 }
 
@@ -322,9 +335,12 @@ where
                 } else {
                     lease.renew_at(&pool, &home, row.epoch).await;
                     // The boot restore runs before any drain round reads the channel's turns.
-                    let restored = port.restore_settled(&home, row.epoch).await;
-                    if restored && matches!(row.state, HomeState::Releasing | HomeState::Reclaiming)
-                    {
+                    let settled = port.restore_settled(&home, row.epoch).await;
+                    let draining =
+                        matches!(row.state, HomeState::Releasing | HomeState::Reclaiming);
+                    if draining && !settled {
+                        home.note_drain(Some(Blocker::TurnUnreadable.as_str()));
+                    } else if draining {
                         drain::run_drain(pool.clone(), Arc::clone(&home), port.clone()).await;
                     }
                 }

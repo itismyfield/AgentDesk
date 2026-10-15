@@ -3,8 +3,9 @@
 use super::*;
 #[cfg(test)]
 use crate::services::cluster::channel_home_boot::restore_mutant;
-use crate::services::cluster::channel_home_boot::{BootPort, ChannelRestore, LegacyReset};
-use crate::services::cluster::channel_home_port::{ChannelHomePort, PersistedInput};
+use crate::services::cluster::channel_home_boot::{
+    BootPort, ChannelRestore, LegacyReset, PersistedInput,
+};
 use crate::services::turn_orchestrator::{
     load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };
@@ -302,15 +303,12 @@ pub(super) fn standby_home_port(
         let channel = (channel != 0).then(|| ChannelId::new(channel))?;
         persisted_input(&owner, &token_hash, channel)
     });
-    let readiness = crate::services::tui_o::writer::host::process_readiness();
-    let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
     let (shared, owner) = (Arc::clone(shared), provider.clone());
     let run: ChannelRestore = Arc::new(move || {
         let (shared, provider) = (Arc::clone(&shared), owner.clone());
         Box::pin(async move { restore_standby_channel(&shared, &provider, channel).await })
     });
-    BootPort::new(reads.persisted_by(persisted), reset)
-        .restored_by(restored)
+    BootPort::reading_persisted(channel, restored, persisted, reset)
         .restoring(provider.as_str(), run)
 }
 
