@@ -8692,6 +8692,7 @@ services::discord::tmux_restart_handoff::retirement_await_tests::retirement_duri
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_dispatch_lookup_blocks_failure
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_notice_preserves_later_effects
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_rowless_snapshot_blocks_kickoff
+services::discord::tmux_watcher_registry::session_binding::tests::authoritative_snapshot_dedupes_sorts_and_rechecks_live_precedence
 services::discord::tmux_watcher_registry_restore_tests::base_and_thread_suffixed_names_resolve_independently
 services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channel_if_current_only_rolls_back_matching_claim
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
@@ -10151,6 +10152,15 @@ services::discord::turn_bridge::tmux_runtime::session_stop::tests::c1_stop_some_
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_foreign_provider_binding_is_host_refused_without_io
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_multiple_typed_owner_sessions_refuse_before_open_state
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_nonowner_typed_session_is_not_a_candidate
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_owner_change_after_judgment_prevents_slash_finish_interrupt
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_owner_only_pending_or_corrupt_binding_refuses_without_io
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_slash_stop_interrupts_unique_owner_only_claude_parent_without_watcher
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_source_rotation_after_judgment_prevents_slash_finish_interrupt
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_text_stop_interrupts_unique_owner_only_codex_parent_without_watcher
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_ttl_mirror_only_session_is_not_a_candidate
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
@@ -12529,6 +12539,7 @@ services::tui_o::shadow::derive::tests::live_requires_attach_and_a_window_bounda
 services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
+services::tui_o::shadow::identity::tests::claude_multi_block_row_keys_each_block_like_one_block_rows
 services::tui_o::shadow::identity::tests::claude_synthetic_resume_chrome_alone_is_excluded
 services::tui_o::shadow::identity::tests::codex_turn_aborted_closes_only_the_named_parent_turn
 services::tui_o::store::cleanup_witness::tests::readers_s1a_malformed_witness_is_not_cleanup_authority
@@ -12733,11 +12744,13 @@ services::tui_o::writer::tests::a_restarted_writer_recovers_the_newest_post_from
 services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_posted_it
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
+services::tui_o::writer::tests::actor::a_channel_stopped_on_a_whole_message_row_resumes_from_its_spool_once
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_recovered_actor_clears_waiting_health_through_its_shared_sink
 services::tui_o::writer::tests::actor::a_resumed_sessions_synthetic_chrome_is_excluded_and_the_next_answer_posts
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
+services::tui_o::writer::tests::actor::a_whole_message_row_posts_each_block_once_without_stopping
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
 services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold

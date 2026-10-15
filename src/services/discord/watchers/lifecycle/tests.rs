@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn same_tmux_different_output_path_replaces_watcher() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let channel_a = ChannelId::new(1485506232256168134);
         let channel_b = ChannelId::new(1485506232256168135);
         let tmux_name = "AgentDesk-codex-adk-cdx-path-change";
@@ -117,7 +118,8 @@ mod tests {
 
     #[test]
     fn turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(1_485_506_232_256_168_134);
         let tmux_name = "AgentDesk-claude-adk-cc-respawn";
         let runtime_path = "/tmp/claude-runtime-after-respawn.jsonl";
@@ -159,7 +161,8 @@ mod tests {
 
     #[test]
     fn reuse_existing_observes_reservation_mismatch_without_repair_or_candidate_write() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(5_191_000_000_000_000_071);
         let requester = ChannelId::new(5_191_000_000_000_000_072);
         let tmux = "AgentDesk-5191-reuse-observe-only";
@@ -194,7 +197,8 @@ mod tests {
     /// `current_msg_id` render seed and converter generation in authority.
     #[test]
     fn forced_rebind_replaces_live_same_output_incumbent() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(1_485_506_232_256_168_136);
         let dispatch = ChannelId::new(1_485_506_232_256_168_137);
         let tmux_name = "AgentDesk-codex-adk-cdx-4455-forced";
@@ -240,7 +244,8 @@ mod tests {
         let owner = ChannelId::new(1_500_000_000_000_000_001);
         let dispatch = ChannelId::new(2_600_000_000_000_000_002);
         let claim = |incumbent: TmuxWatcherHandle, requested_output: &str| {
-            let watchers = TmuxWatcherRegistry::new();
+            let watchers =
+                TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
             assert!(try_claim_watcher(&watchers, owner, incumbent));
             claim_or_reuse_watcher(
                 &watchers,

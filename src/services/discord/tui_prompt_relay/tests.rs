@@ -2269,12 +2269,13 @@ fn external_input_owner_uses_resolved_claude_transcript_before_session_bound_own
     let stale_binding_path = dir.path().join("stale-binding.jsonl");
     let resolved_fresh_path = dir.path().join("resolved-fresh.jsonl");
     let tmux_session_name = "AgentDesk-claude-stale-binding-owner";
-    let watchers = super::super::TmuxWatcherRegistry::new();
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     watchers.insert(
         ChannelId::new(940_000_000_000_001),
         test_watcher_handle(tmux_session_name, &stale_binding_path),
     );
-
     assert_eq!(
         external_input_relay_owner_for_watchers(
             &watchers,
@@ -2304,8 +2305,9 @@ fn external_input_owner_selects_one_relay_path_per_observed_turn() {
     let output_path = dir.path().join("output.jsonl");
     let other_path = dir.path().join("other.jsonl");
     let tmux_session_name = "AgentDesk-codex-owner-split";
-    let watchers = super::super::TmuxWatcherRegistry::new();
-
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     assert_eq!(
         external_input_relay_owner_for_watchers(
             &watchers,
@@ -2315,7 +2317,6 @@ fn external_input_owner_selects_one_relay_path_per_observed_turn() {
         ),
         ExternalInputRelayOwner::BridgeAdapter
     );
-
     watchers.insert(
         ChannelId::new(940_000_000_000_002),
         test_watcher_handle(tmux_session_name, &output_path),
@@ -4454,14 +4455,14 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
     let output_path = dir.path().join("output.jsonl");
     let other_path = dir.path().join("other.jsonl");
     let tmux_session_name = "AgentDesk-codex-synthetic-owner";
-    let watchers = super::super::TmuxWatcherRegistry::new();
-
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     assert!(!tui_direct_watcher_can_own_output(
         &watchers,
         tmux_session_name,
         Some(&output_path),
     ));
-
     watchers.insert(
         ChannelId::new(940_000_000_000_007),
         test_watcher_handle(tmux_session_name, &output_path),
@@ -4477,7 +4478,6 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
         Some(&other_path),
     ));
 }
-
 /// Birth-site owner table. `SessionBoundRelay` needs session-bound delivery, a live
 /// producer AND a live tmux watcher reading this output: the sink only hears that watcher,
 /// so a producer alone or a watcher on another file leaves the row with no deliverer.
