@@ -25,10 +25,7 @@ mod legacy_selection;
 mod parser;
 pub(crate) mod provenance;
 
-pub use legacy_selection::{
-    latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
-    rollout_candidates_for_cwd_since,
-};
+pub use legacy_selection::{latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since};
 use legacy_selection::{wait_for_latest_rollout_for_cwd, wait_for_resumed_rollout_for_session};
 #[cfg(unix)]
 pub(crate) use provenance::{submitted_native_span, tail_closed_episode};
@@ -348,8 +345,10 @@ pub fn tail_rollout_file_from_offset<L: Into<PaneLiveness>>(
         None,
         None,
     )
+    .map(|result| result.0)
 }
 
+#[cfg(test)]
 pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
@@ -359,6 +358,27 @@ pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
 ) -> Result<ReadOutputResult, String> {
+    tail_recovery_rollout_for_tmux(
+        rollout_path,
+        start_offset,
+        session_id,
+        sender,
+        cancel_token,
+        is_alive,
+        tmux_session_name,
+    )
+    .map(|result| result.0)
+}
+
+pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<&str>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    tmux_session_name: &str,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     tail_rollout_file_from_offset_with_pane_busy_probe(
         rollout_path,
         start_offset,
@@ -409,7 +429,7 @@ fn tail_rollout_file_from_offset_with_pane_busy_probe<L: Into<PaneLiveness>>(
     is_alive: impl FnMut() -> L,
     pane_busy_probe: Option<Box<dyn FnMut() -> super::input::CodexPaneBusySignal + Send>>,
     tmux_session_name: Option<&str>,
-) -> Result<ReadOutputResult, String> {
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut defaults = RolloutTailOptions::default();
     defaults.pane_busy_probe = pane_busy_probe;
     defaults.tmux_session_name = tmux_session_name
@@ -424,7 +444,6 @@ fn tail_rollout_file_from_offset_with_pane_busy_probe<L: Into<PaneLiveness>>(
         is_alive,
         defaults,
     )
-    .map(|result| result.0)
 }
 
 /// Tail exactly the rollout already bound to a live Codex TUI pane.
@@ -840,7 +859,8 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<L: Into<PaneL
     if source_pin.is_some() && start_offset > file_len {
         return Err("verified start is beyond the pinned native source".into());
     }
-    let seek_offset = start_offset.min(file_len);
+    let seek_offset = super::session::checkpoint::boundary(&mut file, start_offset)
+        .map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(seek_offset))
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
@@ -926,15 +946,6 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<L: Into<PaneL
                     &accept,
                 ) {
                     return Ok((ended, outcome(&state, seek_offset)));
-                }
-                if try_process_complete_partial_line(
-                    &mut partial_line,
-                    &sender,
-                    &mut state,
-                    &accept,
-                ) {
-                    last_output_at = Some(Instant::now());
-                    continue;
                 }
                 observe_codex_completion_hooks(&mut hook_events, &mut state);
                 if let Some(finalize_path) =
@@ -1229,45 +1240,22 @@ impl<'a> RelaySuppressionSender<'a> {
 }
 
 fn try_process_complete_partial_line(
-    partial_line: &mut Vec<u8>,
+    partial: &mut Vec<u8>,
     sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
     accept: &parser::RecordAcceptance<'_>,
 ) -> bool {
-    // A flushed partial line is a record too, so it passes the same acceptance judgement.
-    if accept.accept_next_record(state) == parser::NextRecord::StopBefore {
+    if !partial.ends_with(b"\n")
+        || accept.accept_next_record(state) == parser::NextRecord::StopBefore
+    {
         return false;
     }
-    let Ok(line) = std::str::from_utf8(partial_line) else {
-        return false;
-    };
-    let trimmed = line.trim();
-    if trimmed.is_empty() || serde_json::from_str::<Value>(trimmed).is_err() {
-        return false;
-    }
-    let line = std::mem::take(partial_line);
+    let line = std::mem::take(partial);
     state.record(line.len());
     process_rollout_line_bytes(&line, sender, state)
 }
 
-/// `final_offset` is the end of the last COMPLETE record — `source_start`
-/// (where this tail seeked) plus the bytes `state.record()` accepted — NOT the
-/// raw `current_offset` the read loop consumed. The two are equal on every
-/// sealed input and diverge only when a torn write leaves the tail parked
-/// mid-record; see
-/// `codex_tui_final_offset_stops_at_the_last_complete_record_5264`.
-///
-/// #5264 PR-B — known asymmetry, unresolved: this value flows into
-/// `CodexTuiTailResult.final_offset` and from there into the durable
-/// `TuiRuntimeBinding.last_offset` / marker cursor (codex.rs:602, 2134, 2166).
-/// The rebind path in
-/// `services/discord/recovery_engine/rebind_runtime.rs:510-523` advances that
-/// SAME durable binding and marker from `ReadOutputResult`'s offset, i.e. the
-/// raw `current_offset`. Before this branch both expressions produced the same
-/// number, so the two paths now advance one cursor with two different meanings.
-/// That asymmetry was introduced here and is deliberately left alone: which of
-/// the two the rebind path should use is a separate judgement, out of scope for
-/// this change.
+/// The durable cursor ends after the last accepted newline, including on recovery joins.
 fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
         harvest: state.harvest,
@@ -2557,19 +2545,20 @@ mod tests {
     }
 
     #[test]
-    fn terminal_drain_processes_final_line_without_newline() {
+    fn terminal_drain_holds_final_line_without_newline() {
         let messages = collect_rollout(
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"final no newline"}]}}"#,
             0,
         );
 
-        assert!(messages.iter().any(
+        assert!(!messages.iter().any(
             |message| matches!(message, StreamMessage::Text { content } if content == "final no newline")
         ));
-        assert!(matches!(
-            messages.last(),
-            Some(StreamMessage::Done { result, .. }) if result == "final no newline"
-        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Done { .. }))
+        );
     }
 
     #[test]

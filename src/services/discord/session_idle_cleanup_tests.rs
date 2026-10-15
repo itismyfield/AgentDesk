@@ -277,3 +277,63 @@ async fn idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+// A session reactivated during the external probe survives the final idle recheck.
+#[tokio::test(flavor = "current_thread")]
+async fn idle_cleanup_keeps_session_reactivated_during_probe_pg() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (tmux_dir, _path_guard) = install_fake_tmux();
+    let runtime_root = tempfile::TempDir::new().expect("runtime root");
+    let _root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        runtime_root.path(),
+    );
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (token, provider) = (shared.token_hash.clone(), ProviderKind::Claude);
+    let mut armed = Vec::new();
+    for (n, name) in ["idle-race-gone", "idle-race-revived"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = ChannelId::new(1_500_600_700_800_901_000 + n as u64);
+        let tmux = provider.build_tmux_session_name(name);
+        let key = adk_session::build_namespaced_session_key(&token, &provider, &tmux);
+        let channel = id.get().to_string();
+        insert_row(&pool, &key, Some((token.as_str(), channel.as_str())), None).await;
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .insert(id, expired_session(name));
+        armed.push(id);
+    }
+    tokio::time::pause();
+    tokio::time::advance(SESSION_MAX_IDLE + std::time::Duration::from_secs(60)).await;
+    tokio::time::resume();
+    let cleanup = tokio::spawn({
+        let shared = shared.clone();
+        async move { cleanup_expired_sessions(&shared).await }
+    });
+    while !tmux_dir.path().join("probed").exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut data = shared.core.lock().await;
+    data.sessions.get_mut(&armed[1]).unwrap().last_active = tokio::time::Instant::now();
+    drop(data);
+    std::fs::write(tmux_dir.path().join("go"), "").unwrap();
+    cleanup.await.unwrap();
+    let sessions = shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(sessions, vec![armed[1]], "the revived session stays");
+    drop(pool);
+    db.drop().await;
+}

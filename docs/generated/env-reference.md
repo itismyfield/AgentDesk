@@ -43,7 +43,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
-| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/turn_orchestrator/installed_actor_handoff.rs` |  |
+| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |

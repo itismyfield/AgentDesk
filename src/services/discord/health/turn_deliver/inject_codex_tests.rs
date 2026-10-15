@@ -283,6 +283,26 @@ async fn codex_listed_channel_uses_production_enablement_pg() {
     );
 }
 
+/// A listed Herdr-hosted channel opens the queued head gate, yet Codex input there stays refused.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_input_on_a_listed_herdr_channel_stays_refused() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let ch = 5_340_851;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("node-a"), &[(ch, "node-a")]);
+    let _gate = crate::services::discord::router::busy_inject_support::open_gate(ch);
+    let queued = crate::services::discord::router::queued_head_inject_covers;
+    assert!(queued(ChannelId::new(ch), None));
+    let pane = CodexPane::new(ch, &steerable(), RuntimeHandoffKind::CodexTui);
+    test_hook::set(ch, InjectMode::All, pane.path("tmux"));
+    let transition = shared.session_transition_lock(ChannelId::new(ch));
+    let _held = transition.try_lock_owned().expect("transition free");
+    assert_eq!(
+        (pane.attempt(&shared).await, pane.tmux_calls()),
+        (InjectAttempt::NotSent("provider_unsupported"), 0)
+    );
+}
+
 /// Unlisted channels retain the dormant result, even with an allowed parent and external mode.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_input_is_refused_as_before_until_codex_is_enabled() {

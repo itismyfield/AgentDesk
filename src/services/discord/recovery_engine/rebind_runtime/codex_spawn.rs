@@ -10,6 +10,11 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
     already_relayed_response: String,
     already_normalized_replay_events: Vec<serde_json::Value>,
 ) -> Result<String, RebindError> {
+    let raw_start_offset = crate::services::codex_tui::session::checkpoint::at(
+        std::path::Path::new(rollout_path),
+        raw_start_offset,
+    )
+    .map_err(|error| RebindError::Internal(error.to_string()))?;
     let relay_output_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let (relay_generation_gate, relay_generation) =
@@ -101,7 +106,7 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
             let tail_handle = std::thread::Builder::new()
                 .name("codex_tui_rebind_rollout_tail".to_string())
                 .spawn(move || {
-                    crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
+                    crate::services::codex_tui::rollout_tail::tail_recovery_rollout_for_tmux(
                         &tail_rollout_path,
                         raw_start_offset,
                         tail_session_id.as_deref(),
@@ -138,8 +143,8 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
 
             match tail_handle {
                 Ok(handle) => match handle.join() {
-                    Ok(Ok(read_result)) => {
-                        let (final_offset, advance_cursor) = match read_result {
+                    Ok(Ok((read_result, outcome))) => {
+                        let (raw_offset, advance_cursor) = match read_result {
                             crate::services::provider::ReadOutputResult::Completed { offset }
                             | crate::services::provider::ReadOutputResult::SessionDied {
                                 offset,
@@ -148,6 +153,8 @@ pub(in crate::services::discord::recovery_engine) fn spawn_codex_tui_rebind_rela
                                 (offset, false)
                             }
                         };
+                        let final_offset = outcome.final_offset;
+                        tracing::debug!(raw_offset, final_offset, "Codex rebind reader checkpoints its complete range");
                         if writer_result.is_ok() && advance_cursor {
                             crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
                                 &tmux_session_name,
