@@ -69,17 +69,12 @@ fn claude(record: &Value) -> Vec<RecordFact> {
 /// any unplaceable block blocks the whole row.
 fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
+    let content = message.get("content").and_then(Value::as_array);
     #[cfg(test)]
-    if V3_RULE.get()
-        && message
-            .get("content")
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            != Some(1)
-    {
+    if V3_RULE.get() && content.map(Vec::len) != Some(1) {
         return vec![blocked("assistant row without exactly one content block")];
     }
-    let blocks = match message.get("content").and_then(Value::as_array) {
+    let blocks = match content {
         Some(blocks) if !blocks.is_empty() => blocks,
         _ => return vec![blocked("assistant row without content blocks")],
     };
