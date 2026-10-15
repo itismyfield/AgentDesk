@@ -1097,3 +1097,6 @@ fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
         peers.push(tmux);
     }
 }
+
+#[path = "o_restart_preservation_tests.rs"]
+mod o_restart;

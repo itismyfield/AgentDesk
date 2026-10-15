@@ -1,14 +1,19 @@
 # exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
 # Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
 db::channel_recovery_custody | helper-module | #5340 | expires=2027-10-14 | dormant custody row store (reserve, revision CAS, read) exercised by the recovery_custody PG tests; it holds no test of its own
+server::routes::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts the transition route's sends and runs a probe between reply and consumption for the route tests; it holds no test of its own
 services::claude_tui::host_input::guarded_submission::test_support | helper-module | #6325 | expires=2026-10-26 | Scoped request and result fixtures used by executor_tests; this helper declares no test id.
+services::discord::health::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts transition context resolutions for the route admission tests; it holds no test of its own
 services::discord::inflight::policy_op_unlink_hook | helper-module | #5340 | expires=2027-10-13 | runs a hook right before the JS remove's unlink so the exec op test can make it fail for real; it holds no test of its own
 services::discord::inflight::save_store::coordinate_replay | helper-module | #5925 | expires=2026-11-13 | dormant coordinate RMW and source-witness contract exercised by coordinate_replay_tests and coordinate_merge_tests; no owned test id
 services::discord::recovery_engine::legacy_restart_replay | helper-module | #5925 | expires=2026-11-13 | dormant classifier, proof and claim contract exercised by legacy_restart_replay_tests; no owned test id
 services::discord::replay_policy::injected::test_support | helper-module | #6008 | expires=2026-10-27 | Shared actual-PG receipt/projection fixture and callback observations for watcher/bridge acceptance tests; declares no test id.
 services::discord::router::message_handler::provider_dispatch::producer_error_test_support | helper-module | #5340 | expires=2027-10-12 | hands the turn-bridge cold-error tests intake's own producer_error frame; it holds no test of its own
 services::discord::runtime_store::rename_fault | helper-module | #5340 | expires=2027-10-13 | makes the atomic writer's real rename fail for receipt fault tests; it holds no test of its own
+services::tui_o::writer::actor::transition::test_hooks | helper-module | #5340 | expires=2027-10-14 | lets the transition actor tests wait for probe workers, count snapshots and look in before a retirement; it holds no test of its own
+services::tui_o::writer::host::transition::test_support | helper-module | #5340 | expires=2027-10-12 | hosts a transition port for the route tests without starting an actor host; it holds no test of its own
 services::turn_orchestrator::pending_queue_persistence::queue_exit_debt::read_back_fault | helper-module | #5340 | expires=2027-10-12 | lets the queue-exit commit tests change the file between a failed save and its re-read; it holds no test of its own
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::scan_fault | helper-module | #6813 | expires=2027-10-12 | injects read_dir and entry failures for queued recovery acceptance tests; owns no test function
 services::turn_orchestrator::policy_close::test_hooks | helper-module | #5340 | expires=2027-10-12 | lets the before-start policy close tests observe and panic at each mailbox step stage; it holds no test of its own
 services::turn_orchestrator::registry_purge::recovery_custody::commit_fault | helper-module | #5340 | expires=2027-10-14 | lets the custody PG tests run a change between a custody write and its commit; it holds no test of its own
+services::turn_orchestrator::registry_purge::recovery_custody::seam | helper-module | #5340 | expires=2027-10-14 | pause points and an effect count on the apply path for the registry PG tests; it holds no test of its own

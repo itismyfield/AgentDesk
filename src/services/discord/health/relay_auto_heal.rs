@@ -1121,6 +1121,7 @@ mod tests {
     ) -> WatcherStateSnapshot {
         let unread_bytes = capture_offset.saturating_sub(last_relay_offset);
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: true,
             tmux_session: Some(tmux_session.to_string()),
@@ -1245,7 +1246,6 @@ mod tests {
             channel_id,
             Some(tmux_session),
         );
-
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);

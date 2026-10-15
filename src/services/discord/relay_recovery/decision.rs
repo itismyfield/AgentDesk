@@ -94,6 +94,11 @@ pub(in crate::services::discord) struct RelayRecoveryEvidence {
     pub last_relay_offset: u64,
     pub last_relay_ts_ms: Option<i64>,
     pub unread_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "health::TailObservation::is_unmeasured"
+    )]
+    pub tail_observation: health::TailObservation,
     pub last_outbound_activity_ms: Option<i64>,
 }
 
@@ -267,6 +272,7 @@ fn evidence_from_snapshot(snapshot: &RelayHealthSnapshot) -> RelayRecoveryEviden
         last_relay_offset: snapshot.last_relay_offset,
         last_relay_ts_ms: snapshot.last_relay_ts_ms,
         unread_bytes: snapshot.unread_bytes,
+        tail_observation: Default::default(),
         last_outbound_activity_ms: snapshot.last_outbound_activity_ms,
     }
 }

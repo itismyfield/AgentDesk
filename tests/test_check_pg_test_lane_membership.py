@@ -2338,7 +2338,7 @@ class PgDbCiWiring(unittest.TestCase):
         # Unconditional on purpose: were the job path-filtered, a PR adding a
         # PG test to an unselected file could skip the very check for it.
         job = self.workflow["jobs"]["scripts"]
-        self.assertNotIn("if", job)
+        self.assertEqual((job.get("if"), job["needs"]), ("${{ !cancelled() }}", ["changes", "lib_test_prepare"]))
         self.assertTrue(
             any("ci-script-checks.sh" in str(step.get("run", "")) for step in job["steps"]),
             "the scripts job must run scripts/ci-script-checks.sh",

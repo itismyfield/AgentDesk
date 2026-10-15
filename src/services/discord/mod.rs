@@ -40,6 +40,7 @@ pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
 };
 mod inflight_heartbeat_sweeper;
+mod ingress_shadow;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
@@ -301,11 +302,7 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
-use crate::services::codex;
-use crate::services::gemini;
-use crate::services::opencode;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
-use crate::services::qwen;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
@@ -2703,6 +2700,7 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
     pub(super) voice_config: crate::voice::VoiceConfig,
     pub(super) voice_receiver: crate::voice::VoiceReceiver,
+    pub(in crate::services::discord) ingress_shadow: Option<ingress_shadow::IngressShadow>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

@@ -48,6 +48,7 @@ mod owe;
 pub(crate) mod provenance;
 #[path = "rotation/readers.rs"]
 mod readers;
+pub(crate) mod transition;
 use fork_lineage::Lineage;
 pub use owe::Owe;
 
