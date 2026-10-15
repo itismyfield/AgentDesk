@@ -171,7 +171,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/voice_barge_in.rs` | 시험 | 시험 fixture의 `_home_availability: None` :1353 |
 | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs` | admission | `registered_channel` :665, `HomeRefusal::NotHeld` 판정 :734 |
 | `src/services/discord/turn_lease.rs` | admission | `registered_channel` → `admit_recovery` :155 |
-| `src/services/discord/turn_presence/admission.rs` | admission | `registered_channel` → `ownership`·`admit_post` :40·:58 |
 | `src/services/discord/turn_presence/entrypoints.rs` | admission | `HomeGate` 재노출 :7, `withdraw_unmounted` :96: Home mount가 바뀌면 이전 owner에 기댄 presence 승인만 거둔다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/actor/transition_snapshot.rs` | 관측 | `home_now` :155: `registered_channel`로 요청 epoch의 home이 열려 있는지만 읽는다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/transition_port.rs` | admission | 전환 요청이 `CommandPermit` :40을 운반한다. 발급은 `admit_command` |
