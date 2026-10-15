@@ -1,11 +1,6 @@
 //! Persisted turn and queue recovery shared by Gateway and REST worker runtimes, and a standby
 //! holder's single-channel boot restore.
 use super::*;
-#[cfg(test)]
-use crate::services::cluster::channel_home_boot::restore_mutant;
-use crate::services::cluster::channel_home_boot::{
-    BootPort, ChannelRestore, LegacyReset, PersistedInput,
-};
 use crate::services::turn_orchestrator::{
     load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
 };
@@ -284,32 +279,37 @@ pub(super) async fn restore_queued_and_inflight_work(
     stale_cards_to_delete
 }
 
-/// A standby holder's port: its own restored flag, set only by this channel's boot restore and
-/// never by the provider's reconcile, plus reads of the channel's persisted queue and marker.
-pub(super) fn standby_home_port(
+type Restore = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+type StandbyRestore = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<dyn Fn() -> Option<bool> + Send + Sync>,
+    Arc<dyn Fn() -> Restore + Send + Sync>,
+);
+
+/// A standby holder's port parts: its own restored flag, which the provider reconcile never sets,
+/// a read of the channel's persisted queue and marker, and the channel's boot restore.
+pub(super) fn standby_restore(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: u64,
-    reset: LegacyReset,
-) -> BootPort {
+) -> StandbyRestore {
     let restored = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(test)]
-    let restored = match restore_mutant("reconcile_as_channel_restored") {
+    let restored = match super::restore_mutant("reconcile_as_channel_restored") {
         true => Arc::clone(&shared.restart.reconcile_done),
         false => restored,
     };
     let (owner, token_hash) = (provider.clone(), shared.token_hash.clone());
-    let persisted: PersistedInput = Arc::new(move || {
+    let persisted = Arc::new(move || {
         let channel = (channel != 0).then(|| ChannelId::new(channel))?;
         persisted_input(&owner, &token_hash, channel)
     });
     let (shared, owner) = (Arc::clone(shared), provider.clone());
-    let run: ChannelRestore = Arc::new(move || {
+    let run = Arc::new(move || -> Restore {
         let (shared, provider) = (Arc::clone(&shared), owner.clone());
         Box::pin(async move { restore_standby_channel(&shared, &provider, channel).await })
     });
-    BootPort::reading_persisted(channel, restored, persisted, reset)
-        .restoring(provider.as_str(), run)
+    (restored, persisted, run)
 }
 
 /// Whether the channel's persisted queue or dispatch marker still holds input; `None` unreadable.

@@ -1,5 +1,7 @@
 use super::codex_adoption_runtime::boot::{BootRole, record_role};
 use super::*;
+#[cfg(test)]
+use crate::services::cluster::channel_home_boot::restore_mutant;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
 #[cfg(test)]
@@ -601,7 +603,10 @@ async fn start_channel_homes(
         let port = |channel: u64| {
             let reset = legacy_reset(shared, provider, channel);
             if role == HomeRole::Standby {
-                return queued_recovery::standby_home_port(shared, provider, channel, reset);
+                let (restored, persisted, run) =
+                    queued_recovery::standby_restore(shared, provider, channel);
+                let port = BootPort::reading_persisted(channel, restored, persisted, reset);
+                return port.restoring(provider.as_str(), run);
             }
             BootPort::reading(channel, Arc::clone(&restored), reset)
         };
