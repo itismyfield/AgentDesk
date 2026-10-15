@@ -676,7 +676,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
         );
     }
-
     // #3041 P1-4 codex: SUCCESS PATH reached — the card/anchor (or system-continuation
     // note) was posted and the bridge legitimately retains the in-flight turn. DISARM
     // the early-return guard so the lease PERSISTS for this turn (otherwise the
@@ -684,7 +683,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // bridge-tail block's own `TuiDirectExternalInputLeaseGuard` (bridge-owner leases)
     // or simply left set (Unassigned / session-bound-owned leases the sink delivers).
     observed_lease_early_return_guard.disarm();
-
     #[cfg(unix)]
     {
         // #3154 P1-3: when the synthetic turn-start was deferred, the detached
