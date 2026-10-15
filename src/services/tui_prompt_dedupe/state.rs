@@ -112,3 +112,36 @@ impl TuiPromptDedupeState {
         before != self.tmux_by_provider_session.len()
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    // Binding publications open on this thread; other test threads may hold STATE meanwhile.
+    static BINDING_PUBLICATION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) struct BindingPublicationHeld;
+
+#[cfg(test)]
+impl BindingPublicationHeld {
+    pub(super) fn enter() -> Self {
+        BINDING_PUBLICATION_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for BindingPublicationHeld {
+    fn drop(&mut self) {
+        BINDING_PUBLICATION_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_marker_publication_unlocked_for_tests() {
+    assert!(
+        BINDING_PUBLICATION_DEPTH.with(std::cell::Cell::get) == 0,
+        "binding cache mutex must not cover marker IO"
+    );
+    crate::services::cluster::stream_relay::source_read_proof::assert_revision_unlocked_for_tests();
+}
