@@ -51,6 +51,16 @@ fn stopped(draft: DraftState) -> IdleReport {
     }
 }
 
+fn unpainted(capture: &str) -> bool {
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
+    !plain.lines().any(|row| row.trim_start().starts_with('❯'))
+        || plain
+            .lines()
+            .rev()
+            .find(|row| !row.trim().is_empty())
+            .is_some_and(|row| row.trim_end() == "❯")
+}
+
 fn run(
     authority: Option<&dyn StashAuthority>,
     allowed: bool,
@@ -79,22 +89,22 @@ fn run(
         }
         let admission = composer_lock::composer_admission(session, || Some(before.clone()));
         let owner = busy_inject::composer_owner(&before);
-        let Some(viewport) = pane.capture_viewport() else {
-            return Some(stopped(DraftState::Unchanged));
-        };
-        let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&viewport);
-        let unpainted = !plain.lines().any(|row| row.trim_start().starts_with('❯'))
-            || plain
-                .lines()
-                .rev()
-                .find(|row| !row.trim().is_empty())
-                .is_some_and(|row| row.trim_end() == "❯");
-        // No composer or an unindented empty marker leaves input to the normal readiness wait.
-        if admission == composer_lock::ComposerAdmission::Any
-            && (owner == busy_inject::ComposerOwner::Empty
-                || (owner == busy_inject::ComposerOwner::Unread && unpainted))
-        {
-            return None;
+        if admission == composer_lock::ComposerAdmission::Any {
+            if owner == busy_inject::ComposerOwner::Empty {
+                return None;
+            }
+            if owner == busy_inject::ComposerOwner::Unread {
+                if unpainted(&before) {
+                    return None;
+                }
+                // Only ambiguous scrollback needs another observation of the current composer.
+                let Some(viewport) = pane.capture_viewport() else {
+                    return Some(stopped(DraftState::Unchanged));
+                };
+                if unpainted(&viewport) {
+                    return None;
+                }
+            }
         }
         if admission == composer_lock::ComposerAdmission::Held
             || owner != busy_inject::ComposerOwner::Person

@@ -184,13 +184,14 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
         session: String,
         channel: u64,
         root: PathBuf,
+        person: bool,
         fenced: AtomicUsize,
         outcomes: Mutex<Vec<InputRun>>,
     }
     impl SubmissionFence for Attempt {
         fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
             assert!(
-                self.root.join("composer-ready").exists(),
+                self.person || self.root.join("composer-ready").exists(),
                 "payload preceded readiness"
             );
             self.fenced.fetch_add(1, Ordering::SeqCst);
@@ -210,6 +211,9 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             target == self.session
         }
         fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
+            if self.person {
+                return self.before_first_payload();
+            }
             panic!("no person draft was observed, so no stash may claim this attempt")
         }
     }
@@ -231,6 +235,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             "unpainted",
             "partial",
             "banner",
+            "person_no_viewport",
             "continuation",
             "viewport_read",
             "viewport_resize",
@@ -241,7 +246,11 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             if !listed
                 && matches!(
                     fault,
-                    "continuation" | "scrollback" | "viewport_read" | "viewport_resize"
+                    "continuation"
+                        | "scrollback"
+                        | "viewport_read"
+                        | "viewport_resize"
+                        | "person_no_viewport"
                 )
             {
                 continue;
@@ -252,13 +261,15 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             let root = renderer_with(
                 &f,
                 &name,
-                if fault == "continuation" {
+                if fault == "person_no_viewport" {
+                    "normal"
+                } else if fault == "continuation" {
                     "person"
                 } else {
                     "fresh"
                 },
                 match fault {
-                    "scrollback" => format!(
+                    "scrollback" | "viewport_read" | "viewport_resize" => format!(
                         "{}{}\x1b[2J\x1b[HClaude is starting…\n",
                         view("[User: previous] old prompt", false),
                         (0..55)
@@ -268,12 +279,13 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     "partial" => "❯ \n".into(),
                     "banner" => "Ready for input (type message + Enter)\n".into(),
                     "continuation" => "❯ human text\n  ❯\n".into(),
+                    "person_no_viewport" => view("js", false),
                     _ => "Claude is starting…\n".into(),
                 },
                 "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
                 PROMPT,
             );
-            if fault == "scrollback" {
+            if matches!(fault, "scrollback" | "viewport_read" | "viewport_resize") {
                 let target = format!("={name}:");
                 let history = f.tmux(&["capture-pane", "-p", "-J", "-t", &target, "-S", "-80"]);
                 let viewport = f.tmux(&["capture-pane", "-p", "-t", &target]);
@@ -288,12 +300,32 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     "old composer is outside the viewport"
                 );
             }
+            if matches!(fault, "unpainted" | "person_no_viewport") {
+                let target = format!("={name}:");
+                let history = f.tmux(&["capture-pane", "-p", "-J", "-t", &target, "-S", "-80"]);
+                if fault == "unpainted" {
+                    assert!(!history.contains('❯'));
+                    assert!(!f.tmux(&["capture-pane", "-p", "-t", &target]).contains('❯'));
+                } else {
+                    assert_eq!(
+                        busy_inject::composer_owner(
+                            &SubmissionTmux
+                                .pin_guarded(&name)
+                                .unwrap()
+                                .capture_draft()
+                                .unwrap()
+                        ),
+                        busy_inject::ComposerOwner::Person
+                    );
+                }
+            }
             let hook = format!(
                 "pin=0; capture=0; viewport=0\nfor arg in \"$@\"; do\n case \"$arg\" in *'#{{window_panes}}'*) pin=1;; capture-pane) capture=1;; 0) viewport=1;; esac\ndone\n\
                  if [ \"$pin\" = 1 ] && [ ! -f {failed} ]; then\n\
                   if [ '{fault}' = pin ] || {{ [ '{fault}' = capture ] && [ \"$capture\" = 1 ]; }}; then touch {failed}; exit 1; fi\nfi\n\
-                 if [ \"$pin\" = 1 ] && [ \"$capture\" = 1 ] && [ \"$viewport\" = 1 ] && [ ! -f {failed} ]; then\n\
+                 if [ \"$pin\" = 1 ] && [ \"$capture\" = 1 ] && [ \"$viewport\" = 1 ]; then\n touch {viewport_seen}\n\
                   case '{fault}' in\n\
+                   unpainted|person_no_viewport) exit 1;;\n\
                    viewport_read) touch {failed}; exit 1;;\n\
                    viewport_resize) {real} -L {socket} -f /dev/null \"$@\"\n\
                     {real} -L {socket} resize-window -t ={name}: -x 161 -y 40\n touch {failed}\n exit 0;;\n\
@@ -303,6 +335,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                   readiness_polls=0\n while [ ! -f {ready} ]; do\n\
                    readiness_polls=$((readiness_polls + 1))\n [ \"$readiness_polls\" -lt 400 ] || exit 1\n sleep 0.01\n done\n exit 0\nfi\n",
                 failed = quote(&root.join("read-failed")),
+                viewport_seen = quote(&root.join("viewport-seen")),
                 release = quote(&root.join("release")),
                 ready = quote(&root.join("composer-ready")),
                 real = quote(&f.real),
@@ -310,11 +343,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             );
             fs::write(
                 &shim,
-                if fault == "continuation" {
-                    original.clone()
-                } else {
-                    original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1)
-                },
+                original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1),
             )
             .unwrap();
             let transcript = root.join("transcript");
@@ -322,6 +351,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 session: name.clone(),
                 channel,
                 root: root.clone(),
+                person: fault == "person_no_viewport",
                 fenced: AtomicUsize::new(0),
                 outcomes: Mutex::new(Vec::new()),
             });
@@ -363,6 +393,15 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 "fresh entry listed={listed} fault={fault} effects={:?} result={result:?}",
                 events(&root)
             );
+            assert_eq!(
+                root.join("viewport-seen").exists(),
+                listed
+                    && matches!(
+                        fault,
+                        "scrollback" | "continuation" | "viewport_read" | "viewport_resize"
+                    ),
+                "listed={listed}, fault={fault}: unexpected viewport observation"
+            );
             if matches!(fault, "continuation" | "viewport_read" | "viewport_resize") {
                 assert!(matches!(
                     result,
@@ -396,7 +435,12 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
             wait("fresh-submit", || {
                 events(&root).contains(&"Enter".to_string())
             });
-            assert_eq!(events(&root), ["paste", "Enter"], "{name}");
+            let expected = if attempt.person {
+                vec!["C-s", "paste", "Enter"]
+            } else {
+                vec!["paste", "Enter"]
+            };
+            assert_eq!(events(&root), expected, "{name}");
             assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
             let users: Vec<serde_json::Value> = fs::read_to_string(&transcript)
                 .unwrap()
@@ -406,10 +450,25 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 .map(|record| record["message"]["content"].clone())
                 .collect();
             assert_eq!(users, [serde_json::Value::String(PROMPT.into())]);
-            assert!(
-                root.join("composer-ready").exists(),
-                "payload preceded readiness"
-            );
+            if attempt.person {
+                let restored = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+                assert!(restored.contains("❯\u{a0}js"));
+                assert_eq!(
+                    busy_inject::composer_owner(
+                        &SubmissionTmux
+                            .pin_guarded(&name)
+                            .unwrap()
+                            .capture_draft()
+                            .unwrap()
+                    ),
+                    busy_inject::ComposerOwner::Person
+                );
+            } else {
+                assert!(
+                    root.join("composer-ready").exists(),
+                    "payload preceded readiness"
+                );
+            }
             fs::write(&shim, &original).unwrap();
         }
     }
