@@ -43,7 +43,7 @@ RELEASE_MUTANTS = {
     "release_before_reset": ["H6-2b", "H7-R"],
     "boot_skips_releasing_drain": ["H6-2b"],
 }
-BLOCKED = {"H6-2a", "H6-3a", "H6-3b", "H6-6b"}
+BLOCKED = {"H6-2a", "H6-3b", "H6-6b"}
 
 
 def complete() -> dict:

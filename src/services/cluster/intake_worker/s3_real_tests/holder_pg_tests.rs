@@ -752,3 +752,53 @@ pub(super) async fn applied_then_released(
     );
     assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }
+
+/// T-H6 released target: MINI boots through its runtime's `BootPort::reading` while the row names
+/// it target of a released channel. Unrestored, its watch leaves the row alone; restored, the watch
+/// adopts it and the lease opens the home. Nothing in the test adopts.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_released_target_adopts_through_its_boot_watch_pg() {
+    let scene = Scene::new().await;
+    let (channel, provider) = (C.to_string(), provider_name(scene.provider));
+    let delegated = o_channel_homes::delegate(&scene.pool, &channel, provider, GW, MINI).await;
+    let delegated = applied(delegated);
+    let released =
+        o_channel_homes::finish_release(&scene.pool, &channel, GW, delegated.epoch).await;
+    let epoch = applied(released).epoch;
+    put(scene.dir(), "epoch", epoch);
+    let released = home_facts(&scene.pool).await.expect("the home row");
+    let mut target = Node::spawn(&scene, "th6_adopt_target", MINI);
+    target.wait_signal("booted", WITHIN).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let unrestored = home_facts(&scene.pool).await;
+    assert_eq!(unrestored.as_ref(), Some(&released), "adopted unrestored");
+    signal(scene.dir(), "restored");
+    target.finish(Duration::from_secs(120)).await;
+    let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
+    assert_eq!(home(&scene).await, held, "the target holds the channel");
+    assert_eq!(scene.row().await.expect("the home row").target, None);
+    scene.drop_db().await;
+}
+
+pub(super) async fn adopt_target_node(env: &Env) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let epoch = epoch_of(env);
+    let restored = Arc::new(AtomicBool::new(false));
+    let node = Booted::boot_reading(env, Arc::clone(&restored)).await;
+    assert_eq!(node.gates.len(), 1, "the released row names this node");
+    signal(&env.dir, "booted");
+    wait_signal(&env.dir, "restored", WITHIN).await;
+    assert_eq!(node.state().await, Some(HomeState::Released));
+    let opened = (node.home_epoch(), node.accepts());
+    assert_eq!(opened, (None, false), "unrestored: the home opened");
+    restored.store(true, Ordering::Release);
+    let adopted = || async { node.state().await == Some(HomeState::Worker) };
+    until_async("the watch adopts the row", WITHIN, adopted).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    node.stop().await;
+}

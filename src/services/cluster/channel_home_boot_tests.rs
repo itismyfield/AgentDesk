@@ -502,3 +502,69 @@ async fn an_unrestored_target_adopts_a_released_channel_only_once_restored_pg() 
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// The target's gate unregistered while its adopt UPDATE waits on a row lock: the adopt still lands
+/// once, the withdrawn gate never opens and no lease runs; the next boot holds and renews the row.
+#[tokio::test]
+async fn an_unregister_during_the_adopt_leaves_one_holder_that_a_restart_renews_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let delegated = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await);
+    let released = o_channel_homes::finish_release(&pool, C, "gw", delegated.epoch).await;
+    let released = applied(released);
+    let mut lock = pool.begin().await.unwrap();
+    let row_lock = "SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE";
+    sqlx::query(row_lock)
+        .bind(C)
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let restored = Arc::new(AtomicBool::new(true));
+    let gates = start(Some(true), || target_boot(&pool, &restored)).await;
+    let waiting = "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database()
+        AND wait_event_type = 'Lock' AND query LIKE '%UPDATE o_channel_homes%'";
+    let mut blocked = false;
+    for _ in 0..500 {
+        let count: i64 = sqlx::query_scalar(waiting).fetch_one(&pool).await.unwrap();
+        if count > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(blocked, "the adopt never reached the row lock");
+    assert!(channel_home::unregister(C).is_some());
+    lock.commit().await.unwrap();
+
+    let adopted = row_in(&pool, 8, HomeState::Worker).await;
+    assert_eq!(
+        (adopted.holder.as_deref(), adopted.target, adopted.epoch),
+        (Some("mini"), None, released.epoch),
+        "the adopt landed once for the one target"
+    );
+    assert!(eventually(5, || running(C) == (false, None)).await);
+    assert_eq!(
+        gates[0].ownership(),
+        HomeOwnership::Lost,
+        "a withdrawn gate opened"
+    );
+    assert!(channel_home::registered(C).is_none());
+
+    stop(C).await;
+    start(Some(true), || target_boot(&pool, &restored)).await;
+    let epoch = released.epoch;
+    assert!(eventually(8, || owned(C) == Some((epoch, HomeIntake::Open))).await);
+    assert_eq!(running(C), (true, Some(epoch)));
+    let held = o_channel_homes::read_home(&pool, C)
+        .await
+        .unwrap()
+        .expect("row");
+    assert_eq!(
+        (held.state, held.holder.as_deref()),
+        (HomeState::Worker, Some("mini"))
+    );
+    stop(C).await;
+    channel_home::unregister(C);
+    pool.close().await;
+    pg_db.drop().await;
+}
