@@ -16,6 +16,9 @@ use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::session_host::HostKind;
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
+#[path = "hosted_execution/legacy_return.rs"]
+pub(crate) mod legacy_return;
+
 pub(crate) const HOSTED_EXECUTION_SCHEMA: u32 = 1;
 const HERDR_HOST: &str = "herdr";
 

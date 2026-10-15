@@ -12,6 +12,7 @@ src/db/calendar_sync/postgres_tests.rs
 src/db/campaigns/tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/canonical_identity_pg_tests.rs
+src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs
 src/db/dispatched_sessions/rebind_override.rs
 src/db/dispatched_sessions/tests.rs
 src/db/dispatches/delivery_events.rs
@@ -330,6 +331,7 @@ db::calendar_sync::postgres_tests
 db::campaigns::tests
 db::dispatched_session_canonical_identity::pg_tests
 db::dispatched_session_rebind_override::tests
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests
 db::dispatched_sessions::tests
 db::dispatches::delivery_events::tests
@@ -808,6 +810,10 @@ db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_res
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg
 db::dispatched_session_rebind_override::tests::health_rebind_override_upserts_selectors_with_recorded_at_guard_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_cas_waits_for_concurrent_incarnation_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_exact_retired_pg_preserves_identity_and_survives_gc
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_heartbeat_is_measured_after_row_lock_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_rejects_changed_inputs_and_live_unknown_records_pg
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_preserves_provider_selectors
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_skips_cancelled_dispatch
