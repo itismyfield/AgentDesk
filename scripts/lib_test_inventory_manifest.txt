@@ -9031,6 +9031,7 @@ services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_res
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::checkpointed_catch_up_reads_the_page_just_past_the_cursor
 services::discord::tui_prompt_relay::relay_e2e::catch_up_pagination_e2e::recent_catch_up_pages_back_to_a_buried_user_message_and_stops
+services::discord::tui_prompt_relay::relay_e2e::codex_o_handoff_replay::codex_o_replays_restored_parked_input_without_legacy_body
 services::discord::tui_prompt_relay::relay_e2e::consumed_command_guard_e2e::a_command_consumed_after_classification_is_refused_at_the_commit
 services::discord::tui_prompt_relay::relay_e2e::consumed_command_guard_e2e::a_command_is_recorded_before_its_handler_returns
 services::discord::tui_prompt_relay::relay_e2e::consumed_command_guard_e2e::a_skill_command_is_settled_while_its_skill_prompt_runs

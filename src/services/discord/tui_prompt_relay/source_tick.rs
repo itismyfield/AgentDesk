@@ -11,11 +11,12 @@ pub(super) struct ClaudeLegacyBodyCandidate {
     pub transcript_path: Option<PathBuf>,
 }
 
-pub(super) struct CodexLegacyBodyCandidate {
+pub(super) struct CodexResolvedSource {
     pub tmux_session_name: String,
     pub channel_id: ChannelId,
     pub binding: TuiRuntimeBinding,
     pub rollout_path: PathBuf,
+    pub legacy_body: bool,
 }
 
 pub(super) async fn claude_rehydrate_source_phase(
@@ -107,7 +108,7 @@ pub(super) async fn claude_source_phase(
 pub(super) async fn codex_source_phase(
     shared: &Arc<SharedData>,
     next_rehydrate: &mut tokio::time::Instant,
-) -> Vec<CodexLegacyBodyCandidate> {
+) -> Vec<CodexResolvedSource> {
     let now = tokio::time::Instant::now();
     if now >= *next_rehydrate {
         let shared_for_rehydrate = shared.clone();
@@ -162,14 +163,13 @@ pub(super) async fn codex_source_phase(
             );
             continue;
         }
-        if !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-            candidates.push(CodexLegacyBodyCandidate {
-                tmux_session_name,
-                channel_id,
-                binding,
-                rollout_path,
-            });
-        }
+        candidates.push(CodexResolvedSource {
+            tmux_session_name,
+            channel_id,
+            binding,
+            rollout_path,
+            legacy_body: !crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()),
+        });
     }
     candidates
 }

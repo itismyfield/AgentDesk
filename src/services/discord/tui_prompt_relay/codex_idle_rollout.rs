@@ -9,6 +9,8 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
     rollout_path: &std::path::Path,
     offset: u64,
 ) {
+    #[cfg(test)]
+    note_poll(tmux_session_name, PollNote::SharedOffset);
     crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
         tmux_session_name,
         rollout_path,
@@ -89,7 +91,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
 
                 let candidates =
                     super::source_tick::codex_source_phase(&shared, &mut next_rehydrate).await;
-                relay_legacy_codex_bodies(&shared, candidates, &mut active_tails, &done_tx).await;
+                replay_and_relay_codex_sources(&shared, candidates, &mut active_tails, &done_tx).await;
 
                 drop(shared);
                 tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
@@ -103,23 +105,20 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     );
 }
 
-async fn relay_legacy_codex_bodies(
+async fn replay_and_relay_codex_sources(
     shared: &Arc<SharedData>,
-    candidates: Vec<super::source_tick::CodexLegacyBodyCandidate>,
+    candidates: Vec<super::source_tick::CodexResolvedSource>,
     active_tails: &mut HashSet<String>,
     done_tx: &tokio::sync::mpsc::UnboundedSender<String>,
 ) {
-    for super::source_tick::CodexLegacyBodyCandidate {
+    for super::source_tick::CodexResolvedSource {
         tmux_session_name,
         channel_id,
         binding,
         rollout_path,
+        legacy_body,
     } in candidates
     {
-        #[cfg(test)]
-        if super::source_tick::skip_body_for_test(&tmux_session_name) {
-            continue;
-        }
         if active_tails.contains(&tmux_session_name) {
             continue;
         }
@@ -131,7 +130,7 @@ async fn relay_legacy_codex_bodies(
         if let Some(inflight) =
             inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
         {
-            if inflight.requires_pinned_terminal_recovery() {
+            if legacy_body && inflight.requires_pinned_terminal_recovery() {
                 if let Some(http) = shared.serenity_http_or_token_fallback() {
                     super::super::recovery_engine::recover_idle_partial_response(
                         &http,
@@ -143,12 +142,16 @@ async fn relay_legacy_codex_bodies(
                 }
                 continue;
             }
-            if codex_ownerless_external_input_inflight_needs_rollout_recovery(
-                &inflight,
-                &tmux_session_name,
-            ) {
+            if legacy_body
+                && codex_ownerless_external_input_inflight_needs_rollout_recovery(
+                    &inflight,
+                    &tmux_session_name,
+                )
+            {
                 // A row naming its native turn resumes only from that turn's record; a
                 // rollout naming no turns keeps the text search.
+                #[cfg(test)]
+                note_poll(&tmux_session_name, PollNote::BodyScan);
                 let resolved = match inflight.native_turn_id.as_deref() {
                     Some(turn) => super::idle_transcript_scan::resolve_codex_turn_prompt_end(
                         &rollout_path,
@@ -333,6 +336,15 @@ async fn relay_legacy_codex_bodies(
             &tmux_session_name,
             &rollout_path,
         );
+        if !legacy_body {
+            continue;
+        }
+        #[cfg(test)]
+        if super::source_tick::skip_body_for_test(&tmux_session_name) {
+            continue;
+        }
+        #[cfg(test)]
+        note_poll(&tmux_session_name, PollNote::BodyScan);
         let scan =
             match super::idle_transcript_scan::scan_codex_records(
                 match std::fs::File::open(&rollout_path) { Ok(file) => file, Err(_) => continue },
@@ -356,6 +368,8 @@ async fn relay_legacy_codex_bodies(
         match scan {
             CodexIdleRolloutScan::NoPrompt { offset } => {
                 if offset != binding.last_offset {
+                    #[cfg(test)]
+                    note_poll(&tmux_session_name, PollNote::SharedOffset);
                     let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
                         &tmux_session_name,
                         &rollout_path,
@@ -377,6 +391,8 @@ async fn relay_legacy_codex_bodies(
                     &rollout_path, line_end_offset.saturating_sub(1),
                 ).unwrap_or(line_end_offset);
                 if prompt_start > binding.last_offset {
+                    #[cfg(test)]
+                    note_poll(&tmux_session_name, PollNote::SharedOffset);
                     let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
                         &tmux_session_name, &rollout_path, Some(binding.last_offset), prompt_start,
                     );
@@ -559,6 +575,8 @@ pub(super) static SCAN_LEASE_PAUSE: Mutex<TestPause> = Mutex::new(None);
 pub(super) enum PollNote {
     Visit,
     EarlierPrompt,
+    BodyScan,
+    SharedOffset,
 }
 #[cfg(test)]
 pub(super) static POLL_NOTES: Mutex<std::collections::BTreeMap<(String, PollNote), usize>> =
