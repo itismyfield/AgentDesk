@@ -6,6 +6,29 @@ use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use serde_json::{Value, json};
 use std::{fs, io, io::Write, path::Path};
 
+/// The parent's re-exports of this module, kept here so the giant parent does not grow.
+pub(super) mod exports {
+    pub(crate) use super::{
+        advance_checked as advance_codex_offset_checked,
+        advance_tmux_runtime_binding_offset_under_source_authority,
+        migrate_raw_native_marker as migrate_codex_raw_marker,
+        preservable_marker as codex_verified_preservable_marker,
+    };
+    #[cfg(unix)]
+    pub(crate) use super::{
+        codex_parked_owner_source, codex_restore_checkpoint, codex_restore_observed_end,
+        codex_restore_parked_owners, codex_restore_scan_floor, codex_restore_source_current,
+        complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
+        prepare_codex_restore, record_codex_unknown_span, settle_codex_parked_delivery,
+    };
+    #[cfg(all(test, unix))]
+    pub(crate) use super::{codex_restore_observation_for_tests, codex_restore_settled_for_tests};
+    #[cfg(unix)]
+    pub(in crate::services::tui_prompt_dedupe) use super::{
+        remember_codex_restored_origin, settle_codex_restored_join,
+    };
+}
+
 fn marker_path(authority: &TmuxSourceAuthority<'_>) -> String {
     tc::session_temp_path(authority.session(), tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT)
 }
@@ -380,22 +403,18 @@ fn advance_cursor(
     } else {
         binding.relay_last_offset()
     };
-    if last_offset == start {
+    // The bool updater keeps main's unchecked write except on a native cursor under restore custody.
+    #[cfg(unix)]
+    let legacy = legacy && !(native && codex_restore_observed_end(tmux_session_name).is_some());
+    if last_offset == start && !legacy {
         return Advance::AlreadyAdvanced;
     }
-    #[cfg(unix)]
-    let legacy = legacy && native && codex_restore_observed_end(tmux_session_name).is_none();
-    #[cfg(not(unix))]
-    let legacy = {
-        let _ = legacy;
-        false
-    };
     if expected.is_some_and(|expected| start != expected)
         || (binding.runtime_kind == RuntimeHandoffKind::CodexTui && last_offset < start && !legacy)
     {
         return Advance::StartMismatch;
     }
-    let source = if binding.runtime_kind == RuntimeHandoffKind::CodexTui && cfg!(unix) {
+    let source = if binding.runtime_kind == RuntimeHandoffKind::CodexTui && cfg!(unix) && !legacy {
         match Source::open(
             tmux_session_name,
             Path::new(output_path),

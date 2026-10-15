@@ -7,26 +7,8 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
-#[cfg(unix)]
-pub(crate) use codex_cursor::{
-    codex_parked_owner_source, codex_restore_checkpoint, codex_restore_observed_end,
-    codex_restore_parked_owners, codex_restore_scan_floor, codex_restore_source_current,
-    complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
-    prepare_codex_restore, record_codex_unknown_span, settle_codex_parked_delivery,
-};
-#[cfg(all(test, unix))]
-pub(crate) use codex_cursor::{
-    codex_restore_observation_for_tests, codex_restore_settled_for_tests,
-};
-#[cfg(unix)]
-pub(super) use codex_cursor::{remember_codex_restored_origin, settle_codex_restored_join};
+pub(crate) use codex_cursor::exports::*;
 mod codex_policy;
-pub(crate) use codex_cursor::{
-    advance_checked as advance_codex_offset_checked,
-    advance_tmux_runtime_binding_offset_under_source_authority,
-    migrate_raw_native_marker as migrate_codex_raw_marker,
-    preservable_marker as codex_verified_preservable_marker,
-};
 pub(crate) use codex_policy::{
     codex_verified_channel_delivery_allowed, codex_verified_channel_requires_proof,
     codex_verified_event_allowed, codex_verified_hold_reason, codex_verified_input_blocked,
@@ -62,21 +44,7 @@ pub(crate) use codex_verified::{
 };
 pub(crate) mod pane_registration;
 pub(crate) use adopt_skip::*;
-pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
-    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    provider: &str,
-    channel: u64,
-    binding: TuiRuntimeBinding,
-) -> bool {
-    if binding.runtime_kind == RuntimeHandoffKind::CodexTui
-        && codex_cursor::migrate_raw_native_marker(authority, &binding).is_err()
-    {
-        return false;
-    }
-    pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority(
-        authority, provider, channel, binding,
-    )
-}
+pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
 
 fn same_runtime_source(
     left: Option<&TuiRuntimeBinding>,
@@ -135,14 +103,7 @@ fn with_runtime_binding_state_under_source_authority<R>(
     #[cfg(test)]
     let _publication = super::state::BindingPublicationHeld::enter();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    #[cfg(unix)]
-    let had_runtime = state.runtime_by_tmux.contains_key(tmux_session_name);
-    state.purge_expired();
-    state.purge_expired_runtime_binding_under_authority(authority);
-    #[cfg(unix)]
-    if had_runtime && !state.runtime_by_tmux.contains_key(tmux_session_name) {
-        state.codex_restore_by_tmux.remove(tmux_session_name);
-    }
+    pane_registration::purge_expired_under_authority(&mut state, authority);
     let previous = state
         .runtime_by_tmux
         .get(tmux_session_name)
@@ -939,8 +900,7 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-        #[cfg(unix)]
-        state.codex_restore_by_tmux.remove(tmux_session_name);
+        pane_registration::forget_restore_scope(state, tmux_session_name);
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
         removed_runtime || removed_provider_sessions
@@ -959,8 +919,7 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
-        #[cfg(unix)]
-        state.codex_restore_by_tmux.remove(tmux_session_name);
+        pane_registration::forget_restore_scope(state, tmux_session_name);
         let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
