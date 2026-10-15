@@ -388,7 +388,7 @@ async fn nothing_is_prepared_or_posted_without_ownership_and_the_delivery_lease(
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unclear_post_is_settled_from_history_and_never_posted_again() {
+async fn an_unclear_post_is_settled_from_history_and_retried_only_once_if_absent() {
     let harness = Harness::new();
     harness.gate.acquired();
     let mut writer = harness.writer();
@@ -404,9 +404,17 @@ async fn an_unclear_post_is_settled_from_history_and_never_posted_again() {
     assert_eq!(writer.deliver(&piece("m2", "second")).await, Step::Done);
     assert!(started.elapsed() >= confirm::LAST_LOOK);
     assert_eq!(outcome(&mut writer, "m2"), Some(PieceOutcome::NotFound));
+    assert_eq!(
+        writer.deliver(&piece("m2", "second")).await,
+        Step::LeaseBusy
+    );
+    let when = super::local_retry::pending(writer.store().ledger())
+        .unwrap()
+        .due;
+    assert_eq!(writer.retry_local(when).await, Step::Done);
     assert_eq!(writer.deliver(&piece("m2", "second")).await, Step::Done);
-    assert_eq!(harness.port.posts(), ["first", "second"]);
-    assert_eq!(writer.store().ledger().anchor(), 1000);
+    assert_eq!(harness.port.posts(), ["first", "second", "second"]);
+    assert_eq!(writer.store().ledger().anchor(), 1001);
     assert_eq!(
         harness.alarms.taken(),
         [WriterAlarm::NotFound { serial: 1 }]
@@ -580,6 +588,7 @@ async fn a_prepared_left_by_a_crash_is_settled_before_the_next_post() {
         let (unit_key, payload) = (unit(&format!("c{serial}")), payload.to_string());
         let anchor_id = channel.ledger().anchor();
         let prepared = LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key,
             piece_index: 0,
@@ -900,6 +909,9 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
         assert_eq!(harness.port.posts(), ["a"]);
     }
 }
+
+#[path = "local_retry_tests.rs"]
+mod local_retry_tests;
 
 #[path = "actor_tests.rs"]
 mod actor;

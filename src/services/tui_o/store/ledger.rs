@@ -18,6 +18,13 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 pub const OPERATOR_RESUME_SUPPORTED: bool = true;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalRetryMark {
+    Budget,
+    Attempt { root_serial: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LedgerEntry {
     ExactEvidence {
@@ -38,6 +45,8 @@ pub enum LedgerEntry {
         payload: String,
         anchor_id: u64,
         epoch: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_retry: Option<LocalRetryMark>,
     },
     Posted {
         serial: u64,
@@ -108,6 +117,8 @@ pub struct PieceRecord {
     pub epoch: u64,
     pub prepared_at: DateTime<Utc>,
     pub outcome: Option<PieceOutcome>,
+    pub local_retry: Option<LocalRetryMark>,
+    pub outcome_at: Option<DateTime<Utc>>,
 }
 
 /// The UUID follows the approval across homes; `(channel, rejected_serial)` is local audit identity.
@@ -320,6 +331,7 @@ impl LedgerState {
                 payload,
                 anchor_id,
                 epoch,
+                local_retry,
             } => {
                 if serial != self.next_serial || self.open_serial.is_some() {
                     self.violate(format!("prepared serial {serial} out of order"));
@@ -327,6 +339,29 @@ impl LedgerState {
                     self.violate(format!(
                         "serial {serial} prepared against anchor {anchor_id}"
                     ));
+                }
+                if let Some(LocalRetryMark::Attempt { root_serial }) = local_retry.as_ref() {
+                    let valid = *root_serial < serial
+                        && self.piece(*root_serial).is_some_and(|root| {
+                            root.local_retry == Some(LocalRetryMark::Budget)
+                                && root.outcome == Some(PieceOutcome::NotFound)
+                                && root.unit_key == unit_key
+                                && root.piece_index == piece_index
+                                && root.payload == payload
+                        })
+                        && self.latest_piece(&unit_key, piece_index).map(|(s, _)| s)
+                            == Some(*root_serial)
+                        && !self.pieces.values().any(|piece| {
+                            piece.local_retry
+                                == Some(LocalRetryMark::Attempt {
+                                    root_serial: *root_serial,
+                                })
+                        });
+                    if !valid {
+                        self.violate(format!(
+                            "invalid local retry {serial} for root {root_serial}"
+                        ));
+                    }
                 }
                 self.next_serial = self.next_serial.max(serial.saturating_add(1));
                 self.open_serial = Some(serial);
@@ -348,6 +383,8 @@ impl LedgerState {
                     epoch,
                     prepared_at: at,
                     outcome: None,
+                    local_retry,
+                    outcome_at: None,
                 };
                 self.pieces.insert(serial, piece);
             }
@@ -357,18 +394,18 @@ impl LedgerState {
                 } else {
                     self.anchor = msg_id;
                 }
-                self.resolve(serial, PieceOutcome::Posted(msg_id));
+                self.resolve(serial, PieceOutcome::Posted(msg_id), at);
             }
             LedgerEntry::Rejected { serial, status } => {
-                self.resolve(serial, PieceOutcome::Rejected(status))
+                self.resolve(serial, PieceOutcome::Rejected(status), at)
             }
-            LedgerEntry::NotFound { serial } => self.resolve(serial, PieceOutcome::NotFound),
-            LedgerEntry::NotSent { serial } => self.resolve(serial, PieceOutcome::NotSent),
+            LedgerEntry::NotFound { serial } => self.resolve(serial, PieceOutcome::NotFound, at),
+            LedgerEntry::NotSent { serial } => self.resolve(serial, PieceOutcome::NotSent, at),
             LedgerEntry::Ambiguous { serial, candidates } => {
-                self.resolve(serial, PieceOutcome::Ambiguous(candidates))
+                self.resolve(serial, PieceOutcome::Ambiguous(candidates), at)
             }
             LedgerEntry::Unresolved { serial, reason } => {
-                self.resolve(serial, PieceOutcome::Unresolved(reason))
+                self.resolve(serial, PieceOutcome::Unresolved(reason), at)
             }
             LedgerEntry::Excluded { unit_key, reason } => {
                 self.excluded.insert(unit_key, reason);
@@ -393,7 +430,7 @@ impl LedgerState {
         }
     }
 
-    fn resolve(&mut self, serial: u64, outcome: PieceOutcome) {
+    fn resolve(&mut self, serial: u64, outcome: PieceOutcome, at: DateTime<Utc>) {
         let Some(piece) = self.pieces.get_mut(&serial) else {
             return self.violate(format!("result for unprepared serial {serial}"));
         };
@@ -401,6 +438,7 @@ impl LedgerState {
             return self.violate(format!("serial {serial} has a result after Posted"));
         }
         piece.outcome = Some(outcome);
+        piece.outcome_at = Some(at);
         if self.open_serial == Some(serial) {
             self.open_serial = None;
         }
@@ -609,6 +647,10 @@ fn replay(
 }
 
 #[cfg(test)]
+#[path = "local_retry_ledger_tests.rs"]
+mod local_retry_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::tui_o::shadow::{ShadowProvider, UnitKind};
@@ -646,6 +688,7 @@ mod tests {
             kind,
         };
         LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key,
             piece_index: 0,

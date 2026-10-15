@@ -425,6 +425,7 @@ fn prepared_store() -> (OStore, ChannelStore) {
     let (store, mut channel) = activated_store(&root);
     let ledger = channel.ledger();
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial: ledger.next_serial(),
         unit_key: maybe_sent_unit(),
         piece_index: 0,
@@ -436,8 +437,7 @@ fn prepared_store() -> (OStore, ChannelStore) {
     (store, channel)
 }
 
-/// First generation: the Prepared and Discord accepting its POST; the reply is lost as this
-/// generation ends.
+/// The first generation ends after Discord accepts its POST but before its reply arrives.
 pub(super) async fn prepared_seed_node(env: &Env) {
     let (_store, channel) = prepared_store();
     let discord = Discord::kept_in(&env.dir.join(HISTORY));

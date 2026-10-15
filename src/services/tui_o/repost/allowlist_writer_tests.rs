@@ -16,6 +16,8 @@ fn selected(enabled: bool, channels: &[u64]) -> Arc<crate::config::Config> {
 
 fn fresh_record() -> PieceRecord {
     PieceRecord {
+        local_retry: None,
+        outcome_at: None,
         unit_key: unit("allowlist-fresh"),
         piece_index: 0,
         payload: "fresh".into(),
@@ -70,7 +72,11 @@ async fn d4b_denied_turn_original_admission_and_tick_have_zero_pg_work_pg() {
         acquisitions.store(0, Ordering::SeqCst);
         assert_eq!(
             <ChannelTurn<Io> as RepostHook<Writer>>::original(&mut hook, 0, fresh_record()).await,
-            OriginalGate::Send
+            if allowed {
+                OriginalGate::SendPgManaged
+            } else {
+                OriginalGate::SendLocal
+            }
         );
         hook.turn(&mut writer).await;
         let mut runner = Runner::new(switch.clone(), pool.clone(), BOT, run_scope());
@@ -328,6 +334,7 @@ async fn d4b_off_approved_piece_still_posts_once_through_actor() {
     let mut channel = harness.channel();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 0,
             unit_key: unit("ledger-only"),
             piece_index: 0,

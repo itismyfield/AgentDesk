@@ -7,11 +7,15 @@ use crate::services::tui_o::writer::binding::{
 use crate::services::tui_o::writer::{PostOutcome, SeenMessage};
 
 #[derive(Default)]
-pub(crate) struct Posts(Mutex<Vec<(u64, SeenMessage)>>);
+pub(crate) struct Posts {
+    records: Mutex<Vec<(u64, SeenMessage)>>,
+    lost: Mutex<std::collections::VecDeque<bool>>,
+    missing: Mutex<Vec<u64>>,
+}
 
 impl Posts {
     pub(crate) fn to(&self, channel: u64) -> Vec<String> {
-        let posts = locked(&self.0);
+        let posts = locked(&self.records);
         let to = posts.iter().filter(|(c, _)| *c == channel);
         to.map(|(_, message)| message.content.clone()).collect()
     }
@@ -27,7 +31,7 @@ impl DiscordPort for Posts {
         channel: u64,
         content: String,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        let mut posts = locked(&self.0);
+        let mut posts = locked(&self.records);
         let id = 101 + posts.len() as u64;
         let author_id = 42;
         let receipt = SeenMessage {
@@ -36,6 +40,10 @@ impl DiscordPort for Posts {
             content,
         };
         posts.push((channel, receipt.clone()));
+        if locked(&self.lost).pop_front().unwrap_or(false) {
+            locked(&self.missing).push(id);
+            return std::future::ready(PostOutcome::Uncertain("response lost".into()));
+        }
         std::future::ready(PostOutcome::Created(receipt))
     }
 
@@ -44,9 +52,20 @@ impl DiscordPort for Posts {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
-        let posts = locked(&self.0);
-        let page = posts.iter().filter(|(c, m)| *c == channel && m.id > after);
-        std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
+        let posts = locked(&self.records);
+        let missing = locked(&self.missing);
+        let page = posts
+            .iter()
+            .filter(|(c, m)| *c == channel && m.id > after && !missing.contains(&m.id));
+        let mut page: Vec<_> = page.map(|(_, m)| m.clone()).collect();
+        if !missing.is_empty() && after < 500_000 {
+            page.push(SeenMessage {
+                id: 500_000,
+                author_id: 77,
+                content: "readable".into(),
+            });
+        }
+        std::future::ready(Ok(page))
     }
 
     fn message(
@@ -54,8 +73,11 @@ impl DiscordPort for Posts {
         channel: u64,
         id: u64,
     ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
-        let posts = locked(&self.0);
-        let found = posts.iter().find(|(c, m)| *c == channel && m.id == id);
+        let posts = locked(&self.records);
+        let missing = locked(&self.missing);
+        let found = posts
+            .iter()
+            .find(|(c, m)| *c == channel && m.id == id && !missing.contains(&m.id));
         std::future::ready(Ok(found.map(|(_, m)| m.clone())))
     }
 }
@@ -94,6 +116,9 @@ impl BindingEvents for Startup {
     }
 }
 
+type FactsHook = Option<Box<dyn FnOnce() + Send>>;
+type CustodyProbe = Option<fn(u64) -> bool>;
+
 /// Reports `facts` for every channel (none blocking by default); the store's own checks and
 /// the adoption still apply. `on_facts` runs once as the next facts are read.
 pub(crate) struct TestHost {
@@ -101,13 +126,13 @@ pub(crate) struct TestHost {
     pub(crate) alarms: Alarms,
     sources: BTreeMap<u64, SourceId>,
     pub(crate) facts: Mutex<ActivationFacts>,
-    pub(crate) on_facts: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub(crate) on_facts: Mutex<FactsHook>,
     /// Legacy's relay state for channels that already hold output; fails closed when unset.
     pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     /// The tmux session each channel's binding names, `host-<channel>` when unset.
     pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
     /// Legacy's custody of a channel as the gateway reads it, as an inflight row; none when unset.
-    pub(crate) custody: Mutex<Option<fn(u64) -> bool>>,
+    pub(crate) custody: Mutex<CustodyProbe>,
     /// Legacy's mailbox work and watcher emission for every channel; idle by default.
     pub(crate) busy: std::sync::atomic::AtomicBool,
     pub(crate) relaying: std::sync::atomic::AtomicBool,
@@ -223,3 +248,6 @@ impl HostIo for TestHost {
         self.relaying.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+#[path = "local_retry_host_tests.rs"]
+mod local_retry;

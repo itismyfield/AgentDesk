@@ -110,6 +110,7 @@ fn rejected() -> tempfile::TempDir {
     };
     let (payload, anchor_id, epoch) = ("original bytes".into(), 100, 1);
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial: 0,
         unit_key,
         piece_index: 0,

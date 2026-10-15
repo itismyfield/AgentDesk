@@ -1252,6 +1252,9 @@ src/
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
+│   │   │   ├── o_writer_repost_io_tests/
+│   │   │   │   └── settle_over_http/
+│   │   │   ├── settle_over_http/
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   ├── fresh_send_tests.rs
@@ -1262,6 +1265,7 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
@@ -2792,6 +2796,7 @@ src/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
+│   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
@@ -2867,6 +2872,11 @@ src/
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs
+│   │   │   ├── local_retry.rs
+│   │   │   ├── local_retry_actor_tests.rs
+│   │   │   ├── local_retry_host_tests.rs
+│   │   │   ├── local_retry_repost_tests.rs
+│   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs

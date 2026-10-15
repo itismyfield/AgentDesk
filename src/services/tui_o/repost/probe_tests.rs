@@ -1412,9 +1412,9 @@ fn f4r_the_marker_names_the_channel_and_is_the_same_on_every_node_and_slot() {
             .to_owned()
     };
     assert_ne!(nonce(&here), nonce(&there));
-
-    // Two nodes derive the piece from their own ledger records: another epoch, anchor, time.
     let record = |epoch, anchor_id| PieceRecord {
+        local_retry: None,
+        outcome_at: None,
         unit_key: unit(CHANNEL),
         piece_index: 2,
         payload: PAYLOAD.into(),

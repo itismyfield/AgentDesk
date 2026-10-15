@@ -174,6 +174,7 @@ fn codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed
         .unwrap();
     let mut owed = store.open_channel(&era, channel.get()).unwrap().unwrap();
     owed.append_ledger(LedgerEntry::Prepared {
+        local_retry: None,
         serial: 1,
         unit_key: UnitKey {
             channel_id: channel.get(),

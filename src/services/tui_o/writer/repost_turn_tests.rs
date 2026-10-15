@@ -9,6 +9,9 @@ use sqlx::PgPool;
 use tokio::sync::{Notify, watch};
 
 use super::*;
+
+#[path = "local_retry_repost_tests.rs"]
+mod local_retry;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::tui_o::repost::admission::{Admitter, OriginalAttempt, OriginalGate};
 use crate::services::tui_o::repost::config::{RepostConfig, RepostSwitch};
@@ -346,6 +349,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let epoch = harness.gate.acquired();
     let mut channel = harness.channel();
     let resumed = LedgerEntry::Prepared {
+        local_retry: None,
         serial: 0,
         unit_key: unit("resumed"),
         piece_index: 0,
@@ -467,6 +471,7 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     let harness = Harness::new();
     let epoch = harness.gate.acquired();
     let open = LedgerEntry::Prepared {
+        local_retry: None,
         serial: 0,
         unit_key: unit("left-open"),
         piece_index: 0,
@@ -545,6 +550,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     let harness = Harness::new();
     let epoch = harness.gate.acquired();
     let prepared = |serial, native: &str| LedgerEntry::Prepared {
+        local_retry: None,
         serial,
         unit_key: unit(native),
         piece_index: 0,

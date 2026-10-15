@@ -106,6 +106,7 @@ fn operator_resume_prepared_child() {
     let original = channel.ledger().piece(0).unwrap().clone();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 1,
             unit_key: original.unit_key,
             piece_index: original.piece_index,
@@ -126,6 +127,7 @@ fn approved() -> (Harness, ResumeApproval) {
     let mut channel = harness.channel();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 0,
             unit_key: unit("original"),
             piece_index: 0,
@@ -184,6 +186,9 @@ async fn operator_resume_no_approval_restarts_block_but_same_harness_with_approv
         assert_eq!(line["entry"]["type"], "prepared");
         assert_eq!(line["entry"]["serial"], next.fetch_add(1, Ordering::SeqCst));
         assert_eq!(line["entry"]["epoch"], 1);
+        if line["entry"]["serial"] == 1 {
+            assert!(line["entry"].get("local_retry").is_none());
+        }
     }));
     let mut writer = harness.writer();
     assert!(!writer.is_stopped());

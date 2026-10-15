@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -73,6 +73,7 @@ fn route_429(retry_after: &str) -> Reply {
 struct Mock {
     base: String,
     seen: Seen,
+    probes: Arc<AtomicUsize>,
 }
 
 impl Mock {
@@ -82,11 +83,19 @@ impl Mock {
         let seen: Seen = Arc::default();
         let mut replies = VecDeque::from(replies);
         let log = Arc::clone(&seen);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let ignored = Arc::clone(&probes);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let Some(request) = read_request(&mut socket).await else {
                     continue;
                 };
+                // Local port probes must not consume scripted Discord replies.
+                if request.0 == "/" {
+                    ignored.fetch_add(1, Ordering::SeqCst);
+                    let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    continue;
+                }
                 log.lock().unwrap().push(request);
                 match replies
                     .pop_front()
@@ -105,7 +114,7 @@ impl Mock {
                 }
             }
         });
-        Self { base, seen }
+        Self { base, seen, probes }
     }
 
     fn requests(&self) -> Vec<(String, Vec<u8>)> {
@@ -640,12 +649,12 @@ mod settle_over_http {
     use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
     use crate::services::tui_o::writer::{AlarmSink, DeliveryLease, WriterAlarm};
 
-    const BOT: u64 = 42;
-    const OTHER: u64 = 77;
-    const PAYLOAD: &str = "transcript unit";
+    pub(super) const BOT: u64 = 42;
+    pub(super) const OTHER: u64 = 77;
+    pub(super) const PAYLOAD: &str = "transcript unit";
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-    struct Lease;
+    pub(super) struct Lease;
 
     impl DeliveryLease for Lease {
         type Held = ();
@@ -656,7 +665,7 @@ mod settle_over_http {
     }
 
     #[derive(Clone, Default)]
-    struct Alarms(Arc<StdMutex<Vec<WriterAlarm>>>);
+    pub(super) struct Alarms(Arc<StdMutex<Vec<WriterAlarm>>>);
 
     impl AlarmSink for Alarms {
         fn raise(&self, _: u64, alarm: WriterAlarm) {
@@ -665,7 +674,7 @@ mod settle_over_http {
     }
 
     /// A message as Discord returns it, complete enough for Serenity to decode.
-    fn message(channel: u64, id: u64, author: u64, content: &str) -> Value {
+    pub(super) fn message(channel: u64, id: u64, author: u64, content: &str) -> Value {
         json!({
             "id": id.to_string(), "channel_id": channel.to_string(), "content": content,
             "author": {"id": author.to_string(), "username": "bot", "discriminator": "0",
@@ -676,15 +685,15 @@ mod settle_over_http {
         })
     }
 
-    fn ok(body: Value) -> Reply {
+    pub(super) fn ok(body: Value) -> Reply {
         reply("200 OK", &[], &body.to_string())
     }
 
-    fn status(line: &str) -> Reply {
+    pub(super) fn status(line: &str) -> Reply {
         reply(line, &[], r#"{"message":"refused","code":0}"#)
     }
 
-    fn unit(channel: u64, native: u64) -> UnitKey {
+    pub(super) fn unit(channel: u64, native: u64) -> UnitKey {
         UnitKey {
             channel_id: channel,
             provider: ShadowProvider::Claude,
@@ -744,6 +753,7 @@ mod settle_over_http {
             let anchor_id = recorded.ledger().anchor();
             let (unit_key, payload) = (unit(channel, serial), format!("earlier {serial}"));
             let prepared = LedgerEntry::Prepared {
+                local_retry: None,
                 serial,
                 unit_key,
                 piece_index: 0,
@@ -934,3 +944,6 @@ mod settle_over_http {
         assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }
+
+#[path = "local_retry_io_tests.rs"]
+mod local_retry_io_tests;
