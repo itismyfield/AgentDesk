@@ -143,7 +143,7 @@ async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_ke
         RetiredForTest, test_support::tree_fingerprint,
     };
     use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
-    use crate::services::discord::tmux::{OOnlyInstallOutcome, watch_host_of};
+    use crate::services::discord::tmux::watch_host_of;
     let test =
         "t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_keep_both_eofs";
     if !isolated_in("retired_host_tick_tests", test, &[]) {
@@ -178,7 +178,7 @@ async fn t6_f_installer_pg_locator_changes_before_and_after_actual_host_await_ke
         let fingerprint = tree_fingerprint(&row_root);
         let observed = observe(&fixture);
         let submitted = Scope::new(&fixture.shared);
-        assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+        fixture.spawn_watcher().await;
         until(
             &observed,
             "actual PG-backed initial EOF on a proven tmux host",
@@ -252,7 +252,7 @@ async fn t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_t
         RetiredForTest, test_support::tree_fingerprint,
     };
     use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
-    use crate::services::discord::tmux::{OOnlyInstallOutcome, watch_host_of};
+    use crate::services::discord::tmux::watch_host_of;
     let test =
         "t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_through_both_eofs";
     if !isolated_in("retired_host_tick_tests", test, &[]) {
@@ -276,7 +276,7 @@ async fn t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_t
         let fingerprint = tree_fingerprint(&row_root);
         let observed = observe(&fixture);
         let submitted = Scope::new(&fixture.shared);
-        assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+        fixture.spawn_watcher().await;
         until(
             &observed,
             "valid install completed real initial tmux EOF probe",

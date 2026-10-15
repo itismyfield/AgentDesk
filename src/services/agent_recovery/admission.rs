@@ -28,22 +28,6 @@ pub(crate) struct AdmissionGuard {
     _transaction: Option<Transaction<'static, Postgres>>,
 }
 
-#[cfg(test)]
-impl AdmissionGuard {
-    /// The admission's own transaction, so a caller extends it instead of locking again elsewhere.
-    pub(crate) fn transaction(&mut self) -> Option<&mut Transaction<'static, Postgres>> {
-        self._transaction.as_mut()
-    }
-
-    /// Commits what the caller wrote in the admission's transaction, which also ends its lock.
-    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
-        match self._transaction {
-            Some(transaction) => transaction.commit().await,
-            None => Ok(()),
-        }
-    }
-}
-
 fn allows(
     state: &ChannelState,
     provider: &ProviderKind,

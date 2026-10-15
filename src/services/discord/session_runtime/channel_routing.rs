@@ -268,6 +268,18 @@ pub(in crate::services::discord) async fn resolve_thread_parent(
     }
 }
 
+/// The thread's parent as an automatic check needs it: a channel that is no thread reads `None`,
+/// and a failed read stays an error rather than passing for a channel with no parent.
+pub(in crate::services::discord) async fn checked_thread_parent(
+    http: &Arc<serenity::Http>,
+    channel_id: serenity::model::id::ChannelId,
+) -> Result<Option<serenity::model::id::ChannelId>, serenity::Error> {
+    let serenity::model::channel::Channel::Guild(gc) = channel_id.to_channel(http).await? else {
+        return Ok(None);
+    };
+    Ok(gc.parent_id.filter(|_| is_actual_thread_kind(gc.kind)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_actual_thread_kind;

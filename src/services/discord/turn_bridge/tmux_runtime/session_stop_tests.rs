@@ -180,6 +180,7 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1b-direct-parent";
@@ -423,6 +424,7 @@ fn codex_parent_without_session_meta_refuses_stop_and_replies() {
             provider: ProviderKind::Codex,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "codex-without-parent-header";
@@ -474,6 +476,7 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1c-discord-turn";

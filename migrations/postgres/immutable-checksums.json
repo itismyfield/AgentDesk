@@ -715,6 +715,11 @@
       "path": "migrations/postgres/0140_channel_recovery_custody.sql",
       "sha256": "2adcb4f9c929b223537b6ea4126a8cf8797a0aaea10314b63490a494bc578bc2",
       "version": 140
+    },
+    {
+      "path": "migrations/postgres/0141_sessions_hosted_execution_archive.sql",
+      "sha256": "8bd647f7c3fd5298e37eeea2d88634fa78ebf93dc35dfc8bf052b159067132e7",
+      "version": 141
     }
   ],
   "version": 1

@@ -1,11 +1,172 @@
 //! Isolated production entry fixtures; every tmux command goes to the child executable.
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
+use crate::services::discord::task_supervisor::watcher_completion::{self, Outcome};
+use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::{self as binding, TuiRuntimeBinding};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+pub(in crate::services::discord) struct InstallFixture {
+    pub shared: Arc<SharedData>,
+    pub registry: Arc<HealthRegistry>,
+    pub http: Arc<serenity::Http>,
+    pub provider: ProviderKind,
+    pub channel: ChannelId,
+    pub session: String,
+    pub output: String,
+}
+
+impl InstallFixture {
+    pub async fn new(provider: ProviderKind, channel: u64) -> Self {
+        Self::new_with_pool(provider, channel, None).await
+    }
+    pub(in crate::services::discord) async fn new_with_pool(
+        provider: ProviderKind,
+        channel: u64,
+        pool: Option<sqlx::PgPool>,
+    ) -> Self {
+        let channel = ChannelId::new(channel);
+        let registry = Arc::new(HealthRegistry::new());
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
+        Arc::get_mut(&mut shared).unwrap().provider = provider.clone();
+        Arc::get_mut(&mut shared).unwrap().pg_pool = pool;
+        {
+            let mut settings = shared.settings.write().await;
+            settings.provider = provider.clone();
+            settings.allowed_channel_ids = vec![channel.get()];
+        }
+        registry
+            .register(provider.as_str().to_owned(), shared.clone())
+            .await;
+        let session = provider.build_tmux_session_name(&format!(
+            "n4d-{}-{}",
+            channel.get(),
+            if provider == ProviderKind::Codex {
+                "cdx"
+            } else {
+                "cc"
+            }
+        ));
+        let output = tc::session_temp_path(&session, "jsonl");
+        std::fs::create_dir_all(Path::new(&output).parent().unwrap()).unwrap();
+        std::fs::write(&output, []).unwrap();
+        std::fs::write(tc::session_temp_path(&session, "generation"), "n4d-source").unwrap();
+        std::fs::write(
+            tc::tmux_owner_path(&session),
+            tc::current_tmux_owner_marker(),
+        )
+        .unwrap();
+        tc::write_tmux_channel_binding(&session, channel.get()).unwrap();
+        tc::write_tmux_runtime_kind_marker(
+            &session,
+            match provider {
+                ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
+                ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+                _ => panic!("fixture requires TUI provider"),
+            },
+        )
+        .unwrap();
+        Self {
+            shared,
+            registry,
+            http: Arc::new(serenity::Http::new("n4d-fixture")),
+            provider,
+            channel,
+            session,
+            output,
+        }
+    }
+
+    /// Start the actual watcher through the general claim and task supervision paths.
+    pub async fn spawn_watcher(&self) {
+        let host = watch_host_of(
+            &self.shared,
+            &self.provider,
+            self.channel.get(),
+            &self.session,
+        )
+        .await;
+        let offset = std::fs::metadata(&self.output).unwrap().len();
+        let handle = TmuxWatcherHandle {
+            tmux_session_name: self.session.clone(),
+            output_path: self.output.clone(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        };
+        let claim = claim_or_reuse_watcher_for_host(
+            &self.shared.tmux_watchers,
+            self.channel,
+            handle,
+            &self.provider,
+            "watcher_test_fixture",
+            None,
+            host,
+        )
+        .unwrap();
+        assert!(claim.should_spawn(), "fixture must submit a fresh watcher");
+        let handle = self.handle();
+        self.shared.record_tmux_watcher_reconnect(self.channel);
+        crate::services::discord::task_supervisor::spawn_observed_tmux_watcher(
+            "watcher_test_fixture",
+            self.shared.clone(),
+            self.session.clone(),
+            handle.cancel.clone(),
+            tmux_output_watcher_with_restore(
+                self.channel,
+                self.http.clone(),
+                self.shared.clone(),
+                self.output.clone(),
+                self.session.clone(),
+                offset,
+                handle.cancel.clone(),
+                handle.paused.clone(),
+                handle.resume_offset.clone(),
+                handle.pause_epoch.clone(),
+                handle.turn_delivered.clone(),
+                handle.last_heartbeat_ts_ms.clone(),
+                None,
+            ),
+        );
+    }
+    pub fn handle(&self) -> TmuxWatcherHandle {
+        let handle = self.shared.tmux_watchers.get(&self.channel).unwrap();
+        TmuxWatcherHandle {
+            tmux_session_name: handle.tmux_session_name.clone(),
+            output_path: handle.output_path.clone(),
+            paused: handle.paused.clone(),
+            resume_offset: handle.resume_offset.clone(),
+            cancel: handle.cancel.clone(),
+            pause_epoch: handle.pause_epoch.clone(),
+            turn_delivered: handle.turn_delivered.clone(),
+            last_heartbeat_ts_ms: handle.last_heartbeat_ts_ms.clone(),
+        }
+    }
+    pub async fn cancel_and_join(&self) {
+        let handle = self.handle();
+        let ticket = watcher_completion::observe(&handle.cancel).expect("observed task registered");
+        crate::services::discord::tmux::tmux_watcher::cancel_for_test(
+            &handle.cancel,
+            Ordering::SeqCst,
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(8), ticket.wait())
+                .await
+                .unwrap(),
+            Outcome::Returned
+        );
+    }
+}
 
 #[path = "n4d2_o_writer_test.rs"]
 mod o_writer;
