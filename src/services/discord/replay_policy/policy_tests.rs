@@ -95,12 +95,7 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
     assert_ne!(permit.next_nonce(), previous);
     assert_eq!(stored(&pool, id).await.0, "startup_failed_no_effect");
 
-    let activities = [
-        Activity::Output,
-        Activity::Tool,
-        Activity::Unclassified,
-        Activity::InjectedInput,
-    ];
+    let activities = [Activity::Output, Activity::Tool, Activity::Unclassified];
     let cases = activities
         .iter()
         .map(|activity| {

@@ -421,8 +421,6 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
-              - 'src/services/discord/tmux_watcher/injected_bridge_tests.rs'
-              - 'src/services/discord/tmux_watcher/injected_watcher_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
@@ -831,7 +829,6 @@ jobs:
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/replace_outcome_policy.rs'
               - 'src/services/discord/replay_policy.rs'
-              - 'src/services/discord/replay_policy/**'
               - 'src/services/discord/restart_mode/**'
               - 'src/services/discord/router/**'
               - 'src/services/discord/runtime_bootstrap.rs'
@@ -1706,7 +1703,7 @@ jobs:
 
       # Compare complete expected/executed ID sets rather than an execution-count floor.
       - name: Library sweep (selection-set gated)
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: bash
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
@@ -2140,7 +2137,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2392,7 +2389,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

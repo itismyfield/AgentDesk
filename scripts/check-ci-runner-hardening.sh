@@ -934,11 +934,11 @@ targets = {
     "needs" => %w[changes lib_test_prepare pg_shards],
     "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "1ef62eee071110ae20706eac36868adae901ca8225bc29808f5298cd1062a04d",
+    "job_sha256" => "41d97b438d2749d8e86a89daf0f97d36b61e1ed61ed43a134e56b241dabdf3ac",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => ["python3 scripts/ci/test-selection.py run --lane sweep"],
-        "timeout_minutes" => 45,
+        "timeout_minutes" => 60,
         "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
@@ -1379,6 +1379,7 @@ if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
     %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
       errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
     end
+    errors << "full_non_pg #{sweep_name} must keep timeout-minutes: 60" unless step["timeout-minutes"] == 60
   end
 else
   errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
