@@ -185,7 +185,9 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/tui_o/cutover/intake_route.rs` | readiness·라우팅 | `home_availability::refusal` :39, `held_channels`·`intake_held_channels` :58–59, `any_registered` :88 |
 | `src/services/tui_o/repost/runner.rs` | admission·readiness | `registered_channel`·`home_availability::refusal` :37–38 |
 | `src/services/tui_o/writer/deliver.rs` | admission | `admit` :157–166(availability 거절 뒤 home `admit_post`) |
+| `src/services/tui_o/writer/actor/transition_snapshot.rs` | admission | `home_now` :155. 등록 home의 기대 epoch·Owned·Open을 확인하고, home 없는 채널은 writer gate를 확인한다 |
 | `src/services/tui_o/writer/host.rs` | admission·readiness | `owned_now` :353, `home_availability::refusal` :499, `registered_channel` :505 |
+| `src/services/tui_o/writer/transition_port.rs` | admission 보관 | `Context::permit` :40. 요청자가 취득한 `CommandPermit`를 작업 종료까지 보관하며 새 permit을 발급하지 않는다 |
 | `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
 | `src/server/routes/agents_stop.rs` | admission | `admit_command`·`admit_unattributed` :66–70 |
 | `src/server/routes/queue_api.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `command_mutant` :206·:240 |

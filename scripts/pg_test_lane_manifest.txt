@@ -1623,7 +1623,6 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_ter
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
 services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
 services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
-services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_clear_move_fail_closed_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
