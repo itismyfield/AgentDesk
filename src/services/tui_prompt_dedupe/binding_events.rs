@@ -1,6 +1,5 @@
 //! Per-channel binding event log: each record is appended and fsynced before the binding it names is published.
 //! Readers use `binding_events_since` and `subscribe_binding_events`; nothing here deletes a record.
-
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -23,7 +22,6 @@ use crate::services::claude_tui::source_verify::{
 use crate::services::discord::runtime_store::fsync_parent_dir;
 pub(crate) use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
-
 pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
 mod claude_fold;
 use claude_fold::Waiting;
@@ -31,7 +29,6 @@ pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) mod codex;
 mod log_record;
 use log_record::{Logged, LoggedRef};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BindingCause {
@@ -43,7 +40,6 @@ pub(crate) enum BindingCause {
     Fork,
     Unknown,
 }
-
 /// `Resolved` completes the `Pending` record `pending_seq`; `Rejected` is audit only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,13 +59,11 @@ pub(crate) enum BindingTarget {
         reason: String,
     },
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BindingEvidence {
     pub hook_event: Option<String>,
     pub received_at: DateTime<Utc>,
 }
-
 /// `seq` rises by exactly one per record of a channel, so a gap means a skipped line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct BindingEvent {
@@ -85,14 +79,12 @@ pub(crate) struct BindingEvent {
     pub evidence: BindingEvidence,
     pub committed_at: DateTime<Utc>,
 }
-
 /// A binding change whose event could not be persisted; the binding was not published.
 #[derive(Debug)]
 pub(crate) struct BindingPersistError {
     pub tmux_session: String,
     pub error: io::Error,
 }
-
 /// What one hook said about a session switch; `source` is the SessionStart reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookSignal {
@@ -103,7 +95,6 @@ pub(crate) struct HookSignal {
     /// The relay's publish time; publish times of one host are what order a pane's transitions.
     pub published_at: Option<DateTime<Utc>>,
 }
-
 impl HookSignal {
     pub(crate) fn from_payload(event: &str, payload: &serde_json::Value) -> Self {
         let text = |key: &str| payload.get(key).and_then(|v| v.as_str()).map(str::to_owned);
@@ -115,7 +106,6 @@ impl HookSignal {
             published_at: None,
         }
     }
-
     /// Only SessionStart names why the session changed.
     pub(crate) fn cause(&self) -> BindingCause {
         if self.event != "session_start" {
@@ -131,7 +121,6 @@ impl HookSignal {
         }
     }
 }
-
 /// Launch reads the execution's context, but only for the first record of that execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CauseSource {
@@ -139,7 +128,6 @@ pub(crate) enum CauseSource {
     Launch,
     Observed,
 }
-
 /// A source proposed for one pane of a channel; `replaced` is the binding it would overwrite.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Proposal<'a> {
@@ -152,7 +140,6 @@ pub(crate) struct Proposal<'a> {
     pub cause: CauseSource,
     pub hook: Option<&'a HookSignal>,
 }
-
 impl<'a> Proposal<'a> {
     /// `None` for runtimes O does not read and for panes without a known channel.
     pub(crate) fn for_binding(
@@ -178,17 +165,14 @@ impl<'a> Proposal<'a> {
             hook: None,
         })
     }
-
     fn session(&self) -> Option<&'a str> {
         self.session_id.map(str::trim).filter(|id| !id.is_empty())
     }
-
     fn payload_path(&self) -> Option<String> {
         let hook = self.hook.and_then(|hook| hook.transcript_path.clone());
         hook.or_else(|| Some(self.path.to_owned()))
     }
 }
-
 /// `verified` pins `current`'s (dev, ino): a hook naming it on another file is an anomaly.
 #[derive(Default)]
 struct PaneState {
