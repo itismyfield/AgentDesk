@@ -239,9 +239,8 @@ impl LedgerEntry {
     }
 }
 
-/// The finalizer half of a policy close: it owns the exact ledger entry and its commit while the
-/// captured mailbox commits. Anything short of a settled tail restores the entry, so the close
-/// stays retryable. Only an entry whose own release was exact lets the mailbox clear the receipt.
+/// The finalizer half of a policy close: the exact entry owns its commit until the tail settles,
+/// and anything short of that restores the entry so the close stays retryable.
 pub(super) async fn handle_policy_close(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     mut intent: super::episode::PolicyCloseIntent,
@@ -256,7 +255,8 @@ pub(super) async fn handle_policy_close(
         .entry(exact)
         .or_insert_with(|| LedgerEntry::orphan(key, intent.provider.clone()));
     let prior = std::mem::replace(&mut entry.phase, Phase::Finalizing);
-    // The fence alone refuses any episode but the latest, so the grant also binds the exact key.
+    // The fence only refuses episodes older than the latest release, so the receipt-only grant
+    // also needs this exact key and a release of its own token.
     let request = &intent.request;
     let (message, nonce) = (request.user_message_id, request.turn_nonce.as_str());
     let named = key.user_msg_id == message.get() && key.matches_episode_nonce(Some(nonce));
