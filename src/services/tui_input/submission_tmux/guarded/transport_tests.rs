@@ -209,7 +209,7 @@ while True:
         });
     }
 
-    fn attach(&self, session: &str) {
+    pub(crate) fn attach(&self, session: &str) {
         self.attach_with_target(session, session, &format!("{}-driver", self.socket));
     }
 

@@ -110,7 +110,7 @@ impl RetryBudget {
     }
 }
 
-/// Why an input's retry state cannot be trusted. Consumers branch on this, never on the detail.
+/// Why an input cannot run or be skipped. Consumers branch on this, never on the detail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnavailableReason {
     RootUnavailable,
@@ -121,6 +121,8 @@ pub(crate) enum UnavailableReason {
     InvalidNotice,
     /// The reads do not cover exactly the input's identity.
     IncompleteView,
+    /// A watched idle draft awaits the existing hold-release pass before FIFO selection.
+    IdleDraftRelease,
 }
 
 /// A refused read: the coded reason and a detail kept for diagnostics only.
@@ -325,7 +327,38 @@ impl CheckedInputView {
         if !self.covers_identity() {
             return RetryClass::Unavailable(UnavailableReason::IncompleteView);
         }
-        classify_reads(self.reads.iter().map(|(_, read)| read))
+        let class = classify_reads(self.reads.iter().map(|(_, read)| read));
+        #[cfg(unix)]
+        if class == RetryClass::Parked
+            && self.provider == ProviderKind::Claude
+            && crate::services::claude_tui::busy_inject::stash_enabled(Some(self.channel_id))
+        {
+            let mut observed = false;
+            for (_, read) in &self.reads {
+                let SourceRead::Budget(budget) = read else {
+                    continue;
+                };
+                if !budget.exhausted() || !budget.draft_hold {
+                    continue;
+                }
+                let Some(session) = budget.draft_session.as_deref() else {
+                    continue;
+                };
+                match crate::services::discord::turn_bridge::followup_requeue::draft_release::idle_release_pending(self.channel_id, session) {
+                    Some(true) => return RetryClass::Unavailable(UnavailableReason::IdleDraftRelease),
+                    Some(false) => observed = true,
+                    None => {}
+                }
+            }
+            if observed {
+                // The watch publishes its hint after saving the release: an old capped
+                // snapshot must not skip a head whose fresh budget is now runnable.
+                let fresh =
+                    Self::read(&self.provider, self.channel_id, self.primary, &self.sources);
+                return classify_reads(fresh.reads.iter().map(|(_, read)| read));
+            }
+        }
+        class
     }
 }
 

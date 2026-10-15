@@ -172,7 +172,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/voice_barge_in.rs` | 시험 | 시험 fixture의 `_home_availability: None` :1353 |
 | `src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery.rs` | admission | `registered_channel` :665, `HomeRefusal::NotHeld` 판정 :734 |
 | `src/services/discord/turn_lease.rs` | admission | `registered_channel` → `admit_recovery` :155 |
-| `src/services/discord/turn_presence/admission.rs` | admission | `registered_channel` → `ownership`·`admit_post` :40·:58 |
 | `src/services/discord/turn_presence/entrypoints.rs` | admission | `HomeGate` 재노출 :7, `withdraw_unmounted` :96: Home mount가 바뀌면 이전 owner에 기댄 presence 승인만 거둔다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/actor/transition_snapshot.rs` | 관측 | `home_now` :155: `registered_channel`로 요청 epoch의 home이 열려 있는지만 읽는다. row·gate를 쓰지 않는다 |
 | `src/services/tui_o/writer/transition_port.rs` | admission | 전환 요청이 `CommandPermit` :40을 운반한다. 발급은 `admit_command` |
@@ -180,12 +179,13 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/queue.rs` | admission | `admit_command`·`admit_unattributed` :243, `admit_command` :501 |
 | `src/services/session_forwarding/home_stop.rs` | 라우팅·admission | sender `read_home` :176, receiver `read_home` :335 → `registered` :368 |
 | `src/services/turn_host.rs` | admission·readiness | `home_refusal` :118, `for_turn` :130, `refusal_before_turn` :155 |
-| `src/services/turn_orchestrator/recovery_custody/mod.rs` | admission | `reserve`의 `read_home_in` :145. admission 트랜잭션 안에서 읽기만 한다. Scoped는 epoch·holder가 이 노드와 다르면 `HomeMismatch`로 거절하고, Legacy는 home epoch만 기록한다 |
 | `src/services/tui_o/cutover.rs` | admission | `delegated` → `registered` :121 |
 | `src/services/tui_o/cutover/intake_route.rs` | readiness·라우팅 | `home_availability::refusal` :39, `held_channels`·`intake_held_channels` :58–59, `any_registered` :88 |
 | `src/services/tui_o/repost/runner.rs` | admission·readiness | `registered_channel`·`home_availability::refusal` :37–38 |
 | `src/services/tui_o/writer/deliver.rs` | admission | `admit` :157–166(availability 거절 뒤 home `admit_post`) |
+| `src/services/tui_o/writer/actor/transition_snapshot.rs` | admission | `home_now` :155. 등록 home의 기대 epoch·Owned·Open을 확인하고, home 없는 채널은 writer gate를 확인한다 |
 | `src/services/tui_o/writer/host.rs` | admission·readiness | `owned_now` :353, `home_availability::refusal` :499, `registered_channel` :505 |
+| `src/services/tui_o/writer/transition_port.rs` | admission 보관 | `Context::permit` :40. 요청자가 취득한 `CommandPermit`를 작업 종료까지 보관하며 새 permit을 발급하지 않는다 |
 | `src/services/tui_o/alarm.rs` | 시험 | 시험 모듈의 `registered_channel` :778 |
 | `src/server/routes/agents_stop.rs` | admission | `admit_command`·`admit_unattributed` :66–70 |
 | `src/server/routes/queue_api.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `command_mutant` :206·:240 |

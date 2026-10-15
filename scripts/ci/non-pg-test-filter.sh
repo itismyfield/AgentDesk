@@ -106,7 +106,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
-  --skip services::discord::health::watcher_respawn::o_only_retry::tests
   --skip services::discord::herdr_terminate::exit_tests
   --skip services::discord::herdr_terminate::route_tests
   --skip services::discord::herdr_terminate::tests
@@ -177,7 +176,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
-  --skip services::discord::tmux::watcher_lifecycle::o_only_restore::tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
   --skip services::discord::tmux_reaper::host_guard_tests
@@ -425,9 +423,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
-  services::discord::commands::control::home_fence::tests::b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session
-  services::discord::commands::control::home_fence::tests::b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing
-  services::discord::commands::control::home_fence::tests::b2b1_queued_cancel_and_drain_reset_keep_the_active_turn_scope
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
   services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
   services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
@@ -455,17 +450,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_tests::any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row
   services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
   services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_failure_cap_and_direct_resume_reason_are_not_success
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_failure_keeps_first_seen_reason_budget_due_and_unknown
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_force_clean_preserves_mailbox_token_counter_and_row
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_natural_death_sweep_recovers_after_failure_backoff_and_spawns_once
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_nonretired_public_force_clean_keeps_mailbox_release_and_rebind
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_nonretired_retry_keeps_input_fence_and_legacy_call_column
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_public_retry_watch_withheld_retains_reason_and_failure_budget
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_retry_and_force_clean_overlap_submit_once
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_retry_before_input_admission_spawns_and_decodes_without_legacy_seed
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_retry_foreign_incumbent_is_failure_without_fallback
-  services::discord::health::watcher_respawn::o_only_retry::tests::n4d2_rowless_observer_uses_durable_binding_and_preserves_deadman
   services::discord::herdr_terminate::tests::m1_disabled_service_has_zero_io
   services::discord::herdr_terminate::tests::m1_hold_release_window_preserves_input_until_settlement
   services::discord::herdr_terminate::tests::m1_host_terminated_settles_exact_turn_and_publishes_queue_once
@@ -515,10 +499,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::ingress_shadow::shadow_tests::only_the_switch_with_listed_channels_starts_an_observer
   services::discord::ingress_shadow::shadow_tests::the_worker_judges_the_real_gate_and_records_every_id
   services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
-  services::discord::input_runtime::supervisor::runtime::ports::tests::b_adopt_requires_all_provider_mapping_views_ports
-  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
-  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_reject_unresolved_resources_without_effects
-  services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_sources_are_read_only_and_unreadable_is_not_empty
   services::discord::input_runtime::supervisor::runtime::ports::tests::c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice
   services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors
   services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
@@ -721,11 +701,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_handed_over_through_custody_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rowless_turn_with_a_mid_stream_resume_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::soft_terminal_read_ending_in_a_split_scalar_baseline
-  services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_boot_api_installs_from_cold_durable_binding
-  services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_general_restore_installs_without_legacy_state
-  services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_legacy_restore_preserves_backfill_and_session_adoption
-  services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_restore_failed_boot_retains_absence_due_and_direct_resume_reason
-  services::discord::tmux::watcher_lifecycle::o_only_restore::tests::n4d2_restore_retry_overlap_submits_once
   services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::configured_channel_binding_is_last_resort_and_provider_scoped
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
@@ -923,7 +898,6 @@ NON_PG_FILTER_REPLAY=(
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
-  services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r01_every_default_and_resolve_sees_one_core_slot_and_attempt
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password

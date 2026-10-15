@@ -1,6 +1,5 @@
 # exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
 # Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
-db::channel_recovery_custody | helper-module | #5340 | expires=2027-10-14 | dormant custody row store (reserve, revision CAS, read) exercised by the recovery_custody PG tests; it holds no test of its own
 server::routes::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts the transition route's sends and runs a probe between reply and consumption for the route tests; it holds no test of its own
 services::claude_tui::host_input::guarded_submission::test_support | helper-module | #6325 | expires=2026-10-26 | Scoped request and result fixtures used by executor_tests; this helper declares no test id.
 services::discord::health::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts transition context resolutions for the route admission tests; it holds no test of its own
@@ -14,5 +13,3 @@ services::tui_o::writer::host::transition::test_support | helper-module | #5340 
 services::turn_orchestrator::pending_queue_persistence::queue_exit_debt::read_back_fault | helper-module | #5340 | expires=2027-10-12 | lets the queue-exit commit tests change the file between a failed save and its re-read; it holds no test of its own
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::scan_fault | helper-module | #6813 | expires=2027-10-12 | injects read_dir and entry failures for queued recovery acceptance tests; owns no test function
 services::turn_orchestrator::policy_close::test_hooks | helper-module | #5340 | expires=2027-10-12 | lets the before-start policy close tests observe and panic at each mailbox step stage; it holds no test of its own
-services::turn_orchestrator::registry_purge::recovery_custody::commit_fault | helper-module | #5340 | expires=2027-10-14 | lets the custody PG tests run a change between a custody write and its commit; it holds no test of its own
-services::turn_orchestrator::registry_purge::recovery_custody::seam | helper-module | #5340 | expires=2027-10-14 | pause points and an effect count on the apply path for the registry PG tests; it holds no test of its own

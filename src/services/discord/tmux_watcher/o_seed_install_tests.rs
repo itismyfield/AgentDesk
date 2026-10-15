@@ -1,4 +1,4 @@
-//! Isolated real installer/watcher cases, retaining raw observations through task completion.
+//! Isolated real watcher entry cases, retaining raw observations through task completion.
 use super::*;
 use crate::services::discord::health::legacy_supervision::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
@@ -7,7 +7,7 @@ use crate::services::discord::health::legacy_supervision::{RetiredForTest, is_re
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
 use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::{spawn_observed_tmux_watcher, watcher_completion};
-use crate::services::discord::tmux::{InstallFixture, OOnlyInstallOutcome};
+use crate::services::discord::tmux::InstallFixture;
 use std::io::Write;
 use std::path::Path;
 
@@ -238,7 +238,7 @@ async fn t6_a_installer_eof_then_nonterminal_decode_is_rowless_through_join() {
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "actual initial EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -304,7 +304,7 @@ async fn t6_c_installer_reaches_expired_streaming_tick_without_legacy_row_effect
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     assert!(crate::services::tui_o::cutover::writer_enabled());
     assert_eq!(
         crate::services::tmux_common::resolve_tmux_runtime_kind_marker(&fixture.session),
@@ -420,7 +420,7 @@ async fn t6_d_real_legacy_predecessor_capsule_is_retained_unadopted() {
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(
         &observed,
         "successor EOF after rejecting Legacy capsule",
@@ -469,7 +469,7 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
     let before = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "predecessor initial EOF", |s| {
         s.event_count("outer_eof") > 0
     })
@@ -507,7 +507,7 @@ async fn t6_e_installed_successor_resumes_real_o_partial_utf8_capsule() {
     );
     assert_ne!(capsule.authority.generation_mtime_ns, 0);
     assert_eq!(capsule.opened_source, capsule.authority.source_file);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "real O custody adoption", |s| {
         s.event_count("capsule_o_adopted") == 1
     })
@@ -561,12 +561,6 @@ async fn legacy_control(channel: u64, n1_only: bool) {
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(
-        fixture.install().await,
-        OOnlyInstallOutcome::Deferred(
-            crate::services::discord::tmux::OOnlyInstallReason::NotRetired
-        )
-    );
     let handle = spawn_legacy(&fixture, 0, Some(restored));
     until(&observed, "Legacy control actual EOF", |s| {
         s.event_count("outer_eof") > 0
@@ -678,12 +672,6 @@ async fn native_legacy_control(channel: u64, n1_only: bool) {
     let restored = restored_watcher_turn_from_inflight(&old_row, &fixture.session, false).unwrap();
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(
-        fixture.install().await,
-        OOnlyInstallOutcome::Deferred(
-            crate::services::discord::tmux::OOnlyInstallReason::NotRetired
-        )
-    );
     let handle = spawn_legacy(&fixture, prefix.len() as u64, Some(restored));
     until(&observed, "native Legacy initial EOF", |s| {
         s.event_count("outer_eof") > 0

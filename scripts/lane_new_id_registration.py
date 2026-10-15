@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Judge every library test ID a change adds: some required PR job must run it, proven
-through its mirror step, its path gate, a running libtest mode and its runner platform.
+"""Judge every library test ID a change adds: main's full lanes or some required PR job must
+run it, a PR job proven through its mirror step, path gate, libtest mode and runner platform.
 
 The added IDs are the lib inventory manifest's growth over the immutable reference commit;
 git diff only finds the touched files that may hide a test the manifest cannot list.
@@ -567,19 +567,27 @@ def platform_gap(coverage, repo_root, test_id, site, decls, aliases, features, p
 
 
 def judge_id(test_id, site, sources, pg_tests, pg_only, gates, platform_of):
-    """A Mapped proof through some required PR job, else [(kind, reason)] per selecting job."""
+    """A Mapped proof through some required PR job or main lane, else [(kind, reason)] per
+    selecting job."""
     selecting: dict[str, list] = {}
     for source in sources.sources:
         lane = source.lane
-        if source.origin in ("pr-required", "pr-advisory") and lane is not None \
+        if source.origin in ("pr-required", "pr-advisory", "main") and lane is not None \
                 and lane.selects_test(test_id) and (lane not in pg_only or test_id in pg_tests):
-            selecting.setdefault(source.owner, []).append(source)
+            selecting.setdefault("main:" * (source.origin == "main") + source.owner,
+                                 []).append(source)
     if not selecting:
         return [(UNREQUIRED, "no PR job selects it")]
     reasons: list[tuple[str, str]] = []
     for job, group in sorted(selecting.items(), key=lambda kv: kv[1][0].origin != "pr-required"):
         mirrors = [m for m in sources.mirrors if m.upstream == job]
         running = [source for source in group if source.runs and not source.guard]
+        if group[0].origin == "main":  # main runs on every merge with no path gate, on ubuntu
+            gap = platform_of(test_id, "linux") if running else "it only lists or runs ignored ids"
+            if not gap:
+                return Mapped(test_id, job, running[0].location, "-", "CI Main", "no path gate")
+            reasons.append((PLATFORM if running else RUNMODE, f"{job}: {gap}"))
+            continue
         gate = gates.get(job, Gate((), (PATH, "parse_jobs did not return it"), None))
         live = [m for m in mirrors if m.proven and not m.conditional]
         source_file = (site or "").rpartition(":")[0]
@@ -646,7 +654,7 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
         )
         findings.extend(touched)
     gates = job_gates(parity, pgm, sources.pr_jobs, repo_root)
-    lanes = [s.lane for s in sources.sources if s.origin.startswith("pr-") and s.lane]
+    lanes = [s.lane for s in sources.sources if s.origin.startswith(("pr-", "main")) and s.lane]
     pg_only = coverage.pg_lanes(lanes, skip_args)
     by_id = {row.test_id: row for row in rows}
     features = functools.cache(default_features)

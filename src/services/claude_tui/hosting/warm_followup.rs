@@ -94,6 +94,9 @@ fn recover_claude_tui_stranded_prompt_draft(
     let mut prompt_draft_cleared_before_submit = false;
     if let Some(snapshot) =
         claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
+        && !(crate::services::claude_tui::host_input::guarded_submission::idle_stash::managed_enabled(tmux_session_name)
+            && crate::services::claude_tui::busy_inject::composer_owner(&snapshot.pane_tail)
+                == crate::services::claude_tui::busy_inject::ComposerOwner::Person)
         && let Some(draft_state) =
             claude_tui_followup_stranded_prompt_draft_state(&snapshot, &transcript_path)
     {
@@ -232,6 +235,9 @@ fn run_claude_tui_warm_followup_submit_and_stream(
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
 ) -> ClaudeTuiWarmFollowupSubmitOutcome {
     if submit_plan.recheck_busy_before_submit
+        && !(crate::services::claude_tui::host_input::guarded_submission::idle_stash::managed_enabled(tmux_session_name)
+            && crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript_path)
+                == crate::services::tui_turn_state::TuiTurnState::Idle)
         && let Some(snapshot) =
             claude_tui_followup_busy_before_submit(tmux_session_name, Some(&transcript_path))
     {

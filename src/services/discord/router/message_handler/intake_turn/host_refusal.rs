@@ -2,11 +2,12 @@ use super::*;
 
 /// Refuses a turn on a Herdr-configured channel before it resets, reconciles or clears anything;
 /// `Err` when its input has no session to go back to, so the caller fails the request instead.
+/// A queued drain's refusal hands its uploads back so the queue owner restores the whole input.
 pub(super) async fn admitted_uploads(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    (channel_id, original_channel_id): (ChannelId, ChannelId),
+    (channel_id, original_channel_id, queued_drain): (ChannelId, ChannelId, bool),
     (uploads, was_cleared): (
         crate::services::cluster::attachment_transfer::uploads::PendingUploads,
         Option<bool>,
@@ -24,6 +25,17 @@ pub(super) async fn admitted_uploads(
         return Ok(Some(uploads));
     };
     tracing::warn!(channel_id = channel_id.get(), "{refusal}");
+    if queued_drain {
+        // Only the clear flag a redirect took goes back here; each retry stays silent.
+        let restore = super::super::super::super::admin_host_guard::return_intake_input;
+        if let Some(cleared) = was_cleared {
+            restore(shared, original_channel_id, (Vec::new(), Some(cleared))).await;
+        }
+        let handoff = super::super::super::intake_dispatch::QueuedTransitionBusyHandoff {
+            owned_uploads: uploads,
+        };
+        return Err(Box::new(handoff));
+    }
     rate_limit_wait(shared, original_channel_id).await;
     if let Err(error) = original_channel_id.say(http, refusal.to_string()).await {
         tracing::warn!(channel_id = channel_id.get(), %error, "herdr refusal notice failed");

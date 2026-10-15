@@ -1,10 +1,10 @@
 //! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
-mod screen;
+pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;
-mod stash;
+pub(in crate::services::claude_tui) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]
@@ -570,6 +570,15 @@ fn stash_channels_configured() -> &'static [u64] {
     static CHANNELS: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     let raw = || std::env::var(STASH_CHANNELS_ENV).ok();
     CHANNELS.get_or_init(|| stash_channels(raw().as_deref()))
+}
+
+#[cfg(unix)]
+pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
+    #[cfg(test)]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return stash_channel_listed(channel, &stash_tests::configured_channels());
+    }
+    stash_channel_listed(channel, stash_channels_configured())
 }
 
 fn stash_channels(raw: Option<&str>) -> Vec<u64> {
