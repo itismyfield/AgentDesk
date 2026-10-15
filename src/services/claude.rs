@@ -645,7 +645,7 @@ pub fn execute_command_streaming(
     fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
-    cache_ttl_minutes: Option<u32>,
+    _cache_ttl_minutes: Option<u32>,
     dispatch_type: Option<&str>,
 ) -> Result<(), String> {
     debug_log("========================================");
@@ -675,32 +675,6 @@ pub fn execute_command_streaming(
                 == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting,
     )?;
 
-    // Phase 1 of the claude-e rollout: route to the per-turn adapter
-    // when the operator picked `runtime: claude-e` and the binary is
-    // present. The adapter ignores tmux/remote — those routes stay on
-    // their existing drivers.
-    if session_selection.driver == crate::services::provider_hosting::ProviderSessionDriver::ClaudeE
-    {
-        debug_log("Routing to claude_e::execute_streaming (runtime=claude-e)");
-        // A managed turn routed away from the TUI fences before this driver writes the prompt.
-        crate::services::claude_tui::submission_fence::before_first_payload()?;
-        return crate::services::claude_e::execute_streaming(
-            prompt,
-            session_id,
-            working_dir,
-            sender,
-            system_prompt,
-            cancel_token,
-            report_channel_id,
-            report_provider,
-            model_override,
-            fast_mode_enabled,
-            compact_percent,
-            compact_lower_bound_tokens,
-            cache_ttl_minutes,
-            dispatch_type,
-        );
-    }
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
 SECURITY RULES (MUST FOLLOW):

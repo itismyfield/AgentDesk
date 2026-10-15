@@ -8,7 +8,6 @@ use crate::services::provider::ProviderKind;
 pub enum ProviderSessionDriver {
     LegacyPrompt,
     TuiHosting,
-    ClaudeE,
 }
 
 impl ProviderSessionDriver {
@@ -16,7 +15,6 @@ impl ProviderSessionDriver {
         match self {
             Self::LegacyPrompt => "legacy-prompt",
             Self::TuiHosting => "tui-hosting",
-            Self::ClaudeE => "claude-e",
         }
     }
 }

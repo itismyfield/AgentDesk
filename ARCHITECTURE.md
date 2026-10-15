@@ -622,12 +622,6 @@ src/
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
-│   ├── claude_e/
-│   │   ├── cancellation.rs
-│   │   ├── jsonl_parser.rs
-│   │   ├── mod.rs
-│   │   ├── process.rs
-│   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
