@@ -343,6 +343,17 @@ pub(super) async fn reconcile(
         }
     }
 
+    // A Codex completion whose turn confirmation was refused retries here until the TTL.
+    for entry in ledger.values_mut() {
+        let channel = entry.turn_key.channel_id.get();
+        if entry.provider == ProviderKind::Codex
+            && entry.completion_admission.claimable()
+            && crate::services::tui_o::cutover::codex_turn_awaited(channel).is_some()
+        {
+            publish_claimed_queue_eligible(shared, entry);
+        }
+    }
+
     // GC admission authority only after the longest bounded late-edge window.
     ledger.retain(|_, entry| {
         !(entry.phase == Phase::Finalized

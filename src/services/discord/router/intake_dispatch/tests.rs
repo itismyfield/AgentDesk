@@ -144,6 +144,7 @@ use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
+mod codex_turn_hold;
 mod final_guards;
 mod replay_hold;
 

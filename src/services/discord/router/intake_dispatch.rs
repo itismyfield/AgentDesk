@@ -117,6 +117,8 @@ pub(crate) enum IntakeAdmission {
     Blocked {
         reason: IntakeBlockedReason,
     },
+    /// A Codex takeover turn still runs on Legacy; the input waits queued for turn mode.
+    DeferredTurnMode,
 }
 
 /// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
@@ -205,6 +207,9 @@ pub(crate) async fn admit_text_intake(
         && let IntakeRoute::Hold(detail) =
             intake_route::route_for_placement(provider, destination.get())
     {
+        if crate::services::tui_o::cutover::codex_turn_awaited(destination.get()).is_some() {
+            return IntakeAdmission::DeferredTurnMode;
+        }
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
         return IntakeAdmission::Blocked { reason };
     }
@@ -576,6 +581,9 @@ pub(crate) async fn finish_text_intake_admission(
             submission.preloaded_uploads.extend(prepared_uploads);
             defer_live_submission(deps, submission, false).await;
         }
+        IntakeAdmission::DeferredTurnMode => {
+            defer_live_submission(deps, submission, false).await;
+        }
         IntakeAdmission::ReplayDeferred(defer) => {
             let channel_id = submission.request.channel_id.get();
             // Unprepared Discord attachments cannot ride the queue item; refuse rather than keep text only.
@@ -769,6 +777,11 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             channel_id,
             user_msg_id,
             "[intake_dispatch] unsafe placement blocked; local execution fenced"
+        ),
+        IntakeAdmission::DeferredTurnMode => tracing::info!(
+            channel_id,
+            user_msg_id,
+            "[intake_dispatch] queued until Codex turn mode is confirmed"
         ),
         IntakeAdmission::Local(_) => {}
     }

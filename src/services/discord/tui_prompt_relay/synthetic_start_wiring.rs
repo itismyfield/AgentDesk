@@ -250,6 +250,26 @@ pub(super) fn failed_synthetic_placeholder_cleanup_target(
     anchor_is_owned_placeholder.then_some(anchor_message_id)
 }
 
+/// Turn mode was confirmed while this observation waited: no Legacy turn starts for it, so its
+/// owned placeholder and its lease are released.
+async fn release_confirmed_observation(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    anchor_message_id: MessageId,
+    anchor_is_owned_placeholder: bool,
+) {
+    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id.get(),
+        prompt.external_input_lease_generation,
+    );
+    let (anchor, owned) = (anchor_message_id, anchor_is_owned_placeholder);
+    delete_failed_synthetic_owned_placeholder(shared, provider, channel_id, anchor, owned).await;
+}
+
 pub(super) async fn delete_failed_synthetic_owned_placeholder(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -483,6 +503,29 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
         // an un-finalized prior turn persists a DURABLE pending-start and hands
         // the claim to a DETACHED per-channel worker (fresh EOF offset); the
         // common no-interleave case stays on the inline fast path.
+        let lock = super::super::tui_direct_pending_start::channel_lock(
+            provider.as_str(),
+            channel_id.get(),
+        );
+        // A Codex turn confirmation takes this lock, so a start it could miss is persisted under it.
+        let mut confirming = None;
+        if provider == ProviderKind::Codex
+            && crate::services::tui_o::cutover::codex_turn_awaited(channel_id.get()).is_some()
+        {
+            confirming = Some(Arc::clone(&lock).lock_owned().await);
+            if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
+                release_confirmed_observation(
+                    shared,
+                    &provider,
+                    channel_id,
+                    prompt,
+                    anchor_message_id,
+                    anchor_is_owned_placeholder,
+                )
+                .await;
+                return true;
+            }
+        }
         let prior = super::synthetic_start::synthetic_start_prior_turn_view(
             shared,
             &provider,
@@ -514,11 +557,10 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
             );
         } else {
-            let lock = super::super::tui_direct_pending_start::channel_lock(
-                provider.as_str(),
-                channel_id.get(),
-            );
-            let _inline_claim_guard = lock.lock().await;
+            let _inline_claim_guard = match confirming.take() {
+                Some(guard) => guard,
+                None => Arc::clone(&lock).lock_owned().await,
+            };
             let (claim, source) =
                 super::synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
                     shared,
@@ -592,3 +634,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
     }
     deferred_synthetic_start
 }
+
+#[cfg(test)]
+#[path = "synthetic_start_wiring_codex_tests.rs"]
+mod codex_tests;

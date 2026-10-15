@@ -311,6 +311,8 @@ pub(crate) mod test_hook {
         BeforeLock,
         BeforeWrite,
         AfterWrite,
+        /// Between the gateway's pending-start and terminal-custody reads.
+        CustodyRead,
     }
 
     type Hook = Box<dyn FnOnce() -> Result<(), String> + Send>;
@@ -324,7 +326,7 @@ pub(crate) mod test_hook {
         HOOKS.lock().unwrap().push((channel, step, Box::new(hook)));
     }
 
-    pub(in crate::services::tui_o) fn run(channel: u64, step: Step) -> Result<(), String> {
+    pub(crate) fn run(channel: u64, step: Step) -> Result<(), String> {
         let mut hooks = HOOKS.lock().unwrap();
         let Some(at) = hooks
             .iter()

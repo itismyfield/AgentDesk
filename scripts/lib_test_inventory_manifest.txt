@@ -6765,6 +6765,7 @@ services::discord::router::intake_dispatch::replay_admission_tests::preflight_se
 services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
 services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
@@ -7200,6 +7201,7 @@ services::discord::runtime_bootstrap::gateway_lease::tests::yields_only_to_a_pre
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::codex_custody::codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::codex_custody::takeover::codex_takeover_holds_the_gateway_fence_through_its_write_and_rechecks_sends_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
@@ -8773,6 +8775,7 @@ services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_cancel_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_complete_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_runtime_lookup_preserves_writing_loader
+services::discord::tui_direct_pending_start::state::turn_retirement::codex::tests::codex_confirmation_reads_past_a_record_longer_than_one_read
 services::discord::tui_direct_pending_start::state::turn_retirement::codex::tests::codex_confirmation_retires_nothing_while_legacy_holds_an_unfinished_turn
 services::discord::tui_direct_pending_start::state::turn_retirement::codex::tests::codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::boot_confirmation_preserves_retirement_order_and_repeated_results
@@ -9125,6 +9128,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_ro
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_session_key_mismatch_preserves_newer_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
+services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_resumed_after_confirmation_persists_no_start
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::bridge_adapter_inflight_marks_external_input_as_bridge_owned
@@ -10236,6 +10240,7 @@ services::discord::turn_finalizer::cleanup::tests::standby_relay_cancel_does_not
 services::discord::turn_finalizer::cleanup::tests::standby_relay_completion_finalizer_removes_hourglass_and_marks_complete
 services::discord::turn_finalizer::cleanup::tests::synthetic_message_ids_skip_backstop_reaction_cleanup
 services::discord::turn_finalizer::cleanup::tests::watcher_context_skips_extra_reaction_calls
+services::discord::turn_finalizer::completion_admission::codex_tests::a_refused_codex_confirmation_keeps_the_claim_for_one_reconcile_wake
 services::discord::turn_finalizer::completion_admission::tests::capped_or_failed_retry_settles_without_queue_admission_4888
 services::discord::turn_finalizer::completion_admission::tests::deferred_candidate_releases_without_busy_outcome_after_projection_settles_4888
 services::discord::turn_finalizer::completion_admission::tests::deferred_resume_failure_settle_first_releases_when_mailbox_arrives_4888
@@ -12691,6 +12696,8 @@ services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
 services::tui_o::writer::late_adopt::codex::prefix::tests::a_captured_first_turn_stays_eligible_until_its_first_output
+services::tui_o::writer::late_adopt::codex::prefix::tests::a_captured_rollout_is_eligible_through_its_first_prompt_mirror
+services::tui_o::writer::late_adopt::codex::prefix::tests::a_captured_rollout_refuses_what_only_resembles_its_environment_or_mirror
 services::tui_o::writer::late_adopt::codex::prefix::tests::takeover_prefix_refuses_output_other_turns_and_unmatched_input
 services::tui_o::writer::late_adopt::codex::prefix::tests::the_environment_codex_writes_before_the_prompt_is_not_a_prompt
 services::tui_o::writer::owed::tests::a_codex_bind_with_an_empty_session_does_not_take_the_stored_cursor
@@ -12830,6 +12837,9 @@ services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_sou
 services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_source_that_already_holds_output_gets_no_init
 services::tui_o::writer::tests::actor::host_start::first_init::a_legacy_claim_before_the_activation_lock_leaves_no_init_and_legacy_sends
 services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_channel_commits_an_empty_init_and_posts_a_late_source_once
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate

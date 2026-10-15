@@ -617,7 +617,8 @@ impl<B: BindingEvents> Sources<B> {
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
             let unread = past_bind::unread_before(log, event.seq, &new, attached);
-            let boundary = if verified {
+            // A verified source an adoption left unread holds old records; it is not owed from 0.
+            let boundary = if verified && !unread {
                 Boundary::Owed { from: 0 }
             } else {
                 past_bind::first_boundary(cause, parent.is_some(), unread)

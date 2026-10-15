@@ -1470,6 +1470,7 @@ src/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
@@ -1598,6 +1599,7 @@ src/
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
 │   │   │   ├── o_writer_host_custody_tests.rs
+│   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
@@ -1936,6 +1938,7 @@ src/
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
+│   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
@@ -2113,6 +2116,7 @@ src/
 │   │   │   ├── cleanup.rs
 │   │   │   ├── completion_admission.rs
 │   │   │   ├── completion_admission_actor.rs
+│   │   │   ├── completion_admission_codex_tests.rs
 │   │   │   ├── completion_signal.rs
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── episode.rs
@@ -2836,6 +2840,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_first_init_tests.rs
 │   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs

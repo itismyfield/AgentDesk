@@ -239,3 +239,6 @@ async fn takeover() {
     pool.close().await;
     fixture.drop().await;
 }
+
+#[path = "o_writer_host_takeover_tests.rs"]
+mod takeover;

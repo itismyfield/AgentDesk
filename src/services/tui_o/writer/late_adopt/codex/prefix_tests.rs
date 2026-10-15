@@ -166,3 +166,75 @@ fn takeover_prefix_refuses_output_other_turns_and_unmatched_input() {
     };
     assert!(matches!(judge(&stale), Verdict::Refuse(d) if d.contains("replaced")));
 }
+
+const CAPTURED_SESSION: &str = "01a0e15a-0000-7000-8000-000000000001";
+
+/// A TUI rollout as Codex 0.147 wrote it from its session_meta to the first prompt's mirror,
+/// with identifiers, paths and texts replaced.
+fn captured_prefix() -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex_busy_inject");
+    let text = std::fs::read_to_string(dir.join("takeover_prefix.jsonl")).unwrap();
+    text.lines().map(str::to_owned).collect()
+}
+
+fn captured_rollout(lines: &[String]) -> Rollout {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-captured.jsonl");
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+    let source = source_id_for(CAPTURED_SESSION, &path).unwrap();
+    Rollout { _dir: dir, source }
+}
+
+fn with_text(line: &str, text: &str) -> String {
+    edited(line, |record| match record["payload"]["type"].as_str() {
+        Some("item_completed") => record["payload"]["item"]["content"][0]["text"] = text.into(),
+        _ => record["payload"]["content"][0]["text"] = text.into(),
+    })
+}
+
+/// Every record boundary of the captured prefix is eligible, the prompt boundary named once the
+/// prompt is written; its environment item is not that prompt.
+#[test]
+fn a_captured_rollout_is_eligible_through_its_first_prompt_mirror() {
+    let lines = captured_prefix();
+    assert_eq!(lines.len(), 10);
+    for end in 1..=lines.len() {
+        let verdict = judge(&captured_rollout(&lines[..end]).source);
+        let Verdict::Eligible(prefix) = verdict else {
+            panic!("{end} records: {verdict:?}");
+        };
+        assert_eq!(prefix.prompt_end.is_some(), end > 8, "{end} records");
+    }
+}
+
+/// An environment block cut short or followed by text is the prompt, so the real one is a second;
+/// one written after the prompt is a second prompt, and a mirror of other text matches nothing.
+#[test]
+fn a_captured_rollout_refuses_what_only_resembles_its_environment_or_mirror() {
+    let lines = captured_prefix();
+    let (environment, prompt, mirror) = (5, 8, 9);
+    let mut partial = lines.clone();
+    partial[environment] = with_text(&lines[environment], "<environment_context>\n  <cwd>/work");
+    let mut outside = lines.clone();
+    let trailed = "<environment_context>\n</environment_context>\nAlso list the files.";
+    outside[environment] = with_text(&lines[environment], trailed);
+    let mut late = lines.clone();
+    let moved = late.remove(environment);
+    late.insert(prompt, moved);
+    let mut mismatched = lines.clone();
+    mismatched[mirror] = with_text(&lines[mirror], "Summarize another rollout.");
+    let cases = [
+        ("a second user prompt", partial),
+        ("a second user prompt", outside),
+        ("a second user prompt", late),
+        ("is not the first prompt", mismatched),
+    ];
+    for (why, lines) in cases {
+        let verdict = judge(&captured_rollout(&lines).source);
+        assert!(
+            matches!(&verdict, Verdict::Refuse(detail) if detail.contains(why)),
+            "{why}: {verdict:?}"
+        );
+    }
+}

@@ -179,6 +179,10 @@ pub(in crate::services::discord) fn confirm_turn_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
+    // A Codex turn Legacy still runs, or a takeover turn still open, keeps its Legacy identity.
+    if *provider == ProviderKind::Codex {
+        return codex::confirm_codex_channels(config, owned);
+    }
     let retire = |channel| match retire_channel(provider, channel) {
         Ok(Retirement {
             removed,

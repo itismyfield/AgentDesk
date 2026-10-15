@@ -94,9 +94,27 @@ fn output_candidate(snapshot: &BootChannels, channel: u64) -> Option<&Candidate>
         .or_else(|| delegated(channel).and_then(|_| snapshot.standby(channel)))
 }
 
+/// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
+pub(crate) fn codex_turn_awaited(
+    channel: u64,
+) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
+    if owned_kind(channel) != Some(RuntimeHandoffKind::CodexTui)
+        || super::turn_mode::transcript_turns(channel)
+    {
+        return None;
+    }
+    let turn = test_override::with_channels(|snapshot| snapshot.map(|s| s.turn().clone()));
+    turn.filter(|turn| turn.selects(channel))
+}
+
 /// A reserved delegated host still needs Legacy to execute its first input and bind a source.
 fn late_legacy_input(provider: &str, channel: u64) -> bool {
-    if !writer_enabled() || !provider.trim().eq_ignore_ascii_case("claude") {
+    let kind = match provider.trim().to_ascii_lowercase().as_str() {
+        "claude" => RuntimeHandoffKind::ClaudeTui,
+        "codex" => RuntimeHandoffKind::CodexTui,
+        _ => return false,
+    };
+    if !writer_enabled() {
         return false;
     }
     let Some(home) = delegated(channel) else {
@@ -110,7 +128,7 @@ fn late_legacy_input(provider: &str, channel: u64) -> bool {
             return false;
         };
         home.while_intake_open(|| {
-            snapshot.kind(channel) == Some(RuntimeHandoffKind::ClaudeTui)
+            snapshot.kind(channel) == Some(kind)
                 && candidate.late_adopt_origin()
                 && candidate.peek() == channel_policy::Adoption::Deferred
         }) == Some(true)

@@ -197,6 +197,11 @@ impl HostIo for GatewayHost {
                 kind.as_str(),
                 channel,
             );
+        #[cfg(test)]
+        {
+            use crate::services::tui_o::writer::activation::test_hook;
+            test_hook::run(channel, test_hook::Step::CustodyRead)?;
+        }
         // Beside a pending start, delivery custody that cannot be read still counts as held.
         match (
             pending_start,

@@ -105,6 +105,12 @@ fn judge(provider: &str, channel: u64, kind: RuntimeHandoffKind) -> IntakeRoute 
             "O channel {channel} is {kind:?}, not provider {provider}"
         ));
     }
+    // A Codex takeover turn keeps Legacy's identity, so new input waits for turn mode.
+    if super::codex_turn_awaited(channel).is_some() {
+        return IntakeRoute::Hold(format!(
+            "O channel {channel} waits for its Codex turn confirmation"
+        ));
+    }
     if accepts(channel) {
         IntakeRoute::Gateway
     } else {

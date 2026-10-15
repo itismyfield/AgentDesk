@@ -116,10 +116,10 @@ fn codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout() {
     let config = selecting(channel);
 
     assert_eq!(
-        confirm_codex_channel(channel, None, &source),
+        confirm_codex_channel(channel, None, Some(&source)),
         Confirmation::Unselected
     );
-    let detail = retry(confirm_codex_channel(channel, Some(&config), &source));
+    let detail = retry(confirm_codex_channel(channel, Some(&config), Some(&source)));
     assert!(detail.contains("Open"), "{detail}");
     assert!(row.exists() && !transcript_turns(channel));
 
@@ -131,14 +131,22 @@ fn codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout() {
         source: source_id_for("parent", &meta_only).unwrap(),
         ..source.clone()
     };
-    retry(confirm_codex_channel(channel, Some(&config), &meta_only));
+    retry(confirm_codex_channel(
+        channel,
+        Some(&config),
+        Some(&meta_only),
+    ));
     std::fs::remove_file(&meta_only.source.path).unwrap();
-    retry(confirm_codex_channel(channel, Some(&config), &meta_only));
+    retry(confirm_codex_channel(
+        channel,
+        Some(&config),
+        Some(&meta_only),
+    ));
     assert!(row.exists() && !transcript_turns(channel));
 
     answer(&source);
     assert_eq!(
-        confirm_codex_channel(channel, Some(&config), &source),
+        confirm_codex_channel(channel, Some(&config), Some(&source)),
         Confirmation::Confirmed
     );
     let _confirmed = TestConfirmation::confirmed(channel);
@@ -159,28 +167,54 @@ fn codex_confirmation_retires_nothing_while_legacy_holds_an_unfinished_turn() {
     persist(&record).unwrap();
     let row = save_row(channel, false);
 
-    let detail = retry(confirm_codex_channel(channel, Some(&config), &source));
+    let detail = retry(confirm_codex_channel(channel, Some(&config), Some(&source)));
     assert!(detail.contains("pending start"), "{detail}");
     let durable = records::<TuiDirectPendingStart>(root(), &ProviderKind::Codex, channel);
     assert_eq!(durable.unwrap().len(), 1, "the pending start is kept");
     assert!(pending_synthetic_start_present("codex", channel) && row.exists());
     delete(&record);
-    let detail = retry(confirm_codex_channel(channel, Some(&config), &source));
+    let detail = retry(confirm_codex_channel(channel, Some(&config), Some(&source)));
     assert!(detail.contains("no terminal delivery"), "{detail}");
     assert!(row.exists() && !transcript_turns(channel));
 
     save_row(channel, true);
     let lock = channel_lock("codex", channel);
     let held = lock.try_lock().unwrap();
-    let detail = retry(confirm_codex_channel(channel, Some(&config), &source));
+    let detail = retry(confirm_codex_channel(channel, Some(&config), Some(&source)));
     assert!(detail.contains("start claim"), "{detail}");
     assert!(row.exists() && !transcript_turns(channel));
     drop(held);
 
     assert_eq!(
-        confirm_codex_channel(channel, Some(&config), &source),
+        confirm_codex_channel(channel, Some(&config), Some(&source)),
         Confirmation::Confirmed
     );
     let _confirmed = TestConfirmation::confirmed(channel);
     assert!(!row.exists());
+}
+
+/// A record longer than one read budget still lets the rollout reach its turn end, so a long tool
+/// output never keeps the takeover turn open.
+#[test]
+fn codex_confirmation_reads_past_a_record_longer_than_one_read() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let channel = 64_700_303;
+    let source = open_rollout(dir.path(), channel);
+    let output = "x".repeat(3 << 20);
+    let long = json!({"type":"response_item","payload":{"type":"function_call_output",
+        "call_id":"c1","output":output}});
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source.source.path)
+        .unwrap();
+    writeln!(file, "{long}").unwrap();
+    drop(file);
+    answer(&source);
+
+    assert_eq!(
+        confirm_codex_channel(channel, Some(&selecting(channel)), Some(&source)),
+        Confirmation::Confirmed
+    );
+    let _confirmed = TestConfirmation::confirmed(channel);
 }
