@@ -46,9 +46,9 @@ agents:
     channels:
       codex: {id: "555"}
 """
-        # A pre-ops config may still contain the retired worker; ignore it.
+        # Ignore obsolete workers that have no supported cell mapping.
         legacy_extra = """
-  - id: adk-claude-e-e2e
+  - id: adk-obsolete-worker-e2e
     channels:
       claude: {id: "333"}
 """
@@ -67,12 +67,8 @@ agents:
         )
 
     def test_parse_cells_rejects_unknown_cell(self):
-        with self.assertRaises(ValueError):
-            matrix.parse_cells("claude-pipe,unknown")
-
-    def test_parse_cells_rejects_retired_cell(self):
-        for raw in ("claude-e", "claude-tui,claude-e"):
-            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "claude-e"):
+        for raw in ("unknown", "claude-pipe,unknown"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "unknown"):
                 matrix.parse_cells(raw)
 
     def test_reset_before_each_boolean_flags(self):
