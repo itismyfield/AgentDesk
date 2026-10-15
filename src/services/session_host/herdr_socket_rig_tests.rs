@@ -61,6 +61,9 @@ impl ProcessOs for LateOs {
 /// Results a test put in place of the default reply, by method.
 type Answers = Arc<Mutex<HashMap<String, Value>>>;
 
+/// What a pane write's params do to the pane before the server answers it.
+type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
+
 /// Prefixes an answer that takes its method's place once a pane write arrives.
 const AFTER_SEND: &str = "after-send:";
 
@@ -73,6 +76,7 @@ pub(crate) struct HerdrRig {
     unanswered_sends: Arc<AtomicBool>,
     /// Pane writes still answered before the rest go unanswered; `usize::MAX` answers them all.
     answered_sends: Arc<AtomicUsize>,
+    on_send: OnSend,
     os: Arc<LateOs>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -126,6 +130,8 @@ impl HerdrRig {
         let answered = answered_sends.clone();
         let answers = Answers::default();
         let scripted = answers.clone();
+        let on_send = OnSend::default();
+        let pane = on_send.clone();
         let thread = thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 let Ok((stream, _)) = listener.accept() else {
@@ -146,6 +152,9 @@ impl HerdrRig {
                     .as_str()
                     .is_some_and(|m| m.starts_with("pane.send"));
                 if send {
+                    if let Some(hook) = pane.lock().unwrap().as_mut() {
+                        hook(&request["params"]);
+                    }
                     let mut answers = scripted.lock().unwrap();
                     let later: Vec<String> = answers.keys().cloned().collect();
                     for key in later {
@@ -175,6 +184,7 @@ impl HerdrRig {
             servers: Arc::new(Mutex::new(VecDeque::from([7]))),
             unanswered_sends,
             answered_sends,
+            on_send,
             os: Arc::default(),
             stop,
             thread: Some(thread),
@@ -242,6 +252,11 @@ impl HerdrRig {
     /// Replies with `result` to every `method` request after the next pane write.
     pub(crate) fn answer_after_send(&self, method: &str, result: Value) {
         self.answer(&format!("{AFTER_SEND}{method}"), result);
+    }
+
+    /// Runs `hook` on the params of every later pane write before the server answers it.
+    pub(crate) fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
+        *self.on_send.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Every later snapshot is complete and lists exactly `panes`.
