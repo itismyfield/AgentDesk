@@ -349,16 +349,6 @@ pub(super) async fn consume_retired_terminal(
         })
         .unwrap_or(false);
     if consumed {
-        #[cfg(unix)]
-        if !arm.turn.injected_candidates.is_empty() && !arm.controls.cancel.load(Ordering::Acquire)
-        {
-            crate::services::discord::replay_policy::injected::consume(
-                ctx.shared,
-                ctx.channel_id.get(),
-                arm.turn.injected_candidates.clone(),
-            )
-            .await;
-        }
         RetiredTerminalOutcome::Consumed
     } else {
         RetiredTerminalOutcome::Retained

@@ -51,31 +51,31 @@ fn stopped(draft: DraftState) -> IdleReport {
     }
 }
 
+fn unpainted(capture: &str) -> bool {
+    let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
+    !plain.lines().any(|row| row.trim_start().starts_with('❯'))
+        || plain
+            .lines()
+            .rev()
+            .find(|row| !row.trim().is_empty())
+            .is_some_and(|row| row.trim_end() == "❯")
+}
+
 fn run(
     authority: Option<&dyn StashAuthority>,
     allowed: bool,
     request: &Request<'_>,
 ) -> Option<IdleReport> {
     let authority = authority.filter(|_| allowed)?;
-    let Ok(session) = request.target.tmux_session() else {
-        return Some(stopped(DraftState::Unchanged));
-    };
-    let Ok(actions) = input::plan_prompt_submit(request.prompt) else {
-        return Some(stopped(DraftState::Unchanged));
-    };
+    let session = request.target.tmux_session().ok()?;
+    let actions = input::plan_prompt_submit(request.prompt).ok()?;
     let Some((input::TuiInputAction::Enter, payload)) = actions.split_last() else {
-        return Some(stopped(DraftState::Unchanged));
+        return None;
     };
-    let Ok(text) = payload_frame(payload) else {
-        return Some(stopped(DraftState::Unchanged));
-    };
+    let text = payload_frame(payload).ok()?;
     let result = composer_lock::try_with_composer_permit(session, |permit| {
-        let Ok(pane) = SubmissionTmux.pin_guarded(session) else {
-            return Some(stopped(DraftState::Unchanged));
-        };
-        let Some(before) = pane.capture_draft() else {
-            return Some(stopped(DraftState::Unchanged));
-        };
+        let pane = SubmissionTmux.pin_guarded(session).ok()?;
+        let before = pane.capture_draft()?;
         if !authority.admits(&pane)
             || request.gate.admit(session).is_err()
             || cancel_requested(request.cancel)
@@ -88,13 +88,26 @@ fn run(
             return None;
         }
         let admission = composer_lock::composer_admission(session, || Some(before.clone()));
-        if admission == composer_lock::ComposerAdmission::Any
-            && busy_inject::composer_owner(&before) == busy_inject::ComposerOwner::Empty
-        {
-            return None;
+        let owner = busy_inject::composer_owner(&before);
+        if admission == composer_lock::ComposerAdmission::Any {
+            if owner == busy_inject::ComposerOwner::Empty {
+                return None;
+            }
+            if owner == busy_inject::ComposerOwner::Unread {
+                if unpainted(&before) {
+                    return None;
+                }
+                // Only ambiguous scrollback needs another observation of the current composer.
+                let Some(viewport) = pane.capture_viewport() else {
+                    return Some(stopped(DraftState::Unchanged));
+                };
+                if unpainted(&viewport) {
+                    return None;
+                }
+            }
         }
         if admission == composer_lock::ComposerAdmission::Held
-            || busy_inject::composer_owner(&before) != busy_inject::ComposerOwner::Person
+            || owner != busy_inject::ComposerOwner::Person
             || judge_pane(ShadowProvider::Claude, &before) == PaneVerdict::Modal
             || observe_claude_jsonl_turn_state(request.transcript) != TuiTurnState::Idle
         {
@@ -160,7 +173,7 @@ fn run(
         guarded_outcome::retain(session, &result.input_run(request.cancel));
         Some(result)
     });
-    result.unwrap_or_else(|| Some(stopped(DraftState::Unchanged)))
+    result.flatten()
 }
 
 struct Effects<'a, 'p> {

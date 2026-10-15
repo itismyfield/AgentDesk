@@ -2,11 +2,10 @@ use super::*;
 #[path = "tmux_watcher/cancel_handoff.rs"]
 pub(in crate::services::discord) mod cancel_handoff;
 use crate::services::discord::InflightTurnState;
-use crate::services::discord::http::{edit_channel_message, send_channel_message};
 use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
 use crate::services::discord::replace_outcome_policy::{
     WatcherRewindAttemptDisposition, classify_watcher_send_failure,
-    watcher_rewind_attempt_disposition, watcher_send_failure_retry_plan,
+    watcher_rewind_attempt_disposition,
 };
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 
@@ -1433,11 +1432,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             .await;
         }
         if relay_ok {
-            #[cfg(unix)]
-            #[rustfmt::skip]
-            let c_terminal = async { let candidates = crate::services::discord::replay_policy::injected::pending(channel_id.get(), &tmux_session_name, &output_path, terminal_event_consumed_offset(current_offset, &all_data)); if !candidates.is_empty() && !cancel.load(Ordering::Acquire) { crate::services::discord::replay_policy::injected::consume(&shared, channel_id.get(), candidates).await; } };
-            #[cfg(unix)]
-            c_terminal.await;
             cancel_handoff::completion::finish_after_receipt(
                 &shared,
                 channel_id,

@@ -221,6 +221,29 @@ impl GuardedPane {
     }
 
     #[cfg(unix)]
+    pub(crate) fn capture_viewport(&self) -> Option<String> {
+        let output = SubmissionTmux
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                &self.geometry.pane,
+                SNAPSHOT,
+                ";",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-t",
+                &self.geometry.pane,
+                "-S",
+                "0",
+            ])
+            .ok()?;
+        let capture = read_capture(output, &self.geometry)?;
+        self.geometry_matches().then_some(capture)
+    }
+
+    #[cfg(unix)]
     pub(crate) fn identity(&self) -> PaneIdentity {
         PaneIdentity {
             session: self.geometry.session.clone(),
