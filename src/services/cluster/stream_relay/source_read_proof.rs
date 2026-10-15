@@ -5,7 +5,33 @@ use std::sync::{LazyLock, Mutex};
 static REVISIONS: LazyLock<Mutex<HashMap<String, Option<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(test)]
+thread_local! {
+    // REVISIONS critical sections open on this thread; other test threads may hold it meanwhile.
+    static REVISIONS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+struct RevisionsHeld;
+
+#[cfg(test)]
+impl RevisionsHeld {
+    fn enter() -> Self {
+        REVISIONS_HELD.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RevisionsHeld {
+    fn drop(&mut self) {
+        REVISIONS_HELD.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 pub(crate) fn invalidate_source(key: &str) {
+    #[cfg(test)]
+    let _held = RevisionsHeld::enter();
     let mut revisions = REVISIONS.lock().unwrap_or_else(|error| error.into_inner());
     let revision = revisions.entry(key.to_owned()).or_insert(Some(0));
     *revision = revision.and_then(|value| value.checked_add(1));
@@ -20,6 +46,7 @@ pub(crate) struct SourcePin {
 impl SourcePin {
     #[cfg(test)]
     pub(crate) fn capture(key: String) -> Option<Self> {
+        let _held = RevisionsHeld::enter();
         let revision = REVISIONS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -30,6 +57,8 @@ impl SourcePin {
     }
 
     pub(crate) fn is_current(&self) -> bool {
+        #[cfg(test)]
+        let _held = RevisionsHeld::enter();
         REVISIONS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -246,7 +275,7 @@ impl PrefixSeal {
 #[cfg(test)]
 pub(crate) fn assert_revision_unlocked_for_tests() {
     assert!(
-        REVISIONS.try_lock().is_ok(),
+        REVISIONS_HELD.with(std::cell::Cell::get) == 0,
         "revision mutex must not cover file IO"
     );
 }
