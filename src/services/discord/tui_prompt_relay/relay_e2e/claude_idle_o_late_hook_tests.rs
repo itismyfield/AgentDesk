@@ -465,3 +465,51 @@ fn explicit_resume_and_automatic_resolution_share_one_committed_order() {
         });
     }
 }
+
+#[test]
+fn cold_restart_opens_retained_b_without_any_new_binding_event() {
+    use crate::services::tui_prompt_dedupe::binding_events;
+    run(async |f| {
+        f.initialize(0);
+        let mut e = f.engine();
+        e.capture().unwrap();
+        provisional(&f, &mut e, true).await;
+        assert!(f.posts().is_empty());
+        let channel = f.pane.channel.get();
+        let path = f
+            .root
+            .join(binding_events::BINDING_EVENTS_DIR)
+            .join(format!("{channel}.log"));
+        let bytes = std::fs::read(&path).unwrap();
+        drop(e);
+        binding_events::forget_channel_for_tests(channel);
+        let mut e = f.engine();
+        pending(&f);
+        f.gate.acquired();
+        e.deliver(100).await;
+        assert_eq!(f.posts(), ["A_BODY"]);
+        e.capture().unwrap();
+        e.deliver(100).await;
+        assert_eq!(
+            f.posts(),
+            ["A_BODY", "N_BODY"],
+            "cold admission must make progress: {:?}",
+            boundary(&f)
+        );
+        opened(&f, prefix(&f).len() as u64);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(e);
+        binding_events::forget_channel_for_tests(channel);
+        let mut e = f.engine();
+        e.capture().unwrap();
+        e.deliver(100).await;
+        assert_eq!(f.posts(), ["A_BODY", "N_BODY"]);
+        opened(&f, prefix(&f).len() as u64);
+        f.assert_posted(
+            "A",
+            &record(&f.pane.a, "a1", "2026-10-01T01:00:00Z", "A_BODY", false),
+        );
+        f.assert_posted("N", &novel(&f, "N_BODY"));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    });
+}

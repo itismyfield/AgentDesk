@@ -384,16 +384,12 @@ pub(crate) fn admit_committed_seq<R>(
     let Some(path) = log_path(channel_id)? else {
         return Ok(None);
     };
-    let logs = lock_logs();
-    let Some(log) = logs.get(&path) else {
+    let mut logs = lock_logs();
+    let Some(log) = logs.get_mut(&path) else {
         return Ok(None);
     };
-    // A restored or poisoned writer cannot admit using only its cached seq.
-    let healthy = log
-        .writer
-        .as_ref()
-        .is_some_and(|writer| !writer.poisoned && !writer.tainted);
-    Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
+    let writer = ensure_writer_loaded(log, &path)?;
+    Ok((!writer.poisoned && !writer.tainted && writer.last_seq == expected).then(hand_off))
 }
 
 #[cfg(all(test, unix))]
@@ -529,6 +525,22 @@ fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
     commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))
 }
 
+fn ensure_writer_loaded<'a>(log: &'a mut ChannelLog, path: &Path) -> io::Result<&'a mut Writer> {
+    if log.writer.is_none() {
+        let writer = Writer::load(path)?;
+        let last = writer.last_seq;
+        log.notify.send_if_modified(|seen| {
+            let moved = *seen < last;
+            *seen = (*seen).max(last);
+            moved
+        });
+        log.writer = Some(writer);
+    }
+    log.writer
+        .as_mut()
+        .ok_or_else(|| io::Error::other("binding writer was not loaded"))
+}
+
 /// Runs `plan` on the channel's writer and appends the record it returns.
 fn commit_with(
     channel_id: u64,
@@ -542,19 +554,7 @@ fn commit_with(
         notify: watch::channel(0).0,
         writer: None,
     });
-    if log.writer.is_none() {
-        let writer = Writer::load(&path)?;
-        let last = writer.last_seq;
-        log.notify.send_if_modified(|seen| {
-            let moved = *seen < last;
-            *seen = (*seen).max(last);
-            moved
-        });
-        log.writer = Some(writer);
-    }
-    let Some(writer) = log.writer.as_mut() else {
-        return Ok(Committed::Unchanged);
-    };
+    let writer = ensure_writer_loaded(log, &path)?;
     let (record, verified, published_at, codex_ownership) = match plan(writer) {
         Planned::Append(record, verified, published_at) => (record, verified, published_at, None),
         Planned::CodexAppend(record, ownership) => (record, false, None, Some(ownership)),
