@@ -313,8 +313,8 @@ def load_plan(root: Path, lane: str):
 
 
 def run_lane(root: Path, lane: str, ids: list[str], command: list[str], env=None) -> int:
-    """run_test_lane over exactly `ids`: a missing, extra, undeclared-ignored id or a
-    summary that disagrees is red, and so is an empty expectation."""
+    """run_test_lane over exactly `ids`: a missing, extra, undeclared-ignored id, a summary
+    that disagrees, an empty expectation or a run that executes none is red."""
     with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as handle:
         handle.write("\n".join(ids) + "\n")
     return subprocess.run(
@@ -332,15 +332,16 @@ def run_pg(root: Path, ids: list[str]) -> int:
         raise ValueError(f"shard {shard} selects no test, or no PostgreSQL test server is named")
     env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
     if mine:
-        # #[ignore] tests stay out as in the full lane; a shard left with none is red.
+        # Only to name a shard whose every planned id is #[ignore]; run_test_lane judges each
+        # ignored id that libtest reports against the pg ledger.
         listed = subprocess.run(
             ["bash", "-c", PREPARED + ' --exact "$@" --list --ignored', "bash", *mine],
             cwd=root, env=env, check=True, stdout=subprocess.PIPE, text=True).stdout
         ignored = set(pgm.partition_pg_test_list(listed, str(shard), allow_empty=True))
-        if not (runnable := [test_id for test_id in mine if test_id not in ignored]):
+        if ignored >= set(mine):
             raise ValueError(f"shard {shard}: every planned id is #[ignore]")
-        command = ["bash", "-c", PREPARED + ' --exact "$@" --test-threads=1', "bash", *runnable]
-        if rc := run_lane(root, "pg-selected", runnable, command, env):
+        command = ["bash", "-c", PREPARED + ' --exact "$@" --test-threads=1', "bash", *mine]
+        if rc := run_lane(root, "pg", mine, command, env):
             return rc
     return subprocess.run([*CONTINUITY], cwd=root, env=env, check=False).returncode \
         if shard == 0 else 0

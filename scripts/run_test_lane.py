@@ -795,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     rc, outcome = run_and_capture(command, args.log)
     errors, warnings, counters = evaluate(args.lane, rc, outcome, entries,
                                           expected_selected, args.max_summaries)
+    if args.expected_ids is not None and not counters["executed"]:
+        errors.append("no planned test executed; a plan whose ids are all ignored proves nothing")
     for warning in warnings:
         print(f"::warning::{warning}")
     for error in errors:

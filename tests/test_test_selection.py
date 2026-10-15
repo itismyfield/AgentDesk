@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -123,13 +124,19 @@ def manifest(ids) -> str:
     return "\n".join(rows) + "\n"
 
 
-def transcript(passed=(), ignored=()) -> str:
+def transcript(passed=(), ignored=(), summary=None) -> str:
+    """A libtest run reporting `passed` and `ignored`; `summary` overrides its counts."""
     lines = [f"test {test_id} ... ok" for test_id in passed]
     lines += [f"test {test_id} ... ignored" for test_id in ignored]
-    count = len(lines)
-    return (f"running {count} tests\n" + "".join(line + "\n" for line in lines)
-            + f"\ntest result: ok. {len(passed)} passed; 0 failed; {len(ignored)} ignored; "
+    ok, skipped = summary or (len(passed), len(ignored))
+    return (f"running {len(lines)} tests\n" + "".join(line + "\n" for line in lines)
+            + f"\ntest result: ok. {ok} passed; 0 failed; {skipped} ignored; "
             "0 measured; 9 filtered out; finished in 0.00s\n")
+
+
+def ledger_rows(lane: str, ids) -> str:
+    return "".join(f"ignored | {test_id} | lane={lane} | #1 | a dormant fixture that this lane "
+                   "keeps ignored until its backing service exists in CI\n" for test_id in ids)
 
 
 def on_shard(shard: int, count: int = 2) -> list[str]:
@@ -343,12 +350,14 @@ class ReplayTests(unittest.TestCase):
                 mock.patch.object(ts, "log"):
             return ts.load_plan(self.repo.root, lane)
 
-    def run_pg(self, shard: int, ids: list[str], ignored=(), reported=None):
+    def run_pg(self, shard: int, ids: list[str], ignored=(), declared=(), reported=None,
+               summary=None):
         """run_pg with libtest faked: the ignored listing, then run_test_lane for real over a
-        transcript that reports `reported` (default: every id it was asked to run)."""
+        transcript reporting `ignored` as ignored and the rest it was asked to run (or
+        `reported`) as passed, against a ledger that declares `declared` for lane pg."""
         calls, real = [], subprocess.run
         ledger = Path(self.tmp.name) / "ledger"
-        ledger.write_text("")
+        ledger.write_text(ledger_rows("pg", declared))
 
         def fake(command, *args, **kwargs):
             calls.append(command)
@@ -361,7 +370,8 @@ class ReplayTests(unittest.TestCase):
             if str(command[1]).endswith("run_test_lane.py"):
                 split = command.index("--")
                 asked = command[split + 5:]
-                text = transcript([*(asked if reported is None else reported)])
+                passed = [i for i in asked if i not in ignored] if reported is None else reported
+                text = transcript(passed, [i for i in asked if i in ignored], summary)
                 lane = [sys.executable, str(RUN_TEST_LANE), "--ledger", str(ledger),
                         *command[2:split + 1], sys.executable, "-c",
                         f"import sys; sys.stdout.write({text!r})"]
@@ -387,19 +397,23 @@ class ReplayTests(unittest.TestCase):
         rc, calls = self.run_pg(1, ids)
         self.assertEqual(rc, 0)
         lane = next(call for call in calls if str(call[1]).endswith("run_test_lane.py"))
-        self.assertEqual(lane[2:4], ["--lane", "pg-selected"])
+        self.assertEqual(lane[2:4], ["--lane", "pg"])
         self.assertIn("--expected-ids", lane)
         self.assertEqual(self.run_pg(1, ids, reported=[])[0], 1)
         self.assertEqual(self.run_pg(1, ids, reported=ids[:1])[0], 1)
 
-    def test_an_ignored_planned_id_stays_out_and_an_all_ignored_shard_is_red(self) -> None:
-        ids = on_shard(1, 3)
-        rc, calls = self.run_pg(1, ids, ignored=ids[:1])
-        self.assertEqual(rc, 0)
+    def test_a_mixed_shard_judges_every_planned_ignore_against_the_pg_ledger(self) -> None:
+        ids = on_shard(1)  # ids[0] runs, ids[1] is #[ignore]
+        rc, calls = self.run_pg(1, ids, ignored=ids[1:])
+        self.assertEqual(rc, 1)  # An undeclared ignore is red.
         lane = next(call for call in calls if str(call[1]).endswith("run_test_lane.py"))
-        self.assertEqual(lane[-2:], ids[1:])
-        with self.assertRaises(ValueError):
-            self.run_pg(1, ids, ignored=ids)
+        self.assertEqual(lane[-2:], ids)
+        self.assertEqual(self.run_pg(1, ids, ignored=ids[1:], declared=ids[1:])[0], 0)
+        for case in ({"reported": []}, {"summary": (2, 0)}, {"summary": (1, 0)}):
+            with self.subTest(case=case):
+                self.assertEqual(self.run_pg(1, ids, ignored=ids[1:], declared=ids[1:], **case)[0], 1)
+        with self.assertRaises(ValueError):  # Every planned id ignored runs nothing.
+            self.run_pg(1, ids, ignored=ids, declared=ids)
 
     def test_shard_zero_runs_the_continuity_recipe_once_and_other_shards_never(self) -> None:
         for shard, ids, lanes, recipes in ((0, [], 0, 1), (0, on_shard(0), 1, 1),
@@ -449,13 +463,13 @@ class ExpectedIdsTests(unittest.TestCase):
     """run_test_lane --expected-ids: the plan's set replaces the manifest's, still exactly."""
 
     def run_lane(self, expected: list[str], reported: list[str], ledger: str = "",
-                 lane: str = "non-pg-sweep", ignored=()) -> tuple[int, str]:
+                 lane: str = "non-pg-sweep", ignored=(), summary=None) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as directory:
             ids = Path(directory) / "ids"
             ids.write_text("\n".join(expected) + "\n")
             ledger_path = Path(directory) / "ledger"
             ledger_path.write_text(ledger)
-            text = transcript(reported, ignored)
+            text = transcript(reported, ignored, summary)
             result = subprocess.run(
                 [sys.executable, str(RUN_TEST_LANE), "--lane", lane, "--expected-ids",
                  str(ids), "--ledger", str(ledger_path), "--", sys.executable, "-c",
@@ -472,16 +486,67 @@ class ExpectedIdsTests(unittest.TestCase):
         self.assertIn("a::b::d", stderr)
 
     def test_a_pg_run_of_zero_tests_or_of_undeclared_ignores_is_red(self) -> None:
-        planned = ["a::b::c_pg"]
-        self.assertEqual(self.run_lane(planned, planned, lane="pg-selected")[0], 0)
-        self.assertEqual(self.run_lane(planned, [], lane="pg-selected")[0], 1)
-        self.assertEqual(self.run_lane(planned, [], lane="pg-selected", ignored=planned)[0], 1)
+        planned, run, held = ["a::b::c_pg", "a::b::d_pg"], ["a::b::c_pg"], ["a::b::d_pg"]
+        declared = ledger_rows("pg", held)
+        self.assertEqual(self.run_lane(planned[:1], run, lane="pg")[0], 0)
+        self.assertEqual(self.run_lane(planned[:1], [], lane="pg")[0], 1)
+        self.assertEqual(self.run_lane(planned, run, lane="pg", ignored=held)[0], 1)
+        self.assertEqual(self.run_lane(planned, run, declared, lane="pg", ignored=held)[0], 0)
+        self.assertEqual(self.run_lane(planned, run, declared, lane="pg", ignored=held,
+                                       summary=(2, 0))[0], 1)
+        self.assertEqual(self.run_lane(planned, [], declared, lane="pg", ignored=held)[0], 1)
+        # Ignores the ledger declares still leave a plan that executed nothing.
+        rc, stderr = self.run_lane(held, [], declared, lane="pg", ignored=held)
+        self.assertEqual(rc, 1)
+        self.assertIn("no planned test executed", stderr)
 
     def test_declared_ignored_ids_outside_the_plan_are_not_stale(self) -> None:
         ledger = ("ignored | x::not::planned | lane=non-pg-sweep | #1 | a dormant fixture that "
                   "this lane keeps ignored until its backing service exists in CI\n")
         rc, stderr = self.run_lane(["a::b::c"], ["a::b::c"], ledger)
         self.assertEqual(rc, 0, stderr)
+
+
+LIBTEST_CRATE = {
+    "Cargo.toml": '[package]\nname = "lanecheck"\nversion = "0.1.0"\nedition = "2021"\n',
+    "src/lib.rs": "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runs_pg() {}\n\n"
+                  "    #[test]\n    #[ignore]\n    fn held_pg() {}\n}\n",
+}
+
+
+@unittest.skipUnless(shutil.which("cargo"), "cargo is not installed")
+class LibtestIntegrationTests(unittest.TestCase):
+    """Real libtest output, one passing and one #[ignore] test, through run_test_lane."""
+
+    def test_a_real_ignored_id_is_red_until_the_pg_ledger_declares_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            crate = Path(directory) / "crate"
+            for name, text in LIBTEST_CRATE.items():
+                (crate / name).parent.mkdir(parents=True, exist_ok=True)
+                (crate / name).write_text(text)
+            ids, ledger = Path(directory) / "ids", Path(directory) / "ledger"
+            planned = ["tests::runs_pg", "tests::held_pg"]
+            ids.write_text("\n".join(planned) + "\n")
+            # No compiler wrapper (empty disables one a cargo config names) and a private target.
+            env = {**os.environ, "RUSTC_WRAPPER": "", "CARGO_BUILD_RUSTC_WRAPPER": "",
+                   "CARGO_TARGET_DIR": str(Path(directory) / "target")}
+
+            def lane(rows: str) -> subprocess.CompletedProcess:
+                ledger.write_text(rows)
+                return subprocess.run(
+                    [sys.executable, str(RUN_TEST_LANE), "--lane", "pg", "--expected-ids", str(ids),
+                     "--ledger", str(ledger), "--", "cargo", "test", "--lib", "--",
+                     "--exact", *planned, "--test-threads=1"],
+                    cwd=crate, env=env, capture_output=True, text=True)
+
+            undeclared = lane("")
+            self.assertEqual(undeclared.returncode, 1, undeclared.stdout + undeclared.stderr)
+            self.assertIn("undeclared-ignored: tests::held_pg", undeclared.stdout + undeclared.stderr)
+            self.assertIn("1 passed; 0 failed; 1 ignored", undeclared.stdout)
+            declared = lane(ledger_rows("pg", planned[1:]))
+            self.assertEqual(declared.returncode, 0, declared.stdout + declared.stderr)
+            self.assertIn("1 passed; 0 failed; 1 ignored", declared.stdout)
+            self.assertIn("executed=1", declared.stdout)
 
 
 REEXPORT = re.compile(r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*pub(?:\([^)]*\))?\s+use\s+([\w:]+)")
