@@ -17,9 +17,6 @@ notes: |
   turn saw pre-tool text and a real tool_use before the final post-tool body.
   Codex cells are excluded because their E2E worker role cannot execute live
   shell/tool commands; Codex modern-schema coverage remains in fixture E-25.
-  This intentionally omits claude-e until the harness has a non-live proof or
-  fixture that claude-e persists the same any_tool_used/has_post_tool_text
-  inflight witness used by wait_for_provider_hold_state.
 steps:
   - send_prompt: |
       E2E E-22 tool_use-to-text completeness fixture.
