@@ -54,7 +54,7 @@ use self::idle_transcript_scan::{
     claude_idle_prompt_observation_should_tail_response, claude_idle_safe_reanchor_offset,
     codex_idle_prompt_observation_should_tail_response,
     scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
-    scan_codex_idle_rollout_for_latest_prompt_matching, scan_codex_idle_rollout_for_prompt,
+    scan_codex_idle_rollout_for_latest_prompt_matching,
 };
 
 #[cfg(unix)]
@@ -124,20 +124,16 @@ use self::relay_ownership::{
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 pub(in crate::services::discord) mod synthetic_start;
 #[cfg(unix)]
-pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
-    DormantSyntheticClaim, capture_dormant_partial,
-};
+pub(in crate::services::discord) use synthetic_start::bridge_handoff::capture_dormant_partial;
 pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
     preserve_admitted_source, preserve_stamped_source,
 };
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
+use self::synthetic_start::build_tui_direct_synthetic_inflight_state;
+#[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
 pub(in crate::services::discord) use self::synthetic_start::tui_direct_watcher_synthetic_inflight_matches;
-use self::synthetic_start::{
-    build_tui_direct_synthetic_inflight_state, restore_pending_starts,
-    tui_direct_synthetic_inflight_active_for_prompt,
-};
 #[cfg(unix)]
 #[allow(unused_imports)]
 use self::synthetic_start::{
@@ -152,6 +148,9 @@ use self::synthetic_start::{
 use self::synthetic_start::{
     release_stale_ownerless_tui_direct_mailbox_if_current, tui_direct_watcher_can_own_output,
 };
+use self::synthetic_start::{
+    restore_pending_starts, tui_direct_synthetic_inflight_active_for_prompt,
+};
 
 #[cfg(unix)]
 pub(in crate::services::discord) mod background_child_completion;
@@ -164,19 +163,18 @@ mod claude_idle_tail;
 mod headless;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
 mod session_rotation_settle;
-#[cfg(unix)]
-#[allow(unused_imports)]
+#[cfg(all(unix, test))]
 use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
 #[cfg(unix)]
 use self::claude_idle_bridge::{
     buffer_idle_prefix, idle_stream_message_is_content, idle_tail_tool_opens,
     stream_tui_idle_response_through_bridge,
-    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_bridge::{
     compose_tui_idle_response, forward_idle_stream_into_bridge,
     tui_idle_tail_should_commit_runtime_binding_offset,
+    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
