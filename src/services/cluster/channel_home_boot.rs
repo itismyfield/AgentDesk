@@ -218,9 +218,8 @@ async fn end(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
-/// Follows the row each renewal period: renews and drains while it names this node holder, adopts
-/// a release it targets once turns are restored, ends a reclaim it targets, and returns the
-/// channel to the gateway rules once the row names it no more.
+/// Follows the row each renewal period: renews and drains as holder, adopts a release or ends a
+/// reclaim as target, and returns the channel to the gateway rules once the row names it no more.
 async fn watch<R>(pool: PgPool, home: Arc<HomeGate>, port: BootPort<R>, lease: Arc<LeaseSlot>)
 where
     R: DrainPort + Send + Sync + 'static,
