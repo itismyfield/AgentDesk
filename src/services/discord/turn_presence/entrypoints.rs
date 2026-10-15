@@ -8,23 +8,17 @@ pub(super) use crate::services::cluster::channel_home::HomeGate;
 use crate::services::discord::SharedData;
 use crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistry;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_o::ownership::OwnershipGate;
 
 /// What an installed presence runtime lets an entry point revoke; it holds no Busy or turn facts.
 pub(in crate::services::discord) trait Fence: Send + Sync {
     /// Revokes the channel's existing registration without creating or reviving one.
     fn withdraw(&self, channel: u64, retire: bool, cause: &'static str);
-    /// Revokes only approvals resting on this Gateway witness; Home-owned ones stay.
-    fn withdraw_gateway(&self, gate: &Arc<OwnershipGate>, cause: &'static str);
     /// Revokes the channel's approvals resting on an owner other than `mount` (`None`: Gateway).
     fn withdraw_unmounted(&self, channel: u64, mount: Option<&Arc<HomeGate>>, cause: &'static str);
     /// The channel's current registration generation; adoption leaves it, a reset replaces it.
     fn generation(&self, channel: u64) -> Option<Arc<()>>;
     /// Revokes the channel's registration only while it is still `generation`.
     fn withdraw_generation(&self, channel: u64, generation: &Arc<()>, cause: &'static str);
-    fn suspend(&self);
-    /// Reopens with fresh registrations only; no earlier approval or deadline comes back.
-    fn resume(&self);
 }
 
 type Installed = (Weak<SharedData>, Weak<dyn Fence>);
@@ -144,22 +138,4 @@ pub(in crate::services::discord) fn withdraw_session(session: &str, cause: &'sta
             fence.withdraw(channel.get(), false, cause);
         }
     }
-}
-
-pub(in crate::services::discord) fn withdraw_gateway(
-    gate: &Arc<OwnershipGate>,
-    cause: &'static str,
-) {
-    for (_, fence) in installed() {
-        fence.withdraw_gateway(gate, cause);
-    }
-}
-
-pub(in crate::services::discord) fn suspend(shared: &SharedData) {
-    owned_by(shared).for_each(|fence| fence.suspend());
-}
-
-/// Only where the existing restart decision rolls the fence back.
-pub(in crate::services::discord) fn resume_fresh(shared: &SharedData) {
-    owned_by(shared).for_each(|fence| fence.resume());
 }

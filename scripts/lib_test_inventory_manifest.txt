@@ -3508,6 +3508,9 @@ services::discord::commands::control::codex_verified_clear_tests::codex_verified
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_managed_reset_refuses_history_reset_and_recreation
 services::discord::commands::control::codex_verified_clear_tests::legacy_codex_and_claude_clear_admission_remains_open
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
+services::discord::commands::control::home_fence::tests::b2b1_clear_and_reset_refuse_until_admitted
+services::discord::commands::control::home_fence::tests::b2b1_failed_clear_restores_backlog_and_keeps_its_session
+services::discord::commands::control::home_fence::tests::b2b1_queued_cancel_clears_backlog_and_drain_reset_applies
 services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
 services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
 services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
