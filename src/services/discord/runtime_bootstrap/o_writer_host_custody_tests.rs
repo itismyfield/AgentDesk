@@ -81,8 +81,8 @@ async fn fenced(host: &impl HostIo, channel: u64, provider: ShadowProvider) -> F
         .unwrap()
 }
 
-/// Legacy's open intake row and pending start stop only the strict entry; terminal custody or a
-/// queued body still stop the Codex entry.
+/// Legacy's open intake row and pending start stop only the strict entry; terminal custody, a
+/// queued body or another node's session still stop the Codex entry.
 #[test]
 fn codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -105,7 +105,7 @@ async fn takeover() {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
     let store = store.unwrap().unwrap();
     let (codex, claude, terminal, queued) = (64_700_401, 64_700_402, 64_700_403, 64_700_404);
-    let held = 64_700_405;
+    let (held, foreign) = (64_700_405, 64_700_406);
     for (channel, provider) in [(codex, Codex), (claude, Claude), (terminal, Codex)] {
         open_intake(
             &pool,
@@ -121,6 +121,14 @@ async fn takeover() {
     }
     persist(&pending(Codex, queued)).unwrap();
     persist(&pending(Claude, held)).unwrap();
+    open_intake(&pool, foreign, "codex").await;
+    super::o_writer_session(
+        &pool,
+        "takeover-foreign",
+        &foreign.to_string(),
+        "node-other",
+    )
+    .await;
     let body = OutboxMessage {
         target: &format!("channel:{queued}"),
         content: "body",
@@ -171,6 +179,7 @@ async fn takeover() {
     let refusals = [
         (terminal, "Legacy retains delivery custody"),
         (queued, "1 queued Legacy bodies"),
+        (foreign, "1 sessions on another node"),
     ];
     for (channel, why) in refusals {
         let FencedFacts {

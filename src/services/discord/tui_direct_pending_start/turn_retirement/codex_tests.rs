@@ -104,8 +104,8 @@ fn retry(confirmation: Confirmation) -> String {
     }
 }
 
-/// An open or metadata-only rollout keeps turn mode off and Legacy's turn row in place; the
-/// boot selection alone never confirms.
+/// An open, metadata-only or missing rollout keeps turn mode off and Legacy's turn row in place;
+/// the boot selection alone never confirms.
 #[test]
 fn codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -131,6 +131,8 @@ fn codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout() {
         source: source_id_for("parent", &meta_only).unwrap(),
         ..source.clone()
     };
+    retry(confirm_codex_channel(channel, Some(&config), &meta_only));
+    std::fs::remove_file(&meta_only.source.path).unwrap();
     retry(confirm_codex_channel(channel, Some(&config), &meta_only));
     assert!(row.exists() && !transcript_turns(channel));
 
