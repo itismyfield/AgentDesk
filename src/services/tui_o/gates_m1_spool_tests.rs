@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::gates_m1_support::{EmptyBindings, TestWriter, writer as make_writer};
 use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
 use crate::services::tui_o::shadow::{
-    CaptureOutcome, CaptureSource, ShadowProvider, SourceId, UnitKey,
+    CaptureOutcome, CaptureSource, IDENTITY_VERSION, ShadowProvider, SourceId, UnitKey,
 };
 use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::spool::source_key;
@@ -245,7 +245,7 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
         assert_eq!(
             sorted(work.clone()),
             sorted(fixture.expected_work()),
-            "v2/v3 output tuples differ: {name}"
+            "v2/current output tuples differ: {name}"
         );
         let pending: Vec<_> = fixture
             .expected
@@ -425,7 +425,7 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
                 old_bytes,
                 "v2 nonempty segment must remain byte-identical"
             );
-            assert_eq!(version(&segments[1]), 3);
+            assert_eq!(version(&segments[1]), u64::from(IDENTITY_VERSION));
             let (mut writer, port) = make_writer(recovered);
             let work = resume(&fixture, &mut writer);
             for item in work {
