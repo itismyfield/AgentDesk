@@ -1091,6 +1091,8 @@ pub(super) struct Discord {
     state: Arc<DiscordState>,
     valve: watch::Sender<bool>,
     history_unavailable: bool,
+    /// Lists another author's message after every anchor.
+    chatter: bool,
 }
 
 /// What every history read of [`Discord::history_unavailable`] fails with.
@@ -1102,6 +1104,7 @@ impl Default for Discord {
             state: Arc::default(),
             valve: watch::channel(true).0,
             history_unavailable: false,
+            chatter: false,
         }
     }
 }
@@ -1138,6 +1141,13 @@ impl Discord {
     /// As this Discord, with every history read failing as an outage would.
     pub(super) fn history_unavailable(mut self) -> Self {
         self.history_unavailable = true;
+        self
+    }
+
+    /// As this Discord, with another author's message listed after every anchor, which shows the
+    /// history readable.
+    pub(super) fn with_chatter(mut self) -> Self {
+        self.chatter = true;
         self
     }
 
@@ -1312,7 +1322,16 @@ impl DiscordPort for Discord {
                 let created = locked(&self.state.created);
                 let page = (self.state.kept.iter().chain(created.iter()))
                     .filter(|(c, m)| *c == channel && m.id > after);
-                Ok(page.map(|(_, m)| m.clone()).collect::<Vec<_>>())
+                let mut page: Vec<_> = page.map(|(_, m)| m.clone()).collect();
+                if self.chatter {
+                    let (id, author_id, content) = (after + 1, BOT + 1, "chatter".to_owned());
+                    page.push(SeenMessage {
+                        id,
+                        author_id,
+                        content,
+                    });
+                }
+                Ok(page)
             };
             let read = HistoryRead {
                 channel,
@@ -1333,8 +1352,21 @@ impl DiscordPort for Discord {
         std::future::ready(answer.expect("the history was read"))
     }
 
-    fn history_readable(&self, _: u64) -> bool {
-        true
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let found = if self.history_unavailable {
+            Err(HISTORY_UNAVAILABLE.to_string())
+        } else {
+            let created = locked(&self.state.created);
+            let mut known = self.state.kept.iter().chain(created.iter());
+            Ok(known
+                .find(|(c, m)| *c == channel && m.id == id)
+                .map(|(_, m)| m.clone()))
+        };
+        std::future::ready(found)
     }
 }
 

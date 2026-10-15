@@ -235,6 +235,7 @@ async fn h4_retained_prepared_payload_identity_and_posted_delivery_survive_resto
     writer
         .store()
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key: open.unit_key.clone(),
             piece_index: open.index,
@@ -367,13 +368,13 @@ impl AlarmSink for HealthSink {
     }
 }
 
-fn health_writer(
-    harness: &Harness,
-) -> (
+type HealthyWriter = (
     ChannelWriter<FakePort, Arc<FakeLease>, HealthSink>,
     Arc<crate::services::tui_o::alarm::AlarmHealth>,
     Arc<Mutex<Vec<usize>>>,
-) {
+);
+
+fn health_writer(harness: &Harness) -> HealthyWriter {
     let health = Arc::new(crate::services::tui_o::alarm::AlarmHealth::default());
     let router = Arc::new(crate::services::tui_o::alarm::AlarmRouter::new(
         None,

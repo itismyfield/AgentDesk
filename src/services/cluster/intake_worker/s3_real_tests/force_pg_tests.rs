@@ -499,8 +499,7 @@ fn snapshot(store: &Path) -> BTreeMap<String, String> {
     files
 }
 
-/// A process with no actor on the dead holder's root: it recovers the store and leaves one
-/// Prepared for a unit no transcript row derives, without posting it.
+/// Leaves an unposted Prepared without a transcript row on the dead holder's recovered store.
 pub(super) async fn seed_prepared_node(env: &Env) {
     let epoch = u64::try_from(epoch_of(env)).unwrap();
     let root = crate::config::runtime_root().expect("node root");
@@ -520,6 +519,7 @@ pub(super) async fn seed_prepared_node(env: &Env) {
         kind: UnitKind::Body,
     };
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial: ledger.next_serial(),
         unit_key,
         piece_index: 0,
