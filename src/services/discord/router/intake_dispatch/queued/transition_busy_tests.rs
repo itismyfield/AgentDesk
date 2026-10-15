@@ -1148,15 +1148,11 @@ async fn p2_b_actual_redirect_busy_restores_origin_channel() {
     .await
     .unwrap()
     .unwrap();
+    // Only the target's transition lock is held, so deferral proves the redirect resolved it.
     assert!(matches!(result, IntakeExecution::Deferred));
-    assert_eq!(
-        f.shared
-            .dispatch
-            .thread_parents
-            .get(&f.channel)
-            .map(|id| *id),
-        Some(target),
-        "the real redirect must have completed"
+    assert!(
+        !f.shared.dispatch.thread_parents.contains_key(&f.channel),
+        "a route without a claim is never published"
     );
     assert_eq!(f.ids().await, [8_012_002, 8_012_003]);
     let original_queue = discord::mailbox_snapshot(&f.shared, f.channel).await;
