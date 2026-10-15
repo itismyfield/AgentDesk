@@ -89,12 +89,10 @@ pub(super) fn prelaunch_runtime_kind_for_managed_session(
     {
         return None;
     }
-    // A retired runtime seeds no handoff kind; its turn is refused at dispatch.
     let selection =
-        crate::services::provider_hosting::try_resolve_provider_session_selection_with_channel(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             provider, true, channel_id,
-        )
-        .ok()?;
+        );
     if selection.driver == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting {
         return match provider {
             ProviderKind::Claude

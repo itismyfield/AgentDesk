@@ -234,7 +234,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "voice_barge_in/progress_playback.rs": {"send_channel_message*": 1},
     "voice_barge_in/routing.rs": {"send_channel_message*": 1},
     "voice_barge_in/runtime_lifecycle.rs": {".say": 1},
-    "voice_barge_in/utterance_pipeline.rs": {"send_channel_message*": 1},
 }
 # file (relative to PRIMITIVE_ROOT): (census rows, target[, gate file]).
 CENSUS: dict[str, tuple[str, ...]] = {
@@ -362,7 +361,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "voice_barge_in/progress_playback.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/routing.rs": ("1-E", "KEEP_36"),
     "voice_barge_in/runtime_lifecycle.rs": ("1-E", "KEEP_36"),
-    "voice_barge_in/utterance_pipeline.rs": ("1-D-notice", "KEEP_NONBODY"),
 }
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.

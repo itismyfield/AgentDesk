@@ -103,6 +103,7 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
+│   ├── runtime_validation.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
@@ -2172,8 +2173,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   ├── pcm_harness_tests.rs
-│   │   │   │   └── retired_text_reply_tests.rs
+│   │   │   │   └── pcm_harness_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs
