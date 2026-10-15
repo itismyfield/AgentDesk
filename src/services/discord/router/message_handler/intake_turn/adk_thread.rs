@@ -338,7 +338,7 @@ pub(super) async fn redirect_dispatch(
         role,
     };
     #[cfg(test)]
-    route_seam::reached(route.target).await;
+    route_reached(route.target).await;
     Ok(Some((
         route,
         bootstrapped_fresh_thread_session,
@@ -350,39 +350,45 @@ pub(super) async fn redirect_dispatch(
 #[path = "route_claim_tests.rs"]
 mod route_claim_tests;
 
-/// Test seam: a resolved route that has not claimed yet, held until the test releases it.
 #[cfg(test)]
-pub(crate) mod route_seam {
-    use poise::serenity_prelude::ChannelId;
-    use std::sync::Mutex;
-    use tokio::sync::oneshot;
+type RouteHold = (
+    ChannelId,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(test)]
+static ROUTE_HOLD: std::sync::Mutex<Option<RouteHold>> = std::sync::Mutex::new(None);
 
-    type Hold = (ChannelId, oneshot::Sender<()>, oneshot::Receiver<()>);
-    static HOLD: Mutex<Option<Hold>> = Mutex::new(None);
+/// Test seam: holds the next route resolved to `target` before its claim; the first receiver fires
+/// there and the route resumes once the returned sender fires.
+#[cfg(test)]
+fn hold_route(
+    target: ChannelId,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (reached, at) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    *ROUTE_HOLD.lock().unwrap() = Some((target, reached, resume));
+    (at, release)
+}
 
-    /// Holds the next route to `target`: `reached` fires there, and it resumes on `release`.
-    pub(crate) fn hold(target: ChannelId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (reached, at) = oneshot::channel();
-        let (release, resume) = oneshot::channel();
-        *HOLD.lock().unwrap() = Some((target, reached, resume));
-        (at, release)
-    }
-
-    pub(super) async fn reached(target: ChannelId) {
-        let held = {
-            let mut hold = HOLD.lock().unwrap();
-            match hold.take() {
-                Some((at, reached, resume)) if at == target => Some((reached, resume)),
-                other => {
-                    *hold = other;
-                    None
-                }
+#[cfg(test)]
+async fn route_reached(target: ChannelId) {
+    let held = {
+        let mut hold = ROUTE_HOLD.lock().unwrap();
+        match hold.take() {
+            Some((at, reached, resume)) if at == target => Some((reached, resume)),
+            other => {
+                *hold = other;
+                None
             }
-        };
-        if let Some((reached, resume)) = held {
-            let _ = reached.send(());
-            let _ = resume.await;
         }
+    };
+    if let Some((reached, resume)) = held {
+        let _ = reached.send(());
+        let _ = resume.await;
     }
 }
 

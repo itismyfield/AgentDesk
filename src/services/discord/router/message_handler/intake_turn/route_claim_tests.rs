@@ -266,7 +266,7 @@ async fn s2f_route_resolved_before_the_tail_is_published_by_its_claim() {
     let workspace = tempfile::tempdir().unwrap();
     let (shared, _api, http) = runtime(&ids, workspace.path()).await;
     let intent = sealed_close(&shared, &ids).await;
-    let (resolved, resume) = super::route_seam::hold(ids.thread);
+    let (resolved, resume) = super::hold_route(ids.thread);
     let (at, release) = hold_provider(ids.thread);
     let steps = async {
         resolved.await.unwrap();
