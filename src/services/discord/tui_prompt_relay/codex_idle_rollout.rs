@@ -91,7 +91,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
 
                 let candidates =
                     super::source_tick::codex_source_phase(&shared, &mut next_rehydrate).await;
-                replay_and_relay_codex_sources(&shared, candidates, &mut active_tails, &done_tx).await;
+                replay_and_relay_codex_sources(&shared, candidates, &mut active_tails, &done_tx)
+                    .await;
 
                 drop(shared);
                 tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
@@ -345,24 +346,28 @@ async fn replay_and_relay_codex_sources(
         }
         #[cfg(test)]
         note_poll(&tmux_session_name, PollNote::BodyScan);
-        let scan =
-            match super::idle_transcript_scan::scan_codex_records(
-                match std::fs::File::open(&rollout_path) { Ok(file) => file, Err(_) => continue },
-                binding.last_offset, None, true,
-                crate::services::tui_prompt_dedupe::codex_restore_observed_end(&tmux_session_name)
-                    .unwrap_or(binding.last_offset),
-            ) {
-                Ok(scan) => scan,
-                Err(error) => {
-                    tracing::debug!(
-                        tmux_session_name = %tmux_session_name,
-                        rollout_path = %rollout_path.display(),
-                        error = %error,
-                        "codex idle rollout relay scan skipped"
-                    );
-                    continue;
-                }
-            };
+        let scan = match super::idle_transcript_scan::scan_codex_records(
+            match std::fs::File::open(&rollout_path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            },
+            binding.last_offset,
+            None,
+            true,
+            crate::services::tui_prompt_dedupe::codex_restore_observed_end(&tmux_session_name)
+                .unwrap_or(binding.last_offset),
+        ) {
+            Ok(scan) => scan,
+            Err(error) => {
+                tracing::debug!(
+                    tmux_session_name = %tmux_session_name,
+                    rollout_path = %rollout_path.display(),
+                    error = %error,
+                    "codex idle rollout relay scan skipped"
+                );
+                continue;
+            }
+        };
 
         let (scan, stats) = scan;
         match scan {
@@ -370,14 +375,31 @@ async fn replay_and_relay_codex_sources(
                 if offset != binding.last_offset {
                     #[cfg(test)]
                     note_poll(&tmux_session_name, PollNote::SharedOffset);
-                    let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
-                        &tmux_session_name,
-                        &rollout_path,
-                        Some(binding.last_offset), offset,
-                    );
-                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
-                        let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
-                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
+                    let advanced =
+                        crate::services::codex_tui::session::advance_codex_tui_checkpoint(
+                            &tmux_session_name,
+                            &rollout_path,
+                            Some(binding.last_offset),
+                            offset,
+                        );
+                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced {
+                        start,
+                        end,
+                        ..
+                    } = advanced
+                    {
+                        let kind = super::rehydration::codex_marker::span_delivery_kind(
+                            channel_id.get(),
+                            &rollout_path,
+                            (start, end),
+                        );
+                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(
+                            &tmux_session_name,
+                            start,
+                            end,
+                            stats,
+                            kind,
+                        );
                     }
                 }
             }
@@ -388,30 +410,51 @@ async fn replay_and_relay_codex_sources(
                 evidence,
             } => {
                 let prompt_start = crate::services::codex_tui::session::checkpoint::at(
-                    &rollout_path, line_end_offset.saturating_sub(1),
-                ).unwrap_or(line_end_offset);
+                    &rollout_path,
+                    line_end_offset.saturating_sub(1),
+                )
+                .unwrap_or(line_end_offset);
                 if prompt_start > binding.last_offset {
                     #[cfg(test)]
                     note_poll(&tmux_session_name, PollNote::SharedOffset);
-                    let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
-                        &tmux_session_name, &rollout_path, Some(binding.last_offset), prompt_start,
-                    );
-                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
-                        let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
-                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
+                    let advanced =
+                        crate::services::codex_tui::session::advance_codex_tui_checkpoint(
+                            &tmux_session_name,
+                            &rollout_path,
+                            Some(binding.last_offset),
+                            prompt_start,
+                        );
+                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced {
+                        start,
+                        end,
+                        ..
+                    } = advanced
+                    {
+                        let kind = super::rehydration::codex_marker::span_delivery_kind(
+                            channel_id.get(),
+                            &rollout_path,
+                            (start, end),
+                        );
+                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(
+                            &tmux_session_name,
+                            start,
+                            end,
+                            stats,
+                            kind,
+                        );
                     }
                 }
                 let observed_at = chrono::Utc::now();
-                let own_turn = evidence.turn_id.clone().or_else(|| super::idle_transcript_scan::codex_native_turn_at(
-                    &rollout_path,
-                    line_end_offset,
-                ));
+                let own_turn = evidence.turn_id.clone().or_else(|| {
+                    super::idle_transcript_scan::codex_native_turn_at(
+                        &rollout_path,
+                        line_end_offset,
+                    )
+                });
                 let observation =
                     crate::services::tui_prompt_dedupe::observe_restored_codex_record_prompt_at(
                         &tmux_session_name,
-                        (&rollout_path,
-                            prompt_start,
-                            &evidence),
+                        (&rollout_path, prompt_start, &evidence),
                         (&prompt, entry_id.as_deref(), own_turn.as_deref()),
                         observed_at,
                     );

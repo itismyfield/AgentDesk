@@ -19,10 +19,10 @@ mod busy_inject_e2e;
 #[path = "cancel_backstop_e2e_tests.rs"]
 mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
-mod consumed_command_guard_e2e;
 #[cfg(unix)]
 #[path = "codex_o_handoff_replay_tests.rs"]
 mod codex_o_handoff_replay;
+mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
 #[cfg(unix)]
 #[path = "idle_phase_split_tests.rs"]
