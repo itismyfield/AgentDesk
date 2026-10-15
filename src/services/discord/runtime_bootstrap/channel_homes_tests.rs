@@ -409,8 +409,11 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
 /// What `channel`'s drain waits on, as health shows it.
 fn blocker(channel: u64) -> Option<String> {
     let health = channel_home::health()?;
-    let draining = health["home_draining"].as_array()?.iter();
-    let mut named = draining.filter(|entry| entry["channel"] == channel.to_string());
+    let (draining, channel) = (
+        health["home_draining"].as_array()?.iter(),
+        channel.to_string(),
+    );
+    let mut named = draining.filter(|entry| entry["channel"].as_str() == Some(channel.as_str()));
     named.next()?["blocker"].as_str().map(str::to_owned)
 }
 
