@@ -25,8 +25,6 @@ mod incarnation;
 mod injected_inputs;
 #[allow(dead_code)]
 pub(crate) mod input_fence;
-#[allow(dead_code)]
-pub(crate) mod input_handback;
 mod intervention;
 mod lease_release;
 mod mailbox_observation;

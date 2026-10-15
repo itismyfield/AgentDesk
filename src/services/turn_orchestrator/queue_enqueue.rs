@@ -1,22 +1,7 @@
 use super::active_source_dedup::settle_completed_sources;
 use super::*;
 
-pub(super) fn enqueue_with_settlement(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-    active_user_message_id: Option<MessageId>,
-    settlement: Option<(&ProviderKind, ChannelId)>,
-) -> EnqueueInterventionResult {
-    enqueue_behind(
-        queue,
-        intervention,
-        active_user_message_id,
-        settlement,
-        false,
-    )
-}
-
-/// `enqueue_with_settlement`, except a `reserved_front` head is never the merge target.
+/// A `reserved_front` head is never the merge target.
 pub(super) fn enqueue_behind(
     queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
@@ -139,5 +124,5 @@ pub(crate) fn enqueue_intervention(
     intervention: Intervention,
     active_user_message_id: Option<MessageId>,
 ) -> EnqueueInterventionResult {
-    enqueue_with_settlement(queue, intervention, active_user_message_id, None)
+    enqueue_behind(queue, intervention, active_user_message_id, None, false)
 }

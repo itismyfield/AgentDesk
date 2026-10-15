@@ -605,40 +605,6 @@ fn event_ids_stay_distinct_for_a_requeued_message_and_a_merged_source() {
     assert_eq!(bytes(channel), before);
 }
 
-/// The handback reads the queue as a legacy array, so it fails on a debt-bearing snapshot and
-/// leaves the file as it was rather than rewriting it without the debt.
-#[test]
-fn handback_refuses_a_debt_bearing_snapshot_without_rewriting_it() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let channel = ChannelId::new(5_341_001);
-    let (x, y) = (human(111, 7, "x", 5), human(112, 8, "y", 5));
-    let mut state = seeded(channel, vec![x.clone(), y.clone()]);
-    let debt = commit(
-        &mut state,
-        channel,
-        vec![y],
-        vec![exit(&x, QueueExitKind::Cancelled)],
-    )
-    .remove(0);
-    let before = bytes(channel);
-
-    let root = pending_queue_root().unwrap();
-    let destination = crate::services::turn_orchestrator::input_handback::Destination {
-        root: root.parent().unwrap(),
-        provider: &ProviderKind::Claude,
-        token_hash: TOKEN,
-        channel: channel.get(),
-        authorized: true,
-        active_sources: &[],
-    };
-    let input = json!({"author_id": 9, "message_id": 113, "text": "handed back", "channel_id": channel.get()});
-    let handed = crate::services::turn_orchestrator::input_handback::enqueue(&destination, &input);
-    let error = handed.unwrap_err().to_string();
-    assert!(error.contains("expected a sequence"), "{error}");
-    assert_eq!(bytes(channel), before);
-    assert_eq!(read(channel), [value(&debt)]);
-}
-
 /// The test writer, which carries no metadata, refuses a V1 snapshot or an unparseable file
 /// instead of replacing or removing it; a missing file and a legacy array are written as before.
 #[test]
