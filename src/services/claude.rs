@@ -370,10 +370,10 @@ fn execute_command_simple_with_model_and_cancel(
     cancel_token_arc: Option<std::sync::Arc<CancelToken>>,
 ) -> Result<String, String> {
     let session_selection =
-        crate::services::provider_hosting::try_resolve_provider_session_selection_with_capability(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_capability(
             &ProviderKind::Claude,
             false,
-        )?;
+        );
     session_selection.log_start("claude.execute_command_simple");
 
     let (claude_bin, resolution) = resolve_claude_binary()?;
@@ -645,7 +645,7 @@ pub fn execute_command_streaming(
     fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
-    cache_ttl_minutes: Option<u32>,
+    _cache_ttl_minutes: Option<u32>,
     dispatch_type: Option<&str>,
 ) -> Result<(), String> {
     debug_log("========================================");
@@ -663,11 +663,11 @@ pub fn execute_command_streaming(
     #[cfg(not(unix))]
     let entrypoint_supports_tui_hosting = false;
     let session_selection =
-        crate::services::provider_hosting::try_resolve_provider_session_selection_with_channel(
+        crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
             &ProviderKind::Claude,
             entrypoint_supports_tui_hosting,
             report_channel_id,
-        )?;
+        );
     session_selection.log_start("claude.execute_command_streaming");
     crate::services::claude_tui::submit_canary::require_profile(
         entrypoint_supports_tui_hosting
@@ -675,32 +675,6 @@ pub fn execute_command_streaming(
                 == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting,
     )?;
 
-    // Phase 1 of the claude-e rollout: route to the per-turn adapter
-    // when the operator picked `runtime: claude-e` and the binary is
-    // present. The adapter ignores tmux/remote — those routes stay on
-    // their existing drivers.
-    if session_selection.driver == crate::services::provider_hosting::ProviderSessionDriver::ClaudeE
-    {
-        debug_log("Routing to claude_e::execute_streaming (runtime=claude-e)");
-        // A managed turn routed away from the TUI fences before this driver writes the prompt.
-        crate::services::claude_tui::submission_fence::before_first_payload()?;
-        return crate::services::claude_e::execute_streaming(
-            prompt,
-            session_id,
-            working_dir,
-            sender,
-            system_prompt,
-            cancel_token,
-            report_channel_id,
-            report_provider,
-            model_override,
-            fast_mode_enabled,
-            compact_percent,
-            compact_lower_bound_tokens,
-            cache_ttl_minutes,
-            dispatch_type,
-        );
-    }
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
 SECURITY RULES (MUST FOLLOW):
@@ -4434,64 +4408,5 @@ mod guarded_owner_tests {
             ),
             "{stopped:?}"
         );
-    }
-
-    /// A retired runtime refuses the simple and the streaming entry before the binary is resolved,
-    /// the canary profile is required or a payload is written; a supported runtime still runs it.
-    #[test]
-    fn a_retired_runtime_refuses_claude_before_the_binary_and_the_canary() {
-        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
-        use std::os::unix::fs::PermissionsExt;
-        const CHANNEL: u64 = 6_570_651;
-        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let root = tempfile::tempdir().unwrap();
-        let (calls, claude) = (root.path().join("claude.calls"), root.path().join("claude"));
-        let stub = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n\
-             if [ \"$1\" = --version ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\n\
-             cat >/dev/null\necho 'stub reply'\n",
-            calls.display()
-        );
-        std::fs::write(&claude, stub).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
-        let _bin = set("AGENTDESK_CLAUDE_PATH", &claude);
-        {
-            let provider = ProviderKind::Claude;
-            let _simple = retired_runtime_for_tests::retire(&provider, None);
-            let _streaming = retired_runtime_for_tests::retire(&provider, Some(CHANNEL));
-            let simple = execute_command_simple_cancellable("status?", None).unwrap_err();
-            assert!(simple.contains(RetiredRuntimeError::CODE), "{simple}");
-            let (sender, _receiver) = std::sync::mpsc::channel();
-            let streaming = execute_command_streaming(
-                "status?",
-                None,
-                root.path().to_str().unwrap(),
-                sender,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(CHANNEL),
-                Some(provider.clone()),
-                None,
-                None,
-                None,
-                0,
-                None,
-                None,
-            )
-            .unwrap_err();
-            assert!(streaming.contains(RetiredRuntimeError::CODE), "{streaming}");
-            assert!(
-                !calls.exists(),
-                "the Claude binary ran for a retired runtime"
-            );
-        }
-        let reply = execute_command_simple_cancellable("status?", None);
-        assert_eq!(reply, Ok("stub reply".to_string()));
-        assert!(calls.exists());
     }
 }

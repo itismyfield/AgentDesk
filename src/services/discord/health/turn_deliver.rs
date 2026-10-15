@@ -102,21 +102,15 @@ pub(crate) async fn preflight_human_input(
         .await
         .map_err(HumanInputError::RuntimeUnavailable)?;
     let settings = shared.settings.read().await;
-    if !author_allowed_for_human_input(
+    if author_allowed_for_human_input(
         settings.owner_user_id,
         &settings.allowed_user_ids,
         author_id,
     ) {
-        return Err(HumanInputError::AuthorNotAllowed);
+        Ok(())
+    } else {
+        Err(HumanInputError::AuthorNotAllowed)
     }
-    runtime_refusal(provider, channel_id)
-}
-
-/// A retired runtime is an invalid target, judged only once the author passed.
-fn runtime_refusal(provider: &ProviderKind, channel_id: ChannelId) -> Result<(), HumanInputError> {
-    use crate::services::provider_hosting::{RetiredRuntimeError, ensure_runtime_executable};
-    ensure_runtime_executable(provider, Some(channel_id.get()))
-        .map_err(|_| HumanInputError::InvalidTarget(RetiredRuntimeError::CODE.to_string()))
 }
 
 enum StartAttempt {
@@ -569,10 +563,6 @@ async fn deliver_resolved(
     if !allowed {
         return (Err(HumanInputError::AuthorNotAllowed), Default::default());
     }
-    // Before the runtime, any injection, external hold, start or enqueue.
-    if let Err(refused) = runtime_refusal(&request.provider, request.channel_id) {
-        return (Err(refused), Default::default());
-    }
     let runtime = match shared.http.cached_serenity_ctx.get().cloned() {
         None => Err("provider runtime is not ready".to_string()),
         Some(ctx) => shared
@@ -934,70 +924,5 @@ mod tests {
                 "author {author}"
             );
         }
-    }
-
-    /// Injection on or off, a retired runtime refuses remote input and its preflight after auth,
-    /// before hold, pane or queue, leaving the row intact; the same panes then take the input.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_retired_runtime_refuses_remote_input_with_injection_on_or_off() {
-        use super::inject_tests::{InjectPane, queue_texts, register_inject_runtime};
-        use crate::services::discord::inflight::{inflight_runtime_root, inflight_state_path};
-        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let (on, off) = (6_570_601_u64, 6_570_602_u64);
-        let registry = HealthRegistry::new();
-        let shared = register_inject_runtime(&registry, &[on, off], None).await;
-        let panes = [
-            (InjectPane::new(on, "external"), on),
-            (InjectPane::new(off, "off"), off),
-        ];
-        let provider = ProviderKind::Claude;
-        let request = |channel: u64, author_id: u64| HumanInputRequest {
-            channel_id: ChannelId::new(channel),
-            provider: provider.clone(),
-            text: "status?".to_string(),
-            author_id,
-            source: "imessage".to_string(),
-            metadata: None,
-            channel_name_hint: None,
-        };
-        let root = inflight_runtime_root().expect("test runtime root");
-        let row = |channel: u64| std::fs::read(inflight_state_path(&root, &provider, channel));
-        let invalid = || HumanInputError::InvalidTarget(RetiredRuntimeError::CODE.to_string());
-
-        for (pane, channel) in &panes {
-            let before = row(*channel).expect("held row");
-            let _retired = retired_runtime_for_tests::retire(&provider, Some(*channel));
-            let refused = deliver_human_input(&registry, request(*channel, 200)).await;
-            assert_eq!(refused, Err(invalid()), "channel {channel}");
-            let unknown = deliver_human_input(&registry, request(*channel, 999)).await;
-            assert_eq!(unknown, Err(HumanInputError::AuthorNotAllowed));
-            let gate = preflight_human_input(&registry, ChannelId::new(*channel), &provider, 200);
-            assert_eq!(gate.await, Err(invalid()));
-            let queued = queue_texts(&shared, *channel).await;
-            assert_eq!(
-                (pane.tmux_calls(), queued.len()),
-                (0, 0),
-                "channel {channel}"
-            );
-            assert_eq!(
-                row(*channel).expect("held row"),
-                before,
-                "channel {channel}"
-            );
-        }
-
-        for (_, channel) in &panes {
-            let queued = deliver_human_input(&registry, request(*channel, 200)).await;
-            let reason = match &queued {
-                Ok(HumanInputDelivery::Queued { reason, .. }) => reason.as_str(),
-                _ => "-",
-            };
-            assert_eq!(reason, EXTERNAL_TURN_ACTIVE, "{queued:?}");
-            assert_eq!(queue_texts(&shared, *channel).await, ["status?"]);
-        }
-        let gate = preflight_human_input(&registry, ChannelId::new(on), &provider, 200);
-        assert_eq!(gate.await, Ok(()));
     }
 }

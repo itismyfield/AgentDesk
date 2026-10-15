@@ -499,11 +499,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
   services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
-  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
-  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
-  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_pid_reuse_evidence_allows_cleanup
-  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_probe_error_preserves_retry
-  services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe
   services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
   services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete
   services::discord::placeholder_sweeper::abandon_guard::tests::dead_pane_without_runtime_files_converges_to_cleanup
@@ -518,12 +513,9 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_exact_boundary_is_recent_and_next_second_is_inactive
   services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_zero_and_negative_are_unknown
   services::discord::placeholder_sweeper::abandon_guard::tests::terminal_marker_owner_death_evicts_without_constructing_message_id_zero
-  services::discord::placeholder_sweeper::abandon_guard::tests::tmux_present_path_is_unchanged_by_claude_e_process_evidence
-  services::discord::placeholder_sweeper::abandon_guard::tests::tmuxless_wrong_runtime_kind_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
-  services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
@@ -596,7 +588,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::message_handler::provider_dispatch::herdr_tests::a_judgment_left_by_an_early_exit_admits_no_later_send
   services::discord::router::message_handler::provider_dispatch::herdr_tests::an_unconfigured_channel_passes_both_entries_without_a_read
   services::discord::router::message_handler::provider_dispatch::herdr_tests::the_switch_alone_decides_whether_a_configured_turn_reaches_the_herdr_executor
-  services::discord::router::message_handler::provider_dispatch::tests::a_retired_runtime_refuses_before_the_host_branch_and_the_driver
   services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_miss_falls_back_to_normal_turn
   services::discord::router::message_handler::voice_announcement_route::voice_route_tests::voice_announcement_foreground_response_bypasses_normal_turn

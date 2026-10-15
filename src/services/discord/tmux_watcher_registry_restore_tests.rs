@@ -38,7 +38,7 @@ fn live_watcher_handle(tmux_session_name: &str) -> TmuxWatcherHandle {
 // authoritative on lookup and does NOT depend on the dedupe mirror.
 #[test]
 fn restored_owner_makes_missing_registry_resolve_for_live_session() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
     let channel = ChannelId::new(1_504_468_805_772_902_471);
 
@@ -65,7 +65,7 @@ fn restored_owner_makes_missing_registry_resolve_for_live_session() {
 
 #[test]
 fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-claude-adk-cc";
     let channel = ChannelId::new(4794);
 
@@ -89,7 +89,7 @@ fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
 // or contradict live truth.
 #[test]
 fn live_watcher_handle_overrides_and_evicts_restored_owner() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
     let restored_channel = ChannelId::new(111_000_000_000_000);
     let live_channel = ChannelId::new(222_000_000_000_000);
@@ -121,7 +121,7 @@ fn live_watcher_handle_overrides_and_evicts_restored_owner() {
 // no-op (and clear any leftover restored entry) — never override live truth.
 #[test]
 fn restore_is_noop_when_live_watcher_owns_session() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-claude-adk-cc";
     let live_channel = ChannelId::new(333_000_000_000_000);
 
@@ -142,7 +142,7 @@ fn restore_is_noop_when_live_watcher_owns_session() {
 // exact key (the relay resolves the channel from the suffixed name).
 #[test]
 fn base_and_thread_suffixed_names_resolve_independently() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let base = "AgentDesk-claude-adk-cc";
     let suffixed = "AgentDesk-claude-adk-cc-t1504468805772902471";
     let channel = ChannelId::new(1_504_468_805_772_902_471);
@@ -163,7 +163,7 @@ fn base_and_thread_suffixed_names_resolve_independently() {
 // the binding so a dead session can never resolve.
 #[test]
 fn clear_restored_owner_drops_binding() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471";
     let channel = ChannelId::new(1_504_468_805_772_902_471);
 
@@ -174,7 +174,7 @@ fn clear_restored_owner_drops_binding() {
 
 #[test]
 fn cancel_and_remove_channel_if_current_only_rolls_back_matching_claim() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-codex-adk-cdx";
     let channel = ChannelId::new(1_504_468_805_772_902_471);
     let handle = live_watcher_handle(tmux);
@@ -206,7 +206,7 @@ fn cancel_and_remove_channel_if_current_only_rolls_back_matching_claim() {
 
 #[test]
 fn tmux_session_is_stale_does_not_fold_cancel_flag_into_heartbeat() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-codex-adk-cdx-fresh-cancel";
     let channel = ChannelId::new(1_504_468_805_772_902_472);
     let handle = live_watcher_handle(tmux);
@@ -255,7 +255,7 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
     let root = tempfile::tempdir().expect("isolated runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
 
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-5071-t3a1-readmitted-row";
     let owner = ChannelId::new(5_071_000_000_000_000_001);
     let usurper = ChannelId::new(5_071_000_000_000_000_002);
@@ -356,7 +356,7 @@ fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
             2,
         ),
     ] {
-        let registry = TmuxWatcherRegistry::new();
+        let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(5_399_000_000_000_000_001);
 
         let handle = live_watcher_handle(tmux);
@@ -399,7 +399,7 @@ fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
 // path the handle no longer has, fails here.
 #[test]
 fn channel_binding_exposes_the_live_watcher_output_path() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-5071-t4b0-binding-path";
     let channel = ChannelId::new(5_071_000_000_000_000_040);
 
@@ -429,7 +429,7 @@ fn channel_binding_exposes_the_live_watcher_output_path() {
 // path would keep reporting the wrapper file after the watcher left it.
 #[test]
 fn channel_binding_output_path_follows_the_native_transcript_handoff() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux = "AgentDesk-5071-t4b0-binding-handoff";
     let channel = ChannelId::new(5_071_000_000_000_000_041);
 
@@ -501,7 +501,7 @@ fn delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire()
     // by accident.
     const HELD_OPEN: std::time::Duration = std::time::Duration::from_millis(300);
 
-    let registry = Arc::new(TmuxWatcherRegistry::new());
+    let registry = Arc::new(TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new())));
     let tmux = "AgentDesk-5071-s4r2-toctou";
     let owner = ChannelId::new(5_071_000_000_000_000_042);
 
@@ -680,7 +680,7 @@ fn watcher_reservation_stale_teardown_preserves_successor_identity() {
 fn watcher_reservation_unpair_is_payload_free_and_outer_clear_is_once() {
     use super::delivery_lease_cell::payload_lock_entries_for_test;
 
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let channel = ChannelId::new(5_191_000_000_000_000_031);
     let tmux = "AgentDesk-5191-payload-free-unpair";
     let handle = live_watcher_handle(tmux);
@@ -750,7 +750,7 @@ fn watcher_reservation_wrong_requester_fenced_removal_preserves_requester() {
 
 #[test]
 fn watcher_reservation_all_central_removal_spellings_clear_pair() {
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let cases = [
         (5_191_000_000_000_000_051, "AgentDesk-5191-remove-channel"),
         (5_191_000_000_000_000_052, "AgentDesk-5191-remove-session"),
@@ -788,7 +788,7 @@ fn watcher_reservation_all_central_removal_spellings_clear_pair() {
 #[test]
 fn watcher_reservation_coord_access_under_payload_is_rejected() {
     let channel = ChannelId::new(5_191_000_000_000_000_061);
-    let registry = TmuxWatcherRegistry::new();
+    let registry = TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let cell = DeliveryLeaseCell::new(channel);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cell.with_state_locked(|_| {
