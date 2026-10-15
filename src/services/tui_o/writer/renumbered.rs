@@ -283,6 +283,10 @@ impl Names {
         if checkpoint.is_some() {
             return Ok(checkpoint);
         }
+        // An init with no source binds every source later, so the whole log is still ahead.
+        if store.init().sources.is_empty() {
+            return Ok(Some(0));
+        }
         let Some(seq) = binding_baseline(named, |source| store.cursor(source).is_some()) else {
             return Ok(None);
         };

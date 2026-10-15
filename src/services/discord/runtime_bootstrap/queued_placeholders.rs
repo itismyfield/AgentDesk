@@ -305,7 +305,6 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
 pub(in crate::services::discord) async fn install_channel_queued_placeholders_checked(
     shared: &SharedData,
     channel: ChannelId,

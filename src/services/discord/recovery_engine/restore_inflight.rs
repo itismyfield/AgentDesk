@@ -87,7 +87,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     Box::pin(restore_inflight_states(http, shared, provider, states)).await;
 }
 
-async fn restore_inflight_states(
+pub(in crate::services::discord) async fn restore_inflight_states(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
