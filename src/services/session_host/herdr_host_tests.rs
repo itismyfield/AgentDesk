@@ -1721,6 +1721,7 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
 const UNBOUND_OBSERVER: &str = "src/services/discord/turn_presence/activity/unbound.rs";
+const UNBOUND_ADAPTER: &str = "src/services/discord/turn_presence/activity/unbound/live.rs";
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 /// The timeouts policy repair facade: the one production caller of the target guard.
 const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
@@ -1829,7 +1830,10 @@ fn herdr_items_have_no_production_caller() {
                 "src/services/termination_audit/host_terminate.rs",
             ],
         ),
-        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
+        (
+            "HostKind::from_persisted",
+            &[LOCATOR, MARKER, UNBOUND_ADAPTER],
+        ),
         (
             "HostKindMarker",
             &[
@@ -1846,6 +1850,7 @@ fn herdr_items_have_no_production_caller() {
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
                 UNBOUND_OBSERVER,
+                UNBOUND_ADAPTER,
             ],
         ),
         (
@@ -2093,16 +2098,50 @@ fn u_observer_callers_confined() {
     let sources = production_sources();
     let items: &[(&str, Owners)] = &[
         ("probe_session_inventory", &[(I, 0)]),
-        ("observe_candidates", &[(U, 0)]),
+        ("observe_candidates", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
         ("unbound_candidates", &[(U, 1)]),
-        ("host_scope", &[(U, 0)]),
-        ("decide_unbound", &[(U, 0)]),
+        ("host_scope", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("decide_unbound", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("observe_inventory", &[(I, 0), (UNBOUND_ADAPTER, 2)]),
     ];
     let violations = guarded_item_violations(&sources, items);
     assert!(
         violations.is_empty(),
-        "dormant observer acquired a production caller: {violations:?}"
+        "observer escaped its activity adapter: {violations:?}"
     );
+    let adapter = code_tokens(&sources[UNBOUND_ADAPTER]);
+    for (item, count) in [
+        ("observe_candidates", 1),
+        ("host_scope", 1),
+        ("decide_unbound", 1),
+        ("observe_inventory", 2),
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, count, "adapter lost {item}");
+        let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(count));
+        let admitted = [(UNBOUND_ADAPTER.into(), body)].into_iter().collect();
+        assert!(guarded_item_violations(&admitted, items).is_empty());
+        for (path, calls) in [
+            ("src/services/unlisted.rs", 1),
+            (UNBOUND_ADAPTER, count + 1),
+        ] {
+            let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(calls));
+            let extra = [(path.into(), body)].into_iter().collect();
+            assert!(
+                !guarded_item_violations(&extra, items).is_empty(),
+                "caller budget missed {path}: {item} x{calls}"
+            );
+        }
+    }
+    for item in [
+        "clear_legacy_session",
+        "guard_first_state_change",
+        "probe_for_policy",
+        "teardown_for_lookup",
+        "keyed_teardown",
+        "resolve_session_target",
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, 0, "adapter acquired {item}");
+    }
     let code = code_tokens(include_str!("../discord/turn_presence/activity/unbound.rs"));
     for (item, count) in [
         ("SessionTargetEvidence", 3),
