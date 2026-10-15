@@ -48,6 +48,13 @@ impl PolicyCommit {
             .clone()
     }
 
+    /// An unsealed ticket goes to the actor this attempt's bridge captured; one that seals it
+    /// there is the actor its tail claims.
+    fn submit_to(&self, mailbox: ChannelMailboxHandle) -> ChannelMailboxHandle {
+        let mut actor = self.actor.lock().unwrap_or_else(PoisonError::into_inner);
+        actor.insert(mailbox).clone()
+    }
+
     /// Drops the actor and plan; the ledger drops the commit itself in the same step.
     pub(super) fn release(&self) {
         *self.actor.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -59,8 +66,7 @@ impl PolicyCommit {
     fn capture(&self, shared: &Arc<SharedData>, channel: ChannelId, voice: bool) -> TailCapture {
         let (shared, plan) = (shared.clone(), self.plan.clone());
         Box::new(move |queued| {
-            let parents =
-                super::super::cleanup::collect_and_clear_thread_parents(&shared, channel);
+            let parents = super::super::cleanup::collect_and_clear_thread_parents(&shared, channel);
             let voice = voice
                 .then(|| shared.voice_barge_in.detach_deferred(channel))
                 .flatten();
@@ -69,10 +75,7 @@ impl PolicyCommit {
             if !queued && silent {
                 shared.dispatch.role_overrides.remove(&channel);
             }
-            let taken = TailPlan {
-                parents,
-                voice,
-            };
+            let taken = TailPlan { parents, voice };
             *plan.lock().unwrap_or_else(PoisonError::into_inner) = Some(taken);
         })
     }
@@ -93,10 +96,16 @@ pub(super) async fn settle(
         snapshot,
     } = intent;
     let trace = request.trace.clone();
+    #[cfg(test)]
+    trace.note_ticket(&commit.ticket);
     let reply = match commit.ticket.sealed() {
-        true => None,
+        // A sealed ticket resumes its tail: this request commits nothing in the mailbox.
+        true => {
+            trace.note(Point::MailboxCommitted, 0);
+            None
+        }
         false => {
-            let actor = commit.actor().unwrap_or(mailbox);
+            let actor = commit.submit_to(mailbox);
             Some(actor.commit_policy_close(request).await)
         }
     };
@@ -121,6 +130,8 @@ pub(super) async fn settle(
         };
         return (outcome, None);
     }
+    // The tail has not run its queue exit yet; a zero here is a reading, not a missing point.
+    trace.note(Point::QueueExit, 0);
     // Test seam between the commit and its tail, which has consumed nothing yet.
     #[cfg(test)]
     {
@@ -143,8 +154,6 @@ async fn run_tail(
     shared: &Arc<SharedData>,
     trace: &crate::services::turn_orchestrator::policy_close::Trace,
 ) -> Option<FinalizeOutcome> {
-    #[cfg(test)]
-    super::super::test_panic_hook::maybe_panic_in_finalize();
     let channel = key.channel_id;
     let decision = match (commit.ticket.decision(), commit.actor()) {
         (Some(decided), _) => decided,
@@ -157,12 +166,17 @@ async fn run_tail(
             PolicyTailSkip::ActorUnreachable,
         )),
     };
-    let finish = commit.ticket.take_finish();
-    if let Some(finish) = finish.as_ref() {
-        super::super::super::apply_queue_exit_feedback(shared, channel, &finish.queue_exit_events)
-            .await;
+    let finish = commit.ticket.finish();
+    let exits = commit.ticket.take_queue_exits();
+    if let Some(exits) = exits.as_ref() {
+        super::super::super::apply_queue_exit_feedback(shared, channel, exits).await;
     }
-    trace.note(Point::QueueExit, u64::from(finish.is_some()));
+    trace.note(Point::QueueExit, u64::from(exits.is_some()));
+    #[cfg(test)]
+    {
+        trace.note_tail(decision);
+        super::super::test_panic_hook::maybe_panic_in_finalize();
+    }
     let removed_token = finish.as_ref().and_then(|f| f.removed_token.clone());
     if let Some(token) = removed_token.as_ref() {
         token
@@ -208,11 +222,7 @@ async fn run_tail(
         .unwrap_or_else(PoisonError::into_inner)
         .take();
     let plan = plan.unwrap_or_default();
-    super::super::cleanup::kickoff_thread_parents_after_finalize(
-        shared,
-        provider,
-        plan.parents,
-    );
+    super::super::cleanup::kickoff_thread_parents_after_finalize(shared, provider, plan.parents);
     let voice_enqueued = match plan.voice {
         Some(buffer) => {
             (shared.voice_barge_in)

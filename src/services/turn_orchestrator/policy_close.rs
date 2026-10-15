@@ -522,6 +522,8 @@ pub(crate) mod test_hooks {
         hook: Mutex<Option<Hook>>,
         loss: Mutex<Option<Loss>>,
         mailbox: Mutex<Option<super::super::input_fence::PolicyMailboxView>>,
+        tail: Mutex<Option<super::tail::PolicyTailDecision>>,
+        ticket: Mutex<Option<std::sync::Weak<super::tail::PolicyCommitTicket>>>,
     }
 
     thread_local! { static ARMED: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
@@ -552,6 +554,8 @@ pub(crate) mod test_hooks {
             hook: Mutex::new(ARMED.with(|slot| slot.borrow_mut().take())),
             loss: Mutex::default(),
             mailbox: Mutex::default(),
+            tail: Mutex::default(),
+            ticket: Mutex::default(),
         }));
         request
     }
@@ -590,6 +594,16 @@ pub(crate) mod test_hooks {
         /// The slot's start instant this request's step compared its cutoff with.
         pub(crate) fn started(&self) -> Option<Instant> {
             *lock(&self.started)
+        }
+
+        /// How this request's tail claim was decided, if its tail ran.
+        pub(crate) fn tail(&self) -> Option<super::tail::PolicyTailDecision> {
+            *lock(&self.tail)
+        }
+
+        /// The ledger ticket this request ran under, held weakly so its release is observable.
+        pub(crate) fn ticket(&self) -> Option<std::sync::Weak<super::tail::PolicyCommitTicket>> {
+            lock(&self.ticket).clone()
         }
 
         /// What the mailbox held as this request reached its input fence.
@@ -643,6 +657,18 @@ pub(crate) mod test_hooks {
         pub(crate) fn note_mailbox(&self, view: super::super::input_fence::PolicyMailboxView) {
             if let Some(probe) = &self.probe {
                 *lock(&probe.mailbox) = Some(view);
+            }
+        }
+
+        pub(crate) fn note_tail(&self, decision: super::tail::PolicyTailDecision) {
+            if let Some(probe) = &self.probe {
+                *lock(&probe.tail) = Some(decision);
+            }
+        }
+
+        pub(crate) fn note_ticket(&self, ticket: &Arc<super::tail::PolicyCommitTicket>) {
+            if let Some(probe) = &self.probe {
+                *lock(&probe.ticket) = Some(Arc::downgrade(ticket));
             }
         }
 

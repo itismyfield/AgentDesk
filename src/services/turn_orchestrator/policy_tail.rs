@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use super::super::claim_observation::ClaimObservation;
 use super::super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxState, FinishTurnResult,
-    InterventionMode, RecoveryDoneSignal,
+    InterventionMode, QueueExitEvent, RecoveryDoneSignal,
 };
 
 /// One exact close's commit record: sealed once by the mailbox step that committed it, then
@@ -22,8 +22,10 @@ pub(crate) struct PolicyCommitTicket {
 }
 
 struct PolicyCommitSeal {
-    /// Taken by the one tail that runs, so its queue feedback and token reach the tail once.
-    finish: Mutex<Option<FinishTurnResult>>,
+    /// The commit's finish without its queue exits; the token goes when the ledger drops the ticket.
+    finish: FinishTurnResult,
+    /// Taken by the first tail that gets this far, so the queue feedback runs at most once.
+    exits: Mutex<Option<Vec<QueueExitEvent>>>,
     stamp: OwnerStamp,
 }
 
@@ -83,10 +85,15 @@ impl PolicyCommitTicket {
         self.seal.get().is_some()
     }
 
-    /// The commit's finish, handed out once.
-    pub(crate) fn take_finish(&self) -> Option<FinishTurnResult> {
+    /// The commit's finish, without its queue exits.
+    pub(crate) fn finish(&self) -> Option<FinishTurnResult> {
+        self.seal.get().map(|seal| without_exits(&seal.finish))
+    }
+
+    /// The commit's queue exits, handed out once.
+    pub(crate) fn take_queue_exits(&self) -> Option<Vec<QueueExitEvent>> {
         let seal = self.seal.get()?;
-        seal.finish
+        seal.exits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
@@ -106,21 +113,27 @@ impl PolicyCommitTicket {
     pub(super) fn seal(
         &self,
         state: &mut ChannelMailboxState,
-        finish: FinishTurnResult,
+        mut finish: FinishTurnResult,
     ) -> FinishTurnResult {
-        let reply = FinishTurnResult {
-            removed_token: finish.removed_token.clone(),
-            has_pending: finish.has_pending,
-            mailbox_online: finish.mailbox_online,
-            queue_exit_events: Vec::new(),
-            persistence_error: finish.persistence_error.clone(),
-        };
+        let exits = std::mem::take(&mut finish.queue_exit_events);
+        let reply = without_exits(&finish);
         let stamp = OwnerStamp::of(state);
         let _ = self.seal.set(PolicyCommitSeal {
-            finish: Mutex::new(Some(finish)),
+            finish,
+            exits: Mutex::new(Some(exits)),
             stamp,
         });
         reply
+    }
+}
+
+fn without_exits(finish: &FinishTurnResult) -> FinishTurnResult {
+    FinishTurnResult {
+        removed_token: finish.removed_token.clone(),
+        has_pending: finish.has_pending,
+        mailbox_online: finish.mailbox_online,
+        queue_exit_events: Vec::new(),
+        persistence_error: finish.persistence_error.clone(),
     }
 }
 

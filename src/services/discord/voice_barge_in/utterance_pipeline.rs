@@ -401,6 +401,27 @@ impl VoiceBargeInRuntime {
         })
     }
 
+    /// Defers `text` for `channel` as a processing barge-in would.
+    #[cfg(test)]
+    pub(in crate::services::discord) async fn defer_for_test(
+        &self,
+        channel: ChannelId,
+        text: &str,
+    ) {
+        let buffer = self.buffer_for_channel(channel);
+        assert!(buffer.lock().await.push_transcript(text));
+    }
+
+    /// The channel's current deferred buffer, if one is in the map.
+    #[cfg(test)]
+    pub(in crate::services::discord) fn deferred_for_test(
+        &self,
+        channel: ChannelId,
+    ) -> Option<Arc<Mutex<DeferredBargeInBuffer>>> {
+        let buffer = self.channels.deferred_buffers.get(&channel.get());
+        buffer.map(|entry| entry.value().clone())
+    }
+
     pub(super) fn buffer_for_channel(
         &self,
         channel_id: ChannelId,

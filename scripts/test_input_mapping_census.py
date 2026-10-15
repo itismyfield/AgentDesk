@@ -316,6 +316,16 @@ class Census(unittest.TestCase):
         changed = predicate.replace("letremove=", "*thread=channel_id;letremove=")
         self.assertNotEqual(retain_arguments("m.thread_parents.retain(" + changed + ");"), [predicate])
 
+    def test_intake_takes_its_role_only_from_the_claimed_route(self):
+        # The provider choice has no observable effect on an unprotected channel, so pin the reads.
+        actual = {
+            path.removeprefix(D): Counter(expressions(source, "role_overrides"))
+            for path, source in self.sources.items()
+            if "router/message_handler/intake_turn" in path and expressions(source, "role_overrides")
+        }
+        expected = {"router/message_handler/intake_turn/adk_thread.rs": {"get": 1, "insert": 1, "remove": 1}}
+        self.assertEqual(actual, {path: Counter(ops) for path, ops in expected.items()})
+
     def test_writer_target_admission_and_root_permit_lifetime_remain(self):
         writer = self.sources[D + "router/message_handler/intake_turn/adk_thread.rs"]
         compact = re.sub(r"\s+", "", writer)

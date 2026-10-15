@@ -346,6 +346,10 @@ pub(super) async fn redirect_dispatch(
     )))
 }
 
+#[cfg(all(test, unix))]
+#[path = "route_claim_tests.rs"]
+mod route_claim_tests;
+
 /// Test seam: a resolved route that has not claimed yet, held until the test releases it.
 #[cfg(test)]
 pub(crate) mod route_seam {
