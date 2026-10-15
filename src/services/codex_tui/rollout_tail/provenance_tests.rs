@@ -440,6 +440,7 @@ fn dormant_closed_span_keeps_native_bounds_and_cancelled_tail_emits_nothing() {
         captured_through: f.header_end,
         prefix_hash: hex::encode(Sha256::digest(std::fs::read(&f.source.path).unwrap())),
         retired: false,
+        transition_cleanup: None,
     };
     let floor = floor_fixture::native_floor(launch.clone(), &cursor);
     let token = std::sync::Arc::new(
