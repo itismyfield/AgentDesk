@@ -35,6 +35,7 @@ pub(super) struct RedirectDispatch<'a> {
     pub pending_uploads:
         &'a mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub session_was_cleared: Option<bool>,
+    pub queued_drain: bool,
 }
 
 pub(super) async fn redirect_dispatch(
@@ -63,6 +64,7 @@ pub(super) async fn redirect_dispatch(
         dispatch_effective_path,
         pending_uploads,
         session_was_cleared,
+        queued_drain,
     } = request;
     let mut bootstrapped_fresh_thread_session = false;
     let mut redirected_permit = None;
@@ -142,7 +144,7 @@ pub(super) async fn redirect_dispatch(
                             format!("redirect input admission refused: {failure:?}")
                         })?;
                     let input = (std::mem::take(pending_uploads), session_was_cleared);
-                    let target = (tid, original_channel_id);
+                    let target = (tid, original_channel_id, queued_drain);
                     let admitted =
                         host_refusal::admitted_uploads(http, shared, provider, target, input);
                     let Some(uploads) = admitted.await? else {
@@ -394,6 +396,7 @@ mod tests {
             dispatch_effective_path: "/unreachable",
             pending_uploads: &mut uploads,
             session_was_cleared: Some(false),
+            queued_drain: false,
         })
         .await;
         assert!(result.err().unwrap().to_string().contains("Closing"));
@@ -472,6 +475,7 @@ mod tests {
             dispatch_effective_path: "/unreachable",
             pending_uploads: &mut uploads,
             session_was_cleared: Some(false),
+            queued_drain: false,
         })
         .now_or_never()
         .expect("closed thread cannot await network");
