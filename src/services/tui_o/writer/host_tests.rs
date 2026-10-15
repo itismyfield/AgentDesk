@@ -271,12 +271,18 @@ fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -
     hosted(harness, io, pg, ready).len()
 }
 
-fn hosted(
+type Hosts = Vec<tokio::task::JoinHandle<()>>;
+
+fn hosted(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -> Hosts {
+    hosted_as(ShadowProvider::Claude, harness, io, (pg, ready))
+}
+
+fn hosted_as(
+    provider: ShadowProvider,
     harness: &Harness,
     io: &Arc<TestIo>,
-    pg: bool,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+    (pg, ready): (bool, &Arc<Readiness>),
+) -> Hosts {
     p5::set_test_root(Some(harness._runtime.path()));
     let parts = || HostParts {
         io: Arc::clone(io),
@@ -284,7 +290,7 @@ fn hosted(
         gate: Arc::clone(&harness.gate),
         readiness: Arc::clone(ready),
     };
-    start(ShadowProvider::Claude, pg, parts)
+    start(provider, pg, parts)
 }
 
 fn empty_init(channel: u64) -> Initialized {
@@ -635,19 +641,8 @@ fn abort(tasks: Vec<tokio::task::JoinHandle<()>>) {
     tasks.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
-fn start_host(
-    harness: &Harness,
-    io: &Arc<TestIo>,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    p5::set_test_root(Some(harness._runtime.path()));
-    let parts = || HostParts {
-        io: Arc::clone(io),
-        runtime_root: Some(root(harness)),
-        gate: Arc::clone(&harness.gate),
-        readiness: Arc::clone(ready),
-    };
-    start(ShadowProvider::Claude, true, parts)
+fn start_host(harness: &Harness, io: &Arc<TestIo>, ready: &Arc<Readiness>) -> Hosts {
+    hosted(harness, io, true, ready)
 }
 
 #[tokio::test(start_paused = true)]
@@ -1268,6 +1263,9 @@ mod rotation_unsettled;
 
 #[path = "host_home_tests.rs"]
 mod home;
+
+#[path = "host_first_init_tests.rs"]
+mod first_init;
 
 #[path = "host_managed_tests.rs"]
 mod managed;

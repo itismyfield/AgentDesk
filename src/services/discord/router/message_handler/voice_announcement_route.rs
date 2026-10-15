@@ -83,9 +83,6 @@ where
     )
     .await
     {
-        // A duplicate only retries a notice the winner failed to send; the handler never reruns.
-        use crate::services::discord::voice_barge_in::VoiceBargeInRuntime as Voice;
-        Voice::retry_retired_voice_notice(channel_id, &announcement.utterance_id).await;
         return VoiceTranscriptAnnouncementRouteOutcome::DuplicateSuppressed;
     }
     if foreground_handler(announcement.clone()).await {
@@ -440,114 +437,6 @@ mod voice_route_tests {
             0,
             "the per-message durable claim dedups the carry-forward (no reply storm)"
         );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    /// Over the real PG claim a failed retired notice is retried only by the duplicate: handler 1,
-    /// notice tries 2, sent 1, claim kept consumed, no model, TTS, handoff or normal fallback.
-    #[tokio::test(flavor = "current_thread")]
-    async fn retired_notice_failure_is_retried_by_the_duplicate_only_pg() {
-        use crate::services::discord::health::legacy_supervision::test_support::{
-            Answer, MockDiscord, message_json,
-        };
-        use crate::services::discord::voice_barge_in::VoiceBargeInRuntime;
-        use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
-        use VoiceTranscriptAnnouncementRouteOutcome::{DuplicateSuppressed, ForegroundHandled};
-        use axum::http::Method;
-        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-        let (channel_id, message_id) = (ChannelId::new(65_706_001), MessageId::new(65_706_002));
-        let announcement = voice_announcement_fixture("상태 알려줘", "utt-retired-notice");
-        let pending_key = crate::voice::announce_meta::durable_voice_announcement_pending_key(
-            "voice:1:65706001:utt-retired-notice",
-            "announce:generation:1",
-        );
-        crate::voice::announce_meta::persist_voice_announcement_reservation_durable(
-            &pool,
-            &pending_key,
-            channel_id,
-            "🎙️ \"상태 알려줘\"",
-            &announcement,
-        )
-        .await
-        .expect("persist durable voice announcement");
-        let bind = crate::voice::announce_meta::bind_voice_announcement_durable_message_id;
-        assert!(
-            bind(&pool, &pending_key, message_id)
-                .await
-                .expect("bind message id")
-        );
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let answer: Answer = {
-            let attempts = Arc::clone(&attempts);
-            Arc::new(move |method: &Method, path: &str| {
-                if *method != Method::POST || !path.ends_with("/messages") {
-                    return None;
-                }
-                let at = "2026-10-14T00:00:00+00:00";
-                Some(match attempts.fetch_add(1, Ordering::SeqCst) {
-                    0 => (
-                        500,
-                        serde_json::json!({"message": "unavailable", "code": 0}),
-                    ),
-                    _ => (200, message_json(65_706_004, 65_706_001, 1, "notice", at)),
-                })
-            })
-        };
-        let discord = MockDiscord::start_with(answer).await;
-        let _rest =
-            crate::services::discord::shared_state::test_rest::install(discord.http.clone());
-        let mut config = crate::voice::VoiceConfig::default();
-        config.enabled = true;
-        config.barge_in.acknowledgement_enabled = false;
-        let runtime = Arc::new(VoiceBargeInRuntime::from_voice_config(&config));
-        let target = ChannelId::new(65_706_003);
-        let foreground = runtime
-            .prepare_foreground_for_tests(channel_id, target)
-            .await;
-        let _retired = retired_runtime_for_tests::retire(&foreground, None);
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let handled = AtomicUsize::new(0);
-
-        let mut outcomes = Vec::new();
-        for _ in 0..3 {
-            let outcome = route_voice_transcript_announcement_once(
-                Some(&pool),
-                channel_id,
-                message_id,
-                false,
-                Some(&announcement),
-                |seen| {
-                    handled.fetch_add(1, Ordering::SeqCst);
-                    let (runtime, shared) = (Arc::clone(&runtime), Arc::clone(&shared));
-                    async move {
-                        runtime
-                            .try_handle_voice_transcript_announcement(&shared, channel_id, &seen)
-                            .await
-                    }
-                },
-            )
-            .await;
-            outcomes.push(outcome);
-        }
-
-        let expected = [ForegroundHandled, DuplicateSuppressed, DuplicateSuppressed];
-        assert_eq!(outcomes, expected);
-        assert_eq!(handled.load(Ordering::SeqCst), 1, "the handler ran once");
-        let sent = attempts.load(Ordering::SeqCst);
-        assert_eq!(
-            sent, 2,
-            "one failed notice, then one retry by the duplicate"
-        );
-        let posts = discord.requests_for(channel_id.get());
-        let notice = |post: &String| post.contains(RetiredRuntimeError::CODE);
-        assert!(posts.len() == 2 && posts.iter().all(notice), "{posts:?}");
-        assert_eq!(runtime.foreground_effects_for_tests(), (1, 1, 0, 0, 0));
-        let load = crate::voice::announce_meta::load_voice_announcement_durable;
-        let live = load(&pool, message_id).await.expect("durable load");
-        assert!(live.is_none(), "the durable claim stays consumed");
 
         pool.close().await;
         pg_db.drop().await;

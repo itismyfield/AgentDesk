@@ -21,8 +21,6 @@ pub(in crate::services::discord) use managed_reset::reset_managed_process_sessio
 pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
-#[allow(dead_code)]
-pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 
@@ -404,8 +402,6 @@ async fn clear_channel_session_state_body(
         anyhow::bail!(reason);
     }
     let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
-    // From here the clear changes the turn, so no earlier approval survives success or failure.
-    super::super::turn_presence::entrypoints::withdraw(shared, channel_id.get(), "clear");
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions

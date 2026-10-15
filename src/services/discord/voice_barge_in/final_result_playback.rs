@@ -16,14 +16,6 @@ impl VoiceBargeInRuntime {
         let foreground = self
             .resolve_effective_foreground_config(voice_channel_id, background_channel_id)
             .await;
-        // The background result stays as delivered; no model summary and no fallback speech.
-        if let Err(retired) = super::utterance_pipeline::foreground_runtime(&foreground) {
-            if let Some(http) = shared.serenity_http_or_token_fallback() {
-                super::utterance_pipeline::post_retired_notice(&http, voice_channel_id, retired)
-                    .await;
-            }
-            return;
-        }
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         // #3911: scope the foreground registration to the generate `.await` via
         // a drop guard that OWNS it. Previously the manual `unregister` ran only

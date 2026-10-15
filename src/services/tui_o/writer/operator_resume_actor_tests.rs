@@ -234,7 +234,7 @@ async fn operator_resume_projection_does_not_overtake_a_real_schema_blocked_reco
     let (harness, path, _) = switched_over(b"");
     seed_approval(&harness, ShadowProvider::Claude);
     let line = serde_json::json!({"type":"assistant","uuid":"ambiguous","apiBlockIndex":0,
-        "message":{"id":"ambiguous","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}});
+        "message":{"id":"ambiguous","content":[{"type":"text","text":"a"},{"type":"image"}]}});
     append(&path, format!("{line}\n").as_bytes());
     let mut channel = harness.channel();
     let source = channel.cursors().next().unwrap().source.clone();

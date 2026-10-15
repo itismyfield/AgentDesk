@@ -8,7 +8,6 @@ use crate::services::provider::ProviderKind;
 pub enum ProviderSessionDriver {
     LegacyPrompt,
     TuiHosting,
-    ClaudeE,
 }
 
 impl ProviderSessionDriver {
@@ -16,51 +15,33 @@ impl ProviderSessionDriver {
         match self {
             Self::LegacyPrompt => "legacy-prompt",
             Self::TuiHosting => "tui-hosting",
-            Self::ClaudeE => "claude-e",
         }
     }
 }
 
-/// Phase 0 of the claude-e rollout. `RuntimeMode` is the operator-facing
-/// shape of `providers.{provider}.runtime` / per-channel `runtime`. It maps
-/// onto `ProviderSessionDriver` once driver availability and entrypoint
-/// support are considered:
-///
-/// | RuntimeMode | Resolved driver (when available) |
-/// |-------------|----------------------------------|
-/// | `Pipe`      | `LegacyPrompt`                   |
-/// | `Tui`       | `TuiHosting`                     |
-/// | `ClaudeE`   | `ClaudeE` (Claude provider only) |
-///
-/// See `docs/claude-e-rollout/decision-log.md`.
+/// Parsed configuration value; retired names never select an execution driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeMode {
     Pipe,
     Tui,
-    ClaudeE,
+    Retired,
 }
 
 impl RuntimeMode {
-    pub fn as_str(self) -> &'static str {
+    fn tui_request(self) -> Option<bool> {
         match self {
-            Self::Pipe => "pipe",
-            Self::Tui => "tui",
-            Self::ClaudeE => "claude-e",
+            Self::Pipe => Some(false),
+            Self::Tui => Some(true),
+            Self::Retired => None,
         }
     }
 
-    /// Parse the YAML `runtime` field. Unknown / empty values return `None`
-    /// so the legacy `tui_hosting` derivation can run as before.
-    ///
-    /// Accepted aliases are minimal on purpose: the canonical spellings
-    /// (`pipe` / `tui` / `claude-e`) plus the underscored form for each.
-    /// Typos like `claudee` are intentionally rejected so the warn-and-
-    /// fallback path runs instead of silently honouring the intent.
+    /// Unknown values retain the legacy fallback; removed aliases remain distinguishable.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "pipe" | "legacy" | "legacy_prompt" | "legacy-prompt" => Some(Self::Pipe),
             "tui" | "tui_hosting" | "tui-hosting" => Some(Self::Tui),
-            "claude-e" | "claude_e" => Some(Self::ClaudeE),
+            "claude-e" | "claude_e" => Some(Self::Retired),
             _ => None,
         }
     }
@@ -102,12 +83,10 @@ static PROVIDER_TUI_HOSTING: LazyLock<RwLock<BTreeMap<String, bool>>> =
 static PROVIDER_TUI_HOSTING_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-/// Phase 0 of the claude-e rollout. Mirrors the `runtime` field on
-/// `ProviderConfig` and per-channel config. Wins over `tui_hosting` when
-/// both are set, per `docs/claude-e-rollout/decision-log.md`.
-static PROVIDER_RUNTIME_MODE: LazyLock<RwLock<BTreeMap<String, RuntimeMode>>> =
+/// Explicit supported runtime choices, taking precedence over legacy `tui_hosting`.
+static PROVIDER_RUNTIME_MODE: LazyLock<RwLock<BTreeMap<String, bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), RuntimeMode>>> =
+static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64), bool>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
 /// Issue #2193 — runtime mirror of `providers.codex.remote_ssh_enabled`.
@@ -136,11 +115,9 @@ pub fn install_provider_hosting_config(config: &Config) {
         }
     }
     let mut channel_values = BTreeMap::new();
-    let mut runtime_mode_values: BTreeMap<String, RuntimeMode> = BTreeMap::new();
-    let mut runtime_mode_channel_values: BTreeMap<(String, u64), RuntimeMode> = BTreeMap::new();
-    // Phase 0: read the new `runtime` field for each provider, normalize the
-    // string, and surface invalid values as a single tracing warning so the
-    // operator can spot typos without breaking startup.
+    let mut runtime_mode_values: BTreeMap<String, bool> = BTreeMap::new();
+    let mut runtime_mode_channel_values: BTreeMap<(String, u64), bool> = BTreeMap::new();
+    // Only supported choices enter the execution mirrors. Strict loading rejects retired names.
     for (provider_id, provider_config) in &config.providers {
         if let Some(raw) = provider_config.runtime.as_deref() {
             let trimmed = raw.trim();
@@ -149,7 +126,10 @@ pub fn install_provider_hosting_config(config: &Config) {
             }
             match RuntimeMode::parse(trimmed) {
                 Some(mode) => {
-                    runtime_mode_values.insert(provider_id.trim().to_ascii_lowercase(), mode);
+                    if let Some(requested) = mode.tui_request() {
+                        runtime_mode_values
+                            .insert(provider_id.trim().to_ascii_lowercase(), requested);
+                    }
                 }
                 None => {
                     tracing::warn!(
@@ -178,8 +158,7 @@ pub fn install_provider_hosting_config(config: &Config) {
             if let Some(enabled) = channel.tui_hosting() {
                 channel_values.insert((provider_id.clone(), channel_id), enabled);
             }
-            // Phase 0: per-channel `runtime` override. `runtime` wins over
-            // `tui_hosting` per decision log entry 2026-05-27.
+            // Channel runtime overrides provider runtime and the legacy boolean.
             if let Some(raw) = channel.runtime_mode_raw() {
                 let trimmed = raw.trim();
                 if trimmed.is_empty() {
@@ -187,7 +166,10 @@ pub fn install_provider_hosting_config(config: &Config) {
                 }
                 match RuntimeMode::parse(trimmed) {
                     Some(mode) => {
-                        runtime_mode_channel_values.insert((provider_id, channel_id), mode);
+                        if let Some(requested) = mode.tui_request() {
+                            runtime_mode_channel_values
+                                .insert((provider_id, channel_id), requested);
+                        }
                     }
                     None => {
                         tracing::warn!(
@@ -225,10 +207,9 @@ pub fn install_provider_hosting_config(config: &Config) {
         "provider per-channel tui_hosting config installed"
     );
 
-    // Phase 0: install runtime mode mirrors (claude-e rollout).
     let runtime_mode_summary = runtime_mode_values
         .iter()
-        .map(|(provider, mode)| format!("{provider}={}", mode.as_str()))
+        .map(|(provider, mode)| format!("{provider}={mode}"))
         .collect::<Vec<_>>()
         .join(",");
     *PROVIDER_RUNTIME_MODE
@@ -240,7 +221,7 @@ pub fn install_provider_hosting_config(config: &Config) {
     );
     let runtime_mode_channel_summary = runtime_mode_channel_values
         .iter()
-        .map(|((provider, channel_id), mode)| format!("{provider}:{channel_id}={}", mode.as_str()))
+        .map(|((provider, channel_id), mode)| format!("{provider}:{channel_id}={mode}"))
         .collect::<Vec<_>>()
         .join(",");
     *PROVIDER_RUNTIME_MODE_BY_CHANNEL
@@ -273,164 +254,6 @@ pub fn codex_remote_ssh_enabled() -> bool {
     *CODEX_REMOTE_SSH_ENABLED
         .read()
         .unwrap_or_else(|error| error.into_inner())
-}
-
-/// A known runtime that no longer executes; consumers refuse the input, never re-select a driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RetiredRuntimeError(());
-
-impl RetiredRuntimeError {
-    /// Stable reason for API responses and logs.
-    pub const CODE: &'static str = "runtime_retired:claude-e";
-    /// What a user sees when a new input is refused.
-    pub const NEW_INPUT_NOTICE: &'static str = "claude-e runtime은 퇴역하여 요청을 실행하거나 대기열에 추가하지 않았습니다. 지원 runtime 설정을 확인한 뒤 다시 요청해 주세요.";
-}
-
-impl std::fmt::Display for RetiredRuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", Self::NEW_INPUT_NOTICE, Self::CODE)
-    }
-}
-
-impl std::error::Error for RetiredRuntimeError {}
-
-/// Drivers that already report `String` errors surface the user notice.
-impl From<RetiredRuntimeError> for String {
-    fn from(error: RetiredRuntimeError) -> Self {
-        error.to_string()
-    }
-}
-
-/// Fallible resolver. Every production selection is still `Ok`, exactly as the plain resolver.
-pub fn try_resolve_provider_session_selection_with_capability(
-    provider: &ProviderKind,
-    entrypoint_supports_tui_hosting: bool,
-) -> Result<ProviderSessionSelection, RetiredRuntimeError> {
-    try_resolve_provider_session_selection_with_channel(
-        provider,
-        entrypoint_supports_tui_hosting,
-        None,
-    )
-}
-
-pub fn try_resolve_provider_session_selection_with_channel(
-    provider: &ProviderKind,
-    entrypoint_supports_tui_hosting: bool,
-    channel_id: Option<u64>,
-) -> Result<ProviderSessionSelection, RetiredRuntimeError> {
-    #[cfg(test)]
-    if retired_runtime_for_tests::is_retired(provider, channel_id) {
-        return Err(RetiredRuntimeError(()));
-    }
-    Ok(resolve_provider_session_selection_with_channel(
-        provider,
-        entrypoint_supports_tui_hosting,
-        channel_id,
-    ))
-}
-
-/// The resolver's refusal for an input consumer that executes later or elsewhere.
-pub fn ensure_runtime_executable(
-    provider: &ProviderKind,
-    channel_id: Option<u64>,
-) -> Result<(), RetiredRuntimeError> {
-    try_resolve_provider_session_selection_with_channel(provider, true, channel_id).map(|_| ())
-}
-
-/// Test-only typed refusal for one provider/channel scope, visible to the installing thread only.
-#[cfg(test)]
-pub(crate) mod retired_runtime_for_tests {
-    use super::ProviderKind;
-    use std::cell::RefCell;
-
-    type Scope = (String, Option<u64>);
-
-    thread_local! {
-        static RETIRED: RefCell<Vec<Scope>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// Lifts its scope's refusal on drop.
-    pub(crate) struct Retired(Scope);
-
-    pub(crate) fn retire(provider: &ProviderKind, channel_id: Option<u64>) -> Retired {
-        let scope = (provider.as_str().to_ascii_lowercase(), channel_id);
-        RETIRED.with(|cell| cell.borrow_mut().push(scope.clone()));
-        Retired(scope)
-    }
-
-    pub(super) fn is_retired(provider: &ProviderKind, channel_id: Option<u64>) -> bool {
-        let scope = (provider.as_str().to_ascii_lowercase(), channel_id);
-        RETIRED.with(|cell| cell.borrow().contains(&scope))
-    }
-
-    impl Drop for Retired {
-        fn drop(&mut self) {
-            RETIRED.with(|cell| {
-                let mut scopes = cell.borrow_mut();
-                if let Some(at) = scopes.iter().position(|scope| *scope == self.0) {
-                    scopes.remove(at);
-                }
-            });
-        }
-    }
-
-    /// One Claude channel's `runtime` installed through the production mirror under the hosting
-    /// config lock; the defaults come back on drop.
-    pub(crate) struct ChannelRuntime {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    pub(crate) fn install_channel_runtime(channel_id: u64, runtime: &str) -> ChannelRuntime {
-        use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef};
-        let lock = super::TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let channel = AgentChannel::Detailed(AgentChannelConfig {
-            id: Some(channel_id.to_string()),
-            provider: Some("claude".to_string()),
-            runtime: Some(runtime.to_string()),
-            ..AgentChannelConfig::default()
-        });
-        let mut config = crate::config::Config::default();
-        config.agents.push(AgentDef {
-            id: "retired-runtime-fixture".to_string(),
-            name: "Retired Runtime Fixture".to_string(),
-            name_ko: None,
-            aliases: Vec::new(),
-            wake_word: None,
-            voice_enabled: false,
-            sensitivity_mode: None,
-            voice: crate::config::AgentVoiceConfig::default(),
-            provider: "claude".to_string(),
-            channels: AgentChannels::new().with("claude", channel),
-            keywords: Vec::new(),
-            department: None,
-            avatar_emoji: None,
-            preferred_intake_node_labels: None,
-        });
-        super::install_provider_hosting_config(&config);
-        ChannelRuntime { _lock: lock }
-    }
-
-    impl Drop for ChannelRuntime {
-        fn drop(&mut self) {
-            super::install_provider_hosting_config(&crate::config::Config::default());
-        }
-    }
-
-    /// A refusal holds for its exact provider/channel scope on the installing thread until drop.
-    #[test]
-    fn a_retired_scope_is_exact_thread_local_and_lifted_on_drop() {
-        let claude = ProviderKind::Claude;
-        let retired = retire(&claude, Some(7));
-        assert!(is_retired(&claude, Some(7)));
-        assert!(!is_retired(&claude, None));
-        assert!(!is_retired(&ProviderKind::Codex, Some(7)));
-        let elsewhere = std::thread::spawn(|| is_retired(&ProviderKind::Claude, Some(7)));
-        assert!(!elsewhere.join().expect("probe thread"));
-        drop(retired);
-        assert!(!is_retired(&claude, Some(7)));
-    }
 }
 
 pub fn resolve_provider_session_selection(provider: &ProviderKind) -> ProviderSessionSelection {
@@ -466,10 +289,7 @@ pub fn resolve_provider_session_selection_with_channel(
         })
         .unwrap_or(provider_default);
 
-    // Phase 0 of the claude-e rollout: the explicit `runtime` field wins
-    // over the legacy `tui_hosting` boolean when both are set. Channel-level
-    // override takes precedence over provider-level. See
-    // `docs/claude-e-rollout/decision-log.md`.
+    // Explicit channel runtime wins over provider runtime, then legacy hosting applies.
     let explicit_runtime_mode = channel_id
         .and_then(|cid| {
             PROVIDER_RUNTIME_MODE_BY_CHANNEL
@@ -486,87 +306,38 @@ pub fn resolve_provider_session_selection_with_channel(
                 .copied()
         });
 
-    let (effective_mode, requested_tui_hosting) = match explicit_runtime_mode {
-        Some(RuntimeMode::Pipe) => (RuntimeMode::Pipe, false),
-        Some(RuntimeMode::Tui) => (RuntimeMode::Tui, true),
-        Some(RuntimeMode::ClaudeE) => (RuntimeMode::ClaudeE, false),
-        None if tui_hosting_from_legacy => (RuntimeMode::Tui, true),
-        None => (RuntimeMode::Pipe, false),
+    let requested_tui_hosting = explicit_runtime_mode.unwrap_or(tui_hosting_from_legacy);
+    let (driver, fallback_reason) = if !requested_tui_hosting {
+        (ProviderSessionDriver::LegacyPrompt, None)
+    } else if !provider_tui_hosting_driver_available(provider) {
+        (
+            ProviderSessionDriver::LegacyPrompt,
+            Some("tui_hosting_driver_unavailable"),
+        )
+    } else if entrypoint_supports_tui_hosting {
+        (ProviderSessionDriver::TuiHosting, None)
+    } else {
+        (
+            ProviderSessionDriver::LegacyPrompt,
+            Some("entrypoint_not_tui_hosted"),
+        )
     };
-
-    match effective_mode {
-        RuntimeMode::Pipe => ProviderSessionSelection {
-            provider_id,
-            requested_tui_hosting,
-            driver: ProviderSessionDriver::LegacyPrompt,
-            fallback_reason: None,
-        },
-        RuntimeMode::Tui => {
-            if !provider_tui_hosting_driver_available(provider) {
-                return ProviderSessionSelection {
-                    provider_id,
-                    requested_tui_hosting,
-                    driver: ProviderSessionDriver::LegacyPrompt,
-                    fallback_reason: Some("tui_hosting_driver_unavailable"),
-                };
-            }
-            if entrypoint_supports_tui_hosting {
-                ProviderSessionSelection {
-                    provider_id,
-                    requested_tui_hosting,
-                    driver: ProviderSessionDriver::TuiHosting,
-                    fallback_reason: None,
-                }
-            } else {
-                ProviderSessionSelection {
-                    provider_id,
-                    requested_tui_hosting,
-                    driver: ProviderSessionDriver::LegacyPrompt,
-                    fallback_reason: Some("entrypoint_not_tui_hosted"),
-                }
-            }
-        }
-        RuntimeMode::ClaudeE => {
-            // Phase 0: only Claude can host `claude-e`. Other providers
-            // requesting it fall back to the legacy pipe driver with an
-            // explicit reason so the operator can correct the config.
-            if !matches!(provider, ProviderKind::Claude) {
-                return ProviderSessionSelection {
-                    provider_id,
-                    requested_tui_hosting,
-                    driver: ProviderSessionDriver::LegacyPrompt,
-                    fallback_reason: Some("claude_e_unsupported_for_provider"),
-                };
-            }
-            // Phase 1 of the claude-e rollout: the adapter module is
-            // wired. If the `claude-e` binary is missing on PATH, we
-            // fall back to the legacy `-p` driver with an explicit
-            // reason so a misconfiguration cannot break dispatch.
-            if !crate::services::claude_e::adapter_available() {
-                return ProviderSessionSelection {
-                    provider_id,
-                    requested_tui_hosting,
-                    driver: ProviderSessionDriver::LegacyPrompt,
-                    fallback_reason: Some("claude_e_binary_missing"),
-                };
-            }
-            ProviderSessionSelection {
-                provider_id,
-                requested_tui_hosting,
-                driver: ProviderSessionDriver::ClaudeE,
-                fallback_reason: None,
-            }
-        }
+    ProviderSessionSelection {
+        provider_id,
+        requested_tui_hosting,
+        driver,
+        fallback_reason,
     }
 }
 
-/// Phase 0 of the claude-e rollout. `runtime: tui` on a provider or channel
-/// counts as a TUI hosting request even when `tui_hosting` is unset, so the
-/// boot path (e.g. `claude_tui::hook_server` publish) does not skip the hook
-/// endpoint for operators who only set the new `runtime` field.
-fn provider_runtime_mode_explicit(config: &Config, provider_id: &str) -> Option<RuntimeMode> {
+/// Explicit supported runtime requests also determine whether boot publishes TUI hooks.
+fn provider_runtime_mode_explicit(config: &Config, provider_id: &str) -> Option<bool> {
     provider_setting(config, provider_id, |provider| {
-        provider.runtime.as_deref().and_then(RuntimeMode::parse)
+        provider
+            .runtime
+            .as_deref()
+            .and_then(RuntimeMode::parse)
+            .and_then(RuntimeMode::tui_request)
     })
 }
 
@@ -589,29 +360,25 @@ fn provider_setting<T>(
     matching.filter_map(|(_, provider)| field(provider)).last()
 }
 
-fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Option<RuntimeMode> {
+fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Option<bool> {
     channel
         .runtime_mode_raw()
         .as_deref()
         .and_then(|raw| RuntimeMode::parse(raw.trim()))
+        .and_then(RuntimeMode::tui_request)
 }
 
-/// Phase 0 of the claude-e rollout. Match `resolve_provider_session_*`
-/// precedence exactly: channel-level `runtime` wins, then provider-level
-/// `runtime`, then channel-level `tui_hosting`, then provider-level
-/// `tui_hosting`. Keeping this predicate aligned with the resolver
-/// prevents "hook published but no channel routes through TUI" drift
-/// (Phase 0 counter-review round 2 MAJOR).
+/// Match the installed resolver precedence so hook publication agrees with driver selection.
 pub(crate) fn channel_effective_tui_request(
     config: &Config,
     channel: &crate::config::AgentChannel,
     provider_id: &str,
 ) -> bool {
     if let Some(mode) = channel_runtime_mode_explicit(channel) {
-        return matches!(mode, RuntimeMode::Tui);
+        return mode;
     }
     if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
-        return matches!(mode, RuntimeMode::Tui);
+        return mode;
     }
     if let Some(legacy) = channel.tui_hosting() {
         return legacy;
@@ -621,7 +388,7 @@ pub(crate) fn channel_effective_tui_request(
 
 fn provider_default_effective_tui_request(config: &Config, provider_id: &str) -> bool {
     if let Some(mode) = provider_runtime_mode_explicit(config, provider_id) {
-        return matches!(mode, RuntimeMode::Tui);
+        return mode;
     }
     provider_tui_hosting(config, provider_id)
 }
@@ -904,8 +671,6 @@ mod tests {
         assert!(!codex_remote_ssh_enabled());
     }
 
-    // -------------------- Phase 0: claude-e rollout tests --------------------
-
     #[test]
     fn runtime_mode_parse_accepts_canonical_and_aliases() {
         assert_eq!(RuntimeMode::parse("pipe"), Some(RuntimeMode::Pipe));
@@ -913,9 +678,9 @@ mod tests {
         assert_eq!(RuntimeMode::parse("legacy"), Some(RuntimeMode::Pipe));
         assert_eq!(RuntimeMode::parse("tui"), Some(RuntimeMode::Tui));
         assert_eq!(RuntimeMode::parse("tui_hosting"), Some(RuntimeMode::Tui));
-        assert_eq!(RuntimeMode::parse("claude-e"), Some(RuntimeMode::ClaudeE));
-        assert_eq!(RuntimeMode::parse("Claude-E"), Some(RuntimeMode::ClaudeE));
-        assert_eq!(RuntimeMode::parse("claude_e"), Some(RuntimeMode::ClaudeE));
+        assert_eq!(RuntimeMode::parse("claude-e"), Some(RuntimeMode::Retired));
+        assert_eq!(RuntimeMode::parse("Claude-E"), Some(RuntimeMode::Retired));
+        assert_eq!(RuntimeMode::parse("claude_e"), Some(RuntimeMode::Retired));
         assert_eq!(RuntimeMode::parse(""), None);
         assert_eq!(RuntimeMode::parse("bogus"), None);
         // Phase 0 counter-review MINOR 4: typo variants must trigger the
@@ -970,68 +735,6 @@ mod tests {
         assert!(selection.requested_tui_hosting);
         assert_eq!(selection.driver, ProviderSessionDriver::TuiHosting);
         assert_eq!(selection.fallback_reason, None);
-
-        install_provider_hosting_config(&Config::default());
-    }
-
-    #[test]
-    fn provider_runtime_claude_e_on_claude_routes_to_adapter_when_available() {
-        // Phase 1 of the claude-e rollout: when the `claude-e` binary
-        // is on PATH the resolver returns `ProviderSessionDriver::ClaudeE`;
-        // otherwise it falls back to `LegacyPrompt` with
-        // `claude_e_binary_missing` so a misconfiguration cannot break
-        // dispatch. The assertion adapts to whichever environment the
-        // test runs in (developer host vs. clean CI).
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let mut config = Config::default();
-        config.providers.insert(
-            "claude".to_string(),
-            ProviderConfig {
-                tui_hosting: Some(true),
-                runtime: Some("claude-e".to_string()),
-                ..ProviderConfig::default()
-            },
-        );
-        install_provider_hosting_config(&config);
-
-        let selection = resolve_provider_session_selection(&ProviderKind::Claude);
-        assert!(!selection.requested_tui_hosting);
-        if crate::services::claude_e::adapter_available() {
-            assert_eq!(selection.driver, ProviderSessionDriver::ClaudeE);
-            assert_eq!(selection.fallback_reason, None);
-        } else {
-            assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
-            assert_eq!(selection.fallback_reason, Some("claude_e_binary_missing"));
-        }
-
-        install_provider_hosting_config(&Config::default());
-    }
-
-    #[test]
-    fn provider_runtime_claude_e_on_codex_falls_back_with_unsupported_reason() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let mut config = Config::default();
-        config.providers.insert(
-            "codex".to_string(),
-            ProviderConfig {
-                tui_hosting: Some(true),
-                runtime: Some("claude-e".to_string()),
-                ..ProviderConfig::default()
-            },
-        );
-        install_provider_hosting_config(&config);
-
-        let selection = resolve_provider_session_selection(&ProviderKind::Codex);
-
-        assert_eq!(selection.driver, ProviderSessionDriver::LegacyPrompt);
-        assert_eq!(
-            selection.fallback_reason,
-            Some("claude_e_unsupported_for_provider")
-        );
 
         install_provider_hosting_config(&Config::default());
     }
@@ -1161,10 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn any_requested_tui_hosting_skips_explicit_runtime_pipe_or_claude_e() {
-        // Phase 0: `runtime: pipe` and `runtime: claude-e` must NOT light up
-        // the hook endpoint even when `tui_hosting: true` is also present
-        // (explicit `runtime` wins).
+    fn any_requested_tui_hosting_skips_explicit_runtime_pipe() {
         let _guard = TEST_CONFIG_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1180,19 +880,6 @@ mod tests {
         );
         // Other providers default to no TUI, so this should be false overall.
         assert!(!any_requested_tui_hosting_driver_available(&pipe_config));
-
-        let mut claude_e_config = Config::default();
-        claude_e_config.providers.insert(
-            "claude".to_string(),
-            ProviderConfig {
-                tui_hosting: Some(true),
-                runtime: Some("claude-e".to_string()),
-                ..ProviderConfig::default()
-            },
-        );
-        assert!(!any_requested_tui_hosting_driver_available(
-            &claude_e_config
-        ));
 
         install_provider_hosting_config(&Config::default());
     }
@@ -1222,6 +909,58 @@ mod tests {
         install_provider_hosting_config(&Config::default());
     }
 
+    #[test]
+    fn graceful_retired_runtime_uses_supported_mirrors_and_matching_hook_predicates() {
+        let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _guard = TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for (provider_runtime, channel_runtime, legacy, expected) in [
+            (Some("claude-e"), None, true, true),
+            (Some(" CLAUDE_E "), None, false, false),
+            (Some("pipe"), Some("claude-e"), true, false),
+            (Some("claude_e"), Some("tui"), false, true),
+            (Some("tui"), Some("claude_e"), false, true),
+            (None, Some("claude-e"), false, false),
+            (None, Some(" CLAUDE_E "), true, true),
+        ] {
+            let mut config = Config::default();
+            config.providers.insert(
+                "claude".to_owned(),
+                ProviderConfig {
+                    runtime: provider_runtime.map(str::to_owned),
+                    tui_hosting: Some(legacy),
+                    ..ProviderConfig::default()
+                },
+            );
+            config.agents.push(test_agent_with_claude_channel_runtime(
+                "42",
+                channel_runtime,
+            ));
+            let channel = config.agents[0].channels.get("claude").unwrap();
+            assert_eq!(
+                channel_effective_tui_request(&config, channel, "claude"),
+                expected
+            );
+            install_provider_hosting_config(&config);
+            let selection = resolve_provider_session_selection_with_channel(
+                &ProviderKind::Claude,
+                true,
+                Some(42),
+            );
+            assert_eq!(selection.requested_tui_hosting, expected);
+            assert_eq!(
+                selection.driver,
+                if expected {
+                    ProviderSessionDriver::TuiHosting
+                } else {
+                    ProviderSessionDriver::LegacyPrompt
+                }
+            );
+        }
+        install_provider_hosting_config(&Config::default());
+    }
+
     fn test_agent_with_claude_channel_runtime(channel_id: &str, runtime: Option<&str>) -> AgentDef {
         AgentDef {
             id: "adk-dashboard-e2e".to_string(),
@@ -1247,63 +986,6 @@ mod tests {
             avatar_emoji: None,
             preferred_intake_node_labels: None,
         }
-    }
-
-    /// Dormant: under every production runtime, claude-e and its alias included, the fallible
-    /// resolver returns the plain resolver's selection and the input check passes.
-    #[test]
-    fn fallible_resolver_keeps_every_production_selection() {
-        let _guard = TEST_CONFIG_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let channel = 6_570_631_u64;
-        let runtimes = [
-            None,
-            Some("pipe"),
-            Some("tui"),
-            Some("claude-e"),
-            Some("claude_e"),
-        ];
-        for runtime in runtimes {
-            let mut config = Config::default();
-            for provider in ["claude", "codex"] {
-                let runtime = runtime.map(str::to_string);
-                let provider_config = ProviderConfig {
-                    runtime,
-                    ..ProviderConfig::default()
-                };
-                config
-                    .providers
-                    .insert(provider.to_string(), provider_config);
-            }
-            let agent = test_agent_with_claude_channel_runtime(&channel.to_string(), runtime);
-            config.agents.push(agent);
-            install_provider_hosting_config(&config);
-            for provider in [
-                ProviderKind::Claude,
-                ProviderKind::Codex,
-                ProviderKind::Qwen,
-            ] {
-                for channel_id in [None, Some(channel), Some(42)] {
-                    for capable in [true, false] {
-                        let plain = resolve_provider_session_selection_with_channel(
-                            &provider, capable, channel_id,
-                        );
-                        let fallible = try_resolve_provider_session_selection_with_channel(
-                            &provider, capable, channel_id,
-                        );
-                        let case = format!("{runtime:?} {provider:?} {channel_id:?} {capable}");
-                        assert_eq!(fallible, Ok(plain), "{case}");
-                    }
-                    assert_eq!(ensure_runtime_executable(&provider, channel_id), Ok(()));
-                }
-                let plain = resolve_provider_session_selection_with_capability(&provider, false);
-                let fallible =
-                    try_resolve_provider_session_selection_with_capability(&provider, false);
-                assert_eq!(fallible, Ok(plain), "{runtime:?} {provider:?}");
-            }
-        }
-        install_provider_hosting_config(&Config::default());
     }
 
     fn test_agent_with_claude_channel(channel_id: &str, tui_hosting: Option<bool>) -> AgentDef {

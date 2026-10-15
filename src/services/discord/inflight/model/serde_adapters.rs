@@ -23,7 +23,6 @@ where
         "claude_tui" => Some(RuntimeHandoffKind::ClaudeTui),
         "codex_tui" => Some(RuntimeHandoffKind::CodexTui),
         "process_backend" => Some(RuntimeHandoffKind::ProcessBackend),
-        "claude_e_adapter" => Some(RuntimeHandoffKind::ClaudeEAdapter),
         _ => None,
     }))
 }

@@ -831,7 +831,6 @@ fn deliver(
                 target.discard_pin();
                 return Err(Pending);
             }
-            crate::services::discord::presence_withdraw_target(provider, channel, "herdr_escape");
             attempted.store(true, Ordering::Release);
             let swapped = mutant("stop_sent_as_indeterminate");
             let result = match target.send_keys(&[HostKey::Escape]) {
