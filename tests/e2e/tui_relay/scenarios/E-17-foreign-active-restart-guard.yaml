@@ -26,8 +26,8 @@ notes: |
   wait_for_provider_hold_state — no sleeps), the matrix then waits until
   /api/health/detail surfaces the foreign mailbox as busy, runs the codex-tui
   restart guard expecting a refusal that names the foreign mailbox, then releases
-  the hold (cancel_turn) and asserts both channels idle. It uses claude-tui (not
-  claude-e) for the foreign hold because the restart guard inspects a
+  the hold (cancel_turn) and asserts both channels idle. It uses claude-tui
+  for the foreign hold because the restart guard inspects a
   relay-backed foreground mailbox.
 restart_guard:
   foreign_hold:

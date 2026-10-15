@@ -86,8 +86,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/writer/unpinned_past_tests.rs",
         "src/db/o_channel_activation_fence_tests.rs",
         "src/db/imsg_reply_tests.rs",
-        "src/services/tui_o/n1_observation/sink_tests.rs",
-        "src/services/tui_o/n1_observation_tests.rs",
         "src/db/replay_disposition_tests.rs",
         "src/db/replay_disposition/write_tests.rs",
         "src/services/discord/replay_policy/permit_tests.rs",
@@ -162,7 +160,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/queue_dispatch/input_effect_tests.rs",
         "src/services/discord/input_transition_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
-        "src/services/discord/input_runtime/effects_tests.rs",
         "src/services/discord/input_runtime/ordering_tests.rs",
         "src/services/discord/input_runtime/fence/g1b_modes_tests.rs",
         "src/services/discord/input_runtime/g1b_command_tests.rs",
@@ -742,6 +739,8 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_o/shadow/capture/observation/observation_tests.rs",
         "src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs",
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
+        "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
+        "src/services/session_host/herdr_gate/legacy_return_tests.rs",
     }
 )
 

@@ -1816,14 +1816,16 @@ mod migration {
     async fn s3act_b3b4a1_migration_applies_to_an_empty_database_and_reruns_as_a_no_op_pg() {
         let db = TestPostgresDb::create().await;
         let pool = bare_pool(&db).await;
-        crate::db::postgres::migrate(&pool)
+        migrator_through(140)
+            .run(&pool)
             .await
             .expect("migrate empty");
         assert!(table_exists(&pool).await, "0140 must create the table");
         let once = applied(&pool).await;
         assert_eq!(once.last().map(|(v, _, ok)| (*v, *ok)), Some((140, true)));
         let objects = other_objects(&pool).await;
-        crate::db::postgres::migrate(&pool)
+        migrator_through(140)
+            .run(&pool)
             .await
             .expect("re-run migrator");
         sqlx::raw_sql(include_str!(
@@ -1881,9 +1883,7 @@ mod migration {
         let before = other_objects(&pool).await;
         let migrations_before = applied(&pool).await;
         let rows_before = row_counts(&pool).await;
-        crate::db::postgres::migrate(&pool)
-            .await
-            .expect("apply 0140");
+        migrator_through(140).run(&pool).await.expect("apply 0140");
         assert!(table_exists(&pool).await);
         assert_eq!(
             other_objects(&pool).await,

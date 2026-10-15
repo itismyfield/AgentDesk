@@ -12,6 +12,7 @@ src/db/calendar_sync/postgres_tests.rs
 src/db/campaigns/tests.rs
 src/db/dispatched_sessions.rs
 src/db/dispatched_sessions/canonical_identity_pg_tests.rs
+src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs
 src/db/dispatched_sessions/rebind_override.rs
 src/db/dispatched_sessions/tests.rs
 src/db/dispatches/delivery_events.rs
@@ -330,6 +331,7 @@ db::calendar_sync::postgres_tests
 db::campaigns::tests
 db::dispatched_session_canonical_identity::pg_tests
 db::dispatched_session_rebind_override::tests
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests
 db::dispatched_sessions::tests
 db::dispatches::delivery_events::tests
@@ -808,6 +810,10 @@ db::dispatched_session_canonical_identity::pg_tests::hosted_execution_lookup_res
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_keeps_live_unknown_and_changed_rows_pg
 db::dispatched_session_canonical_identity::pg_tests::hosted_execution_thread_gc_resolves_the_host_before_the_tmux_probe_pg
 db::dispatched_session_rebind_override::tests::health_rebind_override_upserts_selectors_with_recorded_at_guard_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_cas_waits_for_concurrent_incarnation_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_exact_retired_pg_preserves_identity_and_survives_gc
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_heartbeat_is_measured_after_row_lock_pg
+db::dispatched_sessions::hosted_execution::legacy_return::high_risk_recovery::legacy_return_rejects_changed_inputs_and_live_unknown_records_pg
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::clearing_session_ids_resets_raw_transcript_watermark_evidence
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_preserves_provider_selectors
 db::dispatched_sessions::selector_cleanup_tests::session_authority_pg_tests::disconnect_session_and_prepare_retry_pg_skips_cancelled_dispatch
@@ -1331,10 +1337,12 @@ services::automation_candidate_materializer::iteration_result_tests::prepare_wor
 services::automation_candidate_materializer::iteration_result_tests::submit_iteration_result_rejects_cards_outside_active_loop_state_pg
 services::cluster::attachment_transfer::storage_tests::attachment_bundle_store_restart_identity_integrity_expiry_and_cleanup_pg
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
+services::cluster::channel_home_boot::tests::a_delegated_channel_is_adopted_by_its_target_after_the_gateway_drain_pg
 services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
+services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1622,7 +1630,6 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_ter
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
 services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
 services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
-services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_clear_move_fail_closed_pg
 services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg

@@ -117,11 +117,6 @@ class ScenarioFilter(unittest.TestCase):
         self.assertTrue(e16.get("steps"))
         self.assertNotIn("E-7", ids)
 
-    def test_retired_claude_e_has_no_scenarios(self):
-        self.assertEqual(
-            driver.load_scenarios(self.scenarios_dir, cell="claude-e"), [],
-        )
-
     def test_all_scenario_cells_are_supported(self):
         paths = sorted(self.scenarios_dir.glob("*.yaml"))
         self.assertTrue(paths)

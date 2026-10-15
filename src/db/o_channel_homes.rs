@@ -1,7 +1,6 @@
 //! Channel O home rows (`o_channel_homes`). Every transition is one conditional statement: a
 //! condition that no longer holds is [`HomeWrite::Stale`] and leaves the row unchanged. Each new
 //! epoch comes from one sequence, so no lifecycle of a channel repeats an earlier one's epoch.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::Duration;
 
@@ -84,6 +83,7 @@ pub(crate) struct ForceWindow(Duration);
 impl ForceWindow {
     pub(crate) const MIN: Self = Self(FORCE_AFTER);
 
+    #[cfg(test)]
     pub(crate) fn at_least(after: Duration) -> Option<Self> {
         (after >= FORCE_AFTER).then_some(Self(after))
     }
