@@ -698,4 +698,47 @@ mod writer_return {
         assert!(!gw.ready.accepts(WID));
         gw.end().await;
     }
+
+    /// Boot rows that cannot be read are not their absence: the runtime's first spawn starts no
+    /// writer, neither for the held candidate nor for a channel no watch follows.
+    #[tokio::test]
+    async fn unreadable_boot_rows_start_no_first_writer() {
+        const OTHER: u64 = 1_490_141_479_707_086_948;
+        let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
+        let channels = [(WID, ClaudeTui), (OTHER, ClaudeTui)];
+        let _selected = test_override::force_channels(&channels);
+        let _pending = test_override::force_candidates(&channels);
+        let runtime = tempfile::tempdir().unwrap();
+        let (gate, ready) = (
+            Arc::new(OwnershipGate::default()),
+            Arc::new(Readiness::default()),
+        );
+        gate.acquired();
+        let writers = Arc::new(ChannelWriters::new(Arc::clone(&gate), Arc::clone(&ready)));
+        let unread = Err(HomeError::Db(sqlx::Error::PoolTimedOut));
+        let (pool, reset, ports) = (lazy_pool(), counted(&Arc::default(), None), Arc::default());
+        let mut boot = boot(&pool, "gw", unread, vec![WID], reset, &ports).unwrap();
+        boot.writers = Some(Arc::clone(&writers));
+        start(Some(true), || Some(boot)).await;
+        let (io, root) = (
+            TestHost::new(std::iter::empty()),
+            runtime.path().to_path_buf(),
+        );
+        let parts_ready = Arc::clone(&ready);
+        writers.start_boot(ShadowProvider::Claude, true, move || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(root.clone()),
+            gate: Arc::clone(&gate),
+            readiness: Arc::clone(&parts_ready),
+        });
+        let hosted = (ready.is_hosted(WID), ready.is_hosted(OTHER));
+        let phases = (writers.phase(WID), writers.phase(OTHER));
+        assert_eq!(
+            (hosted, phases),
+            ((false, false), (None, None)),
+            "no first writer"
+        );
+        stop(WC).await;
+        channel_home::unregister(WC);
+    }
 }

@@ -855,6 +855,109 @@ pub(super) async fn return_worker_node(env: &Env) {
     node.stop().await;
 }
 
+/// T-H6 first spawn: a gateway restarting on its store's root while MINI holds the channel starts
+/// no writer for it from its first spawn through its watch's next round; MINI keeps posting.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_gateway_restart_under_a_worker_starts_no_writer_pg() {
+    let scene = Scene::new().await;
+    let before = Node::spawn(&scene, "th6_first_gateway_before", GW);
+    before.finish(Duration::from_secs(180)).await;
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
+    let mut worker = Node::spawn(&scene, "th6_first_worker", MINI);
+    worker.wait_signal("first.worker", WITHIN).await;
+    let gateway = Node::spawn(&scene, "th6_first_gateway", GW);
+    gateway.finish(Duration::from_secs(180)).await;
+    worker.finish(Duration::from_secs(120)).await;
+    assert_eq!(home(&scene).await, held, "the gateway's boot moved nothing");
+    let spans = post_spans(&lifecycle(scene.dir()).unwrap()).unwrap();
+    let posts: Vec<_> = spans
+        .iter()
+        .map(|span| (span.node.as_str(), span.content.as_str()))
+        .collect();
+    let expected = [
+        (GW, "gw-before"),
+        (MINI, "mini-before"),
+        (MINI, "mini-after"),
+    ];
+    assert_eq!(posts, expected);
+    scene.drop_db().await;
+}
+
+/// The gateway's earlier generation: with no row its writer posts once and leaves its store.
+pub(super) async fn first_gateway_before_node(env: &Env) {
+    let (node, writers) = Booted::boot_gateway(env, Discord::default().recording(env)).await;
+    until("the gateway writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("b1", "gw-before"));
+    node.until_posts(&["gw-before"]).await;
+    writers.stop(C).await;
+    node.stop().await;
+}
+
+/// The gateway: its watch's first round sees MINI's row before the runtime's first spawn runs, and
+/// from that spawn through the next round no writer of its own hosts, takes work or posts.
+pub(super) async fn first_gateway_node(env: &Env) {
+    use crate::services::cluster::channel_home_boot::rounds;
+    let discord = Discord::default().recording(env);
+    let (node, writers, first_spawn) = Booted::boot_gateway_homes(env, discord).await;
+    assert!(node.gates.is_empty(), "MINI's row mounts no gate here");
+    until("the watch's first round", WITHIN, || rounds(C) >= 1).await;
+    assert_eq!(rounds(C), 1, "the spawn runs before the next round");
+    first_spawn();
+    let writer = || {
+        let hosted = host::process_readiness().is_hosted(C);
+        (
+            node.accepts(),
+            hosted,
+            writers.phase(C),
+            node.discord().seen(),
+        )
+    };
+    let none = (false, false, None, Vec::<Seen>::new());
+    // Every non-quiet state seen in the window; a row each second gives a ready writer a POST.
+    let (mut observed, mut tick) = (Vec::new(), 0);
+    while rounds(C) < 2 {
+        if tick % 40 == 0 {
+            append(
+                &node.transcript,
+                &row(&format!("g{tick}"), "gw-must-not-post"),
+            );
+        }
+        let now = writer();
+        if now != none && !observed.contains(&now) {
+            observed.push(now);
+        }
+        tick += 1;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(observed, [], "no gateway writer before the next round");
+    tokio::time::sleep(POLL_INTERVAL * 3).await;
+    assert_eq!(writer(), none, "nor after it");
+    signal(&env.dir, "first.gateway");
+    node.stop().await;
+}
+
+/// The worker: it holds the channel through its own watch and lease and posts before and after the
+/// gateway's boot.
+pub(super) async fn first_worker_node(env: &Env) {
+    let epoch = epoch_of(env);
+    let node = Booted::boot_on(env, Discord::default().recording(env)).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the worker writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("w1", "mini-before"));
+    node.until_posts(&["mini-before"]).await;
+    signal(&env.dir, "first.worker");
+    wait_signal(&env.dir, "first.gateway", Duration::from_secs(150)).await;
+    assert!(node.accepts(), "the worker kept the channel");
+    append(&node.transcript, &row("w2", "mini-after"));
+    node.until_posts(&["mini-before", "mini-after"]).await;
+    node.stop().await;
+}
+
 /// T-H6 released target: booted through the runtime's `BootPort::reading`, MINI's watch leaves the
 /// released row alone until restored, then adopts it and the lease opens the home; no test adopt.
 #[tokio::test(flavor = "current_thread")]

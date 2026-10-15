@@ -16,7 +16,7 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::cluster::channel_home::{self, HomeGate, HomeOwnership};
 use crate::services::cluster::channel_home_boot::{
-    self, Boot, BootPort, ChannelWriters, ResetRefused, StartWriter,
+    self, Boot, BootPort, ChannelWriters, ResetRefused,
 };
 use crate::services::cluster::channel_home_drain::DrainPort;
 use crate::services::cluster::channel_home_port::ChannelHomePort;
@@ -2028,6 +2028,17 @@ impl Booted {
     /// A gateway node with no home row: its writers run under its acquired gateway authority and
     /// are supervised as the runtime's, so its candidate watch can return a reclaimed channel.
     pub(super) async fn boot_gateway(env: &Env, discord: Discord) -> (Self, Arc<ChannelWriters>) {
+        let (node, writers, first_spawn) = Self::boot_gateway_homes(env, discord).await;
+        first_spawn();
+        (node, writers)
+    }
+
+    /// [`Booted::boot_gateway`] with its homes started and the runtime's first writer spawn
+    /// (`ChannelWriters::start_boot`) left for the caller to run.
+    pub(super) async fn boot_gateway_homes(
+        env: &Env,
+        discord: Discord,
+    ) -> (Self, Arc<ChannelWriters>, Box<dyn FnOnce()>) {
         let (role, provider) = (env.role.clone(), ShadowProvider::Claude);
         let root = crate::config::runtime_root().expect("node root");
         let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
@@ -2073,14 +2084,8 @@ impl Booted {
             gate: Arc::clone(&gateway),
             readiness: host::process_readiness(),
         };
-        let owned = crate::services::tui_o::cutover::boot_ownership();
-        let started = host::start_managed(provider, true, owned, parts.clone());
-        let start: StartWriter = Arc::new(move |channel| {
-            let owned = crate::services::tui_o::cutover::boot_ownership();
-            let owned = owned.into_iter().filter(|(owned, ..)| *owned == channel);
-            host::start_managed(provider, true, owned.collect(), parts.clone()).pop()
-        });
-        writers.arm(Some(start), started);
+        let spawned = Arc::clone(&writers);
+        let first_spawn = Box::new(move || spawned.start_boot(provider, true, parts));
         let node = Self {
             pool,
             root,
@@ -2090,7 +2095,7 @@ impl Booted {
             writers: Vec::new(),
             _hosts: hosts,
         };
-        (node, writers)
+        (node, writers, first_spawn)
     }
 
     pub(super) fn discord(&self) -> &Discord {

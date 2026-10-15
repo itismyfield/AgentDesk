@@ -7,7 +7,7 @@ use super::*;
 use std::future::Future;
 use std::time::Duration;
 
-use crate::services::cluster::channel_home_boot::{ChannelWriters, StartWriter};
+use crate::services::cluster::channel_home_boot::ChannelWriters;
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
@@ -312,7 +312,7 @@ fn parts(
 
 /// Starts the writer host for this provider's gateway runtime; it never waits on the gateway.
 /// With delegated homes on, its writers are supervised so a reclaimed channel's watch can end and
-/// restart them.
+/// restart them, and a channel another node's boot row names starts none.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -327,21 +327,9 @@ pub(super) fn spawn(
         host::start(shadow, pg_gateway, || parts(shared, provider, config, None));
         return;
     };
-    let owned = crate::services::tui_o::cutover::boot_ownership();
-    let started = host::start_managed(shadow, pg_gateway, owned, || {
-        parts(shared, provider, config, None)
-    });
     let (shared, provider, config) = (Arc::clone(shared), provider.clone(), config.cloned());
-    let start = move |channel| {
-        let owned = crate::services::tui_o::cutover::boot_ownership();
-        let owned = owned
-            .into_iter()
-            .filter(|(owned, ..)| *owned == channel)
-            .collect();
-        let prepare = || parts(&shared, &provider, config.as_ref(), None);
-        host::start_managed(shadow, true, owned, prepare).pop()
-    };
-    writers.arm(pg_gateway.then(|| Arc::new(start) as StartWriter), started);
+    let prepare = move || parts(&shared, &provider, config.as_ref(), None);
+    writers.start_boot(shadow, pg_gateway, prepare);
 }
 
 type Writers = std::collections::BTreeMap<String, Arc<ChannelWriters>>;

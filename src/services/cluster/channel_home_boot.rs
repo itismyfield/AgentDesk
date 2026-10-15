@@ -1,7 +1,9 @@
 //! Starts, only with `runtime.channel_home_delegation_enabled` on, the delegated homes a provider
 //! runtime's boot rows name: one watch per home, one lease per held one, ended before a replacement.
 
-use std::collections::BTreeMap;
+#[cfg(test)]
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +24,10 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
 use crate::services::tui_o::cutover;
 use crate::services::tui_o::ownership::OwnershipGate;
-use crate::services::tui_o::writer::host::{ManagedWriterHandle, Readiness};
+use crate::services::tui_o::shadow::ShadowProvider;
+use crate::services::tui_o::writer::host::{
+    self, HostIo, HostParts, ManagedWriterHandle, Readiness,
+};
 
 type ResetFuture = Pin<Box<dyn Future<Output = Result<(), ResetRefused>> + Send>>;
 
@@ -158,6 +163,8 @@ pub(crate) struct ChannelWriters {
     gateway: Arc<OwnershipGate>,
     readiness: Arc<Readiness>,
     start: OnceLock<Option<StartWriter>>,
+    /// The channels the boot's rows name another node for; `None` until read, so nothing starts.
+    foreign: Mutex<Option<BTreeSet<u64>>>,
 }
 
 impl ChannelWriters {
@@ -169,7 +176,42 @@ impl ChannelWriters {
             gateway,
             readiness,
             start,
+            foreign: Mutex::default(),
         }
+    }
+
+    fn read_boot(&self, foreign: Option<BTreeSet<u64>>) {
+        *self.foreign.lock().unwrap_or_else(PoisonError::into_inner) = foreign;
+    }
+
+    /// The runtime's first writers: only the boot channels its row read admitted, none when it
+    /// failed, supervised here with later starts armed under the gateway lease.
+    pub(crate) fn start_boot<I: HostIo>(
+        &self,
+        provider: ShadowProvider,
+        pg_gateway: bool,
+        parts: impl Fn() -> HostParts<I> + Send + Sync + 'static,
+    ) {
+        let foreign = self
+            .foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        let foreign = if writer_mutant("first_spawn_ignores_boot_rows") {
+            Some(BTreeSet::new())
+        } else {
+            foreign
+        };
+        let mut owned = cutover::boot_ownership();
+        owned.retain(|(channel, ..)| foreign.as_ref().is_some_and(|rows| !rows.contains(channel)));
+        let started = host::start_managed(provider, pg_gateway, owned, &parts);
+        let start = move |channel| {
+            let owned = cutover::boot_ownership().into_iter();
+            let owned = owned.filter(|(owned, ..)| *owned == channel).collect();
+            host::start_managed(provider, true, owned, &parts).pop()
+        };
+        self.arm(pg_gateway.then(|| Arc::new(start) as StartWriter), started);
     }
 
     /// Supervises the writers the boot started and arms later starts; `None` (no gateway lease)
@@ -319,7 +361,16 @@ where
         tracing::error!("channel homes need a PG pool and cluster.instance_id; none started");
         return Vec::new();
     };
-    let (mut channels, unreadable) = match boot.rows.await {
+    let read = boot.rows.await;
+    if let Some(writers) = &boot.writers {
+        let foreign = read.as_ref().ok();
+        let foreign = foreign.map(|rows| foreign_rows(rows, &boot.provider, &boot.local));
+        #[cfg(test)]
+        let foreign = foreign
+            .or_else(|| writer_mutant("first_spawn_reads_error_as_absence").then(BTreeSet::new));
+        writers.read_boot(foreign);
+    }
+    let (mut channels, unreadable) = match read {
         Ok(rows) => (named(&rows, &boot.provider, &boot.local), false),
         Err(error) => {
             tracing::error!(%error, "channel home rows unreadable at boot; candidates held");
@@ -376,6 +427,14 @@ fn named(rows: &[ChannelHome], provider: &str, local: &str) -> Vec<String> {
         .filter(names)
         .map(|row| row.channel_id.clone())
         .collect()
+}
+
+/// The channels with a row this boot mounts no gate for: another node's, or another provider's.
+fn foreign_rows(rows: &[ChannelHome], provider: &str, local: &str) -> BTreeSet<u64> {
+    let named = named(rows, provider, local);
+    let ids = rows.iter().map(|row| &row.channel_id);
+    let ids = ids.filter(|id| !named.contains(id));
+    ids.filter_map(|id| id.parse().ok()).collect()
 }
 
 /// A holder's running lease and the epoch it renews.
@@ -564,9 +623,22 @@ where
                 }
             }
         }
+        #[cfg(test)]
+        ROUNDS.with(|rounds| *rounds.borrow_mut().entry(seen.id).or_default() += 1);
         tokio::time::sleep(RENEW_EVERY).await;
     }
     lease.end().await;
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROUNDS: RefCell<BTreeMap<u64, u64>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// How many rounds the channel's watches on this thread have finished, for tests to order by.
+#[cfg(test)]
+pub(crate) fn rounds(channel: u64) -> u64 {
+    ROUNDS.with(|rounds| rounds.borrow().get(&channel).copied().unwrap_or(0))
 }
 
 struct Watched {
