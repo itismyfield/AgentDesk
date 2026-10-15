@@ -7,7 +7,8 @@ module (`crate::<path>`), file or top-level directory literally. A full-run
 trigger, an inclusion or module path this cannot resolve, the kill switch, an
 error, an empty selection or one of at least 40% of a lane runs that lane in
 full. `plan` decides once; `run` replays the decision in each consumer, refuses
-a plan it cannot reproduce and has run_test_lane prove every planned id ran.
+a plan it cannot reproduce and has run_test_lane prove every planned id ran,
+except main's non-PG filter replay ids, which run outside the ledger as on main.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -348,9 +350,25 @@ def run_pg(root: Path, ids: list[str]) -> int:
 
 
 def run_sweep(root: Path, ids: list[str]) -> int:
-    return run_lane(root, "non-pg-sweep", ids, [
-        "env", "-u", "AGENTDESK_ROOT_DIR", "python3", "scripts/ci/lib-test-artifact.py", "run",
-        "--", "cargo", "test", "--lib", "--", "--exact", *ids])
+    """Planned ids under run_test_lane, except NON_PG_FILTER_REPLAY ids: main replays those
+    outside the ledger, so they run the same way here and each must still report a verdict."""
+    runner, coverage = tools()[:2]
+    replay = set(coverage.load_non_pg_filter_replay(root))
+    judged = [test_id for test_id in ids if test_id not in replay]
+    replayed = [test_id for test_id in ids if test_id in replay]
+    if judged and (rc := run_lane(root, "non-pg-sweep", judged, [
+            "env", "-u", "AGENTDESK_ROOT_DIR", "python3", "scripts/ci/lib-test-artifact.py", "run",
+            "--", "cargo", "test", "--lib", "--", "--exact", *judged])):
+        return rc
+    if not replayed:
+        return 0
+    rc, outcome = runner.run_and_capture(
+        ["bash", "-c", f'cd {shlex.quote(str(root))} && {PREPARED} --exact "$@"', "bash",
+         *replayed], None)
+    if missing := sorted(set(replayed) - outcome.executed - outcome.ignored):
+        print(f"ERROR test-selection sweep: replayed ids without a verdict: {' '.join(missing)}",
+              file=sys.stderr)
+    return rc or int(bool(missing))
 
 
 def main(argv: list[str] | None = None) -> int:

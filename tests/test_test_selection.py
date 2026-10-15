@@ -428,6 +428,43 @@ class ReplayTests(unittest.TestCase):
         shard_recipe = (REPO_ROOT / "justfile").read_text("utf-8").split("\ntest-postgres-shard:", 1)[1]
         self.assertIn("&& just test-postgres-continuity", shard_recipe.split("\n\n", 1)[0])
 
+    def run_sweep(self, ids: list[str], reported=None, replay_rc=0):
+        """run_sweep with both runs faked: the ids run_test_lane judges, the ids replayed outside
+        it, and the replay run exiting `replay_rc` with a verdict for `reported` (default: all)."""
+        judged, replayed, real = [], [], subprocess.run
+        runner = ts.tools()[0]
+
+        def fake_run(command, *args, **kwargs):
+            if command[0] == "git":
+                return real(command, *args, **kwargs)
+            expected = command[command.index("--expected-ids") + 1]
+            judged.append((Path(expected).read_text().split(), command[command.index("--exact") + 1:]))
+            return subprocess.CompletedProcess(command, 0)
+
+        def fake_capture(command, log_path):
+            asked = command[command.index("bash", 1) + 1:]
+            replayed.append(asked)
+            outcome = runner.Outcome()
+            outcome.executed.update(asked if reported is None else reported)
+            return replay_rc, outcome
+
+        with mock.patch.object(ts.subprocess, "run", fake_run), \
+                mock.patch.object(runner, "run_and_capture", fake_capture):
+            return ts.run_sweep(self.repo.root, ids), judged, replayed
+
+    def test_replay_ids_run_outside_the_ledger_and_none_is_dropped(self) -> None:
+        replay = "alpha::changed::tests::pg_named_but_free"
+        ids = self.repo.selected(self.plan, "sweep")
+        self.assertIn(replay, ids)
+        rest = [test_id for test_id in ids if test_id != replay]
+        rc, judged, replayed = self.run_sweep(ids)
+        self.assertEqual((rc, judged, replayed), (0, [(rest, rest)], [[replay]]))
+        self.assertEqual(sorted(rest + replayed[0]), sorted(ids))  # every planned id runs once
+        self.assertEqual(self.run_sweep(ids, reported=[])[0], 1)  # a replay id with no verdict
+        self.assertEqual(self.run_sweep(ids, replay_rc=101)[0], 101)  # a failing replay test
+        self.assertEqual(self.run_sweep([replay])[1:], ([], [[replay]]))
+        self.assertEqual(self.run_sweep(rest)[1:], ([(rest, rest)], []))
+
     def test_full_mode_runs_mains_commands_and_plan_writes_its_outputs(self) -> None:
         full = json.loads(json.dumps(self.plan))
         for entry in full["lanes"].values():
