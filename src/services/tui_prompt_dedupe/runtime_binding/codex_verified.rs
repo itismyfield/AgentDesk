@@ -509,6 +509,72 @@ pub(super) fn publish_proof(
     Ok(true)
 }
 
+/// Records the source a successful resume spawn executed as that execution's ExplicitResume proof.
+pub(crate) fn record_executed_resume(
+    context: &BindingContext,
+    selected_session_id: &str,
+    selected_rollout_path: &Path,
+) -> io::Result<bool> {
+    tc::with_tmux_source_authority(&context.tmux_session, |authority| {
+        validate_context(authority, context)?;
+        let fold = executed_resume(
+            authority,
+            context,
+            selected_session_id,
+            Some(selected_rollout_path),
+        )?;
+        publish_proof(authority, context, &fold)
+    })
+}
+
+fn executed_resume(
+    authority: &TmuxSourceAuthority<'_>,
+    context: &BindingContext,
+    executed: &str,
+    path: Option<&Path>,
+) -> io::Result<Fold> {
+    let fold = binding_events::codex::read_ownership(context)?;
+    if fold.verified.is_some() {
+        return Ok(fold);
+    }
+    let probe = Claim {
+        session_id: executed.to_owned(),
+        path: path.map(Path::to_path_buf),
+        evidence: ClaimEvidence::ExplicitResume {
+            executed_session_id: executed.to_owned(),
+        },
+    };
+    if !claim_eligible(context, &probe) {
+        return Err(invalid("Codex executed resume is not this launch"));
+    }
+    let descriptor = |claim: &Claim| {
+        native(context, claim)
+            .map_err(|_| invalid("Codex resume descriptor unavailable"))
+            .and_then(|source| source_id(&source))
+    };
+    let source = descriptor(&probe)?;
+    let same = |claim: &Claim| {
+        (descriptor(claim)? == source)
+            .then_some(())
+            .ok_or_else(|| invalid("Codex descriptor changed before commit"))
+    };
+    // The durable claim names the canonical file the verifier opened, not the selected spelling.
+    let claim = Claim {
+        path: Some(source.path.clone()),
+        ..probe
+    };
+    binding_events::codex::commit_executed_resume_published(
+        context,
+        &claim,
+        source.clone(),
+        || {
+            validate_context(authority, context)?;
+            same(&claim)
+        },
+        &same,
+    )
+}
+
 pub(crate) fn observe_verified_codex_hook(
     payload_session: Option<&str>,
     payload: &serde_json::Value,
@@ -595,6 +661,14 @@ pub(crate) fn resolve_under_authority(authority: &TmuxSourceAuthority<'_>) -> In
         Err(_) => return IngressOutcome::Unavailable(UnavailableReason::HistoryUnreadable),
     };
     let result = (|| -> io::Result<bool> {
+        // The current spawn marker follows the resume gates, so it proves the resume executed.
+        if let Some(executed) = context
+            .expected_native_session_id
+            .as_deref()
+            .filter(|_| context.launch_mode == "resume")
+        {
+            let _ = executed_resume(authority, &context, executed, None);
+        }
         let mut fold = binding_events::codex::read_ownership(&context)?;
         for _ in 0..=fold.pending.len() {
             let before = fold.clone();
