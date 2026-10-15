@@ -79,7 +79,10 @@ fn run(
         }
         let admission = composer_lock::composer_admission(session, || Some(before.clone()));
         let owner = busy_inject::composer_owner(&before);
-        let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&before);
+        let Some(viewport) = pane.capture_viewport() else {
+            return Some(stopped(DraftState::Unchanged));
+        };
+        let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&viewport);
         let unpainted = !plain.lines().any(|row| row.trim_start().starts_with('❯'))
             || plain
                 .lines()

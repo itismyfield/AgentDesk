@@ -225,17 +225,25 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
     let original = fs::read_to_string(&shim).unwrap();
     for listed in [true, false] {
         for (i, fault) in [
+            "scrollback",
             "capture",
             "pin",
             "unpainted",
             "partial",
             "banner",
             "continuation",
+            "viewport_read",
+            "viewport_resize",
         ]
         .into_iter()
         .enumerate()
         {
-            if !listed && fault == "continuation" {
+            if !listed
+                && matches!(
+                    fault,
+                    "continuation" | "scrollback" | "viewport_read" | "viewport_resize"
+                )
+            {
                 continue;
             }
             let channel = 6_899_950 + i as u64 + if listed { 0 } else { 10 };
@@ -250,19 +258,46 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     "fresh"
                 },
                 match fault {
-                    "partial" => "❯ \n",
-                    "banner" => "Ready for input (type message + Enter)\n",
-                    "continuation" => "❯ human text\n  ❯\n",
-                    _ => "Claude is starting…\n",
-                }
-                .into(),
+                    "scrollback" => format!(
+                        "{}{}\x1b[2J\x1b[HClaude is starting…\n",
+                        view("[User: previous] old prompt", false),
+                        (0..55)
+                            .map(|i| format!("startup output {i}\n"))
+                            .collect::<String>()
+                    ),
+                    "partial" => "❯ \n".into(),
+                    "banner" => "Ready for input (type message + Enter)\n".into(),
+                    "continuation" => "❯ human text\n  ❯\n".into(),
+                    _ => "Claude is starting…\n".into(),
+                },
                 "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
                 PROMPT,
             );
+            if fault == "scrollback" {
+                let target = format!("={name}:");
+                let history = f.tmux(&["capture-pane", "-p", "-J", "-t", &target, "-S", "-80"]);
+                let viewport = f.tmux(&["capture-pane", "-p", "-t", &target]);
+                assert!(history.contains("❯\u{a0}[User: previous] old prompt"));
+                assert_eq!(
+                    busy_inject::composer_owner(&history),
+                    busy_inject::ComposerOwner::Unread
+                );
+                assert!(viewport.contains("Claude is starting…"));
+                assert!(
+                    !viewport.contains('❯'),
+                    "old composer is outside the viewport"
+                );
+            }
             let hook = format!(
-                "pin=0; capture=0\nfor arg in \"$@\"; do\n case \"$arg\" in *'#{{window_panes}}'*) pin=1;; capture-pane) capture=1;; esac\ndone\n\
+                "pin=0; capture=0; viewport=0\nfor arg in \"$@\"; do\n case \"$arg\" in *'#{{window_panes}}'*) pin=1;; capture-pane) capture=1;; 0) viewport=1;; esac\ndone\n\
                  if [ \"$pin\" = 1 ] && [ ! -f {failed} ]; then\n\
                   if [ '{fault}' = pin ] || {{ [ '{fault}' = capture ] && [ \"$capture\" = 1 ]; }}; then touch {failed}; exit 1; fi\nfi\n\
+                 if [ \"$pin\" = 1 ] && [ \"$capture\" = 1 ] && [ \"$viewport\" = 1 ] && [ ! -f {failed} ]; then\n\
+                  case '{fault}' in\n\
+                   viewport_read) touch {failed}; exit 1;;\n\
+                   viewport_resize) {real} -L {socket} -f /dev/null \"$@\"\n\
+                    {real} -L {socket} resize-window -t ={name}: -x 161 -y 40\n touch {failed}\n exit 0;;\n\
+                  esac\nfi\n\
                  if [ \"$capture\" = 1 ] && [ \"$pin\" = 0 ] && [ ! -f {release} ]; then\n\
                   {real} -L {socket} -f /dev/null \"$@\"\n touch {release}\n\
                   readiness_polls=0\n while [ ! -f {ready} ]; do\n\
@@ -328,7 +363,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 "fresh entry listed={listed} fault={fault} effects={:?} result={result:?}",
                 events(&root)
             );
-            if fault == "continuation" {
+            if matches!(fault, "continuation" | "viewport_read" | "viewport_resize") {
                 assert!(matches!(
                     result,
                     Err(guarded_outcome::SubmissionError::Guarded(
@@ -337,9 +372,14 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                 ));
                 assert!(events(&root).is_empty());
                 assert_eq!(attempt.fenced.load(Ordering::SeqCst), 0);
-                let visible = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
-                assert!(visible.contains("❯ human text"));
-                assert!(visible.lines().any(|row| row.starts_with("  ❯")));
+                if fault == "continuation" {
+                    let visible = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+                    assert!(visible.contains("❯ human text"));
+                    assert!(visible.lines().any(|row| row.starts_with("  ❯")));
+                } else {
+                    assert!(root.join("read-failed").exists());
+                    assert!(!root.join("release").exists());
+                }
                 continue;
             }
             assert!(result.is_ok(), "listed={listed}, fault={fault}: {result:?}");
