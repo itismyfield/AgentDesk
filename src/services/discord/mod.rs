@@ -107,10 +107,7 @@ mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
-pub(crate) use turn_presence::entrypoints::{
-    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
-    withdraw_unmounted as presence_withdraw_unmounted,
-};
+pub(crate) use turn_presence::entrypoints::Lease as PresenceLease;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
