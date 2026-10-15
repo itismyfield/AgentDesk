@@ -12613,6 +12613,7 @@ services::tui_o::repost::io::tests::f1r_an_unpolled_request_dropped_sends_and_co
 services::tui_o::repost::io::tests::f6_gateway_and_delegated_transport_share_rate_authority
 services::tui_o::repost::io::tests::f6_hookable_overflow_on_success_never_reclassifies_or_reposts
 services::tui_o::repost::io::tests::repost_sends_keep_one_nonce_and_marker_outside_the_content
+services::tui_o::repost::io::tests::settle_over_http::a_lost_post_is_absent_only_when_a_real_read_proves_history_readable
 services::tui_o::repost::o_piece_ledger_tests::a_new_holder_or_serial_reaches_the_same_row_and_a_failed_read_is_no_empty_row_pg
 services::tui_o::repost::o_piece_ledger_tests::a_receipt_resolves_its_piece_once_and_never_moves_to_another_piece_pg
 services::tui_o::repost::o_piece_ledger_tests::a_slot_spent_before_its_post_is_never_refunded_and_slot_two_is_the_last_pg
@@ -12862,6 +12863,7 @@ services::tui_o::writer::tests::a_piece_is_prepared_under_ownership_then_posted_
 services::tui_o::writer::tests::a_prepared_left_by_a_crash_is_settled_before_the_next_post
 services::tui_o::writer::tests::a_refused_post_blocks_the_channel_even_after_reopening
 services::tui_o::writer::tests::a_restarted_writer_recovers_the_newest_post_from_its_ledger
+services::tui_o::writer::tests::a_settlement_ends_at_its_deadline_however_slowly_full_pages_arrive
 services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_posted_it
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post

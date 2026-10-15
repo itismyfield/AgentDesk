@@ -454,6 +454,13 @@ async fn settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out
         ),
         "an empty page with no own post read back proves nothing"
     );
+    assert!(
+        matches!(
+            confirm::settle(&port, CHANNEL, 1001, "same", false, &[4242]).await,
+            Verdict::Unresolved(_)
+        ),
+        "an own post gone with a 404 proves nothing"
+    );
     port.unreadable.store(true, Ordering::SeqCst);
     assert!(matches!(
         confirm::settle(&port, CHANNEL, 1001, "same", false, &proof).await,
