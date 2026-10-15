@@ -340,9 +340,7 @@ fn n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance() {
             .unwrap()
             .cancel
             .store(true, Ordering::Release);
-        let transcript = concat!(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"n1a-live-task\",\"name\":\"Task\",\"input\":{\"description\":\"n1a footer task\",\"prompt\":\"keep running\",\"subagent_type\":\"general-purpose\"}}]}}\n",
-        );
+        let transcript = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"n1a-live-task\",\"name\":\"Task\",\"input\":{\"description\":\"n1a footer task\",\"prompt\":\"keep running\",\"subagent_type\":\"general-purpose\"}}]}}\n";
         std::fs::write(&output, transcript).unwrap();
         let binding = TuiRuntimeBinding {
             runtime_kind: RuntimeHandoffKind::ClaudeTui,
@@ -489,3 +487,8 @@ fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_witho
         assert!(h.unhandled_requests().is_empty());
     });
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "claude_idle_o_transition_tests.rs"]
+mod claude_idle_o_transition;

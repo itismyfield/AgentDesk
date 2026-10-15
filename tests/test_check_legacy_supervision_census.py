@@ -44,6 +44,19 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertIn('"src/still_test.rs"', self.path.read_text())
         self.assertIn('"src/fixture_tests.rs"', self.path.read_text())
 
+    def test_split_pin_edits_child_and_preserves_delegate(self):
+        child = self.root / 'scripts/test_only_module_skip_pin_paths.py'
+        child.write_text(self.original)
+        delegate = 'from test_only_module_skip_pin_paths import *\n'
+        self.path.write_text(delegate)
+        (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
+        self.assertIsNone(self.outcome(('src/promoted.rs',)))
+        self.assertEqual(self.path.read_text(), delegate)
+        source = child.read_text()
+        self.assertNotIn('"src/promoted.rs"', source)
+        self.assertIn('"src/new_tests.rs"', source)
+        self.assertIn('"src/still_test.rs"', source)
+
     def test_omitted_promotion_refuses_removal_without_writing(self):
         self.assertEqual(self.outcome(), 'refusing pin removal')
         self.assertEqual(self.path.read_text(), self.original)

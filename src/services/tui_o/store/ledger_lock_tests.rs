@@ -29,6 +29,7 @@ fn pending(runtime: &Path) -> (OStore, SourceId, std::path::PathBuf) {
             source: source.clone(),
             seq: 1,
             parent: None,
+            hot_candidate: None,
             committed_at: Utc::now(),
             boundary: Boundary::Pending {
                 candidates: vec![0],

@@ -37,6 +37,28 @@ pub struct SourceLink {
     pub parent: Option<SourceId>,
     pub committed_at: DateTime<Utc>,
     pub boundary: Boundary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_candidate: Option<HotCandidate>,
+}
+
+/// Fixed at first hot attachment; an old Pending never gains this eligibility on restore.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotCandidate {
+    pub channel: u64,
+    pub pane: String,
+    pub nonce: String,
+    pub parent: SourceId,
+}
+
+/// The binding and captured snapshots that justified an automatic start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryEvidence {
+    pub candidate: HotCandidate,
+    pub seq: u64,
+    pub through: u64,
+    pub prefix_hash: String,
+    pub parent_through: u64,
+    pub parent_hash: String,
 }
 
 /// The source an old one was rotated to and what that hop measured. The extra fields sit beside
@@ -146,6 +168,19 @@ impl ChannelStore {
         for link in rotation.links.values_mut() {
             let from = self.ledger.boundary_resolved(&link.source);
             if let (Boundary::Pending { .. }, Some(from)) = (&link.boundary, from) {
+                if let Some(evidence) = self.ledger.boundary_evidence(&link.source) {
+                    if link.hot_candidate.as_ref() != Some(&evidence.candidate)
+                        || link.seq != evidence.seq
+                        || evidence.candidate.channel != self.init.channel
+                        || evidence.candidate.parent == link.source
+                        || from >= evidence.through
+                    {
+                        return Err(damage("automatic boundary evidence does not match link"));
+                    }
+                    link.parent = Some(evidence.candidate.parent.clone());
+                } else {
+                    link.hot_candidate = None;
+                }
                 link.boundary = Boundary::Owed { from };
                 applied.push(link.source.clone());
             }
@@ -155,6 +190,59 @@ impl ChannelStore {
             self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))?;
         }
         Ok(applied)
+    }
+
+    /// Appends/fsyncs proof before applying parent and start together through the resolution path.
+    pub(crate) fn resolve_automatic_boundary(
+        &mut self,
+        source: &SourceId,
+        from: u64,
+        evidence: BoundaryEvidence,
+    ) -> Result<(), StoreError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(LEDGER_FILE))?;
+        let mut file = durable::LockedFile::try_lock(file)?;
+        if ledger::resolution(&mut file, source)?.is_some() {
+            return Err(StoreError::Rejected(
+                "boundary already resolved; reopen the writer".into(),
+            ));
+        }
+        let rotation = self.rotation()?;
+        let link = rotation
+            .link(source)
+            .ok_or_else(|| damage("missing pending link"))?;
+        let snapshot = |source: &SourceId, through, hash: &str| {
+            self.cursor(source)
+                .is_some_and(|c| c.captured_through == through && c.prefix_hash == hash)
+        };
+        if !matches!(link.boundary, Boundary::Pending { .. })
+            || link.seq != evidence.seq
+            || link.hot_candidate.as_ref() != Some(&evidence.candidate)
+            || evidence.candidate.channel != self.init.channel
+            || evidence.candidate.parent == *source
+            || from >= evidence.through
+            || !snapshot(source, evidence.through, &evidence.prefix_hash)
+            || !snapshot(
+                &evidence.candidate.parent,
+                evidence.parent_through,
+                &evidence.parent_hash,
+            )
+            || self.ledger.boundary_resolved(source).is_some()
+        {
+            return Err(damage("stale automatic boundary proof"));
+        }
+        self.append_ledger(LedgerEntry::BoundaryResolved {
+            source: source.clone(),
+            from,
+            excluded_range: 0..from,
+            operator: "claude_content_continuity".into(),
+            at: Utc::now(),
+            evidence: Some(Box::new(evidence)),
+        })?;
+        self.apply_resolved_boundaries()?;
+        Ok(())
     }
 }
 
@@ -245,6 +333,7 @@ impl OStore {
             excluded_range: 0..from,
             operator,
             at,
+            evidence: None,
         };
         append(&mut file, at, &entry)?;
         Ok((link.source.clone(), from))

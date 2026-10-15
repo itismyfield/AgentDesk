@@ -10,6 +10,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::rotation::BoundaryEvidence;
 use super::{StoreError, damage};
 use crate::services::discord::runtime_store::fsync_parent_dir;
 use crate::services::tui_o::shadow::{SourceId, UnitKey};
@@ -80,6 +81,8 @@ pub enum LedgerEntry {
         excluded_range: Range<u64>,
         operator: String,
         at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<Box<BoundaryEvidence>>,
     },
 }
 
@@ -140,7 +143,7 @@ pub struct LedgerState {
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
-    resolved: HashMap<SourceId, u64>,
+    resolved: HashMap<SourceId, (u64, Option<Box<BoundaryEvidence>>)>,
     violation: Option<String>,
     exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
     approvals: BTreeMap<u64, ResumeApproval>,
@@ -257,7 +260,11 @@ impl LedgerState {
 
     /// The start an operator resolved for a pending source; the first entry stands.
     pub fn boundary_resolved(&self, source: &SourceId) -> Option<u64> {
-        self.resolved.get(source).copied()
+        self.resolved.get(source).map(|(from, _)| *from)
+    }
+
+    pub(crate) fn boundary_evidence(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
+        self.resolved.get(source)?.1.as_deref()
     }
 
     /// Ownership evidence that pauses the channel: a serial out of order, two open pieces,
@@ -387,8 +394,13 @@ impl LedgerState {
                     ));
                 }
             }
-            LedgerEntry::BoundaryResolved { source, from, .. } => {
-                self.resolved.entry(source).or_insert(from);
+            LedgerEntry::BoundaryResolved {
+                source,
+                from,
+                evidence,
+                ..
+            } => {
+                self.resolved.entry(source).or_insert((from, evidence));
             }
         }
     }
