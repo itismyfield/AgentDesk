@@ -215,7 +215,7 @@ impl<B: BindingEvents> Sources<B> {
                     if fp.len > through {
                         let source = reader.source.clone();
                         self.unretire(writer, &source)?;
-                        writer.alarm(WriterAlarm::RetiredSourceGrew { source });
+                        transition::regrowth_alarm(writer, source);
                     } else if now >= until {
                         self.readers[index].capture = None;
                     }
@@ -597,7 +597,7 @@ impl<B: BindingEvents> Sources<B> {
         }
         for source in grew_back {
             self.unretire(writer, &source)?;
-            writer.alarm(WriterAlarm::RetiredSourceGrew { source });
+            transition::regrowth_alarm(writer, source);
         }
         let count = self.readers.iter().filter(|r| r.reading()).count();
         if count > MAX_READERS && !self.readers_alarmed {

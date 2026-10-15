@@ -116,9 +116,6 @@ E2E_TURN_START_TIMEOUT_MAX_S = 180.0
 # one second and the default two observations may be raised to at most three.
 E2E_FINAL_REFETCH_INTERVAL_MAX_S = 60.0
 E2E_FINAL_REFETCHES_MAX = 3
-# o_panel_below.rs re-posts a completed panel below O's last post for FOLLOW_WINDOW
-# (30s); the extra 5s covers that last POST and DELETE.
-COMPLETION_MOVE_WAIT_S = 35.0
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -4744,6 +4741,40 @@ def _assert_provider_hold_marker_seen(
     )
 
 
+# Completed-panel chrome; the idle-recap card is a separate post, not the turn's panel.
+_PANEL_COMPLETION_PATTERNS = tuple(
+    pattern for pattern in assertions._COMPLETION_CHROME_PATTERNS
+    if pattern is not assertions._IDLE_RECAP_COMPLETION_PATTERN
+)
+
+
+def completed_panel_in_place(window: assertions.Window) -> None:
+    """Pass completion chrome above the body only as the turn's one panel, seen edited from a
+    running state to completed under its own id, with no panel posted again or deleted."""
+    def matches(content: Any, patterns: tuple[Any, ...]) -> bool:
+        return any(pattern.search(str(content or "")) for pattern in patterns)
+
+    rows = [row for row in window.raw_messages if not assertions.is_our_send(row)]
+    completed = [str(row.get("id") or "") for row in rows
+                 if matches(row.get("content"), _PANEL_COMPLETION_PATTERNS)]
+    deleted = [str(row.get("id") or "") for row in rows
+               if str(row.get("id") or "") in window.deleted_ids
+               and matches(row.get("content"), assertions._STATUS_PATTERNS)]
+    if len(completed) != 1 or deleted:
+        raise assertions.AssertionError(
+            f"completion panel posted again or deleted: completed={completed} deleted={deleted}"
+        )
+    if not any(
+        str(update.get("id") or "") == completed[0]
+        and matches(update.get("after"), _PANEL_COMPLETION_PATTERNS)
+        and not matches(update.get("before"), _PANEL_COMPLETION_PATTERNS)
+        for update in window.message_updates
+    ):
+        raise assertions.AssertionError(
+            f"completion panel {completed[0]} above the body was not seen edited in place"
+        )
+
+
 def run_assertion(
     spec: dict[str, Any],
     *,
@@ -5005,8 +5036,8 @@ def run_assertion(
         body_marker = params.get("body_marker") if isinstance(params, dict) else params
         required = bool(params.get("required", False)) if isinstance(params, dict) else False
         body_marker = expand_marker(str(body_marker))
-        trace, move_wait = None, False
-        for attempt in range(int(COMPLETION_MOVE_WAIT_S // 2) + 2):
+        trace, bound, last_attempt = None, 10.0, 3
+        for attempt in range(last_attempt + 1):
             try:
                 assertions.completion_chrome_after_body(
                     window,
@@ -5014,25 +5045,19 @@ def run_assertion(
                     required=required,
                 )
                 break
+            except assertions.CompletionOrderError:
+                # A panel opened before the body stays above it; it passes only completed in place.
+                completed_panel_in_place(window)
+                break
             except assertions.AssertionError:
                 first = min((at for body, at in (record or {}).get("_body_observations", {}).items()
                              if body_marker in body), default=None)
                 if pending_refetch is None or first is None:
                     raise
-                try:
-                    assertions.completion_chrome_after_body(window, body_marker=body_marker)
-                except assertions.CompletionOrderError:
-                    # A completed panel above the body may still be moved below it.
-                    move_wait = True
-                bound, last_attempt = (
-                    (COMPLETION_MOVE_WAIT_S, int(COMPLETION_MOVE_WAIT_S // 2) + 1)
-                    if move_wait else (10.0, 3)
-                )
                 if trace is None:
                     trace = {"refetches": 0, "deadline_at": first + bound,
                              "elapsed_s": time.monotonic() - first, "outcome": "FAIL"}
                     record.setdefault("completion_rechecks", []).append(trace)
-                trace["deadline_at"] = first + bound
                 if attempt >= last_attempt:
                     trace["outcome"] = "EXHAUSTED"
                     raise

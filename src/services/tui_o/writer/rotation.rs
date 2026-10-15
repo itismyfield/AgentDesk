@@ -50,6 +50,7 @@ mod owe;
 pub(crate) mod provenance;
 #[path = "rotation/readers.rs"]
 mod readers;
+pub(crate) mod transition;
 use fork_lineage::Lineage;
 pub use owe::Owe;
 
@@ -592,6 +593,9 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        let verified = crate::services::tui_prompt_dedupe::codex_verified::historical_source_proven(
+            event, &new,
+        );
         // A source an earlier event of this batch attached is the stored name of its file now.
         let mut stored = |source: &SourceId| self.names.bind_name(writer.store(), source);
         let old = old.map(&mut stored).transpose()?;
@@ -618,7 +622,11 @@ impl<B: BindingEvents> Sources<B> {
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
             let unread = past_bind::unread_before(log, event.seq, &new, attached);
-            let boundary = past_bind::first_boundary(cause, parent.is_some(), unread);
+            let boundary = if verified {
+                Boundary::Owed { from: 0 }
+            } else {
+                past_bind::first_boundary(cause, parent.is_some(), unread)
+            };
             let link = SourceLink {
                 source: new.clone(),
                 seq: event.seq,
@@ -893,3 +901,5 @@ pub(crate) mod probe {
             .map(|w| w.observed_at)
     }
 }
+
+mod retained_capture;

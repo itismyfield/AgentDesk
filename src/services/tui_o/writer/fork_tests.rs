@@ -455,7 +455,10 @@ async fn a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator() {
         "{tag} resolved posts"
     );
     assert_eq!(boundary(harness, b), Boundary::Owed { from: end });
-    let grew = WriterAlarm::RetiredSourceGrew { source: b.clone() };
+    let grew = WriterAlarm::RetiredSourceGrew {
+        source: b.clone(),
+        cleanup_history: None,
+    };
     assert_eq!(harness.alarms.taken(), [grew]);
     halt(stop, task).await;
 }

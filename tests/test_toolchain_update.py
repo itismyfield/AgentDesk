@@ -127,7 +127,7 @@ def check_for(key: str, *, tier: str, method: str) -> update.ToolCheck:
 
 
 class InventoryAndDraftTests(unittest.TestCase):
-    def test_inventory_matches_issue_4555_without_silent_omissions(self) -> None:
+    def test_inventory_matches_supported_tools_without_silent_omissions(self) -> None:
         inventory = tool_inventory()
         self.assertEqual(
             {spec.key for spec in inventory},
@@ -135,7 +135,6 @@ class InventoryAndDraftTests(unittest.TestCase):
                 "claude",
                 "codex",
                 "ocx",
-                "claude-e",
                 "cswap",
                 "cargo-rustc",
                 "tmux",
@@ -235,9 +234,13 @@ class InventoryAndDraftTests(unittest.TestCase):
 class ApprovalAndApplyTests(unittest.TestCase):
     def test_destructive_npm_hygiene_requires_per_tool_approval(self) -> None:
         runner = FakeRunner()
-        with tempfile.TemporaryDirectory() as temp:
+        spec = replace(next(item for item in tool_inventory() if item.key == "codex"), tier="hygiene")
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch.object(update, "tool_inventory", return_value=(spec,)),
+        ):
             _, draft, _ = update.write_draft(
-                [check_for("claude-e", tier="hygiene", method="npm-g")], Path(temp)
+                [check_for("codex", tier="hygiene", method="npm-g")], Path(temp)
             )
             with self.assertRaises(update.ApprovalError):
                 update.apply_draft(
@@ -247,7 +250,7 @@ class ApprovalAndApplyTests(unittest.TestCase):
                     safe_window_confirmation=update.SAFE_WINDOW_CONFIRMATION,
                     runner=runner,
                 )
-        self.assertNotIn(("npm", "install", "-g", "claude-e@1.1.0"), runner.calls)
+        self.assertNotIn(("npm", "install", "-g", "@openai/codex@1.1.0"), runner.calls)
 
     def test_installer_hygiene_requires_per_tool_approval(self) -> None:
         runner = FakeRunner()
@@ -768,7 +771,7 @@ class SmokeGateTests(unittest.TestCase):
         results = update.run_smoke_profile("node", runner, strict=True)
         inventory = next(result for result in results if result.check == "node global CLI inventory")
         self.assertFalse(inventory.ok)
-        self.assertIn("expected=3", inventory.detail)
+        self.assertIn("expected=2", inventory.detail)
         self.assertIn("@openai/codex", inventory.detail)
 
     def test_node_smoke_probes_every_manifest_npm_global_cli(self) -> None:
@@ -783,7 +786,7 @@ class SmokeGateTests(unittest.TestCase):
         )
         results = update.run_smoke_profile("node", runner, strict=True)
         self.assertTrue(all(result.ok for result in results), results)
-        for command in (("codex", "--version"), ("ocx", "--version"), ("claude-e", "--version")):
+        for command in (("codex", "--version"), ("ocx", "--version")):
             self.assertIn(command, runner.calls)
 
     def test_postgresql_strict_gate_requires_server_comparison(self) -> None:

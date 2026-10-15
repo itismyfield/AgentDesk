@@ -17,7 +17,7 @@ services, and manual-only tools are reported explicitly rather than silently dro
 | Update method | Targets | Authority |
 |---|---|---|
 | native installer | `claude` | approval required; never scheduled for apply |
-| npm global | `codex`, `ocx`, `claude-e` | `codex`/`ocx` approval tier; all npm mutations, including hygiene `claude-e`, require an exact per-tool approval marker |
+| npm global | `codex`, `ocx` | approval tier; all npm mutations, including tools classified as hygiene, require an exact per-tool approval marker |
 | uv tool | `cswap` (`claude-swap`) | approval required because `--list --json` has drifted |
 | rustup | `cargo/rustc` | hygiene candidate; per-tool approval required; rustup binary self-update disabled; post-update compiler smoke required |
 | Homebrew | `tmux`, `gh`, `node`, `python@3.14`, `uv`, `pipx`, `jq`, `ripgrep`, `ffmpeg`, `whisper-cpp`, `postgresql@17` | `tmux`, `node`, and PostgreSQL require approval; the rest are hygiene candidates |
@@ -65,7 +65,7 @@ python3 "$ROOT/scripts/toolchain_update.py" apply \
 
 `--apply-hygiene` selects every hygiene row whose draft decision is `update-available`.
 Native/self-updater/rustup/npm mutations remain approval-gated even when their tier is hygiene, so
-`claude-e`, `cargo/rustc`, and `opencode` must be approved first. Rustup toolchain updates pass
+`cargo/rustc` and `opencode` must be approved first. Rustup toolchain updates pass
 `--no-self-update`, so they cannot silently replace the rustup binary. Report-only rows cannot enter
 the apply path. The launchd plist contains neither `approve` nor `apply` and cannot cross either gate.
 
@@ -82,7 +82,7 @@ result is an unapproved version and fails before smoke:
 - `ocx health` must succeed after the version probe. This catches the proxy-stop behavior observed
   during prior `ocx update` use; the script does not restart the proxy automatically.
 - `tmux -V` must parse; Node must load `npm ls -g --depth=0 --json`, retain every npm-global CLI in
-  the manifest (`codex`, `ocx`, `claude-e`), and successfully probe every corresponding binary.
+  the manifest (`codex`, `ocx`), and successfully probe every corresponding binary.
 - PostgreSQL requires both `psql --version` and a matching server major from `SHOW server_version`.
   A strict apply therefore requires `AGENTDESK_DATABASE_URL` or `DATABASE_URL`.
 - Rust checks the actual rustup `stable` rustc/cargo pair; Homebrew hygiene tools, `edge-tts`, and

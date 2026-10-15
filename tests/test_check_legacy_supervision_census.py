@@ -6,6 +6,7 @@ import sys
 from unittest.mock import patch
 from pathlib import Path
 from scripts import check_legacy_supervision_census as guard
+from scripts.rust_lex import StripState, strip_line
 
 
 class SkipPromotionTests(unittest.TestCase):
@@ -56,6 +57,23 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertNotIn('"src/promoted.rs"', source)
         self.assertIn('"src/new_tests.rs"', source)
         self.assertIn('"src/still_test.rs"', source)
+    def test_explicit_deletion_removes_only_missing_pin(self):
+        (self.root / 'src/fixture_tests.rs').unlink()
+        with patch.object(guard.classifier._SKIP_PIN, 'PINNED_TEST_ONLY_MODULE_FILES',
+                          frozenset(('src/fixture_tests.rs', 'src/still_test.rs'))):
+            guard.sync_skips(self.root, deleted_paths=('src/fixture_tests.rs',))
+        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertIn('"src/still_test.rs"', self.path.read_text())
+
+    def test_existing_deletion_path_refuses_without_writing(self):
+        with self.assertRaisesRegex(RuntimeError, 'deletion path still exists: src/still_test.rs'):
+            guard.sync_skips(self.root, deleted_paths=('src/still_test.rs',))
+        self.assertEqual(self.path.read_text(), self.original)
+
+    def test_unpinned_deletion_refuses_without_writing(self):
+        with self.assertRaisesRegex(RuntimeError, 'deletion is not pinned: src/missing.rs'):
+            guard.sync_skips(self.root, deleted_paths=('src/missing.rs',))
+        self.assertEqual(self.path.read_text(), self.original)
 
     def test_omitted_promotion_refuses_removal_without_writing(self):
         self.assertEqual(self.outcome(), 'refusing pin removal')
@@ -84,13 +102,33 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
         self.assertIn('"src/still_test.rs"', source)
 
+    def test_explicit_deleted_pin_removes_only_missing_path(self):
+        missing = 'src/fixture_tests.rs'
+        (self.root / missing).unlink()
+        guard.sync_skips(self.root, ('src/promoted.rs',), (missing,))
+        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertIn('"src/still_test.rs"', self.path.read_text())
 
-class N4DInstallerDormancyTests(unittest.TestCase):
+    def test_deleted_pin_refuses_existing_unpinned_or_implicit_removal(self):
+        for path, expected in (
+            ('src/fixture_tests.rs', 'deletion path still exists: src/fixture_tests.rs'),
+            ('src/missing.rs', 'deletion is not pinned: src/missing.rs'),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    guard.sync_skips(self.root, ('src/promoted.rs',), (path,))
+                self.assertEqual(self.path.read_text(), self.original)
+        (self.root / 'src/fixture_tests.rs').unlink()
+        self.assertEqual(self.outcome(('src/promoted.rs',)), 'refusing pin removal')
+        self.assertEqual(self.path.read_text(), self.original)
+
+
+class RemovedRetiredPathTests(unittest.TestCase):
     INSTALLER = 'src/services/discord/watchers/lifecycle/o_only_install.rs'
     SYMBOL = re.compile(r'\b(?:install_retired_o_watcher|claim_retired_o_watcher_for_host|o_only_install|OOnlyInstall(?:Request|Outcome|Reason))\b')
 
     def errors(self, raw, code, name):
-        errors = [f'{name}: production installer symbol {m.group()}' for m in self.SYMBOL.finditer(code)]
+        errors = [f'{name}: removed installer symbol {m.group()}' for m in self.SYMBOL.finditer(code)]
         lines = code.splitlines()
         for match in re.finditer(r'\binclude\s*!\s*\([^;]*?\)|#\[[^\]]*\]', raw, re.S):
             if 'o_only_install' not in match.group():
@@ -99,20 +137,26 @@ class N4DInstallerDormancyTests(unittest.TestCase):
             column = match.start() - raw.rfind('\n', 0, match.start()) - 1
             active = lines[line][column:] if line < len(lines) else ''
             if active.startswith('#[') or re.match(r'include\s*!', active):
-                errors.append(f'{name}: production installer reinclude')
+                errors.append(f'{name}: removed installer reinclude')
         return errors
 
     def inspect(self, source):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'source.rs'
             path.write_text(source)
-            return self.errors(source, guard.classifier._production_text(path), 'source.rs')
+            state = StripState()
+            code = '\n'.join(strip_line(line, state) for line in source.splitlines())
+            return self.errors(source, code, 'source.rs')
 
-    def test_actual_installer_has_its_own_dormant_production_census(self):
+    def test_installer_files_and_symbols_are_physically_removed(self):
         root = Path.cwd()
         files, skips = guard.classifier._scan_inputs(root, guard.classifier.PINNED_TEST_ONLY_MODULE_FILES)
-        self.assertIn(root / self.INSTALLER, files)
-        self.assertNotIn(root / self.INSTALLER, skips, 'installer must be scanned as production')
+        for relative in (self.INSTALLER, self.INSTALLER.replace('.rs', '_tests.rs')):
+            path = root / relative
+            self.assertFalse(path.exists(), relative)
+            self.assertNotIn(path, files)
+            self.assertNotIn(path, skips)
+        self.assertIn(root / 'src/services/discord/watchers/lifecycle/n4d2_entry_test.rs', skips)
         source = (root / 'src/services/discord/watchers/lifecycle/n4d2_boundary_tests.rs').read_text()
         census = re.findall(
             r'fn n4d2_dormant_census_counts_actual_production_callers\(\)\s*\{\s*let script = r#"(.*?)"#;',
@@ -123,7 +167,7 @@ class N4DInstallerDormancyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines(), [
             'canonical_retired_production_writers=0',
-            'restore_retired_o_watchers_owner_runtime_boot_callers=0',
+            'removed_retired_install_restore_retry_symbols=0',
             'canonical_retired_condition_unchanged=true',
             'activation_ready=false',
         ])
@@ -135,26 +179,28 @@ class N4DInstallerDormancyTests(unittest.TestCase):
             'use crate::services::discord::install_retired_o_watcher as hidden;',
             'pub use hidden::OOnlyInstallRequest as Request;',
             'fn startup() { claim_retired_o_watcher_for_host(args); }',
+            '#[cfg(test)] struct OOnlyInstallReason;',
         ):
             with self.subTest(source=source):
                 self.assertTrue(self.inspect(source))
 
-    def test_installer_cfg_removal_and_reinclude_fail_without_hiding_linux(self):
+    def test_installer_reinclude_fails_in_every_cfg(self):
         for item in (
             '#[path = "watchers/lifecycle/o_only_install.rs"] mod hidden;',
             'include!("watchers/lifecycle/o_only_install.rs");',
             'pub use hidden::install_retired_o_watcher;',
         ):
             with self.subTest(item=item):
-                self.assertEqual(self.inspect('#[cfg(test)]\n' + item), [])
-                self.assertTrue(self.inspect(item), 'removing the test-only gate must fail')
+                self.assertTrue(self.inspect('#[cfg(test)]\n' + item))
+                self.assertTrue(self.inspect(item))
                 self.assertTrue(self.inspect('#[cfg(any(test, target_os = "linux"))]\n' + item))
 
-    def test_installer_prose_and_test_only_items_are_not_production_callers(self):
+    def test_installer_prose_is_ignored_but_test_only_symbols_are_removed(self):
         source = ('// install_retired_o_watcher\n'
-                  'fn prose() { let a = r#"include!(\"o_only_install.rs\");"#; }\n'
-                  '#[cfg(test)] fn fixture() { install_retired_o_watcher(request); }')
+                  'fn prose() { let a = r#"include!(\"o_only_install.rs\");"#; }\n')
         self.assertEqual(self.inspect(source), [])
+        self.assertTrue(self.inspect(
+            '#[cfg(test)] fn fixture() { install_retired_o_watcher(request); }'))
 
 
 class DormantCensusTests(unittest.TestCase):
@@ -243,8 +289,8 @@ class DormantCensusTests(unittest.TestCase):
         self.assertRegex(errors[0], r"re-pin 'confirm_at_boot': '[0-9a-f]{64}'")
 
     def test_edit_outside_protected_functions_passes(self):
-        edited = lambda code: code.replace('let mut boundaries = Vec::new();',
-                                           'let mut boundaries = Vec::with_capacity(4);', 1)
+        edited = lambda code: code.replace('let retire = |channel|',
+                                           'let retire = |channel: u64|', 1)
         self.assertNotEqual(edited(guard.classifier._production_text(Path(self.TURN))),
                             guard.classifier._production_text(Path(self.TURN)))
         self.assertEqual(self.protected_audit(self.TURN, edited), [])

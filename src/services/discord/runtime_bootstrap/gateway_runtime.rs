@@ -53,35 +53,12 @@ pub(super) async fn run_bot_start_gateway_runtime(
     let voice_receiver_for_setup = voice_receiver.clone();
 
     let slash_commands = run_bot_build_slash_commands();
+    // Only a gateway reaches here, so standby and REST runtimes never start the ingress shadow.
+    let ingress_shadow =
+        super::super::ingress_shadow::ShadowConfig::of(&crate::config::load_graceful());
 
     let framework = poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: slash_commands,
-            command_check: Some(|ctx| {
-                Box::pin(async move {
-                    let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
-                    let allowed = provider_handles_channel(
-                        ctx.serenity_context(),
-                        &ctx.data().provider,
-                        &settings_snapshot,
-                        ctx.channel_id(),
-                    )
-                    .await;
-                    if !allowed {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
-                            ctx.command().name,
-                            ctx.channel_id(),
-                            ctx.data().provider.as_str()
-                        );
-                    }
-                    Ok(allowed)
-                })
-            }),
-            event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
-            ..Default::default()
-        })
+        .options(run_bot_framework_options(slash_commands))
         .setup(move |ctx, _ready, framework| {
             let shared_for_migrate = shared_clone.clone();
             let health_registry_for_setup = health_registry.clone();
@@ -89,6 +66,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
             let token_for_ready = token_owned.clone();
             let voice_config_for_setup = voice_config_for_setup.clone();
             let voice_receiver_for_setup = voice_receiver_for_setup.clone();
+            let ingress_shadow = ingress_shadow.clone();
             Box::pin(run_bot_framework_setup(
                 ctx,
                 _ready,
@@ -104,6 +82,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
                 startup_reconcile_remaining,
                 startup_doctor_started,
                 api_port,
+                ingress_shadow,
             ))
         })
         .build();
@@ -149,4 +128,41 @@ pub(super) async fn run_bot_start_gateway_runtime(
         api_port,
     )
     .await;
+}
+
+/// The production framework options: slash commands, their channel guard and the event handler.
+pub(in crate::services::discord) fn run_bot_framework_options(
+    commands: Vec<poise::Command<Data, Error>>,
+) -> poise::FrameworkOptions<Data, Error> {
+    poise::FrameworkOptions {
+        commands,
+        command_check: Some(|ctx| {
+            Box::pin(async move {
+                let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
+                let allowed = provider_handles_channel(
+                    ctx.serenity_context(),
+                    &ctx.data().provider,
+                    &settings_snapshot,
+                    ctx.channel_id(),
+                )
+                .await;
+                if !allowed {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
+                        ctx.command().name,
+                        ctx.channel_id(),
+                        ctx.data().provider.as_str()
+                    );
+                }
+                Ok(allowed)
+            })
+        }),
+        event_handler: |ctx, event, _framework, data| {
+            // handle_event's only production caller, so every gateway event is observed before any branch.
+            super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
+            Box::pin(handle_event(ctx, event, data))
+        },
+        ..Default::default()
+    }
 }

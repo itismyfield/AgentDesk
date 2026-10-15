@@ -46,7 +46,7 @@ def write_workflow(
     mutation_step: str | None = None,
 ) -> None:
     commands = [
-        "env -u AGENTDESK_ROOT_DIR "
+        "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- "
         + " ".join(lane["command"])
         + " -- --test-threads=1"
         for lane in lanes
@@ -68,7 +68,9 @@ def write_workflow(
                 "if": "${{ !cancelled() }}",
                 "needs": [contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
             },
-            contract.RELAY_AUTHORITY_TARGETS_JOB: {"steps": steps},
+            contract.RELAY_AUTHORITY_TARGETS_JOB: {
+                "needs": ["lib_test_prepare"], "if": "${{ !cancelled() }}", "steps": steps,
+            },
             contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
                 "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
                 "env": {
@@ -103,6 +105,14 @@ def manifest_path(
     return temporary, path
 
 
+def isolate_from_runner_artifact(case: unittest.TestCase) -> None:
+    # An inherited ADK_LIB_TEST_ARTIFACT makes run_lane read the runner's binary, not the fixture.
+    environment = mock.patch.dict(os.environ)
+    environment.start()
+    case.addCleanup(environment.stop)
+    os.environ.pop("ADK_LIB_TEST_ARTIFACT", None)
+
+
 class ManifestContract(unittest.TestCase):
     def test_execution_graph_cannot_skip_contract_lanes(self) -> None:
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
@@ -111,6 +121,8 @@ class ManifestContract(unittest.TestCase):
             (contract.RELAY_AUTHORITY_JOB, "if", None),
             (contract.RELAY_AUTHORITY_JOB, "needs", [contract.RELAY_AUTHORITY_TARGETS_JOB]),
             (contract.RELAY_AUTHORITY_JOB, "continue-on-error", True),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", None),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", None),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", ["changes"]),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "false"),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "continue-on-error", True),
@@ -219,8 +231,8 @@ class ManifestContract(unittest.TestCase):
         self.assertIn("t5-structural-signal-authority-teardown",
                       {gap["name"] for gap in gaps})
         job = contract.load_relay_authority_job(REPO_ROOT)
-        self.assertNotIn("if", job)
-        self.assertNotIn("needs", job)
+        self.assertEqual(job["if"], "${{ !cancelled() }}")
+        self.assertIn(job["needs"], ("lib_test_prepare", ["lib_test_prepare"]))
         workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
         for lane in selected:
             command = contract.expected_workflow_command(lane)
@@ -409,7 +421,7 @@ class ManifestContract(unittest.TestCase):
 
 RELAY_C1_LANE = "t5-c1-rowless-terminal-ledger-and-lease"
 CENSUS_COMMAND = (
-    "          env -u AGENTDESK_ROOT_DIR cargo test --lib "
+    "          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
     "services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1"
 )
 
@@ -442,7 +454,7 @@ def add_undeclared_lane(payload: dict, root: Path) -> None:
         command=["cargo", "test", "--lib", "services::discord::inflight"], minimum=1,
     ) | {"name": "new-lane"})
     replace_once(root / contract.PR_WORKFLOW, CENSUS_COMMAND,
-                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight -- --test-threads=1")
+                 CENSUS_COMMAND + "\n          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::inflight -- --test-threads=1")
 
 
 def drop_entry(path: str):
@@ -537,6 +549,9 @@ class AuthoritySurfaceContract(unittest.TestCase):
 
 
 class SelectionContract(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_from_runner_artifact(self)
+
     def test_list_count_uses_test_ids_not_cargo_summary(self) -> None:
         output = "a::one: test\na::two: test\n2 tests, 0 benchmarks\n"
         self.assertEqual(contract.count_test_ids(output), 2)
@@ -576,6 +591,9 @@ class FloorGateEndToEnd(unittest.TestCase):
     """`failures_for` is graded in isolation above. This drives the whole gate --
     real `run_lane`, real cargo process, real `main` -- so a future refactor that
     stops feeding the listing into the floor is caught here, not in review."""
+
+    def setUp(self) -> None:
+        isolate_from_runner_artifact(self)
 
     def _run_against_listing(self, *, listed: int, minimum: int) -> tuple[int, str, str]:
         temporary, manifest = manifest_path([active_lane(minimum=minimum)])

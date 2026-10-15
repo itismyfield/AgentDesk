@@ -1,7 +1,6 @@
 {
   "src/cli/migrate/source.rs": 1,
   "src/db/dispatched_sessions/hosted_execution.rs": 1,
-  "src/db/o_channel_homes.rs": 1,
   "src/services/cluster/channel_home.rs": 1,
   "src/services/cluster/channel_home_drain.rs": 1,
   "src/services/cluster/channel_home_port.rs": 1,

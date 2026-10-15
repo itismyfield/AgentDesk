@@ -14,12 +14,15 @@ fn content(body: &str) -> String {
     value["content"].as_str().unwrap_or_default().to_string()
 }
 
+/// Leaves out the first-answer progress edit: thread timing decides whether the bridge sends it,
+/// and `delivered_once` checks its shape in every run.
 fn output(requests: &Requests, codex: &CodexChannel) -> Output {
     let sent = deliveries(requests, codex.channel)
         .into_iter()
         .rev()
         .take(1)
         .map(|(method, path, body)| (method, path, content(&body)))
+        .filter(|(_, _, content)| content == RESPONSE)
         .collect();
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&codex.tmux);
     (sent, binding.expect("binding").last_offset)
@@ -111,14 +114,15 @@ async fn rollout_first(shared: &Arc<SharedData>, codex: &CodexChannel, anchor: u
     append(&codex.rollout, &answer_lines());
 }
 
+/// Waits for the answer edit itself, not only a progress edit ahead of it.
 async fn delivered(requests: &Requests, codex: &CodexChannel) {
+    let answered = || {
+        deliveries(requests, codex.channel)
+            .iter()
+            .any(|(_, _, body)| content(body) == RESPONSE)
+    };
     assert!(
-        wait_for(Duration::from_secs(20), || !deliveries(
-            requests,
-            codex.channel
-        )
-        .is_empty())
-        .await,
+        wait_for(Duration::from_secs(20), answered).await,
         "{} answer never reached Discord: {:?}",
         codex.tmux,
         requests.lock().unwrap()
@@ -139,6 +143,17 @@ fn delivered_once(requests: &Requests, codex: &CodexChannel, anchor: u64) {
     let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
     for (method, path, _) in &sent {
         assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");
+    }
+    // When the answer and the turn end reach the bridge in separate passes, its first-answer
+    // fast lane edits the same anchor once with the answer above the status line.
+    assert!(sent.len() <= 2, "one answer edit: {sent:?}");
+    let (_, _, last) = sent.last().expect("answer edit");
+    assert_eq!(content(last), RESPONSE, "the answer edit is the last");
+    if let [(_, _, progress), _] = sent.as_slice() {
+        assert!(
+            content(progress).starts_with(&format!("{RESPONSE}\n\n")),
+            "only the answer's progress edit precedes it: {sent:?}"
+        );
     }
     assert_eq!(tail_starts(codex.channel), 1, "one tail for {}", codex.tmux);
 }

@@ -302,15 +302,15 @@ time for diagnostics; neither is a stored approval value.
   requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
   `continue-on-error`, and any edge that expands the closure is a
   review-triggering gate failure.
-
   <!-- required-publisher-wiring -->
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
+  | `lib_test_prepare` | none | none |
   | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
   | `relay_authority_mutations` | none | none |
-  | `relay_authority_targets` | none | none |
-  | `scripts` | `changes` | none |
+  | `relay_authority_targets` | `lib_test_prepare` | `${{ !cancelled() }}` |
+  | `scripts` | `changes`, `lib_test_prepare` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |
   | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
@@ -1018,8 +1018,8 @@ time for diagnostics; neither is a stored approval value.
     `finish_restored_watcher_active_turn(.., normal_completion=true, ..)` with the
     pinned current-turn id; PausedLive (no terminator — paused at selector /
     permission prompt / subagent running / long silent tool) → DEFER, never
-    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend/
-    ClaudeEAdapter) → KEEP the legacy `mailbox_finalize_owed` flag path VERBATIM.
+    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend) → KEEP
+    the legacy `mailbox_finalize_owed` flag path VERBATIM.
     The DEFER decision now keys on the STRUCTURAL TERMINATOR (not on response
     emptiness), which is the fix for the contradiction that killed the first A2
     attempt (deferring `delegated && empty` made the empty-but-done completion's
@@ -1510,7 +1510,8 @@ time for diagnostics; neither is a stored approval value.
     production modules are below 1000 prod lines and the registry entry was
     removed under the ghost-registration rule.)
   - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
-    `capture-pane` tail capture, the `claude-e` transcript-tail fallback
+    `capture-pane` tail capture, the Claude transcript-tail fallback when tmux
+    is unavailable
     (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`
     / `parse_transcript_line_text` workers), and the Haiku `compose_with_haiku`
     call plus #4079's user-perspective suggested-reply prompt contract (its

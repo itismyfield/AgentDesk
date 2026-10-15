@@ -15,14 +15,7 @@ except ModuleNotFoundError:
 
 D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
-H = D + "health/legacy_supervision/boot_status.rs"
-ENTRIES = {
-    R + ".rs": "new install_process install_in",
-    R + "/cohort.rs": "new epoch update try_start_confirmation mark_timed_out wait_released snapshot begin work_once arrive_reaped exclude_no_runtime transition fail drop",
-    R + "/completion.rs": "value matches new run_once start join_work receive",
-    R + "/publication.rs": "matches new confirm publish_with seal",
-    H: "",
-}
+ENTRIES = {}
 # Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
 # "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
@@ -37,7 +30,7 @@ PROTECTED = {
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
     'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'cf38b1f1b18f3e6464c04bc3ecf82eccb6bb558c0f415eb76daae732c933eeaf'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1d692d44f1073550b7163ffac6d16a1c2ed51c42f23edd1d5524dc824181ae27'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 
@@ -111,7 +104,7 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root, promoted_paths=()):
+def sync_skips(root, promoted_paths=(), deleted_paths=()):
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
@@ -123,6 +116,12 @@ def sync_skips(root, promoted_paths=()):
     actual = {p.relative_to(root).as_posix() for p in basename | resolved}
     existing = {p.relative_to(root).as_posix() for p in files}
     promoted = set(promoted_paths)
+    deleted = set(deleted_paths)
+    for rel in sorted(deleted):
+        if (root / rel).exists() or (root / rel).is_symlink():
+            raise RuntimeError("deletion path still exists: " + rel)
+        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+            raise RuntimeError("deletion is not pinned: " + rel)
     for rel in sorted(promoted):
         if rel not in existing:
             raise RuntimeError("promotion path missing: " + rel)
@@ -130,13 +129,13 @@ def sync_skips(root, promoted_paths=()):
             raise RuntimeError("promotion remains test-only: " + rel)
         if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
             raise RuntimeError("promotion is not pinned: " + rel)
-    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted:
+    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted - deleted:
         raise RuntimeError("refusing pin removal")
-    for rel in sorted(promoted):
+    for rel in sorted(promoted | deleted):
         pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
         source, count = re.subn(pattern, '', source)
         if count != 1:
-            raise RuntimeError("promotion pin is ambiguous: " + rel)
+            raise RuntimeError("removal pin is ambiguous: " + rel)
     for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
         measured = {p.relative_to(root).as_posix() for p in paths}
         for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
@@ -154,8 +153,10 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
         parser.add_argument('--promote', action='append', default=[], metavar='PATH',
                             help='explicitly remove this existing production module from the skip pin')
+        parser.add_argument('--remove-deleted', '--delete-pin', action='append', default=[], metavar='PATH',
+                            help='explicitly remove this deleted file from the skip pin')
         args = parser.parse_args(sys.argv[2:])
-        sync_skips(Path.cwd(), args.promote)
+        sync_skips(Path.cwd(), args.promote, args.remove_deleted)
         sys.exit(0)
     ok, report = check(Path.cwd())
     print(report)

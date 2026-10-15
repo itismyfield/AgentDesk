@@ -42,6 +42,13 @@ PG_SHARD_RECIPE = "test-postgres-shard"
 PG_INCLUDE_DERIVATION = tuple('''\
 readonly -a NON_PG_SKIP_ARGS
 readonly -a NON_PG_FILTER_REPLAY
+run_prepared_lib_test() {
+if [ -n "${ADK_LIB_TEST_ARTIFACT:-}" ]; then
+python3 scripts/ci/lib-test-artifact.py run -- "$@"
+else
+"$@"
+fi
+}
 PG_INCLUDE_ARGS=()
 for ((index = 1; index < ${#NON_PG_SKIP_ARGS[@]}; index += 2)); do
 PG_INCLUDE_ARGS+=("${NON_PG_SKIP_ARGS[$index]}")
@@ -51,7 +58,7 @@ case "${PG_INCLUDE_SHARD-}" in
 "") ;;
 *)
 python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "$PG_INCLUDE_SHARD" || return 1
-PG_SELECTED_TESTS="$(set -o pipefail; cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
+PG_SELECTED_TESTS="$(set -o pipefail; run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
 mapfile -t PG_INCLUDE_ARGS <<< "$PG_SELECTED_TESTS"
 PG_INCLUDE_ARGS=(--exact "${PG_INCLUDE_ARGS[@]}")
 unset PG_SELECTED_TESTS
@@ -67,7 +74,6 @@ NON_PG_FILTER_WORKFLOWS = (
     Path(".github/workflows/ci-nightly.yml"),
 )
 NON_PG_FILTER_REQUIRED_JOBS = frozenset({
-    ".github/workflows/ci-pr.yml:library_sweep",
     ".github/workflows/ci-main.yml:full_non_pg",
     ".github/workflows/ci-nightly.yml:full_macos",
     ".github/workflows/ci-nightly.yml:full_windows",
@@ -82,7 +88,6 @@ SEEDS = (
 )
 CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool")
 
-
 def _seed_pattern(seed: str) -> re.Pattern[str]:
     """Match exact type seeds and supported function-name suffix variants."""
     suffix = r"[A-Za-z0-9_]*" if seed in {
@@ -91,7 +96,6 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
         "lock_test_lifecycle",
     } else ""
     return re.compile(rf"\b{re.escape(seed)}{suffix}\b")
-
 
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
@@ -147,7 +151,6 @@ PG_DB_BLOCK_HEADER = (
 )
 _PG_DB_ENTRY = re.compile(r"^-\s+['\"]([^'\"]+)['\"]\s*$")
 
-
 @lru_cache(maxsize=None)
 def shell_lexer():
     """The shared shell lexer beside this file, which both CI gates read shell with;
@@ -164,7 +167,6 @@ def shell_lexer():
     spec.loader.exec_module(module)
     return module
 
-
 def _load_coverage_module(repo_root: Path):
     path = repo_root / "scripts/check_test_lane_coverage.py"
     spec = importlib.util.spec_from_file_location("pg_lane_coverage", path)
@@ -174,7 +176,6 @@ def _load_coverage_module(repo_root: Path):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
 
 @dataclass(frozen=True)
 class PgInventory:
@@ -188,7 +189,6 @@ class PgInventory:
     def modules(self) -> set[str]:
         return {name.rpartition("::")[0] for name in self.tests}
 
-
 @dataclass(frozen=True)
 class Analysis:
     inventory: PgInventory
@@ -196,13 +196,11 @@ class Analysis:
     allowlist_count: int
     findings: tuple["Finding", ...] = ()
 
-
 @dataclass(frozen=True)
 class Finding:
     kind: str
     source: str
     detail: str
-
 
 @dataclass(frozen=True)
 class ModuleRange:
@@ -1067,6 +1065,7 @@ def _cargo_commands(
 
 # The closed set of prefixes CI runs `cargo test` behind; any other prefix is unproven.
 _ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
+_ARTIFACT_RUN = ["python3", "scripts/ci/lib-test-artifact.py", "run", "--"]
 # The run_test_lane.py options CI passes, each with the argparse value it accepts.
 _RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
 
@@ -1083,8 +1082,8 @@ def _prefix_template(words: list[str]) -> bool:
         return len(names) == len(values) and names.count("--lane") == 1 \
             and all(re.fullmatch(_RUN_TEST_LANE_OPTIONS.get(name, r"(?!)"), value)
                     for name, value in zip(names, values)) \
-            and words[end + 1:] == _ROOT_UNSET
-    return words in ([], _ROOT_UNSET)
+            and words[end + 1:] in (_ROOT_UNSET, _ROOT_UNSET + _ARTIFACT_RUN)
+    return words in ([], _ROOT_UNSET, ["run_prepared_lib_test"], _ARTIFACT_RUN, _ROOT_UNSET + _ARTIFACT_RUN)
 
 
 def _proven_cargo_argv(command: str) -> list[str] | None:
@@ -1111,7 +1110,7 @@ def _proven_cargo_argv(command: str) -> list[str] | None:
         argv = None
     if scan.issues or argv is None or argv[:2] != ["cargo", "test"] \
             or argv != [token.value for token in tokens[at:]] \
-            or len(prefix) != at or not _prefix_template(prefix) or (sourced and prefix) \
+            or len(prefix) != at or not _prefix_template(prefix) or (sourced and prefix not in ([], ["run_prepared_lib_test"])) \
             or any(token.kind != "WORD" or token.depth for token in tokens) \
             or any(token.dynamic and token.value not in arrays for token in tokens):
         raise ValueError(

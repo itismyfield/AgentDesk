@@ -99,7 +99,7 @@ async fn after_await_case(replace_source: bool) {
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     let ticket = watcher_completion::observe(&handle.cancel).unwrap();
     until(&observed, "initial EOF before awaited native card", |s| {

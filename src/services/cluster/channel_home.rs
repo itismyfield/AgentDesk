@@ -16,6 +16,8 @@ use tokio::time::Instant;
 use crate::db::o_channel_homes::{self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 
+pub(crate) mod ingress_snapshot;
+
 /// How often a holder renews its lease.
 pub(crate) const RENEW_EVERY: Duration = Duration::from_secs(5);
 /// A holder closes its own gate this long after sending its last successful renewal (H).
@@ -540,7 +542,6 @@ impl HomeGate {
     }
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
-    #[cfg(test)]
     pub(crate) fn admit_at_epoch(
         &self,
         provider: &str,
@@ -550,7 +551,6 @@ impl HomeGate {
         self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
     }
 
-    #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
         provider: &str,
@@ -669,20 +669,6 @@ fn first_mount(homes: &Registry) -> Option<MutexGuard<'static, ()>> {
         .get()
         .is_none()
         .then(|| FIRST_MOUNT.lock().unwrap_or_else(PoisonError::into_inner))
-}
-
-/// Runs `admit` only while `channel` has no Home; no Home can mount until it returns.
-pub(crate) fn admit_unhomed<T>(channel: u64, admit: impl FnOnce() -> T) -> Option<T> {
-    with_homes(|homes| {
-        let _first = first_mount(homes);
-        let Some(homes) = homes.get() else {
-            return Some(admit());
-        };
-        let registry = lock_homes(homes);
-        #[cfg(test)]
-        tests::before_unhomed_poll();
-        (!registry.gates.contains_key(&channel.to_string())).then(admit)
-    })
 }
 
 /// Reads the registered gates; while none was ever registered nothing is locked.

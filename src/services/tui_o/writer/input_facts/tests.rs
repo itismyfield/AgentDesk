@@ -527,22 +527,6 @@ fn ordered_events_keep_abort_start_and_input_in_record_order() {
     );
 }
 
-fn observed(
-    rx: &std::sync::mpsc::Receiver<crate::services::tui_o::n1_observation::Event>,
-) -> Vec<Value> {
-    rx.try_iter()
-        .map(|e| serde_json::to_value(e).unwrap())
-        .collect()
-}
-
-fn line_start(path: &std::path::Path, line: usize) -> u64 {
-    let text = std::fs::read_to_string(path).unwrap();
-    text.split_inclusive('\n')
-        .take(line)
-        .map(str::len)
-        .sum::<usize>() as u64
-}
-
 fn codex_parent(
     root: &std::path::Path,
     name: &str,
@@ -558,8 +542,7 @@ fn codex_parent(
 
 // A closer of a turn opened without a native id ends the turn without proving it completed.
 #[test]
-fn n1_anonymous_turn_close_is_unknown_not_completed() {
-    use crate::services::tui_o::n1_observation::tests as harness;
+fn anonymous_turn_close_preserves_idle_and_ordered_close() {
     let root = tempfile::tempdir().unwrap();
     let claude = root.path().join("claude.jsonl");
     std::fs::write(&claude, "").unwrap();
@@ -572,35 +555,16 @@ fn n1_anonymous_turn_close_is_unknown_not_completed() {
         34,
         &[unnamed("task_started"), unnamed("task_complete")],
     );
-    let (observer, rx) = harness::fixture(16);
-    harness::scoped(Some(observer.clone()), || {
-        for (binding, witness) in [
-            (
-                binding(&claude, ShadowProvider::Claude, 33),
-                line_start(&claude, 2),
-            ),
-            (codex.clone(), line_start(&codex.source.path, 2)),
-        ] {
-            let mut facts = InputFacts::open(binding.clone()).unwrap();
-            assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
-            assert_eq!(shapes(&facts).last().unwrap(), "closed - aborted=false");
-            let events = observed(&rx);
-            assert_eq!(events.len(), 1, "{events:?}");
-            assert_eq!(events[0]["event"], "n1_outcome_unknown");
-            assert_eq!(events[0]["reason"], "unattributed_close");
-            assert_eq!(events[0]["witness_offset"], witness);
-            assert_eq!(events[0]["logical_turn_key"], Value::Null);
-            let counters = &harness::snapshot_value(&observer, binding.channel_id)["counters"];
-            assert_eq!(counters["closed_events"], 0);
-            assert_eq!(counters["unknown_outcome_events"], 1);
-        }
-    });
+    for binding in [binding(&claude, ShadowProvider::Claude, 33), codex] {
+        let mut facts = InputFacts::open(binding).unwrap();
+        assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
+        assert_eq!(shapes(&facts).last().unwrap(), "closed - aborted=false");
+    }
 }
 
-// The turn a halted reader held open stays unresolved, and so does its closer after a resume.
+// A halted reader keeps its resume point, and a resumed reader can process its closer.
 #[test]
-fn n1_halted_reader_reports_its_open_turn_unknown() {
-    use crate::services::tui_o::n1_observation::tests as harness;
+fn halted_reader_preserves_resume_and_repeated_error() {
     let root = tempfile::tempdir().unwrap();
     let blocked = json!({"type":"response_item","payload":{"type":"unknown_item","id":"x"}});
     let parent = codex_parent(
@@ -622,114 +586,12 @@ fn n1_halted_reader_reports_its_open_turn_unknown() {
         .unwrap()
         .write_all(b"broken\n")
         .unwrap();
-    let (observer, rx) = harness::fixture(16);
-    harness::scoped(Some(observer.clone()), || {
-        let mut facts = InputFacts::open(parent.clone()).unwrap();
-        assert!(facts.poll(u64::MAX).is_err());
-        let resume = facts.resume_point().cloned().unwrap();
-        let mut resumed = InputFacts::resume(parent.clone(), &resume).unwrap();
-        assert_eq!(resumed.poll(u64::MAX).unwrap().state, TurnState::Idle);
-        let mut torn = InputFacts::open(binding(&claude, ShadowProvider::Claude, 36)).unwrap();
-        assert!(torn.poll(u64::MAX).is_err());
-        assert!(torn.poll(u64::MAX).is_err(), "a halted reader reports once");
-    });
-    let events = observed(&rx);
-    let summary: Vec<_> = events
-        .iter()
-        .map(|e| {
-            let id = &e["logical_turn_key"]["native_turn_id"];
-            (
-                e["event"].clone(),
-                e["reason"].clone(),
-                id.clone(),
-                e["witness_offset"].clone(),
-            )
-        })
-        .collect();
-    let path = &parent.source.path;
-    let unknown = |reason: &str, id: &str, at: u64| {
-        (
-            json!("n1_outcome_unknown"),
-            json!(reason),
-            json!(id),
-            json!(at),
-        )
-    };
-    assert_eq!(
-        summary,
-        [
-            unknown("reader_halted", "t1", line_start(path, 2)),
-            unknown("edge_turn", "t1", line_start(path, 3)),
-            unknown("reader_halted", "a", line_start(&claude, 1)),
-        ]
-    );
-}
-
-// Every observation fault leaves each poll's result, ordered facts and resume point as with no observer.
-#[test]
-fn n1_observation_faults_leave_reader_results_unchanged() {
-    use crate::services::tui_o::n1_observation::tests as harness;
-    let root = tempfile::tempdir().unwrap();
-    let unnamed = |kind: &str| json!({"type":"event_msg", "payload":{"type":kind}});
-    let parent = codex_parent(
-        root.path(),
-        "codex.jsonl",
-        37,
-        &[
-            codex("task_started", "t0"),
-            codex("task_complete", "t0"),
-            codex("task_started", "t1"),
-            json!({"type":"response_item","payload":{"type":"unknown_item","id":"x"}}),
-            codex("task_complete", "t1"),
-            unnamed("task_started"),
-            unnamed("task_complete"),
-            codex("task_started", "t2"),
-        ],
-    );
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&parent.source.path)
-        .unwrap()
-        .write_all(b"broken\n")
-        .unwrap();
-    let trace = || {
-        let mut out = Vec::new();
-        let mut facts = InputFacts::open(parent.clone()).unwrap();
-        for _ in 0..3 {
-            let result = facts.poll(u64::MAX);
-            let resume = facts.resume_point().cloned();
-            out.push(format!(
-                "{result:?} {:?} {resume:?} {}",
-                shapes(&facts),
-                facts.awaiting_boundary()
-            ));
-            match (result, resume) {
-                (Err(_), Some(resume)) => {
-                    facts = InputFacts::resume(parent.clone(), &resume).unwrap()
-                }
-                _ => break,
-            }
-        }
-        out
-    };
-    let control = harness::scoped(None, trace);
-    assert_eq!(control.len(), 2, "{control:?}");
-    let (observer, _rx) = harness::fixture(64);
-    assert_eq!(harness::scoped(Some(observer.clone()), trace), control);
-    let counters = &harness::snapshot_value(&observer, 37)["counters"];
-    assert_eq!(
-        (
-            &counters["closed_events"],
-            &counters["unknown_outcome_events"]
-        ),
-        (&json!(1), &json!(4))
-    );
-    for failure in ["full", "closed", "lock", "sink"] {
-        let (seen, observer) = harness::faulted(failure, |observer| (trace(), observer));
-        assert_eq!(seen, control, "{failure}");
-        assert!(
-            !harness::healthy(&observer),
-            "{failure} fault was exercised"
-        );
-    }
+    let mut facts = InputFacts::open(parent.clone()).unwrap();
+    assert!(facts.poll(u64::MAX).is_err());
+    let resume = facts.resume_point().cloned().unwrap();
+    let mut resumed = InputFacts::resume(parent, &resume).unwrap();
+    assert_eq!(resumed.poll(u64::MAX).unwrap().state, TurnState::Idle);
+    let mut torn = InputFacts::open(binding(&claude, ShadowProvider::Claude, 36)).unwrap();
+    assert!(torn.poll(u64::MAX).is_err());
+    assert!(torn.poll(u64::MAX).is_err(), "a halted reader stays halted");
 }
