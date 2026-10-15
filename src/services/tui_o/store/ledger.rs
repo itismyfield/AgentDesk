@@ -247,6 +247,7 @@ impl LedgerState {
         self.violation.is_none()
             && self.open_serial.is_none()
             && matches!(piece.outcome, Some(PieceOutcome::Rejected(400 | 403 | 404)))
+            && !matches!(piece.local_retry, Some(LocalRetryMark::Attempt { .. }))
             && self
                 .latest_piece(&piece.unit_key, piece.piece_index)
                 .is_some_and(|(latest, _)| latest == serial)

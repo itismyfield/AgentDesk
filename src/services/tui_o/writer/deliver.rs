@@ -700,11 +700,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
             }
             PostOutcome::Refused(status) => {
+                let reason = if self.store.ledger().piece(serial).is_some_and(|piece| {
+                    matches!(piece.local_retry, Some(LocalRetryMark::Attempt { .. }))
+                }) {
+                    "local retry budget exhausted"
+                } else {
+                    "this serial needs a new operator approval"
+                };
                 tracing::warn!(
                     channel = self.channel,
                     serial,
                     status,
-                    "[tui_o] POST rejected; this serial needs a new operator approval"
+                    "[tui_o] POST rejected; {reason}"
                 );
                 if let Err(step) = self.record(LedgerEntry::Rejected { serial, status }) {
                     return step;

@@ -316,7 +316,7 @@ where
         }
         actor.observe_waiting(false);
         let now = actor.utc_now();
-        if actor.verified.is_none() && actor.delivery_allowed() {
+        if actor.delivery_allowed() {
             actor.writer.retry_local(now).await;
         }
         if !actor.writer.has_local_retry() {
@@ -748,7 +748,7 @@ mod test_support {
         actor.read_sources();
         actor.collect_settled();
         let now = actor.utc_now();
-        if actor.verified.is_none() && actor.delivery_allowed() {
+        if actor.delivery_allowed() {
             actor.writer.retry_local(now).await;
         }
         if !actor.writer.has_local_retry() {

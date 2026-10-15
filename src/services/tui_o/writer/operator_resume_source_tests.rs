@@ -1,6 +1,124 @@
 use super::*;
 
 #[test]
+fn local_retry_managed_verified_host_drains_budget_before_following_exact_work() {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::local_retry_managed_verified_host_drains_budget_before_following_exact_work"
+    )) {
+        return;
+    }
+    use crate::services::tui_o::writer::host::{self, HostParts, Readiness, test_io::TestHost};
+    use dedupe::codex_verified::{
+        VerifiedSourceSnapshot,
+        provenance::{CodexEpisodeSpan, TurnEpisodeRef, admission},
+    };
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _fake_tmux =
+        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(Some(root.path()));
+    let (context, canonical, retained) = durable_canary_without_launch_files(root.path());
+    std::fs::hard_link(&retained, &canonical).unwrap();
+    crate::services::discord::runtime_store::fsync_parent_dir(&canonical).unwrap();
+    publish_nonce(&context);
+    dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
+    dedupe::set_codex_delivery_permission_for_tests(
+        &context,
+        dedupe::CodexDeliveryPermissionForTests::Allowed,
+    );
+    dedupe::resolve_codex_claims();
+    let proof = crate::services::tmux_common::with_tmux_source_authority(
+        CANARY_TMUX,
+        VerifiedSourceSnapshot::capture,
+    )
+    .unwrap();
+    let source = proof.execution().source.clone();
+    assert!(dedupe::codex_verified_o_source_allowed(
+        CANARY_CHANNEL,
+        &source
+    ));
+    let _selected = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        CANARY_CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+    )]);
+    tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().unwrap().block_on(async {
+        for retired in [None, Some(true), Some(false)] {
+            let bytes = std::fs::read(&source.path).unwrap();
+            let harness = Harness::build_channel(CANARY_CHANNEL, |_| vec![InitSource {
+                source_id: source.clone(), delivery_start: bytes.len() as u64,
+                prefix_hash: hex::encode(Sha256::digest(&bytes)),
+            }]);
+            let mut store = harness.channel();
+            let mut key = unit("missing root");
+            key.channel_id = CANARY_CHANNEL;
+            key.provider = ShadowProvider::Codex;
+            store.append_ledger(LedgerEntry::Prepared { serial: 0, unit_key: key, piece_index: 0,
+                payload: "local saved payload".into(), anchor_id: 100, epoch: 1,
+                local_retry: Some(crate::services::tui_o::store::ledger::LocalRetryMark::Budget) }).unwrap();
+            store.append_ledger(LedgerEntry::NotFound { serial: 0 }).unwrap();
+            store.init_codex_provenance().unwrap();
+            if let Some(retired) = retired {
+                let path = harness._runtime.path().join("disallowed.jsonl");
+                std::fs::write(&path, b"").unwrap();
+                let old = source_id_for("retired", &path).unwrap();
+                assert!(!dedupe::codex_verified_o_source_allowed(CANARY_CHANNEL, &old));
+                store.attach_source(&old).unwrap();
+                store.set_retired(&old, retired).unwrap();
+            }
+            let start = std::fs::metadata(&source.path).unwrap().len();
+            append(&source.path, &output_line("event_msg", serde_json::json!({"type":"task_started","turn_id":"following"})));
+            append(&source.path, &output_line("response_item", serde_json::json!({"type":"message","role":"assistant","id":"exact","content":[{"type":"output_text","text":"following exact"}]})));
+            append(&source.path, &output_line("event_msg", serde_json::json!({"type":"task_complete","turn_id":"following"})));
+            let episode = TurnEpisodeRef { channel_id: CANARY_CHANNEL, user_message_id: 711,
+                request_owner_id: 8, turn_nonce: "retry-following".into(), native_turn_id: "following".into() };
+            let span = CodexEpisodeSpan { execution: proof.execution().clone(), episode: episode.clone(),
+                delivery_channel_id: CANARY_CHANNEL, offset_authority_channel_id: CANARY_CHANNEL,
+                generation_mtime_ns: 1, start, end: Some(std::fs::metadata(&source.path).unwrap().len()) };
+            store.persist_codex_span(span).unwrap();
+            drop(store);
+            let io = TestHost::new([(CANARY_CHANNEL, source.clone())]);
+            io.sessions.lock().unwrap().insert(CANARY_CHANNEL, CANARY_TMUX.into());
+            harness.gate.acquired();
+            let ready = Arc::new(Readiness::default());
+            assert!(!admission::owed_delivery_ready(CANARY_CHANNEL), "actor mode must come from managed host proof");
+            let mut hosts = host::start_managed(ShadowProvider::Codex, true,
+                crate::services::tui_o::cutover::boot_ownership(), || HostParts {
+                    io: io.clone(), runtime_root: Some(harness._runtime.path().into()),
+                    gate: harness.gate.clone(), readiness: ready.clone(),
+                });
+            assert_eq!(hosts.len(), 1);
+            polls(3).await;
+            assert!(ready.submission(CANARY_CHANNEL).is_some(), "real host installed commands receiver");
+            admission::set_ready_for_tests(CANARY_CHANNEL, true);
+            let token = Arc::new(crate::services::provider::CancelToken::from_persisted_turn_nonce(Some(episode.turn_nonce.clone())));
+            admission::issue_for_tests(proof.execution().clone(), episode, &token).unwrap();
+            polls(20).await;
+            assert!(io.posts.to(CANARY_CHANNEL).is_empty(), "before due, both local and exact must wait");
+            polls(20).await;
+            let posts = io.posts.to(CANARY_CHANNEL);
+            if retired.is_none() {
+                assert_eq!(posts, ["local saved payload", "following exact"], "due Budget must drain even in verified mode");
+                let store = harness.channel();
+                assert_eq!(store.ledger().piece(1).unwrap().local_retry, Some(crate::services::tui_o::store::ledger::LocalRetryMark::Attempt { root_serial: 0 }));
+                assert!(matches!(store.ledger().piece(1).unwrap().outcome, Some(PieceOutcome::Posted(_))));
+                assert_eq!(store.ledger().piece(2).unwrap().local_retry, None);
+            } else {
+                assert!(posts.is_empty(), "disallowed source remains held, including retired source");
+                assert_eq!(harness.channel().ledger().next_serial(), 1);
+            }
+            hosts.pop().unwrap().stop_and_join().await.unwrap();
+            admission::set_ready_for_tests(CANARY_CHANNEL, false);
+            admission::forget_channel_for_tests(CANARY_CHANNEL);
+        }
+    });
+    dedupe::reset_state_for_tests();
+    dedupe::binding_events::set_test_root(None);
+}
+
+#[test]
 fn local_retry_retired_source_stays_held_when_only_the_new_source_is_allowed() {
     if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
         module_path!(),

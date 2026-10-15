@@ -1,6 +1,54 @@
 use super::*;
 use crate::services::tui_o::store::ledger::LocalRetryMark;
 
+#[tokio::test(start_paused = true)]
+async fn local_retry_rejected_child_cannot_be_resumed_into_a_third_post() {
+    let (harness, _, _) = switched_over(b"");
+    harness.gate.acquired();
+    harness.port.say(BOT + 1, "readable");
+    harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .extend([Reply::Unsent, Reply::Refused(403)]);
+    let item = piece("retry", "twice only");
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&item).await, Step::Done);
+    let due = crate::services::tui_o::writer::local_retry::pending(writer.store().ledger())
+        .unwrap()
+        .due;
+    assert_eq!(writer.retry_local(due).await, Step::Stopped);
+    assert_eq!(
+        writer.store().ledger().piece(1).unwrap().outcome,
+        Some(PieceOutcome::Rejected(403))
+    );
+    drop(writer);
+    let approval = harness
+        .store
+        .record_operator_resume(CHANNEL, 1, "operator", "restored");
+    for _ in 0..3 {
+        let mut writer = harness.writer();
+        writer.deliver(&item).await;
+        drop(writer);
+        let (stop, task) = spawn(harness.writer());
+        polls(70).await;
+        let _ = stop.send(true);
+        task.await.unwrap();
+    }
+    assert_eq!(
+        harness.port.posts(),
+        ["twice only", "twice only"],
+        "Attempt approval must not produce POST 3"
+    );
+    assert!(matches!(
+        approval,
+        Err(crate::services::tui_o::store::StoreError::Rejected(_))
+    ));
+    assert!(harness.channel().ledger().approval(1).is_none());
+    assert_eq!(harness.channel().ledger().next_serial(), 2);
+}
+
 async fn not_found(harness: &Harness) {
     for _ in 0..4000 {
         if harness

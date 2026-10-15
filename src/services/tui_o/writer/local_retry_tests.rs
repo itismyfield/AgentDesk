@@ -235,6 +235,48 @@ async fn local_retry_unreadable_root_or_child_has_no_further_post() {
 
 struct GateHook(crate::services::tui_o::repost::admission::OriginalGate);
 
+#[tokio::test(start_paused = true)]
+async fn local_retry_original_rejections_keep_operator_resume_for_budget_and_unmarked_rows() {
+    use crate::services::tui_o::repost::admission::OriginalGate;
+    for marked in [false, true] {
+        for status in [400, 403, 404] {
+            let harness = Harness::new();
+            harness.gate.acquired();
+            harness
+                .port
+                .replies
+                .lock()
+                .unwrap()
+                .push_back(Reply::Refused(status));
+            let mut writer = harness
+                .writer()
+                .with_repost(Some(Box::new(GateHook(if marked {
+                    OriginalGate::SendLocal
+                } else {
+                    OriginalGate::SendPgManaged
+                }))));
+            let item = piece("retry", "operator restored");
+            assert_eq!(writer.deliver(&item).await, Step::Stopped);
+            assert_eq!(
+                writer.store().ledger().piece(0).unwrap().local_retry,
+                marked.then_some(LocalRetryMark::Budget)
+            );
+            drop(writer);
+            harness
+                .store
+                .record_operator_resume(CHANNEL, 0, "operator", "restored")
+                .unwrap();
+            let mut writer = harness.writer();
+            assert_eq!(writer.deliver(&item).await, Step::Done);
+            assert_eq!(
+                harness.port.posts(),
+                ["operator restored", "operator restored"]
+            );
+            assert_eq!(writer.store().ledger().piece(1).unwrap().local_retry, None);
+        }
+    }
+}
+
 impl crate::services::tui_o::repost::runner::RepostHook<Writer> for GateHook {
     fn turn<'a>(
         &'a mut self,
