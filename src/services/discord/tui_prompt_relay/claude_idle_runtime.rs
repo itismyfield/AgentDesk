@@ -110,16 +110,40 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
             // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
             continue;
         };
-        // Source discovery must progress while the original body reader is inflight.
-        let transcript_path = resolve_idle_relay_transcript(
+        let transcript_turns =
+            crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
+        // Keep an unconsumed Legacy prompt available after the original inflight finishes.
+        let transcript_path = super::claude_source::resolve_idle_relay_transcript_with_scan_offset(
             &shared,
             &tmux_session_name,
             channel_id,
             &binding,
             !session_bound_discord_delivery_enabled(),
+            |path| {
+                let eof = claude_tui_rehydrate_start_offset(path);
+                if transcript_turns {
+                    return Some(eof);
+                }
+                match scan_claude_idle_transcript_for_last_prompt(
+                    path,
+                    eof.saturating_sub(CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES),
+                ) {
+                    Ok(ClaudeIdleTranscriptScan::Prompt {
+                        prompt_start_offset,
+                        ..
+                    }) => Some(prompt_start_offset),
+                    Ok(
+                        ClaudeIdleTranscriptScan::NoPrompt { offset }
+                        | ClaudeIdleTranscriptScan::CompactionReanchor { offset },
+                    ) => Some(offset),
+                    Err(error) => {
+                        tracing::debug!(%error, transcript_path = %path.display(),
+                            "deferred Claude source registration until its initial prompt scan succeeds");
+                        None
+                    }
+                }
+            },
         );
-        let transcript_turns =
-            crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
         if let Some(row) =
             super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
             && (!transcript_turns || !super::super::inflight::is_synthetic_create_state(&row))

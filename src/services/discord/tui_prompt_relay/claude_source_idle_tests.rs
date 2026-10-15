@@ -97,11 +97,13 @@ fn record(session: &str, key: &str, at: &str, body: &str, sdk: bool) -> String {
 
 impl Pane {
     fn new(root: &Path, channel: u64) -> Self {
+        Self::with_tmux(root, channel, format!("scope-source-{channel}"))
+    }
+    fn with_tmux(root: &Path, channel: u64, tmux: String) -> Self {
         let (a, b) = (
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
         );
-        let tmux = format!("scope-source-{channel}");
         let home = root.join("claude-home");
         let cwd = root.join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -216,6 +218,129 @@ impl Pane {
 
 async fn polls() {
     tokio::time::sleep(Duration::from_secs(4)).await;
+}
+
+#[test]
+fn legacy_inflight_discovery_preserves_the_first_prompt_until_finalize() {
+    use crate::services::discord::{inflight, shared_state::test_rest, turn_finalizer::*};
+    use axum::{
+        body::Bytes,
+        http::{Method, StatusCode, Uri},
+        response::IntoResponse,
+    };
+    use std::io::Write;
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    dedupe::reset_state_for_tests();
+    let _bindings = BindingRoot::at(root.path());
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .finish();
+    let _trace = tracing::subscriber::set_default(subscriber);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+        let mut pane = Pane::with_tmux(root.path(), 7_574,
+            ProviderKind::Claude.build_tmux_session_name("scope-cut2-1a-7574"));
+        let _tmux = FakeTmux::install(&pane.tmux);
+        std::fs::write(tc::session_temp_path(&pane.tmux, "generation"), b"1").unwrap();
+        let _selected = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        assert!(!crate::services::tui_o::turn_mode::transcript_turns(pane.channel.get()));
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+        let recorded = requests.clone();
+        let channel = pane.channel.get();
+        let next = Arc::new(std::sync::atomic::AtomicU64::new(7_574_100));
+        let app = axum::Router::new().fallback(move |method: Method, uri: Uri, body: Bytes| {
+            let (requests, next) = (recorded.clone(), next.clone());
+            async move {
+                let path = uri.path().to_string();
+                requests.lock().unwrap().push((method.to_string(), path.clone(), String::from_utf8_lossy(&body).into_owned()));
+                if method == Method::DELETE || method == Method::PUT || path.ends_with("/typing") {
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                let id = path.rsplit('/').next().and_then(|s| s.parse::<u64>().ok())
+                    .filter(|_| method != Method::POST).unwrap_or_else(|| next.fetch_add(1, Ordering::SeqCst));
+                axum::Json(serde_json::json!({"id":id.to_string(), "channel_id":channel.to_string(), "content":"",
+                    "author":{"id":"1", "username":"bot", "discriminator":"0001", "avatar":null},
+                    "timestamp":"2026-10-15T00:00:00+00:00", "edited_timestamp":null, "tts":false,
+                    "mention_everyone":false, "mentions":[], "mention_roles":[], "attachments":[],
+                    "embeds":[], "pinned":false, "type":0})).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = serenity::HttpBuilder::new("test-token")
+            .proxy(format!("http://{}", listener.local_addr().unwrap())).ratelimiter_disabled(true).build();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = Arc::new(http);
+        let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
+        Arc::get_mut(&mut pane.shared).unwrap().health_registry = Arc::downgrade(&registry);
+        registry.set_utility_bot_http_for_tests(crate::services::discord::bot_role::UtilityBotRole::Notify, http.clone()).await;
+        let _http = test_rest::install(http);
+        let relay_shared = pane.shared.clone();
+        super::super::hook_observer::spawn_tui_prompt_relay_observer(
+            "claude".into(), subscribe_hook_events(), move |prompt| {
+                let shared = relay_shared.clone();
+                Box::pin(async move { super::super::relay_observed_prompt(&shared, prompt).await })
+            });
+        let posts = || requests.lock().unwrap().iter().filter(|(method, path, body)|
+            method == "POST" && path.ends_with("/messages") && (body.contains("message_reference") || body.contains("B_NEW_BODY"))).count();
+        let delivered = || requests.lock().unwrap().iter().any(|(method, _, body)|
+            matches!(method.as_str(), "POST" | "PATCH") && body.contains("B_NEW_BODY"));
+        let actor = Arc::new(CancelToken::new());
+        pane.shared.mailbox(pane.channel).restore_active_turn(actor, serenity::UserId::new(1), MessageId::new(991)).await;
+        let row = pane.row();
+        inflight::save_inflight_state(&row).unwrap();
+        let old_prompt = serde_json::json!({"type":"user", "sessionId":pane.b, "uuid":"b-old-user",
+            "entrypoint":"cli", "message":{"role":"user", "content":"previous B prompt"}});
+        let new_prompt = serde_json::json!({"type":"user", "sessionId":pane.b, "uuid":"b-new-user",
+            "entrypoint":"cli", "message":{"role":"user", "content":"new B prompt"}});
+        let history = format!("{old_prompt}\n{}", record(&pane.b, "b-old-answer", "2026-10-01T02:00:00Z", "B_OLD_BODY", false));
+        std::fs::write(pane.b_path(), format!("{history}{new_prompt}\n")).unwrap();
+        pane.idle().await;
+        pane.grow();
+        writeln!(std::fs::OpenOptions::new().append(true).open(pane.b_path()).unwrap(),
+            "{}", serde_json::json!({"type":"system", "subtype":"stop_hook_summary", "session_id":pane.b})).unwrap();
+        pane.idle().await;
+        pane.idle().await;
+        let replacement = source_id_for(&pane.b, &pane.b_path()).unwrap();
+        assert_eq!(binding_events::binding_events_since(channel, 0).unwrap().iter()
+            .filter(|event| event.new == binding_events::BindingTarget::Source(replacement.clone())).count(), 1);
+        let retained = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel).unwrap();
+        assert_eq!((retained.output_path, retained.last_offset), (row.output_path.clone(), row.last_offset));
+        assert_eq!(posts(), 0, "B is registered but A still owns the body");
+        let finalized = Box::pin(pane.shared.turn_finalizer.submit_terminal(
+            TurnKey::new(pane.channel, row.effective_finalizer_turn_id(), pane.shared.restart.current_generation),
+            ProviderKind::Claude, TerminalEvent::Complete,
+            FinalizeContext { clear_inflight: true, ..FinalizeContext::watcher() }, pane.shared.clone())).await;
+        assert!(matches!(finalized, FinalizeOutcome::Finalized { .. }), "A must finalize through the production actor");
+        assert!(inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel).is_none());
+        pane.idle().await;
+        let completed = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if posts() == 1 && delivered() && inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel).is_none() { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await;
+        assert!(completed.is_ok(), "after A finalize B must POST exactly once: {:?}", requests.lock().unwrap());
+        assert_eq!(posts(), 1);
+        assert!(delivered(), "the response card must carry B's actual body");
+        for _ in 0..3 { pane.idle().await; }
+        assert_eq!(posts(), 1, "later idle ticks cannot replay B");
+        assert!(!requests.lock().unwrap().iter().any(|(_, _, body)| body.contains("B_OLD_BODY")));
+        _tmux.mark_missing();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while CLAUDE_IDLE_RESPONSE_TAILS.lock().unwrap().contains(&pane.tmux) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the fixture's remaining reader must stop when its fake pane disappears");
+        server.abort();
+        let _ = server.await;
+        dedupe::reset_state_for_tests();
+    });
 }
 
 #[test]
