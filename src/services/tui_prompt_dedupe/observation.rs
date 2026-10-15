@@ -168,6 +168,33 @@ pub(crate) fn observe_codex_record_prompt_at(
     )
 }
 
+#[cfg(unix)]
+pub(crate) fn observe_restored_codex_record_prompt_at(
+    tmux: &str,
+    (path, start, record): (&std::path::Path, u64, &RecordEvidence),
+    (prompt, entry, inferred): (&str, Option<&str>, Option<&str>),
+    at: DateTime<Utc>,
+) -> PromptObservation {
+    let turn = record.turn_id.as_deref().or(inferred);
+    if !handoff::codex_record_admission(tmux, path, start, prompt, (entry, turn), record) {
+        return PromptObservation::Ignored;
+    }
+    observe_inner(
+        "codex",
+        tmux,
+        &[prompt.to_string()],
+        (entry, None, turn),
+        PromptObservationEffect::NotifyAndLease,
+        at,
+        handoff::Evidence::Restored {
+            record,
+            path,
+            start,
+            entry,
+        },
+    )
+}
+
 /// A held input, observed again once its handoff settled.
 pub(super) fn observe_held_prompt(
     provider: &str,
@@ -455,11 +482,32 @@ fn observe_inner(
         .and_then(|prompt| classify_local_only_slash_control(prompt));
     let record = match evidence {
         handoff::Evidence::Record(record) => Some(record),
+        #[cfg(unix)]
+        handoff::Evidence::Restored { record, .. } => Some(record),
         _ => None,
     };
     let (decision, released) = {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state.purge_expired();
+        #[cfg(unix)]
+        if let handoff::Evidence::Restored {
+            record,
+            path,
+            start,
+            entry,
+        } = evidence
+            && !handoff::restored_record_allowed(
+                &state,
+                tmux_session_name,
+                path,
+                start,
+                &candidates[0],
+                (entry, native_turn),
+                record,
+            )
+        {
+            return PromptObservation::Ignored;
+        }
         let key = PromptKey::new(&provider, tmux_session_name);
         let released = record
             .map(|record| state.settle_handoff_for_record(&key, &candidates[0], record))

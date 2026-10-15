@@ -1944,6 +1944,28 @@ impl Booted {
     where
         R: DrainPort + Send + Sync + 'static,
     {
+        let port = move |id| BootPort::new(reads(id), Arc::clone(&reset));
+        Self::boot_port_on(env, port, discord, provider, gateway).await
+    }
+
+    /// As [`Booted::boot`], each port built by the runtime's own `BootPort::reading` with `restored`
+    /// as the runtime's "persisted turns restored" flag.
+    pub(super) async fn boot_reading(env: &Env, restored: Arc<AtomicBool>) -> Self {
+        let port = move |id| BootPort::reading(id, Arc::clone(&restored), no_reset());
+        let (discord, provider) = (Discord::default(), ShadowProvider::Claude);
+        Self::boot_port_on(env, port, discord, provider, GW).await
+    }
+
+    async fn boot_port_on<R>(
+        env: &Env,
+        port: impl Fn(u64) -> BootPort<R>,
+        discord: Discord,
+        provider: ShadowProvider,
+        gateway: &str,
+    ) -> Self
+    where
+        R: DrainPort + Send + Sync + 'static,
+    {
         let role = env.role.clone();
         let root = crate::config::runtime_root().expect("node root");
         let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
@@ -1952,7 +1974,6 @@ impl Booted {
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);
         let (local, boot_pool) = (role.clone(), pool.clone());
-        let port = move |id| BootPort::new(reads(id), Arc::clone(&reset));
         let prepare = move || {
             Some(Boot {
                 provider: provider_name(provider).into(),

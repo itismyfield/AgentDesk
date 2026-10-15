@@ -21,6 +21,13 @@ FILTER = ROOT / "scripts/ci/non-pg-test-filter.sh"
 MEMBERSHIP = ROOT / "scripts/check_pg_test_lane_membership.py"
 
 
+def load_selector():
+    spec = importlib.util.spec_from_file_location("non_pg_filter_selector", ROOT / "scripts/ci/test-selection.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_membership_module():
     spec = importlib.util.spec_from_file_location("non_pg_filter_membership", MEMBERSHIP)
     assert spec and spec.loader
@@ -115,7 +122,13 @@ bash -euo pipefail -c "$PROGRAM"
             self.assertEqual(jobs[job_id]["strategy"], {
                 "fail-fast": False, "matrix": "${{ fromJSON(needs.pg_shards.outputs.matrix) }}"})
             self.assertEqual(jobs[job_id]["env"]["PG_INCLUDE_SHARD"], "${{ matrix.shard }}")
-            self.assertIn("--pg-shard-matrix", jobs["pg_shards"]["steps"][1]["run"])
+            plan = jobs["pg_shards"]["steps"][1]["run"]
+            # The PR plan's full matrix is main's: every shard of the shared partition.
+            self.assertIn("--pg-shard-matrix" if filename == "ci-main.yml" else "test-selection.py plan", plan)
+        result = subprocess.run([sys.executable, str(MEMBERSHIP), "--pg-shard-matrix"],
+                                check=True, capture_output=True, text=True)
+        import json
+        self.assertEqual({"shard": load_selector().shards([], True)}, json.loads(result.stdout))
         mirror = jobs["fast_targeted_tests_required_context"]
         self.assertEqual(mirror["name"], "Fast targeted tests (ubuntu-latest)")
         self.assertEqual(mirror["steps"][1]["env"]["UPSTREAM_RESULT"], "${{ needs.test_fast.result }}")
@@ -285,12 +298,14 @@ bash -euo pipefail -c "$1"
     def test_prepared_pg_shards_and_replay_dispatch_without_extra_cargo(self) -> None:
         membership = load_membership_module()
         coverage = membership._load_coverage_module(ROOT)
-        program = "\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), "test-postgres-shard"))
+        program, continuity = ("\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), name))
+                               for name in ("test-postgres-shard", "test-postgres-continuity"))
         skips = membership.load_non_pg_skip_args(ROOT)[1::2]
         ids = sorted(name for name in membership.load_lib_test_inventory(ROOT)
                      if any(value in name for value in skips))
         script = r'''
 cargo() { printf 'unexpected cargo\n' >&2; return 99; }
+just() { [[ "$*" == test-postgres-continuity ]] && bash -euo pipefail -c "$CONTINUITY"; }
 python3() {
   if [[ "$1" == scripts/ci/lib-test-artifact.py ]]; then
     shift 3
@@ -300,7 +315,7 @@ python3() {
     command python3 "$@"
   fi
 }
-export -f cargo python3
+export -f cargo python3 just
 bash -euo pipefail -c "$PROGRAM"
 '''
         with tempfile.TemporaryDirectory() as temp:
@@ -310,7 +325,7 @@ bash -euo pipefail -c "$PROGRAM"
             for shard in ("0", "1"):
                 log.write_text("")
                 env = {**os.environ, "ADK_LIB_TEST_ARTIFACT": temp, "PG_LIST": str(listed),
-                       "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard,
+                       "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard, "CONTINUITY": continuity,
                        "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
                 result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
