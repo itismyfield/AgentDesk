@@ -264,9 +264,9 @@ fn a_possibly_sent_head_found_by_a_restart_is_unknown_and_never_resubmitted() {
     });
 }
 
-/// An Unknown head is a barrier: no dequeue, turn claim, finish, clear or purge passes it or drops it.
+/// An Unknown head is a barrier: no dequeue, turn claim, finish or purge passes it or drops it.
 #[test]
-fn an_unknown_head_blocks_every_consumer_and_survives_every_drain() {
+fn an_unknown_head_blocks_every_consumer_and_survives_every_purge() {
     let _root = root();
     block_on(async {
         let channel = ChannelId::new(6_813_014);
@@ -292,11 +292,6 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_drain() {
         assert!(!starts(&handle, 23, TurnAdmissionOrder::Immediate).await);
         let _ = handle.finish_turn(ctx()).await;
         let before = std::fs::read(queue_path(channel)).unwrap();
-        let cleared = handle.clear(ctx()).await;
-        assert!(cleared.persistence_error.is_some());
-        assert!(cleared.queue_exit_events.is_empty());
-        assert!(!cleared.discarded_message_ids.contains(&MessageId::new(21)));
-        assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
         let purged = handle.purge_queue(ctx(), true).await;
         assert!(purged.input_refusal.is_some());
         assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
@@ -309,6 +304,61 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_drain() {
             [21, 22]
         );
         assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
+    });
+}
+
+/// A clear discards an Unknown head a restart read from disk together with its queue; a failed
+/// clear write keeps both, so the head still holds the queue until the retried clear.
+#[test]
+fn a_clear_discards_an_unknown_head_from_disk_and_a_failed_write_keeps_it() {
+    let _root = root();
+    block_on(async {
+        let channel = ChannelId::new(6_995_001);
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let done = human(30, 6, "done");
+        assert!(handle.enqueue(done.clone(), ctx()).await.enqueued);
+        submit(&handle, &done).await;
+        let head = human(31, 7, "status?");
+        assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
+        let ticket = reserve(&handle, &head).await;
+        let settled = settle(&handle, ticket, HeadOutcome::Unconfirmed).await;
+        assert_eq!(settled, "unknown");
+        assert!(handle.enqueue(human(32, 8, "b"), ctx()).await.enqueued);
+        assert!(handle.enqueue(human(33, 9, "c"), ctx()).await.enqueued);
+
+        let restart = ChannelMailboxRegistry::default().handle(channel);
+        let hydrated = restart.hydrate_pending_queue_from_disk(ctx()).await;
+        assert_eq!(hydrated.persistence_error, None);
+        let ids = |rows: Vec<(u64, Vec<u64>, String)>| rows.iter().map(|q| q.0).collect::<Vec<_>>();
+        assert_eq!(ids(queued(&restart).await), [31, 32, 33]);
+        assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
+        let before = std::fs::read(queue_path(channel)).unwrap();
+        fail_queue_saves(channel, 1);
+        let failed = restart.clear(ctx()).await;
+        assert!(failed.persistence_error.is_some());
+        assert!(failed.queue_exit_events.is_empty());
+        assert_eq!(ids(queued(&restart).await), [31, 32, 33]);
+        assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
+        assert_eq!(
+            taken(&restart).await,
+            None,
+            "the kept head still holds the queue"
+        );
+
+        let cleared = restart.clear(ctx()).await;
+        assert_eq!(cleared.persistence_error, None);
+        for id in [31, 32, 33] {
+            assert!(cleared.discarded_message_ids.contains(&MessageId::new(id)));
+        }
+        let kinds: Vec<_> = cleared.queue_exit_events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [QueueExitKind::Superseded; 3]);
+        assert!(queued(&restart).await.is_empty());
+        let written = disk(channel);
+        assert_eq!(written["items"], serde_json::json!([]));
+        assert!(written["head_injection"].is_null());
+        assert_eq!(written["terminal_identities"][0]["primary"], 30);
+        assert!(restart.enqueue(human(34, 8, "next"), ctx()).await.enqueued);
+        assert_eq!(taken(&restart).await, Some(34));
     });
 }
 
@@ -439,9 +489,9 @@ fn write_failures_issue_no_ticket_or_leave_the_head_unknown() {
     });
 }
 
-/// While reserved, a front restore, a cancel, a clear and a purge each keep the head first and whole.
+/// While reserved, a front restore, a cancel and a purge each keep the head first and whole.
 #[test]
-fn restore_cancel_clear_and_purge_keep_a_reserved_head() {
+fn restore_cancel_and_purge_keep_a_reserved_head() {
     let _root = root();
     block_on(async {
         let channel = ChannelId::new(6_813_017);
@@ -465,9 +515,6 @@ fn restore_cancel_clear_and_purge_keep_a_reserved_head() {
                 .collect::<Vec<_>>(),
             [61, 62]
         );
-        let cleared = handle.clear(ctx()).await;
-        assert!(cleared.persistence_error.is_some());
-        assert!(!cleared.discarded_message_ids.contains(&MessageId::new(61)));
         assert!(handle.enqueue(human(63, 8, "third"), ctx()).await.enqueued);
         let purged = handle.purge_queue(ctx(), true).await;
         assert!(purged.input_refusal.is_some());

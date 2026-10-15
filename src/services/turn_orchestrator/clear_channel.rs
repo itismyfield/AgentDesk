@@ -16,26 +16,30 @@ pub(super) fn clear_channel_state(
     persistence: QueuePersistenceContext,
 ) -> ClearChannelResult {
     state.last_persistence = Some(persistence.clone());
-    if let Err(error) = queued_head::refuse_destructive(state, channel_id, &persistence) {
-        return ClearChannelResult {
-            persistence_error: Some(error),
-            ..Default::default()
-        };
-    }
+    // An explicit clear discards the queued head too, whatever its phase.
+    let previous_head = match queued_head::release_for_clear(state, channel_id, &persistence) {
+        Ok(previous) => previous,
+        Err(error) => {
+            return ClearChannelResult {
+                persistence_error: Some(error),
+                ..Default::default()
+            };
+        }
+    };
     let mut discarded_message_ids: Vec<MessageId> =
         state.active_user_message_id.into_iter().collect();
     let removed_token = release_active_turn_anchor(state, channel_id, Some(&persistence.provider));
     let previous_queue = state.intervention_queue.clone();
-    // A reserved queued head is not cleared: it may already be in the pane.
-    let keep = queued_head::protected_len(state, channel_id, &persistence);
     let queue_exit_events: Vec<QueueExitEvent> = state
         .intervention_queue
-        .drain(keep..)
+        .drain(..)
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
         .collect();
     if let Err(error) =
         persist_queue_or_restore(state, channel_id, &persistence, previous_queue, "clear")
     {
+        // The head stays held too, so nothing behind it runs before a retried clear.
+        state.queued_head = previous_head;
         return ClearChannelResult {
             removed_token,
             queue_exit_events: Vec::new(),
