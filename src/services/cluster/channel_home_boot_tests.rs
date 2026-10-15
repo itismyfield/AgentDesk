@@ -527,9 +527,8 @@ mod writer_return {
     const WC: &str = "1490141479707086947";
     const WID: u64 = 1_490_141_479_707_086_947;
 
-    /// A gateway with its lease acquired whose writers are supervised as the runtime's; `starts`
-    /// keeps, for each writer start after the boot, whether another writer still hosted the
-    /// channel and whether a home gate was still registered.
+    /// A leased gateway with supervised writers; `starts` records, per later writer start, whether
+    /// another writer still hosted the channel and whether a home gate was still registered.
     struct Gateway {
         _runtime: tempfile::TempDir,
         transcript: PathBuf,

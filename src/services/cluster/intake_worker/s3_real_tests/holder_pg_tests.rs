@@ -753,9 +753,8 @@ pub(super) async fn applied_then_released(
     assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }
 
-/// T-H6 return: one gateway watch follows a delegation from no row through the worker's reclaim.
-/// Its writer ends with the release, and once the reclaimed row is gone a new gateway writer is
-/// ready and posts again; no two processes' POSTs overlap.
+/// T-H6 return: one gateway watch follows a delegation through the worker's reclaim; its writer
+/// ends with the release, a new one posts once the row goes, and no two processes' POSTs overlap.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_gateway_reclaim_roundtrip_restores_writer_pg() {
     let scene = Scene::new().await;
