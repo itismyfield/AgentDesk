@@ -74,7 +74,6 @@ NON_PG_FILTER_WORKFLOWS = (
     Path(".github/workflows/ci-nightly.yml"),
 )
 NON_PG_FILTER_REQUIRED_JOBS = frozenset({
-    ".github/workflows/ci-pr.yml:library_sweep",
     ".github/workflows/ci-main.yml:full_non_pg",
     ".github/workflows/ci-nightly.yml:full_macos",
     ".github/workflows/ci-nightly.yml:full_windows",

@@ -521,7 +521,8 @@ async fn handle_text_message_admitted(
         .unwrap_or_else(|| settings_provider.clone());
     let early_fast_mode_channel_id =
         effective_fast_mode_channel_id(channel_id, early_thread_parent.clone());
-    let (inbound, input) = ((channel_id, channel_id), (preloaded_uploads, None));
+    let inbound = (channel_id, channel_id, _queued_drain);
+    let input = (preloaded_uploads, None);
     let admitted = host_refusal::admitted_uploads(http, shared, &settings_provider, inbound, input);
     let Some(preloaded_uploads) = admitted.await? else {
         return Ok(IntakeExecution::Executed);
@@ -894,8 +895,6 @@ async fn handle_text_message_admitted(
             );
         }
     }
-    let dispatch_uses_thread_routing =
-        crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
     let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit)) =
         adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
             http,
@@ -907,12 +906,12 @@ async fn handle_text_message_admitted(
             dispatch_id_for_thread: &dispatch_id_for_thread,
             dispatch_info_cached: &dispatch_info_cached,
             dispatch_type_str: dispatch_type_str.as_deref(),
-            dispatch_uses_thread_routing,
             is_already_thread,
             user_text,
             dispatch_effective_path: &dispatch_effective_path,
             pending_uploads: &mut pending_uploads,
             session_was_cleared,
+            queued_drain: _queued_drain,
         })
         .await?
     else {

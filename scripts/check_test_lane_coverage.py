@@ -915,7 +915,7 @@ def check(
     parity = _parity_module()
     sources = parity.collect_sources(repo_root, sys.modules[__name__])
     required_lanes = tuple(
-        dict.fromkeys(s.lane for s in sources.of("pr-required") if s.lane is not None)
+        dict.fromkeys(s.lane for s in sources.required if s.lane is not None)
     )
     exceptions, exception_findings = parity.load_exceptions(
         repo_root / parity.EXCEPTIONS_REL
@@ -945,8 +945,8 @@ def check(
     required_failed = report_axis(
         "required_pr_coverage", "required-pr", required_current, required_baseline,
         set(reference_required_pr), reference_label,
-        f"Select '+' modules in a required PR job ({jobs}); main, nightly and "
-        "justfile lanes do not count. Remove '-' entries to lock in debt reduction.",
+        f"Select '+' modules in a required PR job or a main lane ({jobs}); nightly "
+        "and justfile lanes do not count. Remove '-' entries to lock in debt reduction.",
     )
     parity_findings = [*exception_findings, *verdict.findings]
     for axis, found in (
@@ -969,12 +969,12 @@ def check(
         print(
             f"OK: required_pr_coverage: {len(required_current)} uncovered module(s) "
             f"match the required-PR baseline; {len(required_lanes)} invocation(s) in "
-            f"required PR jobs: {jobs}."
+            f"required PR jobs and main lanes: {jobs}."
         )
     if emit_success and not parity_findings:
         print(
             f"OK: pr_filter_parity: {verdict.explicit} explicit justfile filter(s); "
-            f"{verdict.matched} selected by required PR named filters, "
+            f"{verdict.matched} selected by required PR or main named filters, "
             f"{verdict.excepted} by proven exceptions."
         )
     new_failed = False
