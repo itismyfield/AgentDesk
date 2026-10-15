@@ -89,6 +89,10 @@ async fn the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg() {
         );
         assert!(started.await.is_empty());
         assert!(o_writer_host::spawn_delegated(&shared, &ProviderKind::Claude, None).is_empty());
+        assert!(
+            o_writer_host::lifecycles(None).is_empty(),
+            "off: no shutdown lifecycle"
+        );
     }
     assert_eq!(lazy.size(), 0, "off: no connection opened");
     assert!(!channel_home::any_registered());
@@ -160,7 +164,6 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
         1,
         "off the O home: only the delegated channel"
     );
-    writers.iter().for_each(tokio::task::JoinHandle::abort);
     drop(foreign);
 
     // On the O home every selected channel has an adoption; still only a registered one is hosted.
@@ -180,7 +183,6 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
         1,
         "on the O home: only the registered channel"
     );
-    writers.iter().for_each(tokio::task::JoinHandle::abort);
     channel_home::unregister(&home_held);
     let alarmed = crate::services::tui_o::alarm::health_reasons();
     let unregistered = [PLAIN, HOME_PLAIN].map(|channel| format!(":{channel}"));
@@ -192,7 +194,10 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
         0,
         "no hold alarm for an unregistered channel"
     );
-    channel_home_boot::stop(&channel).await;
+    use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
+    let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
+    homes.stop_and_join(StopReason::Sigterm).await;
+    assert_eq!(channel_home_boot::running(&channel), (false, None));
     channel_home::unregister(&channel);
     pool.close().await;
     db.drop().await;

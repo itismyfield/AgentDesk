@@ -198,6 +198,7 @@ src/services/discord/router/message_handler/watchdog_host_tests.rs
 src/services/discord/runtime_bootstrap/channel_homes_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
+src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
@@ -528,6 +529,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -1821,6 +1823,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_ex
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::missing_existing_persisted_artifact_returns_false_and_reopens_every_runtime_fence_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::promotion_cancel_keeps_the_writer_incarnation_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
@@ -1846,6 +1849,8 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_ho
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_session_reactivated_during_probe_pg
