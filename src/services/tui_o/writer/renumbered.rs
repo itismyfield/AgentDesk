@@ -272,8 +272,9 @@ impl Names {
         Ok(())
     }
 
-    /// Where a resume or seed starts: the checkpoint, else the last bind of an attached source,
-    /// whose name an empty session leaves compatible must still read as stored to be taken.
+    /// Where a resume or seed starts: the checkpoint, 0 for an init with no source, else the last
+    /// bind of an attached source, whose name an empty session leaves compatible must still read
+    /// as stored to be taken.
     pub(super) fn start(
         &self,
         store: &ChannelStore,
@@ -282,6 +283,10 @@ impl Names {
     ) -> Result<Option<u64>, WriterAlarm> {
         if checkpoint.is_some() {
             return Ok(checkpoint);
+        }
+        // An init with no source binds every source later, so the whole log is still ahead.
+        if store.init().sources.is_empty() {
+            return Ok(Some(0));
         }
         let Some(seq) = binding_baseline(named, |source| store.cursor(source).is_some()) else {
             return Ok(None);
