@@ -4253,10 +4253,12 @@ services::discord::health::transcript_turn::tests::retired_residue_degrades_publ
 services::discord::health::transcript_turn::tests::row_observation_tells_a_missing_row_from_a_failed_stat
 services::discord::health::transcript_turn::tests::store_presence_tells_a_missing_store_from_an_unreadable_one
 services::discord::health::transcript_turn::tests::view_goes_stale_after_120_seconds_without_a_push
+services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_stays_queued_when_the_execution_changes_before_the_paste_pg
+services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_without_the_exact_receipt_stays_unknown_and_holds_the_tail_pg
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
 services::discord::health::turn_deliver::inject_codex_tests::claude_injection_keeps_reading_a_separate_relay_pg

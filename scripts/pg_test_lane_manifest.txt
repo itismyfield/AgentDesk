@@ -1531,10 +1531,12 @@ services::discord::health::recovery::stall_alert::tests::pg_outbox_routes_dm_ale
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::long_active_turn_preserves_authority_without_paging_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
+services::discord::health::turn_deliver::inject::herdr::tests::herdr_ack_without_the_exact_receipt_stays_unconfirmed_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg
 services::discord::health::turn_deliver::inject::herdr::tests::herdr_refusal_or_unreachable_server_hands_the_input_back_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg
 services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_stays_queued_when_the_execution_changes_before_the_paste_pg
+services::discord::health::turn_deliver::inject::herdr::tests::queued_herdr_head_without_the_exact_receipt_stays_unknown_and_holds_the_tail_pg
 services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_steers_the_open_turn_quietly_pg
 services::discord::health::turn_deliver::inject_codex_tests::claude_injection_keeps_reading_a_separate_relay_pg
 services::discord::health::turn_deliver::inject_codex_tests::codex_injection_reads_native_with_a_separate_relay_pg
