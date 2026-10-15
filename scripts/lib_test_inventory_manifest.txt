@@ -8714,6 +8714,7 @@ services::discord::tmux_restart_handoff::retirement_await_tests::retirement_duri
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_dispatch_lookup_blocks_failure
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_notice_preserves_later_effects
 services::discord::tmux_restart_handoff::retirement_await_tests::retirement_during_handoff_rowless_snapshot_blocks_kickoff
+services::discord::tmux_watcher_registry::session_binding::tests::authoritative_snapshot_dedupes_sorts_and_rechecks_live_precedence
 services::discord::tmux_watcher_registry_restore_tests::base_and_thread_suffixed_names_resolve_independently
 services::discord::tmux_watcher_registry_restore_tests::cancel_and_remove_channel_if_current_only_rolls_back_matching_claim
 services::discord::tmux_watcher_registry_restore_tests::channel_binding_exposes_the_live_watcher_output_path
@@ -10174,6 +10175,15 @@ services::discord::turn_bridge::tmux_runtime::session_stop::tests::c1_stop_some_
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::codex_parent_without_session_meta_refuses_stop_and_replies
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused
 services::discord::turn_bridge::tmux_runtime::session_stop::tests::n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_unread_turn
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_foreign_provider_binding_is_host_refused_without_io
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_multiple_typed_owner_sessions_refuse_before_open_state
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_nonowner_typed_session_is_not_a_candidate
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_owner_change_after_judgment_prevents_slash_finish_interrupt
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_owner_only_pending_or_corrupt_binding_refuses_without_io
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_slash_stop_interrupts_unique_owner_only_claude_parent_without_watcher
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_source_rotation_after_judgment_prevents_slash_finish_interrupt
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_text_stop_interrupts_unique_owner_only_codex_parent_without_watcher
+services::discord::turn_bridge::tmux_runtime::session_stop::tests::n2a_ttl_mirror_only_session_is_not_a_candidate
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_sends_one_escape_and_spends_the_claim_only_once_sent
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_claude_stop_writes_nothing_unless_every_fence_passes
 services::discord::turn_bridge::tmux_runtime::stop_host::tests::a_herdr_stop_for_another_provider_is_refused_before_any_io
