@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Label cargo-test commands with the CI context that runs them, and require every
-explicit justfile filter to be selected by explicit required-PR filters or an exception."""
+"""Label cargo-test commands with the CI context that runs them, and require every explicit
+justfile filter to be selected by required-PR or main lane filters, or an exception."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ INERT_MODES = ("--list", "--ignored")
 SWEEP_COVERED = "sweep-covered"
 MAIN_ONLY_TARGET = "main-only-target"
 LIBRARY_TARGETS = frozenset({"lib", "all-targets", "default"})
+_NESTED_JUST = re.compile(r"(?:^|&&|;)\s*just\s+([A-Za-z0-9_-]+)\s*$")
 _UPSTREAM_NAME = re.compile(r"\bUPSTREAM_JOB_NAME\s*:\s*['\"]?([A-Za-z0-9_-]+)")
 _UPSTREAM_RESULT = re.compile(
     r"\bUPSTREAM_RESULT\s*:\s*['\"]?\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}"
@@ -100,8 +101,15 @@ class Sources:
         return tuple(s for s in self.sources if s.origin in origins and s.runs and not s.guard)
 
     @property
+    def required(self) -> tuple[LaneSource, ...]:
+        """Required PR runs plus main's lanes: a PR runs only the plan's PostgreSQL and sweep
+        tests, so main's literal full lanes, which a deploy needs green, prove coverage."""
+        return self.of("pr-required") + tuple(s for s in self.of("main") if s.lane)
+
+    @property
     def required_test_jobs(self) -> str:
-        return ", ".join(sorted({s.owner for s in self.of("pr-required")})) or "none proven"
+        return ", ".join(sorted({f"{'main:' * (s.origin == 'main')}{s.owner}"
+                                 for s in self.required})) or "none proven"
 
 
 @dataclass(frozen=True)
@@ -175,11 +183,13 @@ def _source(cti, coverage, expansions, origin, owner, location, words):
 
 
 def justfile_sources(cti, coverage, repo_root: Path, expansions):
-    """Every recipe's cargo-test commands, owned by the recipe that declares them."""
+    """Every recipe's cargo-test commands, owned by the recipe that declares them, and the
+    recipes each one runs through `just <recipe>`."""
     path = repo_root / "justfile"
     extracted = {line: words for line, words, _ in cti.extract_justfile_commands(path)}
     sources: list[LaneSource] = []
     findings: list[Finding] = []
+    calls: dict[str, list[str]] = {}
     recipe = None
     for lineno, line in enumerate(path.read_text("utf-8").splitlines(), 1):
         if line and not line[0].isspace():
@@ -197,7 +207,9 @@ def justfile_sources(cti, coverage, repo_root: Path, expansions):
             findings.extend([finding] if finding else [])
         elif "cargo test" in line:
             findings.append(_unreadable(location, line.strip()))
-    return sources, findings
+        elif nested := _NESTED_JUST.search(line.strip()):
+            calls.setdefault(recipe, []).append(nested.group(1))
+    return sources, findings, calls
 
 
 def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str], dict[str, int]]:
@@ -457,11 +469,16 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
         coverage.load_non_pg_skip_args(repo_root) if filter_present else (),
         coverage.load_non_pg_filter_replay(repo_root) if filter_present else (),
     )
-    sources, justfile_findings = justfile_sources(cti, coverage, repo_root, expansions)
+    sources, justfile_findings, calls = justfile_sources(cti, coverage, repo_root, expansions)
     findings: list[Finding] = []
-    recipes: dict[str, list[LaneSource]] = {}
+    own: dict[str, list[LaneSource]] = {}
     for source in sources:
-        recipes.setdefault(source.owner, []).append(source)
+        own.setdefault(source.owner, []).append(source)
+
+    def runs(name: str, seen: frozenset[str] = frozenset()) -> list[LaneSource]:
+        return [*own.get(name, ()), *(source for callee in calls.get(name, ()) if callee not in seen
+                                      for source in runs(callee, seen | {name}))]
+    recipes = {name: runs(name) for name in {*own, *calls}}
     mirrors: list[Mirror] = []
     pr_jobs: tuple = ()
     for name, rel in (("pr", PR_WORKFLOW_REL), *OTHER_WORKFLOWS):
@@ -548,9 +565,9 @@ def _sample(ids) -> str:
 def judge_parity(
     sources: Sources, test_ids: frozenset[str], exceptions, pg_tests=frozenset(), pg_only=()
 ) -> ParityResult:
-    """Explicit justfile filters need explicit required-PR selection or a proven exception;
-    the required sweep and its replay never count as explicit, the PG lane only for PG ids."""
-    required = sources.of("pr-required")
+    """Explicit justfile filters need required-PR or main selection or a proven exception;
+    the sweep and its replay never count as explicit, the PG lane only for PG ids."""
+    required = sources.required
     ordered = sorted(test_ids)
 
     def selected(lanes) -> set[str]:

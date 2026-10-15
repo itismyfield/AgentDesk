@@ -116,7 +116,7 @@ impl Fixture {
             .unwrap()
             .join(format!("rollout-{id}.jsonl"))
     }
-    fn header(&self, id: &str, child: bool) {
+    fn header(&self, id: &str, child: bool) -> u64 {
         let source = if child {
             json!({"subagent":{"thread_spawn":{"parent_thread_id":ID}}})
         } else {
@@ -124,6 +124,7 @@ impl Fixture {
         };
         let meta = json!({"type":"session_meta", "timestamp":(self.context.created_at + chrono::Duration::seconds(1)).to_rfc3339(), "payload":{"id":id,"timestamp":(self.context.created_at + chrono::Duration::seconds(1)).to_rfc3339(),"cwd":self.root.path(),"source":source,"originator":"codex_cli_rs"}});
         fs::write(self.path(id), format!("{meta}\n")).unwrap();
+        fs::metadata(self.path(id)).unwrap().len()
     }
     fn send(
         &self,
@@ -525,7 +526,7 @@ fn restart_refuses_unlinked_or_foreign_proof_cursors_and_replaced_relay_identity
 #[test]
 fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     let h = Fixture::new("fresh", None);
-    h.header(ID, false);
+    let end = h.header(ID, false);
     h.send("session-start", ID, Value::Null, None);
     let relay = crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
     fs::write(&relay, "delivered\nunread relay bytes\n").unwrap();
@@ -535,7 +536,7 @@ fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     assert!(advance_tmux_runtime_binding_offset(
         &h.context.tmux_session,
         h.path(ID).to_str().unwrap(),
-        12
+        end
     ));
     assert!(advance_tmux_runtime_binding_offset(
         &h.context.tmux_session,
@@ -558,7 +559,7 @@ fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     register_tmux_channel(&h.context.tmux_session, 584_504);
     codex_verified::resolve_registered_claims();
     let restored = h.consumer().unwrap();
-    assert_eq!(restored.last_offset, 12);
+    assert_eq!(restored.last_offset, end);
     assert_eq!(restored.relay_last_offset, Some(0));
     // Explicit reconnection may certify the replacement, starting at zero.
     let mut reconnect = restored;
@@ -874,7 +875,7 @@ fn concurrent_start_and_matching_ups_share_one_native_proof() {
 #[test]
 fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     let h = Fixture::new("fresh", None);
-    h.header(ID, false);
+    let end = h.header(ID, false);
     h.send("session-start", ID, Value::Null, None);
     h.assert_proof();
     let before = h.fold();
@@ -893,7 +894,7 @@ fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
         &h.context.tmux_session,
         &h.path(ID),
-        12,
+        end,
     );
     register_rehydrated_tmux_runtime_binding("codex", &h.context.tmux_session, 584_504, discovered);
     h.send(
@@ -904,8 +905,7 @@ fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     );
     assert_eq!(h.fold(), before);
     let binding = h.consumer().unwrap();
-    assert_eq!(binding.last_offset, 12);
-    assert_eq!(binding.relay_last_offset(), 12);
+    assert_eq!([binding.last_offset, binding.relay_last_offset()], [end; 2]);
     assert_eq!(binding.relay_output_path, None);
 }
 
@@ -914,7 +914,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
     for restart in [false, true] {
         for normalized in [false, true] {
             let h = Fixture::new("fresh", None);
-            h.header(ID, false);
+            let end = h.header(ID, false);
             h.send("session-start", ID, Value::Null, None);
             let first = h.fold().verified.unwrap();
             let relay =
@@ -928,7 +928,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert!(advance_tmux_runtime_binding_offset(
                 &h.context.tmux_session,
                 h.path(ID).to_str().unwrap(),
-                12
+                end
             ));
             if normalized {
                 assert!(advance_tmux_runtime_binding_offset(
@@ -937,7 +937,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
                     10
                 ));
             }
-            let m = if normalized { 10 } else { 12 };
+            let m = if normalized { 10 } else { end };
             let held = h.path(ID).with_extension("held");
             fs::rename(h.path(ID), &held).unwrap();
             h.send("user-prompt-submit", ID, json!("later prompt"), None);
@@ -946,7 +946,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert!(pending.conflicted);
             assert!(h.consumer().is_none());
             let pending_seq = pending.pending[0].seq;
-            assert_eq!(h.raw().unwrap().last_offset, 12);
+            assert_eq!(h.raw().unwrap().last_offset, end);
             fs::rename(&held, h.path(ID)).unwrap();
             if restart {
                 dedupe::reset_state_for_tests();
@@ -962,10 +962,10 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert_eq!(latest.source, first.source);
             let raw = h.raw().unwrap();
             assert_eq!(h.consumer(), Some(raw.clone()));
-            assert_eq!(raw.last_offset, 12);
+            assert_eq!(raw.last_offset, end);
             assert_eq!(raw.relay_last_offset, Some(m));
             let marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
-            assert_eq!(marker["rollout_start_offset"], 12);
+            assert_eq!(marker["rollout_start_offset"], end);
             assert_eq!(marker["codex_ownership"]["proof_seq"], latest.seq);
             if normalized {
                 assert_eq!(marker["codex_relay"]["last_offset"], 10);

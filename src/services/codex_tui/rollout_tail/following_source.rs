@@ -66,7 +66,8 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
     if source_pin.is_some() && start_offset > file_len {
         return Err("verified start is beyond the pinned native source".into());
     }
-    let mut seek_offset = start_offset.min(file_len);
+    let mut seek_offset = super::super::session::checkpoint::boundary(&mut file, start_offset)
+        .map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(seek_offset))
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
@@ -138,7 +139,8 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
                     crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
                         &file,
                     );
-                seek_offset = opened.offset;
+                seek_offset = super::super::session::checkpoint::boundary(&mut file, opened.offset)
+                    .map_err(|error| error.to_string())?;
                 file.seek(SeekFrom::Start(seek_offset))
                     .map_err(|error| error.to_string())?;
                 current_offset = seek_offset;
@@ -201,15 +203,6 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
                     &accept,
                 ) {
                     return Ok((ended, outcome(&state, seek_offset, &current_path)));
-                }
-                if try_process_complete_partial_line(
-                    &mut partial_line,
-                    &sender,
-                    &mut state,
-                    &accept,
-                ) {
-                    last_output_at = Some(Instant::now());
-                    continue;
                 }
                 observe_codex_completion_hooks(&mut hook_events, &mut state);
                 if let Some(finalize_path) =

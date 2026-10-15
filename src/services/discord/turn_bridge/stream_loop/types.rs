@@ -16,6 +16,8 @@ pub(crate) mod terminal_prepare_test {
     #[derive(Default)]
     pub(crate) struct TerminalPrepareTestHook {
         pub(crate) channel_id: u64,
+        pub(crate) before_admission: bool,
+        pub(crate) after_send: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
         pub(crate) entered: tokio::sync::Notify,
         pub(crate) release: tokio::sync::Notify,
         pub(crate) after_revalidation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -37,6 +39,7 @@ pub(crate) mod terminal_prepare_test {
 #[cfg(unix)]
 pub(in super::super) struct PinnedTerminalTransport<'a> {
     pub(in super::super) source: (&'a SharedData, &'a dyn TurnGateway, &'a ProviderKind),
+    pub(in super::super) admitted: Option<&'a CodexRange>,
     pub(in super::super) target: (ChannelId, ChannelId, MessageId),
     pub(in super::super) payload: (Option<&'a str>, &'a str, (u64, u64)),
     pub(in super::super) trace: (Option<&'a str>, Option<&'a str>, Option<&'a str>),
@@ -59,6 +62,12 @@ impl PinnedTerminalTransport<'_> {
         let (shared, gateway, provider) = self.source;
         let (owner, channel, msg) = self.target;
         let (tmux, body, range) = self.payload;
+        if let Some(admitted) = self.admitted
+            && !admitted.parked_current(shared).await
+        {
+            pinned.release_without_receipt(NotDelivered);
+            return (false, false, None);
+        }
         let settle =
             cutover::begin_pinned_terminal(shared, provider, long, (owner, channel), range);
         let (message_id, failed, fallback) = if long {
@@ -93,6 +102,13 @@ impl PinnedTerminalTransport<'_> {
                 Ok(BodySend::OwnedByO) | Err(_) => (None, true, false),
             }
         };
+        #[cfg(test)]
+        if message_id.is_some()
+            && let Some(hook) = terminal_prepare_test::for_channel(channel)
+            && let Some(mutate) = hook.after_send.lock().unwrap().take()
+        {
+            mutate();
+        }
         let committed = if let Some(message_id) = message_id {
             let result = match pinned.commit_after_send(shared, message_id.get()) {
                 Pending(lease) => lease.commit_after_send(shared, message_id.get()),
@@ -110,6 +126,9 @@ impl PinnedTerminalTransport<'_> {
             pinned.release_without_receipt(failed.then_some(NotDelivered).unwrap_or(Unknown));
             false
         };
+        if committed && let Some(admitted) = self.admitted {
+            admitted.complete_parked_delivery();
+        }
         let receipt = committed.then_some(message_id).flatten();
         settle(receipt, committed);
         (committed, fallback, receipt)
@@ -153,6 +172,7 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, text);
     let (committed, _, receipt) = PinnedTerminalTransport {
         source: (shared, gateway, &provider),
+        admitted: Some(&admitted),
         target: (owner, channel, message),
         payload: (
             row.tmux_session_name.as_deref(),
@@ -260,8 +280,10 @@ macro_rules! dispatch_pinned_terminal {
         if $admitted.is_some() {
             #[cfg(test)]
             if let Some(hook) = $crate::services::discord::turn_bridge::stream_loop::types::terminal_prepare_test::for_channel($channel) {
-                hook.entered.notify_one();
-                hook.release.notified().await;
+                if !hook.before_admission {
+                    hook.entered.notify_one();
+                    hook.release.notified().await;
+                }
             }
             let prepared = $crate::services::discord::turn_bridge::stream_loop::types::prepare_bridge_lease(
                 bridge_delivery_lease_for_inflight(
@@ -288,6 +310,7 @@ macro_rules! dispatch_pinned_terminal {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
                     let transport = PinnedTerminalTransport {
                         source: ($shared.as_ref(), $gateway.as_ref(), &$provider),
+                        admitted: $admitted,
                         target: ($owner, $channel, $message),
                         payload: (
                             $inflight.tmux_session_name.as_deref(),
