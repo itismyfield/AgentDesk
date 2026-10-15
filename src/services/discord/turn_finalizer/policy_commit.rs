@@ -23,7 +23,7 @@ pub(in crate::services::discord::turn_finalizer) struct PolicyCommit {
 /// What the granted claim took from the channel inside the actor, before any successor could.
 #[derive(Default)]
 struct TailPlan {
-    thread_parents: Vec<ChannelId>,
+    parents: Vec<ChannelId>,
     voice: Option<DeferredVoice>,
 }
 
@@ -59,7 +59,7 @@ impl PolicyCommit {
     fn capture(&self, shared: &Arc<SharedData>, channel: ChannelId, voice: bool) -> TailCapture {
         let (shared, plan) = (shared.clone(), self.plan.clone());
         Box::new(move |queued| {
-            let thread_parents =
+            let parents =
                 super::super::cleanup::collect_and_clear_thread_parents(&shared, channel);
             let voice = voice
                 .then(|| shared.voice_barge_in.detach_deferred(channel))
@@ -70,7 +70,7 @@ impl PolicyCommit {
                 shared.dispatch.role_overrides.remove(&channel);
             }
             let taken = TailPlan {
-                thread_parents,
+                parents,
                 voice,
             };
             *plan.lock().unwrap_or_else(PoisonError::into_inner) = Some(taken);
@@ -211,7 +211,7 @@ async fn run_tail(
     super::super::cleanup::kickoff_thread_parents_after_finalize(
         shared,
         provider,
-        plan.thread_parents,
+        plan.parents,
     );
     let voice_enqueued = match plan.voice {
         Some(buffer) => {
