@@ -2311,11 +2311,10 @@ async fn deliver_direct_terminal(fx: &mut Fixture, n: u32, last: bool) {
             Err(error) => panic!("direct admission observations lost: {error:?}"),
         }
     }
-    while last {
-        let Ok(event) = tokio::time::timeout_at(deadline, fx.observed.recv()).await else {
-            break;
-        };
-        assert_direct_admission_unique(fx, &event.expect("observation channel open"));
+    if last {
+        while let Ok(event) = tokio::time::timeout_at(deadline, fx.observed.recv()).await {
+            assert_direct_admission_unique(fx, &event.expect("observation channel open"));
+        }
     }
     assert_eq!(fx.sent(&answer).len(), 1);
     fx.assert_answer(&answer, fx.anchor_of(&answer));
