@@ -204,6 +204,101 @@ async fn the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart()
     halt(stop, task).await;
 }
 
+/// An assistant row holding a whole message, as Claude Code writes its blocks into one row.
+fn whole_message(id: &str, content: serde_json::Value) -> Vec<u8> {
+    let row = serde_json::json!({"type": "assistant", "uuid": format!("u-{id}"),
+        "apiBlockIndex": 0, "message": {"id": id, "content": content}});
+    let mut line = serde_json::to_vec(&row).unwrap();
+    line.push(b'\n');
+    line
+}
+
+fn thinking_then_tool(id: &str) -> Vec<u8> {
+    let thinking = serde_json::json!({"type": "thinking", "thinking": "t", "signature": "s"});
+    let tool =
+        serde_json::json!({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}});
+    whole_message(id, serde_json::json!([thinking, thinking, tool]))
+}
+
+/// Native keys the ledger recorded excluded, in order.
+fn excluded_keys(harness: &Harness) -> Vec<String> {
+    let ledger = std::fs::read_to_string(ledger_path(harness)).unwrap();
+    let entries = ledger.lines().filter_map(|line| {
+        let entry = serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone();
+        let key = entry["unit_key"]["native_key"].as_str().map(str::to_owned);
+        key.filter(|_| entry["type"] == "excluded")
+    });
+    entries.collect()
+}
+
+/// Rows holding several blocks between one-block rows post each text block once and never stop.
+#[tokio::test(start_paused = true)]
+async fn a_whole_message_row_posts_each_block_once_without_stopping() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let (stop, task) = spawn(harness.writer());
+    let tool =
+        serde_json::json!({"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {}});
+    let texts = serde_json::json!([{"type": "text", "text": "third a"}, tool,
+        {"type": "text", "text": "third b"}]);
+    for line in [
+        row("m1", "first"),
+        thinking_then_tool("m2"),
+        whole_message("m3", texts),
+        row("m4", "fourth"),
+    ] {
+        append(&path, &line);
+    }
+    polls(3).await;
+    assert!(!task.is_finished(), "the actor keeps running");
+    assert_eq!(
+        harness.port.posts(),
+        ["first", "third a", "third b", "fourth"]
+    );
+    assert_eq!(excluded_keys(&harness), ["m2:2", "m3:1"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
+/// A store left by a writer that stopped on a whole-message row, its rows spooled past the
+/// cursor, resumes from the spool: rows after the stop post once and earlier posts never repeat.
+#[tokio::test(start_paused = true)]
+async fn a_channel_stopped_on_a_whole_message_row_resumes_from_its_spool_once() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let (stop, task) = spawn(harness.writer());
+    append(&path, &row("m1", "first"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first"]);
+    halt(stop, task).await;
+    append(
+        &path,
+        &[thinking_then_tool("m2"), row("m3", "after")].concat(),
+    );
+    let mut channel = harness.channel();
+    let cursor = channel.cursors().next().unwrap().clone();
+    let (source, through) = (cursor.source.clone(), cursor.captured_through);
+    let mut capture = SourceCapture::reopen(source, through, &cursor.prefix_hash).unwrap();
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("capture failed")
+    };
+    channel
+        .append_spool(&batch, &capture.prefix_hash())
+        .unwrap();
+    drop(channel);
+    let (stop, task) = spawn(harness.writer());
+    append(&path, &row("m4", "live"));
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first", "after", "live"]);
+    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    halt(stop, task).await;
+    let (stop, task) = spawn(harness.writer());
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first", "after", "live"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
+}
+
 /// A cold resume of an interrupted turn writes a synthetic "No response requested." row; the
 /// actor records it excluded and posts only the next turn's answer.
 #[tokio::test(start_paused = true)]

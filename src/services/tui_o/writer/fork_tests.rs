@@ -28,7 +28,7 @@ fn blocked(uuid: &str) -> Vec<u8> {
     line(
         serde_json::json!({"type": "assistant", "uuid": uuid, "apiBlockIndex": 0,
         "timestamp": Utc::now().to_rfc3339(), "message": {"id": uuid,
-        "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}),
+        "content": [{"type": "text", "text": "a"}, {"type": "image"}]}}),
     )
 }
 

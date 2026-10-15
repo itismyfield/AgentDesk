@@ -12534,6 +12534,7 @@ services::tui_o::shadow::derive::tests::live_requires_attach_and_a_window_bounda
 services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
 services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
 services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
+services::tui_o::shadow::identity::tests::claude_multi_block_row_keys_each_block_like_one_block_rows
 services::tui_o::shadow::identity::tests::claude_synthetic_resume_chrome_alone_is_excluded
 services::tui_o::shadow::identity::tests::codex_turn_aborted_closes_only_the_named_parent_turn
 services::tui_o::store::cleanup_witness::tests::readers_s1a_malformed_witness_is_not_cleanup_authority
@@ -12738,11 +12739,13 @@ services::tui_o::writer::tests::a_restarted_writer_recovers_the_newest_post_from
 services::tui_o::writer::tests::a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_posted_it
 services::tui_o::writer::tests::a_tool_call_is_left_to_the_panel_and_only_the_body_posts
 services::tui_o::writer::tests::a_violation_recorded_while_running_stops_the_writer_before_the_next_post
+services::tui_o::writer::tests::actor::a_channel_stopped_on_a_whole_message_row_resumes_from_its_spool_once
 services::tui_o::writer::tests::actor::a_full_spool_pauses_capture_until_delivered_segments_are_collected
 services::tui_o::writer::tests::actor::a_recovered_actor_clears_waiting_health_through_its_shared_sink
 services::tui_o::writer::tests::actor::a_resumed_sessions_synthetic_chrome_is_excluded_and_the_next_answer_posts
 services::tui_o::writer::tests::actor::a_source_rewritten_behind_the_cursor_halts_the_channel_before_any_post
 services::tui_o::writer::tests::actor::a_stop_an_abort_or_eof_settles_nothing_the_channel_still_owes
+services::tui_o::writer::tests::actor::a_whole_message_row_posts_each_block_once_without_stopping
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
 services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold
