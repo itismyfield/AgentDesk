@@ -481,4 +481,78 @@ mod tests {
         assert_eq!(gate.mode(), Mode::Closing);
         closing.drain().await;
     }
+
+    /// A queued input refused by its reused Herdr thread hands every taken upload to its queue
+    /// owner once; the session gets back only its clear flag and keeps an upload that came later.
+    #[tokio::test]
+    async fn a_refused_queued_redirect_returns_its_uploads_and_clear_flag() {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let original = ChannelId::new(6_325_512);
+        let reused = ChannelId::new(6_325_513);
+        // Without a database the configured thread's row is unreadable, so Herdr refuses it.
+        let hosts = [(reused.get(), "mac-mini")];
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &hosts);
+        let map = crate::services::discord::host_defer_gate::tests::map_channel;
+        map(&shared, original, "redirect-input").await;
+        let upload = |record: &str| {
+            crate::services::cluster::attachment_transfer::uploads::Upload::Local(record.into())
+        };
+        let (taken, queued, late) = (upload("taken"), upload("queued"), upload("late"));
+        // The intake already took the session's upload and clear flag; another upload arrived since.
+        let late_only = vec![late];
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&original).unwrap().pending_uploads = late_only.clone();
+        drop(core);
+        let info = crate::services::discord::router::thread_binding::DispatchInfo {
+            active_thread_id: Some(reused.to_string()),
+            ..Default::default()
+        };
+        let http = Arc::new(serenity::http::Http::new("Bot input-test-no-network"));
+        let mut uploads = vec![taken.clone(), queued.clone()];
+        let result = redirect_dispatch(RedirectDispatch {
+            http: &http,
+            cache: None,
+            shared: &shared,
+            provider: &shared.provider,
+            channel_id: original,
+            original_channel_id: original,
+            dispatch_id_for_thread: &Some("dispatch-test".into()),
+            dispatch_info_cached: &Some(info),
+            dispatch_type_str: None,
+            is_already_thread: false,
+            user_text: "input",
+            dispatch_effective_path: "/unreachable",
+            pending_uploads: &mut uploads,
+            session_was_cleared: Some(true),
+            queued_drain: true,
+        })
+        .now_or_never()
+        .expect("a queued refusal sends no notice");
+        type Handoff =
+            crate::services::discord::router::intake_dispatch::QueuedTransitionBusyHandoff;
+        let handoff = result
+            .err()
+            .expect("the refusal goes back to the queue owner")
+            .downcast::<Handoff>()
+            .expect("a busy handoff");
+        assert_eq!(
+            handoff.owned_uploads,
+            vec![taken, queued],
+            "each taken upload goes back to the queue once"
+        );
+        let core = shared.core.lock().await;
+        let session = core.sessions.get(&original).unwrap();
+        assert!(
+            session.cleared,
+            "the redirect's clear flag returns to the session"
+        );
+        assert_eq!(
+            session.pending_uploads, late_only,
+            "only the later upload stays on the session"
+        );
+        assert!(!core.sessions.contains_key(&reused), "no thread bootstrap");
+        drop(core);
+        assert!(!shared.dispatch.thread_parents.contains_key(&original));
+    }
 }
