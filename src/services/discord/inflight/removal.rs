@@ -685,8 +685,6 @@ fn classify_inflight_row_for_restore(
 pub(in crate::services::discord) struct InflightProbeLoad {
     pub(in crate::services::discord) states: Vec<InflightTurnState>,
     pub(in crate::services::discord) complete: bool,
-    #[cfg(test)]
-    pub(in crate::services::discord) failure: Option<RestoreFailure>,
 }
 
 #[cfg(test)]
@@ -703,7 +701,6 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
-            failure: Some(RestoreFailure::retryable("restore root/scope unavailable")),
         };
     };
     if channel == 0
@@ -712,9 +709,6 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
-            failure: Some(RestoreFailure::Rejected(
-                "restore scope/input unavailable".into(),
-            )),
         };
     }
     let mut loaded = if scoped_restore_mutant("scope") {
@@ -793,16 +787,11 @@ fn load_inflight_probe_with_scope(
             return InflightProbeLoad {
                 states: Vec::new(),
                 complete: error.kind() == std::io::ErrorKind::NotFound,
-                #[cfg(test)]
-                failure: (error.kind() != std::io::ErrorKind::NotFound)
-                    .then(|| RestoreFailure::retryable(error)),
             };
         }
     };
     let mut states = Vec::new();
     let mut complete = true;
-    #[cfg(test)]
-    let mut failure = None;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let allocation = crate::services::discord::runtime_store::process_generation_binding();
     for entry in entries {
@@ -843,19 +832,11 @@ fn load_inflight_probe_with_scope(
                     })
                 };
                 complete &= backfilled.is_ok();
-                #[cfg(test)]
-                if scope.is_some() {
-                    failure = backfilled.as_ref().err().cloned();
-                }
                 backfilled.unwrap_or(state)
             }
             RowVerdict::Keep(state, false) | RowVerdict::KeepGateRefused(state, _) => state,
             RowVerdict::Skip(incomplete) => {
                 complete &= !incomplete;
-                #[cfg(test)]
-                if incomplete && scope.is_some() {
-                    failure = Some(RestoreFailure::retryable("scoped row read/lock incomplete"));
-                }
                 continue;
             }
             RowVerdict::HideStale(..)
@@ -894,12 +875,7 @@ fn load_inflight_probe_with_scope(
         }
         states.push(state);
     }
-    InflightProbeLoad {
-        states,
-        complete,
-        #[cfg(test)]
-        failure,
-    }
+    InflightProbeLoad { states, complete }
 }
 
 mod boot_custody;

@@ -7,11 +7,8 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
+pub(crate) use codex_cursor::exports::*;
 mod codex_policy;
-pub(crate) use codex_cursor::{
-    advance_tmux_runtime_binding_offset_under_source_authority,
-    preservable_marker as codex_verified_preservable_marker,
-};
 pub(crate) use codex_policy::{
     codex_verified_channel_delivery_allowed, codex_verified_channel_requires_proof,
     codex_verified_event_allowed, codex_verified_hold_reason, codex_verified_input_blocked,
@@ -103,9 +100,10 @@ fn with_runtime_binding_state_under_source_authority<R>(
     operation: impl FnOnce(&mut TuiPromptDedupeState) -> R,
 ) -> R {
     let tmux_session_name = authority.session();
+    #[cfg(test)]
+    let _publication = super::state::BindingPublicationHeld::enter();
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
-    state.purge_expired();
-    state.purge_expired_runtime_binding_under_authority(authority);
+    pane_registration::purge_expired_under_authority(&mut state, authority);
     let previous = state
         .runtime_by_tmux
         .get(tmux_session_name)
@@ -135,15 +133,6 @@ fn with_runtime_binding_authority<R>(
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         with_runtime_binding_state_under_source_authority(authority, operation)
     })
-}
-
-#[cfg(test)]
-pub(crate) fn assert_marker_publication_unlocked_for_tests() {
-    assert!(
-        STATE.try_lock().is_ok(),
-        "binding cache mutex must not cover marker IO"
-    );
-    crate::services::cluster::stream_relay::source_read_proof::assert_revision_unlocked_for_tests();
 }
 
 pub fn subscribe_observed_prompts() -> broadcast::Receiver<ObservedTuiPrompt> {
@@ -911,6 +900,7 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        pane_registration::forget_restore_scope(state, tmux_session_name);
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);
         removed_runtime || removed_provider_sessions
@@ -929,6 +919,7 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     }
     let removed = with_runtime_binding_authority(tmux_session_name, |state| {
         let removed_runtime = state.runtime_by_tmux.remove(tmux_session_name).is_some();
+        pane_registration::forget_restore_scope(state, tmux_session_name);
         let removed_channel = state.channel_by_tmux.remove(tmux_session_name).is_some();
         let removed_provider_sessions =
             state.remove_provider_session_mappings_for_tmux(tmux_session_name);

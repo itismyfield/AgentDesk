@@ -427,3 +427,6 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 pub(crate) mod executor_tests;
+
+#[cfg(unix)]
+pub(crate) mod idle_stash;

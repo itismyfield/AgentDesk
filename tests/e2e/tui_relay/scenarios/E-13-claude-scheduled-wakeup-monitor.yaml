@@ -7,7 +7,7 @@ isolation: required
 notes: |
   Claude Code pipe/headless 전용 회귀. 첫 turn은 ScheduleWakeup/Monitor 계열
   대기 상태를 만들고, 이후 자동 wakeup으로 재진입한 turn이 사용자-visible
-  marker를 Discord에 relay해야 한다. TUI/claude-e cells는 이 matrix에서
+  marker를 Discord에 relay해야 한다. TUI cells는 이 matrix에서
   persistent Claude Code wake session을 안정적으로 만들지 않으므로 일반 relay
   시나리오만 맡긴다.
 steps:

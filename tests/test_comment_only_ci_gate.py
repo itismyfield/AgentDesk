@@ -336,10 +336,12 @@ class GateProcessTests(unittest.TestCase):
 
 
 TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'((?:[^']|'')*)'|([A-Za-z_][\w.-]*))")
+FORCE_FULL = "needs.pg_shards.outputs.force_full == 'true'"
 
 
 def cancelled_path_gate(expr: str, lookup) -> bool:
-    """Only the status-first cancellation guard and one path output are shared gates."""
+    """Only the status-first cancellation guard and one path output, which the selector's
+    kill switch may open in parentheses, are shared gates."""
     def unparen(value: str) -> str:
         value = value.strip()
         while value.startswith("(") and value.endswith(")"):
@@ -355,11 +357,15 @@ def cancelled_path_gate(expr: str, lookup) -> bool:
 
     terms = unparen(expr).split("&&")
     status = unparen(terms[0])
-    assert len(terms) == 2 and "||" not in expr and status.startswith("!"), expr
+    assert len(terms) == 2 and status.startswith("!"), expr
     assert re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])), expr
-    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'", unparen(terms[1]))
+    path, *opened = unparen(terms[1]).split("||")
+    assert not opened or terms[1].strip().startswith("(") and [o.strip() for o in opened] == [FORCE_FULL], expr
+    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'", unparen(path))
     assert output, expr
-    return not truthy(lookup("cancelled()")) and str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
+    forced = bool(opened) and str(lookup("needs.pg_shards.outputs.force_full")).lower() == "true"
+    selected = str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
+    return not truthy(lookup("cancelled()")) and (selected or forced)
 
 
 def evaluate(expr: str, lookup) -> object:
@@ -468,8 +474,10 @@ class WorkflowSimulation:
         rust_tests_skip: str | None = None,
         gate_outcome: str = "success",
         run_cancelled: bool = False,
+        force_full: str = "false",
     ):
         self.run_cancelled = run_cancelled
+        self.force_full = force_full
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
         gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
@@ -495,6 +503,9 @@ class WorkflowSimulation:
             return self.run_cancelled
         parts = name.split(".")
         assert parts[0] == "needs", name
+        if parts[2] == "outputs" and parts[1] == "pg_shards":
+            assert parts[3] == "force_full", name
+            return self.force_full
         if parts[2] == "outputs":
             assert parts[1] == "changes", name
             return self.changes.get(parts[3], "")
@@ -566,6 +577,9 @@ class CancelledPathExpressionTests(unittest.TestCase):
             "!cancelled() && needs.other.outputs.pg_db == 'true'",
             "!cancelled() && " + output + " && " + output,
             "!cancelled() && " + output + " || needs.changes.outputs.rust_tests == 'true'",
+            "!cancelled() && " + output + " || " + FORCE_FULL,
+            "!cancelled() && (" + output + " || needs.other.outputs.force_full == 'true')",
+            "!cancelled() && (" + output + " || " + FORCE_FULL + " || " + output + ")",
             "(!cancelled() || always()) && " + output,
             output + " && !cancelled()",
             "!cancelled(false) && " + output,
@@ -650,6 +664,16 @@ class WorkflowWiringTests(unittest.TestCase):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "success", job_id)
                 self.assertPublishedGreen(run)
+
+    def test_the_kill_switch_runs_both_heavy_lanes_even_for_a_comment_only_change(self) -> None:
+        run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", force_full="true")
+        self.assertEqual((run.results["test_fast"], run.results["library_sweep"]), ("success", "success"))
+        self.assertPublishedGreen(run)
+        failed = {"test_fast": "failure", "library_sweep": "failure"}
+        published = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", force_full="true",
+                                       forced=failed).mirror_runs()
+        for context in ("Fast targeted tests (ubuntu-latest)", "Library test sweep (ubuntu-latest)"):
+            self.assertIn(1, [result.returncode for result in published[context]], context)
 
     def test_heavy_mirrors_still_fail_closed_when_not_comment_only(self) -> None:
         contexts = {
