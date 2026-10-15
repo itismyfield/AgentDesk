@@ -652,7 +652,11 @@ src/
 │   │   │   └── relay_receipts.rs
 │   │   ├── host_input/
 │   │   │   ├── guarded_submission/
-│   │   │   │   └── executor_tests.rs
+│   │   │   │   ├── idle_stash/
+│   │   │   │   │   ├── idle_stash_tests.rs
+│   │   │   │   │   └── receipt.rs
+│   │   │   │   ├── executor_tests.rs
+│   │   │   │   └── idle_stash.rs
 │   │   │   └── guarded_submission.rs
 │   │   ├── hosting/
 │   │   │   ├── followup_support.rs
@@ -664,6 +668,7 @@ src/
 │   │   │   ├── draft_hold.rs
 │   │   │   ├── final_ready_tests.rs
 │   │   │   ├── literal_chunks.rs
+│   │   │   ├── submission.rs
 │   │   │   └── timeout_draft_tests.rs
 │   │   ├── session/
 │   │   │   └── auto_compact_launch_tests.rs
@@ -1549,6 +1554,7 @@ src/
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
+│   │   │   │   ├── provider_dispatch_idle_stash_tests.rs
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
@@ -1964,8 +1970,9 @@ src/
 │   │   │   ├── finalize_epilogue/
 │   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
-│   │   │   │   └── tests/
-│   │   │   │       └── person_draft_tests.rs
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── person_draft_tests.rs
+│   │   │   │   └── draft_release.rs
 │   │   │   ├── headless_delivery/
 │   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs

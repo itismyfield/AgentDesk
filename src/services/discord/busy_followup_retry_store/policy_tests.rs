@@ -67,6 +67,224 @@ fn class_of_bytes(bytes: &[u8]) -> RetryClass {
     class_of(&[&decode_checked(bytes).map_or_else(SourceRead::Unreadable, SourceRead::Budget)])
 }
 
+#[cfg(unix)]
+fn capped_draft(channel: u64, session: &str) -> CheckedInputView {
+    for _ in 0..MAX_BUSY_RETRY_COUNT {
+        store::record_attempt(
+            &ProviderKind::Claude,
+            (channel, 101, 700),
+            &[],
+            std::time::Duration::ZERO,
+            Some(session),
+        )
+        .unwrap();
+    }
+    CheckedInputView::read(&ProviderKind::Claude, channel, 101, &[])
+}
+
+#[cfg(unix)]
+fn bind_idle(session: &str, path: &Path) {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        session,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: None,
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+}
+
+#[cfg(unix)]
+fn rewatch(channel: u64, session: &str) {
+    use crate::services::claude_tui::composer_lock::{DraftGuard, guard_draft};
+    guard_draft(session, DraftGuard::DraftRestored);
+    let live = std::collections::HashMap::from([(
+        serenity::all::ChannelId::new(channel),
+        std::collections::HashSet::from([101]),
+    )]);
+    crate::services::discord::turn_bridge::followup_requeue::rewatch_draft_holds(
+        &crate::services::discord::make_shared_data_for_tests(),
+        &ProviderKind::Claude,
+        &live,
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn idle_capped_head_release_rereads_stale_view_and_repeated_hold_does_not_block_forever() {
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
+        events, renderer, view,
+    };
+    use crate::services::discord::turn_bridge::followup_requeue::draft_release::idle_release_pending;
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let channel = 6_899_981;
+    let session = "policy-idle-release";
+    let _listed = StashChannelGuard::new(channel);
+    let pane = renderer(&f, session, "normal");
+    bind_idle(session, &pane.join("transcript"));
+    let stale = capped_draft(channel, session);
+    assert_eq!(
+        stale.classify(),
+        Parked,
+        "no active release path preserves ordinary cap selection"
+    );
+    rewatch(channel, session);
+    let held = Unavailable(UnavailableReason::IdleDraftRelease);
+    assert_eq!(stale.classify(), held);
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session, || {
+        assert_eq!(
+            stale.classify(),
+            held,
+            "a simultaneous watch capture must not let a later input overtake"
+        );
+    });
+    assert_eq!(auto_pick(&[held, Ready]), None);
+    assert!(!layers(
+        layer(&[Unavailable(UnavailableReason::IdleDraftRelease)]),
+        layer(&[])
+    ));
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if idle_release_pending(channel, session) == Some(false) {
+            break;
+        }
+    }
+    assert_eq!(idle_release_pending(channel, session), Some(false));
+    assert_eq!(
+        stale.classify(),
+        Ready,
+        "a released head must not be skipped using its old capped snapshot"
+    );
+    let reheld = capped_draft(channel, session);
+    assert_eq!(
+        reheld.classify(),
+        Parked,
+        "same unsupported state cannot block the channel indefinitely"
+    );
+    assert_eq!(auto_pick(&[reheld.classify(), Ready]), Some(1));
+    assert!(
+        events(&pane).is_empty(),
+        "classification and the watcher grant no submission authority"
+    );
+    std::fs::write(pane.join("tampered"), view("", false)).unwrap();
+    f.tmux(&["send-keys", "-t", session, "C-r"]);
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if idle_release_pending(channel, session).is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        CheckedInputView::read(&ProviderKind::Claude, channel, 101, &[]).classify(),
+        Ready
+    );
+    assert_eq!(idle_release_pending(channel, session), None);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn idle_order_boundary_preserves_general_legacy_busy_and_non_target_caps() {
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    use crate::services::claude_tui::host_input::guarded_submission::idle_stash::tests::{
+        events, renderer,
+    };
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let channel = 6_899_982;
+    let session = "policy-idle-controls";
+    let _listed = StashChannelGuard::new(channel);
+    let pane = renderer(&f, session, "normal");
+    bind_idle(session, &pane.join("transcript"));
+    let saved = capped_draft(channel, session);
+    rewatch(channel, session);
+    assert_eq!(
+        saved.classify(),
+        Unavailable(UnavailableReason::IdleDraftRelease)
+    );
+    let classify = |provider: &ProviderKind, channel, budget| {
+        CheckedInputView::from_reads(
+            provider,
+            channel,
+            101,
+            &[],
+            vec![(101, SourceRead::Budget(budget))],
+        )
+        .classify()
+    };
+    let held = store::load(&ProviderKind::Claude, channel, 101).unwrap();
+    for (name, provider, id, budget) in [
+        (
+            "ordinary cap",
+            ProviderKind::Claude,
+            channel,
+            RetryBudget {
+                draft_hold: false,
+                ..held.clone()
+            },
+        ),
+        (
+            "legacy without pane",
+            ProviderKind::Claude,
+            channel,
+            RetryBudget {
+                draft_session: None,
+                ..held.clone()
+            },
+        ),
+        ("other provider", ProviderKind::Codex, channel, held.clone()),
+        (
+            "unlisted channel",
+            ProviderKind::Claude,
+            channel + 1,
+            held.clone(),
+        ),
+    ] {
+        let class = classify(&provider, id, budget);
+        assert_eq!(class, Parked, "{name}");
+        assert_eq!(auto_pick(&[class, Ready]), Some(1), "{name}");
+    }
+    assert_eq!(
+        classify(
+            &ProviderKind::Claude,
+            channel,
+            RetryBudget {
+                capped: false,
+                busy_retry_count: 1,
+                ..held.clone()
+            }
+        ),
+        Ready
+    );
+    std::fs::write(
+        pane.join("transcript"),
+        "{\"type\":\"user\",\"message\":{\"content\":\"running turn\"}}\n",
+    )
+    .unwrap();
+    assert_eq!(
+        saved.classify(),
+        Parked,
+        "a busy pane keeps its existing bypass meaning"
+    );
+    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session, || {
+        assert_eq!(
+            saved.classify(),
+            Parked,
+            "busy lock contention must not change cap selection"
+        );
+    });
+    assert_eq!(auto_pick(&[saved.classify(), Ready]), Some(1));
+    assert!(events(&pane).is_empty());
+}
+
 #[test]
 fn queue_wait_costs_nothing_and_only_real_attempts_reach_the_cap() {
     let t0 = 10_000_000;
