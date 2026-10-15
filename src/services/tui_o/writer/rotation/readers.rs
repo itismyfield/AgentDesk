@@ -28,6 +28,7 @@ impl<B: BindingEvents> Sources<B> {
                 .prepare_cleanup_witnesses()
                 .map_err(halted("witness directory"))?;
         }
+        self.refined.clear();
         let resolved = writer.store().apply_resolved_boundaries();
         resolved.map_err(halted("resolved boundary"))?;
         renumbered::unique(writer.store().cursors()).map_err(halt)?;

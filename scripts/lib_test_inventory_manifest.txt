@@ -9061,6 +9061,12 @@ services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_tra
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::durable_resolution_recovers_append_before_apply_with_the_same_parent_and_start
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::explicit_hook_clear_keeps_zero_start_and_parentless_resume_keeps_pending
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::first_record_session_and_persisted_event_nonce_are_revalidated
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_clear_and_startup_replay_the_already_spooled_n_once
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_fork_and_compact_promote_a_and_use_explicit_prefix_policy
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_parentless_resume_revokes_candidate_and_keeps_n_pending
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::newer_explicit_hook_blocks_proof_before_follow_applies_it
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::refinement_guards_and_continuation_event_contract_are_durable_and_idempotent
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::refinement_survives_restart_before_checkpoint_and_duplicate_hook
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::multipart_anchor_needs_every_piece_posted
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::native_content_and_all_row_unit_identities_must_match
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::old_markerless_pending_and_parent_responsibility_cascade_never_open

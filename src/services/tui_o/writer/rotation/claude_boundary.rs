@@ -5,6 +5,66 @@ use super::*;
 use crate::services::tui_o::store::rotation::{BoundaryEvidence, HotCandidate};
 
 impl<B: BindingEvents> Sources<B> {
+    pub(super) fn refine_provisional<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        event: &BindingEvent,
+        source: &SourceId,
+        parent_hint: Option<&SourceId>,
+    ) -> Result<(), WriterAlarm> {
+        let Some(link) = self.rotation.link(source).cloned().filter(|l| {
+            l.hot_candidate.is_some() && matches!(l.boundary, Boundary::Pending { .. })
+        }) else {
+            return Ok(());
+        };
+        let mut event = event.clone();
+        if let BindingRecord::Bound {
+            new: BindingTarget::Source(new),
+            parent_hint: parent,
+            ..
+        } = &mut event.record
+        {
+            *new = source.clone();
+            *parent = parent_hint.cloned();
+        }
+        self.flush(writer)?;
+        if let Some(rotation) = writer
+            .store()
+            .refine_provisional_hot_link(&link, &event)
+            .map_err(halted("explicit boundary refinement"))?
+        {
+            self.rotation = rotation;
+            self.prefix_seen.remove(&source_key(source));
+            self.refined.push(source.clone());
+        }
+        Ok(())
+    }
+
+    fn replay_refined<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
+        &mut self,
+        writer: &mut ChannelWriter<P, L, A>,
+        deriver: &mut UnitDeriver,
+        owed: &mut impl Owe,
+    ) -> Result<(), WriterAlarm> {
+        for source in std::mem::take(&mut self.refined) {
+            let store = writer.store();
+            self.sync_parent(&source_key(&source), |p| {
+                store
+                    .cursor(p)
+                    .map(|c| (c.captured_through, c.prefix_hash.clone()))
+            });
+            writer
+                .store()
+                .for_each_frame(&source, |frame| {
+                    if let SpoolFrame::Record(record) = frame {
+                        self.owe(deriver, owed, &source, &record);
+                    }
+                })
+                .map_err(halted("explicit boundary replay"))?;
+        }
+        self.flush(writer)
+    }
+
     /// Runs even when every reader returned an empty batch or was held/dormant.
     pub(super) fn reevaluate_boundaries<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
@@ -87,7 +147,15 @@ impl<B: BindingEvents> Sources<B> {
                     && hop(event, events)
                         .is_some_and(|(a, b)| *a == candidate.parent && *b == link.source)
             });
-        if !valid_event || !verified_first(&link.source) {
+        let superseded = events.iter().any(|event| {
+            event.seq > link.seq
+                && matches!(
+                    &event.record,
+                    BindingRecord::Bound { new: BindingTarget::Source(source), cause, .. }
+                        if *cause != BindingCause::Unknown && *source == link.source
+                )
+        });
+        if !valid_event || superseded || !verified_first(&link.source) {
             return Ok(None);
         }
         let Some(from) = parent_from(&self.rotation, &candidate.parent) else {
@@ -207,6 +275,7 @@ impl<B: BindingEvents> Sources<B> {
         if self.checkpoint.is_none() {
             return Ok(());
         }
+        self.replay_refined(writer, deriver, owed)?;
         let mut left: Vec<usize> = (0..self.readers.len()).collect();
         while let Some(at) = left.iter().position(|&index| !self.held(index)) {
             let index = left.remove(at);
