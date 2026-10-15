@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use sqlx::PgPool;
@@ -15,7 +15,7 @@ use super::channel_home::{self, RENEW_EVERY};
 pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
-use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState};
+use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
 use crate::services::tui_o::cutover;
@@ -25,23 +25,45 @@ type ResetFuture = Pin<Box<dyn Future<Output = Result<(), ResetRefused>> + Send>
 /// The gateway side's existing session reset for a releasing drain, built by the runtime.
 pub(crate) type LegacyReset = Arc<dyn Fn() -> ResetFuture + Send + Sync>;
 
-/// The drain's reads of the channel in this process and the reset its runtime supplies.
+/// The drain's reads of the channel in this process, the reset its runtime supplies and the
+/// runtime's "persisted turns restored" flag a released channel's adoption waits on.
 pub(crate) struct BootPort<R = ChannelHomePort> {
     reads: Arc<R>,
     reset: LegacyReset,
+    restored: Arc<AtomicBool>,
 }
 
 impl<R> Clone for BootPort<R> {
     fn clone(&self) -> Self {
         let (reads, reset) = (Arc::clone(&self.reads), Arc::clone(&self.reset));
-        Self { reads, reset }
+        let restored = Arc::clone(&self.restored);
+        Self {
+            reads,
+            reset,
+            restored,
+        }
     }
 }
 
 impl<R> BootPort<R> {
+    /// Unrestored, so it adopts nothing until [`BootPort::restored_by`] names the runtime's flag.
     pub(crate) fn new(reads: R, reset: LegacyReset) -> Self {
         let reads = Arc::new(reads);
-        Self { reads, reset }
+        let restored = Arc::default();
+        Self {
+            reads,
+            reset,
+            restored,
+        }
+    }
+
+    pub(crate) fn restored_by(mut self, restored: Arc<AtomicBool>) -> Self {
+        self.restored = restored;
+        self
+    }
+
+    fn restored(&self) -> bool {
+        self.restored.load(Ordering::Acquire)
     }
 }
 
@@ -49,7 +71,8 @@ impl BootPort {
     /// The channel's reads against this process's writer, with `restored` as its runtime sets it.
     pub(crate) fn reading(channel: u64, restored: Arc<AtomicBool>, reset: LegacyReset) -> Self {
         let readiness = crate::services::tui_o::writer::host::process_readiness();
-        Self::new(ChannelHomePort::new(channel, readiness, restored), reset)
+        let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
+        Self::new(reads, reset).restored_by(restored)
     }
 }
 
@@ -195,8 +218,8 @@ async fn end(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
-/// Follows the row each renewal period: renews and drains while it names this node holder, ends a
-/// reclaim it targets, and returns the channel to the gateway rules once the row names it no more.
+/// Follows the row each renewal period: renews and drains as holder, adopts a release or ends a
+/// reclaim as target, and returns the channel to the gateway rules once the row names it no more.
 async fn watch<R>(pool: PgPool, home: Arc<HomeGate>, port: BootPort<R>, lease: Arc<LeaseSlot>)
 where
     R: DrainPort + Send + Sync + 'static,
@@ -215,6 +238,16 @@ where
                 home.note_drain(None);
                 if row.holder.as_deref() != local {
                     lease.end().await;
+                    // Adopted, the row names this node holder and the next read starts its lease.
+                    let releases_here =
+                        row.state == HomeState::Released && row.target.as_deref() == local;
+                    if releases_here && port.restored() {
+                        let (channel, holder) = (home.channel_id(), home.holder());
+                        let adopted = o_channel_homes::adopt(&pool, channel, holder, row.epoch);
+                        if let Ok(HomeWrite::Applied(_)) = adopted.await {
+                            continue;
+                        }
+                    }
                     // The reclaim's target ends it: the row goes and the channel unregisters.
                     let reclaimed = row.state == HomeState::Reclaimed;
                     if reclaimed

@@ -1,7 +1,6 @@
 //! Channel O home rows (`o_channel_homes`). Every transition is one conditional statement: a
 //! condition that no longer holds is [`HomeWrite::Stale`] and leaves the row unchanged. Each new
 //! epoch comes from one sequence, so no lifecycle of a channel repeats an earlier one's epoch.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::Duration;
 
@@ -84,6 +83,7 @@ pub(crate) struct ForceWindow(Duration);
 impl ForceWindow {
     pub(crate) const MIN: Self = Self(FORCE_AFTER);
 
+    #[cfg(test)]
     pub(crate) fn at_least(after: Duration) -> Option<Self> {
         (after >= FORCE_AFTER).then_some(Self(after))
     }
@@ -184,21 +184,6 @@ impl From<sqlx::Error> for HomeError {
     fn from(error: sqlx::Error) -> Self {
         Self::Db(error)
     }
-}
-
-/// [`read_home`] inside the caller's transaction, so it reads with the caller's other statements.
-#[cfg(test)]
-pub(crate) async fn read_home_in(
-    conn: &mut sqlx::PgConnection,
-    channel_id: &str,
-) -> Result<Option<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
-        "SELECT {COLUMNS} FROM o_channel_homes WHERE channel_id = $1"
-    ))
-    .bind(channel_id)
-    .fetch_optional(conn)
-    .await?;
-    row.as_ref().map(decode).transpose()
 }
 
 fn decode(row: &PgRow) -> Result<ChannelHome, HomeError> {

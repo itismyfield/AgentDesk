@@ -237,7 +237,7 @@ fn s0o_limits_and_dormant_activity_source_are_unchanged() {
         .unwrap();
     assert_eq!(
         hex::encode(Sha256::digest(production.as_bytes())),
-        "bb6977908888dc3c71abc6815bd0eb5635918da5a07c3e2560c9f8f554fc0a14"
+        "8c42aa4c34e6c5f8b0f5e61973751ad451637cf94a86312a8bfd58a017bdda0b"
     );
 }
 

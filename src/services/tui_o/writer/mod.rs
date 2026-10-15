@@ -201,3 +201,6 @@ pub(crate) mod transition_port;
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod source_read_tests;

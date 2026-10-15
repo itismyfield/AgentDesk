@@ -204,7 +204,14 @@ test-postgres-shard:
     pg_selection_status=$?
     if [ "$pg_selection_status" != 0 ]; then exit "$pg_selection_status"; fi
     if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
-    # The routing test keeps these targets identical to the unsharded recipe.
+    unset PG_INCLUDE_SHARD && just test-postgres-continuity
+
+# Shard 0 of both PG matrices and the PR selector's shard 0 run these. The routing test
+# keeps them identical to the unsharded recipe's.
+test-postgres-continuity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/ci/non-pg-test-filter.sh
     run_prepared_lib_test cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
     run_prepared_lib_test cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
     run_prepared_lib_test cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
