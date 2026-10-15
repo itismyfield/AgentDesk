@@ -104,6 +104,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::health::turn_deliver::inject::herdr::tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::herdr_terminate::exit_tests

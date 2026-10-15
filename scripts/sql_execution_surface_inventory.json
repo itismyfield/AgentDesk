@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "62b52104576518e17c01ef78ec0078a0bb902ca6",
+  "measured_at_sha": "1547e2b3510751da3d70abf73096f92ef1c16728",
   "records": [
     {
       "root": "migrations/postgres",
@@ -29935,6 +29935,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:a78245f0e87dd6aecc414741af38d8d549b59dc97dc0bb9c2f999d51014edbf1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/health/turn_deliver/inject/herdr_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b824f7c901ed4b6041ec86a825cb5ee3dbbb7b8c0d2e6a3d0d9cac493c7102f5"
     },
     {
       "root": "src",
