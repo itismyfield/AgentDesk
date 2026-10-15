@@ -23,9 +23,9 @@ use crate::services::tui_o::shadow::{CaptureBatch, CapturedRecord, IDENTITY_VERS
 pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
-/// Segment versions recovery replays: v3 only reads Codex `turn_aborted` as Idle, which derives
-/// no unit, so v2 raw frames yield the same units. Appends always roll to a current segment.
-const READABLE_IDENTITY_VERSIONS: [u32; 2] = [2, 3];
+/// Replayable versions: v3 only reads Codex `turn_aborted` as Idle and v4 only keys Claude rows v3
+/// blocked, so older frames keep every delivered unit's key. Appends roll to a current segment.
+const READABLE_IDENTITY_VERSIONS: [u32; 3] = [2, 3, 4];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -1009,7 +1009,7 @@ mod tests {
             lines(&mut fixture.open().unwrap(), &fixture.source),
             ["L1", "L2", "L3"]
         );
-        // Only the 2 to 3 upgrade is readable, and versions never go back along the spool.
+        // Versions only move forward along the spool.
         set_version(&segments[1], 2);
         set_version(&old, 3);
         assert_eq!(reason(fixture.open()), HaltReason::StoreDamage);

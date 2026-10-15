@@ -48,8 +48,13 @@ impl DiscordPort for TestPort {
         Ok(Vec::new())
     }
 
-    fn history_readable(&self, _channel: u64) -> bool {
-        true
+    async fn message(&self, _channel: u64, id: u64) -> Result<Option<SeenMessage>, String> {
+        let (author_id, content) = (self.bot_id(), String::new());
+        Ok(Some(SeenMessage {
+            id,
+            author_id,
+            content,
+        }))
     }
 }
 

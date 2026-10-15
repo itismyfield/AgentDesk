@@ -82,6 +82,7 @@ fn seed_rejection(harness: &Harness, native: &str, serial: u64, approve: bool) {
     let mut channel = harness.channel();
     let anchor_id = channel.ledger().anchor();
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial,
         unit_key: unit(native),
         piece_index: 0,

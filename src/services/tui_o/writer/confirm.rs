@@ -1,16 +1,23 @@
 //! Settling a POST whose result is unknown: read history after the anchor and match the exact
 //! payload from this bot. Nothing here posts, and "not seen" never licenses a repost.
 
+use std::future::Future;
 use std::time::Duration;
 
-use super::DiscordPort;
+use super::{DiscordPort, SeenMessage};
 
 /// First look after the request ended or the process restarted.
 pub const FIRST_LOOK: Duration = Duration::from_secs(10);
-/// Second look; no candidate by then is `NotFound`.
+/// Second look; no candidate by then, with history proven readable, is `NotFound`.
 pub const LAST_LOOK: Duration = Duration::from_secs(30);
 pub const HISTORY_PAGE: usize = 100;
 pub const MAX_PAGES: usize = 10;
+/// Bounds each read, rate-limit wait and body decode included.
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds a whole settlement, so it ends inside the delivery lease held over the POST.
+pub(crate) const SETTLE_DEADLINE: Duration = Duration::from_secs(110);
+/// How many of this bot's latest posts an empty history may be checked against.
+pub(crate) const PROOF_IDS: usize = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -30,31 +37,66 @@ pub fn judge(candidates: &[u64], earlier_same_payload: bool) -> Option<Verdict> 
     }
 }
 
-/// Ids of this bot's messages after `anchor` whose content equals `payload`, oldest first.
+/// A read that fails or outlasts `READ_TIMEOUT` is an error, never an empty answer.
+pub(crate) async fn bounded<T>(read: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    let late = |_| Err(format!("read exceeded {READ_TIMEOUT:?}"));
+    tokio::time::timeout(READ_TIMEOUT, read)
+        .await
+        .unwrap_or_else(late)
+}
+
+/// Reads known messages by id in order until `proves` takes one: a 404 or a message that proves
+/// nothing tries the next, a failed or late read stops. `Ok(None)` means none proved anything.
+pub(crate) async fn first_proof<M, T, R>(
+    ids: &[u64],
+    read: impl Fn(u64) -> R,
+    proves: impl Fn(u64, M) -> Option<T>,
+) -> Result<Option<T>, String>
+where
+    R: Future<Output = Result<Option<M>, String>>,
+{
+    for &id in ids {
+        if let Some(proof) = bounded(read(id)).await?.and_then(|read| proves(id, read)) {
+            return Ok(Some(proof));
+        }
+    }
+    Ok(None)
+}
+
+/// What one bounded scan after the anchor saw.
+#[derive(Default)]
+struct Seen {
+    /// This bot's messages whose content equals the payload, oldest first.
+    exact: Vec<u64>,
+    /// This bot's messages with other content: Discord may have changed the payload's text.
+    altered: bool,
+    /// Any message at all was listed, which only a readable history returns.
+    listed: bool,
+}
+
 async fn scan<P: DiscordPort>(
     port: &P,
     channel: u64,
     anchor: u64,
     payload: &str,
-) -> Result<Vec<u64>, String> {
-    let (mut after, mut found) = (anchor, Vec::new());
+) -> Result<Seen, String> {
+    let (mut after, mut seen) = (anchor, Seen::default());
     for _ in 0..MAX_PAGES {
-        let mut page = port
-            .history_after(channel, after)
+        let mut page = bounded(port.history_after(channel, after))
             .await
             .map_err(|error| format!("history read failed: {error}"))?;
         page.sort_by_key(|message| message.id);
-        let exact = page
-            .iter()
-            .filter(|m| m.author_id == port.bot_id() && m.content == payload);
-        found.extend(exact.map(|message| message.id));
+        seen.listed |= !page.is_empty();
+        for message in page.iter().filter(|m| m.author_id == port.bot_id()) {
+            if message.content == payload {
+                seen.exact.push(message.id);
+            } else {
+                seen.altered = true;
+            }
+        }
         match page.last() {
             Some(last) if page.len() >= HISTORY_PAGE => after = last.id,
-            // Other authors' messages prove nothing about reading this bot's.
-            _ if found.is_empty() && !port.history_readable(channel) => {
-                return Err("no candidate without read permission proof".into());
-            }
-            _ => return Ok(found),
+            _ => return Ok(seen),
         }
     }
     Err(format!(
@@ -62,26 +104,52 @@ async fn scan<P: DiscordPort>(
     ))
 }
 
-/// Looks at `FIRST_LOOK` and again at `LAST_LOOK`; a read that cannot be trusted is `Unresolved`.
+/// The last look found no exact candidate. An empty listing is also what Discord returns without
+/// history permission, so it counts as absence only after one of `proof_ids` reads back by id.
+async fn absent<P: DiscordPort>(port: &P, channel: u64, seen: &Seen, proof_ids: &[u64]) -> Verdict {
+    if seen.altered {
+        return Verdict::Unresolved("same-author non-exact message observed".into());
+    }
+    if seen.listed {
+        return Verdict::NotFound;
+    }
+    let bot = port.bot_id();
+    let own = |id: u64, read: SeenMessage| (read.id == id && read.author_id == bot).then_some(());
+    match first_proof(proof_ids, |id| port.message(channel, id), own).await {
+        Ok(Some(())) => Verdict::NotFound,
+        Ok(None) => Verdict::Unresolved("empty history without read permission proof".into()),
+        Err(error) => Verdict::Unresolved(format!("permission proof read failed: {error}")),
+    }
+}
+
+/// Looks at `FIRST_LOOK` and again at `LAST_LOOK`, all within `SETTLE_DEADLINE`. A failed first
+/// read waits for the last look, whose own failure is `Unresolved`.
 pub async fn settle<P: DiscordPort>(
     port: &P,
     channel: u64,
     anchor: u64,
     payload: &str,
     earlier_same_payload: bool,
+    proof_ids: &[u64],
 ) -> Verdict {
-    let mut waited = Duration::ZERO;
-    for look in [FIRST_LOOK, LAST_LOOK] {
-        tokio::time::sleep(look - waited).await;
-        waited = look;
-        match scan(port, channel, anchor, payload).await {
-            Err(reason) => return Verdict::Unresolved(reason),
-            Ok(candidates) => {
-                if let Some(verdict) = judge(&candidates, earlier_same_payload) {
-                    return verdict;
-                }
-            }
+    let looks = async {
+        tokio::time::sleep(FIRST_LOOK).await;
+        if let Ok(seen) = scan(port, channel, anchor, payload).await
+            && let Some(verdict) = judge(&seen.exact, earlier_same_payload)
+        {
+            return verdict;
         }
-    }
-    Verdict::NotFound
+        tokio::time::sleep(LAST_LOOK - FIRST_LOOK).await;
+        match scan(port, channel, anchor, payload).await {
+            Err(reason) => Verdict::Unresolved(reason),
+            Ok(seen) => match judge(&seen.exact, earlier_same_payload) {
+                Some(verdict) => verdict,
+                None => absent(port, channel, &seen, proof_ids).await,
+            },
+        }
+    };
+    let late = |_| Verdict::Unresolved(format!("settlement exceeded {SETTLE_DEADLINE:?}"));
+    tokio::time::timeout(SETTLE_DEADLINE, looks)
+        .await
+        .unwrap_or_else(late)
 }
