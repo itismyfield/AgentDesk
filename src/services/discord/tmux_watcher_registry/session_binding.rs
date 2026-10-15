@@ -125,7 +125,8 @@ mod tests {
 
     #[test]
     fn authoritative_snapshot_dedupes_sorts_and_rechecks_live_precedence() {
-        let registry = TmuxWatcherRegistry::new();
+        let registry =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let channel = ChannelId::new(2_201);
         let foreign = ChannelId::new(2_202);
         for name in ["z-last", "a-first", "same", "foreign-live"] {

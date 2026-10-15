@@ -224,11 +224,6 @@ pub(in crate::services) struct TmuxWatcherRegistry {
 
 #[rustfmt::skip]
 impl TmuxWatcherRegistry {
-    #[cfg(test)]
-    pub(in crate::services::discord) fn new() -> Self {
-        Self::new_with_coords(Arc::new(dashmap::DashMap::new()))
-    }
-
     pub(in crate::services::discord) fn new_with_coords(
         tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
     ) -> Self {

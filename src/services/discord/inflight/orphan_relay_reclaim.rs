@@ -953,7 +953,8 @@ mod tests {
         let tmux = state.tmux_session_name.clone().expect("session");
         let identity = InflightTurnIdentity::from_state(&state);
         let pin = InflightEpisodePin::from_state(&state);
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let downgrade = |pin: Option<&InflightEpisodePin>| {
             downgrade_orphan_owner_in_root(
                 root,
@@ -970,7 +971,6 @@ mod tests {
             OrphanRelayReclaimOutcome::Skipped,
             "age gate"
         );
-
         let mut other_episode = state.clone();
         other_episode.turn_nonce = Some("successor-episode".to_string());
         let other_pin = InflightEpisodePin::from_state(&other_episode);
