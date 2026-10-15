@@ -22,6 +22,30 @@ pub(crate) trait SubmissionFence: Send + Sync {
     fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused>;
     /// The refusal that closed this attempt's input, if any.
     fn refusal(&self) -> Option<PreSubmitPersistenceRefused>;
+    fn idle_stash_context(&self) -> Option<IdleStashContext> {
+        None
+    }
+    fn idle_stash_admits(&self, _target: &str) -> bool {
+        false
+    }
+    fn claim_idle_stash(&self, _target: &str) -> Result<(), PreSubmitPersistenceRefused> {
+        Err(PreSubmitPersistenceRefused {
+            reason: "no managed idle-stash authority".into(),
+        })
+    }
+}
+
+pub(crate) struct IdleStashContext {
+    pub(crate) channel: u64,
+    pub(crate) target: String,
+    pub(crate) available: bool,
+}
+
+#[cfg(unix)]
+pub(crate) fn idle_stash_scope() -> Option<(Arc<dyn SubmissionFence>, IdleStashContext)> {
+    let fence = current()?;
+    let context = fence.idle_stash_context()?;
+    Some((fence, context))
 }
 
 thread_local! {
