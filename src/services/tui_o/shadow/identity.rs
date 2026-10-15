@@ -69,7 +69,12 @@ fn claude(record: &Value) -> Vec<RecordFact> {
 /// any unplaceable block blocks the whole row.
 fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
-    let blocks = match message.get("content").and_then(Value::as_array) {
+    let content = message.get("content").and_then(Value::as_array);
+    #[cfg(test)]
+    if V3_RULE.get() && content.map(Vec::len) != Some(1) {
+        return vec![blocked("assistant row without exactly one content block")];
+    }
+    let blocks = match content {
         Some(blocks) if !blocks.is_empty() => blocks,
         _ => return vec![blocked("assistant row without content blocks")],
     };
@@ -96,6 +101,31 @@ fn claude_blocks(record: &Value) -> Vec<RecordFact> {
         facts.push(RecordFact::Unit(native_key, kind, content));
     }
     facts
+}
+
+#[cfg(test)]
+thread_local! {
+    static V3_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, this thread classifies Claude rows by the v3 rule, which blocked every assistant
+/// row not holding exactly one block, so tests can build the store a v3 writer stopped on.
+#[cfg(test)]
+pub(crate) struct V3Rule(());
+
+#[cfg(test)]
+impl V3Rule {
+    pub(crate) fn hold() -> Self {
+        V3_RULE.set(true);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for V3Rule {
+    fn drop(&mut self) {
+        V3_RULE.set(false);
+    }
 }
 
 /// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
