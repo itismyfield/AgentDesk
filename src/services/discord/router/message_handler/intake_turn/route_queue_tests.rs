@@ -130,7 +130,7 @@ fn c_route(ids: &Ids) -> QueuedRoute {
 /// item keeps that route through a busy restore, and the replay's claim publishes it.
 #[tokio::test]
 async fn s2f_lost_claim_replays_its_resolved_route() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "queue::s2f_lost_claim_replays_its_resolved_route"
     )) {
@@ -207,7 +207,7 @@ async fn s2f_lost_claim_replays_its_resolved_route() {
 /// item keeps that route, and the replay's claim publishes it.
 #[tokio::test]
 async fn s2f_transition_busy_intake_replays_its_resolved_route() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "queue::s2f_transition_busy_intake_replays_its_resolved_route"
     )) {
@@ -279,7 +279,7 @@ fn codex_runs(thread: ChannelId, message: MessageId) -> bool {
 /// claim publishes them again, and D, queued behind C, takes the role channel's provider.
 #[tokio::test]
 async fn s2f_inherited_route_is_republished_by_its_claim() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "queue::s2f_inherited_route_is_republished_by_its_claim"
     )) {
@@ -368,7 +368,7 @@ async fn s2f_inherited_route_is_republished_by_its_claim() {
 /// claim. The claim replaces both, and the replaced parent loses its guard with a queue kick.
 #[tokio::test]
 async fn s2f_claim_replaces_stale_role_and_parent_edge() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "queue::s2f_claim_replaces_stale_role_and_parent_edge"
     )) {
@@ -473,7 +473,7 @@ fn s2f_only_inputs_with_one_route_merge() {
 /// as none, and that item resolves its route again on replay.
 #[tokio::test]
 async fn s2f_old_queue_file_replays_by_resolving_again() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "queue::s2f_old_queue_file_replays_by_resolving_again"
     )) {

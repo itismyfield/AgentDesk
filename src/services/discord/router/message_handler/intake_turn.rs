@@ -272,8 +272,7 @@ pub(super) async fn handle_text_message(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
     request: IntakeRequest,
-    _queued_drain: bool,
-    queued: Option<adk_thread::Route>,
+    (_queued_drain, queued): (bool, Option<adk_thread::Route>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -283,8 +282,7 @@ pub(super) async fn handle_text_message(
             deps,
             preserve_on_cancel,
             request,
-            _queued_drain,
-            queued,
+            (_queued_drain, queued),
             preloaded_uploads,
             gate_resolved_voice_announcement,
         ))
@@ -308,8 +306,7 @@ pub(super) async fn handle_text_message(
             },
             preserve_on_cancel,
             request,
-            _queued_drain,
-            queued,
+            (_queued_drain, queued),
             preloaded_uploads,
             gate_resolved_voice_announcement,
         ))
@@ -323,8 +320,7 @@ async fn handle_text_message_admitted(
     deps: &IntakeDeps<'_>,
     preserve_on_cancel: bool,
     request: IntakeRequest,
-    _queued_drain: bool,
-    queued: Option<adk_thread::Route>,
+    (_queued_drain, queued): (bool, Option<adk_thread::Route>),
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {

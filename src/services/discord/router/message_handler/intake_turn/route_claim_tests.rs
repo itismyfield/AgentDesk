@@ -11,6 +11,12 @@ use std::time::Duration;
 #[path = "route_queue_tests.rs"]
 mod queue;
 
+/// Runs `test` in a child spawned under the env lock, so no other test's variables leak into it.
+fn child(test: &str) -> bool {
+    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    crate::services::discord::admin_host_guard::tests::api_child(test)
+}
+
 /// A receipt the step clears at once; the routing contract does not depend on its row.
 struct Cleared(u64);
 
@@ -257,7 +263,7 @@ fn opened() {
 /// and C publishes its parent edge and the same role channel once its claim succeeds.
 #[tokio::test]
 async fn s2f_route_resolved_before_the_tail_is_published_by_its_claim() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "s2f_route_resolved_before_the_tail_is_published_by_its_claim"
     )) {
@@ -312,7 +318,7 @@ async fn s2f_route_resolved_before_the_tail_is_published_by_its_claim() {
 /// role channel A's did, stays exactly as C published it.
 #[tokio::test]
 async fn s2f_claimed_route_survives_a_later_tail() {
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+    if !child(concat!(
         "services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::",
         "s2f_claimed_route_survives_a_later_tail"
     )) {

@@ -66,8 +66,7 @@ pub(crate) async fn execute_intake_turn_core(
         },
         request.preserve_on_cancel,
         request,
-        false,
-        None,
+        (false, None),
         uploads,
         // Worker dispatch has no in-process gate carry-forward; it re-resolves
         // the durable announcement row for its `user_msg_id` (#3905).

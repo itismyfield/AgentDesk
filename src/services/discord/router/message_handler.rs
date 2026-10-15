@@ -287,8 +287,7 @@ pub(super) async fn finish_admitted_local(
         deps,
         preserve_on_cancel,
         request,
-        queued_drain,
-        queued,
+        (queued_drain, queued),
         preloaded_uploads,
         voice_announcement,
     )
