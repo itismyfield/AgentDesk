@@ -186,21 +186,6 @@ impl From<sqlx::Error> for HomeError {
     }
 }
 
-/// [`read_home`] inside the caller's transaction, so it reads with the caller's other statements.
-#[cfg(test)]
-pub(crate) async fn read_home_in(
-    conn: &mut sqlx::PgConnection,
-    channel_id: &str,
-) -> Result<Option<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
-        "SELECT {COLUMNS} FROM o_channel_homes WHERE channel_id = $1"
-    ))
-    .bind(channel_id)
-    .fetch_optional(conn)
-    .await?;
-    row.as_ref().map(decode).transpose()
-}
-
 fn decode(row: &PgRow) -> Result<ChannelHome, HomeError> {
     let channel_id: String = row.try_get("channel_id")?;
     let raw: String = row.try_get("state")?;

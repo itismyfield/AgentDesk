@@ -326,55 +326,82 @@ pub(super) fn scan_claude_idle_transcript_for_last_prompt(
     }
 }
 
+#[cfg(test)]
 pub(super) fn scan_codex_idle_rollout_for_prompt(
     rollout_path: &Path,
     start_offset: u64,
 ) -> Result<CodexIdleRolloutScan, String> {
-    let mut file = std::fs::File::open(rollout_path)
-        .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
-        .len();
-    let mut offset = if start_offset > file_len {
-        0
-    } else {
-        start_offset
-    };
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
+    scan_codex_records(
+        std::fs::File::open(rollout_path).map_err(|error| error.to_string())?,
+        start_offset,
+        None,
+        true,
+        start_offset,
+    )
+    .map(|batch| batch.0)
+}
 
+pub(super) fn scan_codex_records(
+    mut file: std::fs::File,
+    start_offset: u64,
+    end: Option<u64>,
+    find_prompt: bool,
+    stats_floor: u64,
+) -> Result<
+    (
+        CodexIdleRolloutScan,
+        crate::services::codex_tui::session::checkpoint::ScanStats,
+    ),
+    String,
+> {
+    let len = file.metadata().map_err(|error| error.to_string())?.len();
+    let end = end.unwrap_or(len);
+    if start_offset > end || end > len {
+        return Err("Codex scan range beyond source".to_string());
+    }
+    let mut offset =
+        crate::services::codex_tui::session::checkpoint::boundary(&mut file, start_offset)
+            .map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    let mut reader = std::io::BufReader::new(file.take(end - offset));
+    let mut line = String::new();
+    let mut stats = crate::services::codex_tui::session::checkpoint::ScanStats::default();
     loop {
         line.clear();
         let line_start_offset = offset;
         let bytes_read = reader
             .read_line(&mut line)
-            .map_err(|error| format!("read Codex rollout {}: {error}", rollout_path.display()))?;
-        if bytes_read == 0 {
-            return Ok(CodexIdleRolloutScan::NoPrompt { offset });
+            .map_err(|error| error.to_string())?;
+        if bytes_read == 0 || !line.ends_with('\n') {
+            return Ok((
+                CodexIdleRolloutScan::NoPrompt {
+                    offset: line_start_offset,
+                },
+                stats,
+            ));
         }
         offset = offset.saturating_add(bytes_read as u64);
-        let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            if !line.ends_with('\n') {
-                return Ok(CodexIdleRolloutScan::NoPrompt {
-                    offset: line_start_offset,
-                });
-            }
-            continue;
-        };
-        if let Some((prompt, entry_id, evidence)) =
-            crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(
-                &json,
-            )
+        let json = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+        if find_prompt
+            && let Some((prompt, entry_id, evidence)) = json.as_ref().and_then(|json| {
+                crate::services::tui_prompt_dedupe::extract_codex_rollout_user_prompt_with_evidence(
+                    json,
+                )
+            })
         {
-            return Ok(CodexIdleRolloutScan::Prompt {
-                prompt,
-                line_end_offset: offset,
-                entry_id,
-                evidence,
-            });
+            return Ok((
+                CodexIdleRolloutScan::Prompt {
+                    prompt,
+                    line_end_offset: offset,
+                    entry_id,
+                    evidence,
+                },
+                stats,
+            ));
+        }
+        if line_start_offset >= stats_floor {
+            stats.observe(bytes_read, json.as_ref());
         }
     }
 }
@@ -589,20 +616,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_idle_rollout_scan_restarts_when_file_shrinks() {
+    fn codex_idle_rollout_scan_holds_an_offset_past_the_source() {
         let dir = tempfile::tempdir().expect("temp dir");
         let rollout = dir.path().join("rollout.jsonl");
         let prompt = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"after shrink\"}]}}\n";
         std::fs::write(&rollout, prompt).expect("write rollout");
 
-        assert_eq!(
-            scan_codex_idle_rollout_for_prompt(&rollout, 99_999).expect("scan shrunken"),
-            CodexIdleRolloutScan::Prompt {
-                prompt: "after shrink".to_string(),
-                line_end_offset: prompt.len() as u64,
-                entry_id: None,
-                evidence: Default::default(),
-            }
+        assert!(
+            scan_codex_idle_rollout_for_prompt(&rollout, 99_999).is_err(),
+            "a stale source cursor must not grant a scan from zero"
         );
     }
 

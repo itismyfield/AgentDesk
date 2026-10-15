@@ -146,7 +146,7 @@ pub(super) fn tui_idle_tail_stream_should_commit_runtime_binding_offset(
     discord_delivery_succeeded
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 pub(super) fn compose_tui_idle_response(
     done_result: Option<String>,
     error_result: Option<String>,
@@ -295,6 +295,23 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         lease,
     )
     .await?;
+    if provider == ProviderKind::Codex
+        && let Some(turn) = claim.row.native_turn_id.as_deref()
+    {
+        crate::services::tui_prompt_dedupe::link_codex_parked_owner(
+            tmux_session_name,
+            turn,
+            prompt_text,
+            (
+                claim.row.channel_id,
+                claim.row.turn_nonce.clone().unwrap_or_default(),
+                claim.row.external_turn_id.clone().unwrap_or_default(),
+                claim.row.session_key.clone().unwrap_or_default(),
+                claim.row.user_msg_id,
+                claim.row.turn_start_offset.unwrap_or_default(),
+            ),
+        );
+    }
     if !claim.row.full_response.is_empty() && start_offset < claim.row.last_offset {
         return Err("idle continuation must resume from its saved source cursor".into());
     }
@@ -733,7 +750,7 @@ fn forward_idle_stream_into_bridge_with_logging(
     (text_frames_forwarded, source_offset)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_tui_direct_bridge_inflight_state(
     provider: ProviderKind,

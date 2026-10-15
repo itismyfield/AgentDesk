@@ -893,9 +893,9 @@ targets = {
     "label" => "PostgreSQL job",
     "name" => "PostgreSQL tests (shard ${{ matrix.shard }})",
     "needs" => ["changes", "pg_shards", "lib_test_prepare"],
-    "if" => "${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}",
+    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "d95c13e58f2c94f717ebfad464023e595a81153438ad229c84459be711f1fe62",
+    "job_sha256" => "cbbadf7bad4f8c631281b6a686f614e1c75a18c9388720c12a87a3fbd3840e47",
     "cargo_steps" => {
       "Footer-only marker regressions" => {
         "commands" => [
@@ -921,27 +921,25 @@ targets = {
         ],
         "timeout_minutes" => 10,
       },
-      "just test-postgres-shard" => {
-        "commands" => ["just test-postgres-shard"],
+      "PostgreSQL shard tests" => {
+        "commands" => ["python3 scripts/ci/test-selection.py run --lane pg"],
         "timeout_minutes" => 75,
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
   "library_sweep" => {
     "label" => "PR library sweep job",
     "name" => "Library test sweep",
-    "needs" => %w[changes lib_test_prepare],
-    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}",
+    "needs" => %w[changes lib_test_prepare pg_shards],
+    "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "95c83baa2729a8f12413bc6843a63fab57554beffa03302bc2cdb53946cde124",
+    "job_sha256" => "1ef62eee071110ae20706eac36868adae901ca8225bc29808f5298cd1062a04d",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
-        "commands" => [
-          "source scripts/ci/non-pg-test-filter.sh",
-          'python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"',
-          "run_non_pg_filter_replay",
-        ],
+        "commands" => ["python3 scripts/ci/test-selection.py run --lane sweep"],
         "timeout_minutes" => 45,
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
@@ -1410,7 +1408,9 @@ plan = {
     { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
   ],
 }
-plan.merge!("needs" => "changes", "if" => "needs.changes.outputs.pg_db == 'true'") if pr
+plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}"),
+            "steps" => [plan["steps"][0], { "id" => "plan", "shell" => "bash", "env" => { "ADK_CI_SELECT" => "${{ vars.ADK_CI_SELECT }}" }, "run" => "python3 scripts/ci/test-selection.py plan" }]) if pr
+recipe, recipe_step = pr ? ["python3 scripts/ci/test-selection.py run --lane pg", "PostgreSQL shard tests"] : ["just test-postgres-shard"] * 2
 job = document.dig("jobs", job_id)
 unless job.is_a?(Hash)
   warn "#{main_path}: job postgres is missing"
@@ -1420,7 +1420,7 @@ errors << "#{main_path}: pg_shards must emit the canonical matrix" unless docume
 errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
 errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
 errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards", "lib_test_prepare"] : "pg_shards")
-errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}" : !job.key?("if"))
+errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}" : !job.key?("if"))
 errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
 errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
 env = job["env"] || {}
@@ -1432,7 +1432,7 @@ diagnostics = {
 }
 
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test)/) }
+runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test|test-selection\.py\s+run)/) }
 start_run = "./scripts/ci/postgres-service.sh start"
 steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
 steps.each do |step|
@@ -1449,9 +1449,9 @@ index = ->(pred) { steps.index(&pred) }
 start = index.(->(step) { step["run"] == start_run })
 tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == "just test-postgres-shard" } == 1
-test_step = steps.find { |step| step["run"].to_s.strip == "just test-postgres-shard" } || {}
-errors << "PG shard step must keep its exact name" unless test_step["name"] == "just test-postgres-shard"
+errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == recipe } == 1
+test_step = steps.find { |step| step["run"].to_s.strip == recipe } || {}
+errors << "PG shard step must keep its exact name" unless test_step["name"] == recipe_step
 errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
 errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }

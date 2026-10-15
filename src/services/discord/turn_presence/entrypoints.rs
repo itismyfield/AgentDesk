@@ -5,8 +5,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 pub(super) use crate::services::cluster::channel_home::HomeGate;
-#[cfg(all(test, unix))]
-pub(super) use crate::services::cluster::channel_home::registered_channel as current_mount;
 use crate::services::discord::SharedData;
 use crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistry;
 use crate::services::provider::ProviderKind;
@@ -44,37 +42,6 @@ fn installed() -> Vec<(Weak<SharedData>, Arc<dyn Fence>)> {
         .iter()
         .filter_map(|(shared, fence)| Some((shared.clone(), fence.upgrade()?)))
         .collect()
-}
-
-/// Installs `fence` behind the hooks for `shared` until dropped; the one installer a runtime uses.
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) struct Installation(Weak<dyn Fence>);
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) fn install(
-    shared: &Arc<SharedData>,
-    fence: Weak<dyn Fence>,
-) -> Installation {
-    let mut installed = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
-    installed.push((Arc::downgrade(shared), fence.clone()));
-    INSTALLED_COUNT.fetch_add(1, Ordering::AcqRel);
-    Installation(fence)
-}
-
-#[cfg(all(test, unix))]
-impl Drop for Installation {
-    fn drop(&mut self) {
-        let mut installed = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
-        let before = installed.len();
-        installed.retain(|(_, fence)| !Weak::ptr_eq(fence, &self.0));
-        INSTALLED_COUNT.fetch_sub(before - installed.len(), Ordering::AcqRel);
-    }
-}
-
-/// How many runtimes are installed for `shared`.
-#[cfg(all(test, unix))]
-pub(super) fn installed_for(shared: &SharedData) -> usize {
-    owned_by(shared).count()
 }
 
 fn owned_by(shared: &SharedData) -> impl Iterator<Item = Arc<dyn Fence>> + '_ {
@@ -196,7 +163,3 @@ pub(in crate::services::discord) fn suspend(shared: &SharedData) {
 pub(in crate::services::discord) fn resume_fresh(shared: &SharedData) {
     owned_by(shared).for_each(|fence| fence.resume());
 }
-
-#[cfg(all(test, unix))]
-#[path = "entrypoints_tests.rs"]
-pub(in crate::services::discord) mod tests;
