@@ -21,8 +21,6 @@ pub(in crate::services::discord) use managed_reset::reset_managed_process_sessio
 pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
-#[allow(dead_code)]
-pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 
@@ -189,6 +187,8 @@ fn build_fallback_session_key_for_clear(
     super::super::adk_session::build_namespaced_session_key(token_hash, provider, &tmux_name)
 }
 
+#[cfg(test)]
+mod clear_wait_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod codex_verified_clear_tests;
@@ -394,12 +394,10 @@ async fn clear_channel_session_state_body(
         Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
         None => None,
     };
-    // Intake and kickoff stay off the mailbox until a failed clear has stopped
-    // its released turn and re-armed the restored backlog.
-    let transition_guard = shared
-        .acquire_session_transition(channel_id)
-        .await
-        .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
+    // Intake and kickoff stay off the mailbox until a failed clear has stopped its released turn
+    // and re-armed the restored backlog; a running pane effect is waited out, never refused.
+    let transition = shared.session_transition_lock(channel_id);
+    let transition_guard = transition.lock_owned().await;
     if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
         anyhow::bail!(reason);
     }

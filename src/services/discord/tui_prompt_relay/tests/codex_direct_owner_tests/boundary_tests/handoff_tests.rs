@@ -563,8 +563,9 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
     }
     if matches!(race, Some(ParkedRace::ReceiptLimit)) {
         let parked_receipt = native_receipts(fx.codex.channel.get())[0].clone();
-        for n in 100..132 {
-            deliver_direct_terminal(&mut fx, n).await;
+        let direct = 100..132;
+        for n in direct.clone() {
+            deliver_direct_terminal(&mut fx, n, n + 1 == direct.end).await;
         }
         let receipts = native_receipts(fx.codex.channel.get());
         assert_eq!(receipts.len(), 32);
@@ -2256,18 +2257,38 @@ fn codex_6903_markerless_discovery_without_custody_keeps_complete_boundary() {
     run(|root| Box::pin(markerless_saved_custody(root, false)));
 }
 
+/// Direct prompts are admitted once; seeing one again after its admission is a duplicate.
+fn assert_direct_admission_unique(fx: &Fixture, event: &ObservedTuiPrompt) {
+    assert!(
+        event.tmux_session_name != fx.codex.tmux
+            || !event.prompt.starts_with("DIRECT_6903_PROMPT_"),
+        "direct admission is unique: {event:?}"
+    );
+}
+
 fn terminal_only(native: &str, answer: &str) -> String {
     rollout_line(serde_json::json!({"type":"event_msg", "payload":{
         "type":"task_complete", "turn_id":native, "last_agent_message":answer}}))
 }
 
-async fn deliver_direct_terminal(fx: &mut Fixture, n: u32) {
+/// The next call watches this prompt for re-admission; `last` keeps watching to the
+/// admission deadline instead, since no later call will.
+async fn deliver_direct_terminal(fx: &mut Fixture, n: u32, last: bool) {
     let prompt = format!("DIRECT_6903_PROMPT_{n}");
     let answer = format!("DIRECT_6903_ANSWER_{n}");
     fx.append(&opening(&turn(n), &prompt));
-    let mut events = events_for(fx, &prompt, Duration::from_secs(5)).await;
-    assert_eq!(events.len(), 1, "direct admission is unique");
-    super::super::super::super::relay_observed_prompt(&fx.shared, events.remove(0)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let event = loop {
+        let event = tokio::time::timeout_at(deadline, fx.observed.recv())
+            .await
+            .expect("direct admission is published")
+            .expect("observation channel open");
+        if event.tmux_session_name == fx.codex.tmux && event.prompt == prompt {
+            break event;
+        }
+        assert_direct_admission_unique(fx, &event);
+    };
+    super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
     let end = fx.append(&terminal_only(&turn(n), &answer));
     assert!(fx.delivered(&answer).await);
     assert!(
@@ -2283,6 +2304,18 @@ async fn deliver_direct_terminal(fx: &mut Fixture, n: u32) {
         wait_for(Duration::from_secs(5), || fx.lease().is_none()).await,
         "completed direct lease must release"
     );
+    loop {
+        match fx.observed.try_recv() {
+            Ok(event) => assert_direct_admission_unique(fx, &event),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(error) => panic!("direct admission observations lost: {error:?}"),
+        }
+    }
+    if last {
+        while let Ok(event) = tokio::time::timeout_at(deadline, fx.observed.recv()).await {
+            assert_direct_admission_unique(fx, &event.expect("observation channel open"));
+        }
+    }
     assert_eq!(fx.sent(&answer).len(), 1);
     fx.assert_answer(&answer, fx.anchor_of(&answer));
 }
@@ -2379,7 +2412,7 @@ async fn direct_pending_rotation(root: &Path, fx: &mut Fixture) {
     .expect("ACK and receipt release source replacement");
     assert_eq!(fresh.output_path, next.display().to_string());
     fx.codex.rollout = next;
-    deliver_direct_terminal(fx, 81).await;
+    deliver_direct_terminal(fx, 81, true).await;
     fx.polls(3).await;
     assert_eq!(fx.sent(answer).len(), 1);
     fx.assert_answer(answer, fx.anchor_of(answer));
@@ -2514,7 +2547,7 @@ async fn generation_switch_settles_parked(
     assert_eq!(fresh.session_id.as_deref(), Some("g2-6903"));
     fx.codex.rollout = next;
     for n in 100..132 {
-        deliver_direct_terminal(fx, n).await;
+        deliver_direct_terminal(fx, n, false).await;
     }
     let receipts = native_receipts(channel);
     assert_eq!(receipts.len(), 32);
@@ -2524,7 +2557,7 @@ async fn generation_switch_settles_parked(
             .any(|receipt| receipt.source == parked.source),
         "the G1 receipt must actually be drained"
     );
-    deliver_direct_terminal(fx, 132).await;
+    deliver_direct_terminal(fx, 132, true).await;
     fx.polls(3).await;
     assert!(
         native_receipts(channel)

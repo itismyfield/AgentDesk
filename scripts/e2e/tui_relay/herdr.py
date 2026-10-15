@@ -22,9 +22,9 @@ TMUX_STEPS = {
 # Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
 AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
 CHANNEL_ID = re.compile(r"\d{17,}")
-# Text !clear refusals as worded in commands/control/native.rs and control.rs. A wording change
-# only loses the fail-fast: the acknowledgement wait then times out as before.
-CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:", "세션 전환 중이라 초기화하지 못했어요")
+# Text !clear refusals as worded in commands/control/native.rs and control.rs, which share this prefix.
+# A wording change only loses the fail-fast: the acknowledgement wait then times out as before.
+CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:",)
 
 
 def validate_arguments(parser, args):
