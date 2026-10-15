@@ -683,8 +683,7 @@ fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
 /// Makes `home` its channel's gate in this process; intake for the channel then follows it.
 /// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
-    let mounted = Arc::clone(&home);
-    let changed = with_homes(|homes| {
+    with_homes(|homes| {
         let _first = first_mount(homes);
         let mut registry = lock_homes(homes.get_or_init(Mutex::default));
         if registry
@@ -692,7 +691,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             .get(&home.channel_id)
             .is_some_and(|old| Arc::ptr_eq(old, &home))
         {
-            return false;
+            return;
         }
         registry.prune();
         let mut local = home.locked();
@@ -705,7 +704,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             })
         {
             tracing::error!(channel = %home.channel_id, "home registration refused: unrelated command counter already active");
-            return false;
+            return;
         }
         if let Some(old) = registry.gates.get(&home.channel_id) {
             old.withdraw();
@@ -721,13 +720,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
         local.commands = Arc::clone(count);
         drop(local);
         registry.gates.insert(home.channel_id.clone(), home);
-        true
     });
-    // Outside the registry lock, which a typing first poll may hold.
-    if changed {
-        let withdraw = crate::services::discord::presence_withdraw_unmounted;
-        withdraw(&mounted.channel_id, Some(&mounted), "home_mounted");
-    }
 }
 
 /// Removes the gate immediately; outstanding permits remain visible to a replacement.
@@ -739,7 +732,6 @@ pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
         registry.prune();
         Some(removed)
     })?;
-    crate::services::discord::presence_withdraw_unmounted(channel_id, None, "home_unmounted");
     Some(removed)
 }
 
@@ -767,10 +759,6 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
         registry.prune();
         true
     });
-    if removed {
-        let withdraw = crate::services::discord::presence_withdraw_unmounted;
-        withdraw(&home.channel_id, None, "home_unmounted");
-    }
     removed
 }
 

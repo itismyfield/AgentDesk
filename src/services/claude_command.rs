@@ -80,11 +80,6 @@ impl ClaudeBinary {
         args.push(self.program.to_string_lossy().into_owned());
     }
 
-    pub(crate) fn append_claude_e_bin_arg(&self, args: &mut Vec<String>) {
-        args.push("--claude-bin".to_string());
-        args.push(self.program.to_string_lossy().into_owned());
-    }
-
     pub(crate) fn append_shell_escaped_to(&self, output: &mut String) {
         output.push_str(&crate::services::process::shell_escape(
             self.program.to_string_lossy().as_ref(),
@@ -121,14 +116,6 @@ impl ClaudeCommandBuilder {
     /// binary-resolution PATH by construction.
     pub(crate) fn for_binary(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution))
-    }
-
-    /// Build a command that launches a wrapper program which transitively
-    /// spawns Claude (`agentdesk tmux-wrapper …`, `claude-e …`). The
-    /// binary-resolution PATH is supplied separately by the caller because the
-    /// wrapper — not the Claude binary — is the program here.
-    pub(crate) fn for_wrapper(program: impl AsRef<OsStr>) -> Self {
-        Self::build(program, None)
     }
 
     /// Build the native Claude `--version` probe from a resolved capability.
@@ -198,8 +185,6 @@ mod chokepoint_guard_tests {
     const FORBIDDEN_RAW_SPAWN: &[&str] = &[
         "Command::new(claude_bin",
         "Command::new(&claude_bin",
-        "Command::new(claude_e_bin",
-        "Command::new(&claude_e_bin",
         // Full-path `std::process::Command::new(...)` equivalents. A caller could
         // otherwise dodge the bare-`Command::new(` literals above by spelling out
         // the module path. This is a cheap breadth extension only; it does NOT
@@ -208,8 +193,6 @@ mod chokepoint_guard_tests {
         // is tracked as the #4559 raw-spawn follow-up.
         "std::process::Command::new(claude_bin",
         "std::process::Command::new(&claude_bin",
-        "std::process::Command::new(claude_e_bin",
-        "std::process::Command::new(&claude_e_bin",
     ];
 
     fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -297,7 +280,7 @@ mod chokepoint_guard_tests {
 
         assert!(
             violations.is_empty(),
-            "Claude/claude-e binary raw-spawned outside the chokepoint \
+            "Claude binary raw-spawned outside the chokepoint \
              (build it with claude_command::ClaudeCommandBuilder instead):\n{}",
             violations.join("\n")
         );
@@ -309,7 +292,7 @@ mod chokepoint_guard_tests {
     /// check or emptying `FORBIDDEN_RAW_SPAWN` is caught here.
     #[test]
     fn raw_spawn_guard_flags_foreign_spawns_and_exempts_the_chokepoint() {
-        let spawn_source = "let command = std::process::Command::new(claude_e_bin);";
+        let spawn_source = "let command = std::process::Command::new(claude_bin);";
         let foreign = scan_raw_spawn_sources([("src/services/other.rs", spawn_source)]);
         assert!(
             foreign

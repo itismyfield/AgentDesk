@@ -49,8 +49,6 @@ pub async fn execute_simple_with_timeout_and_context(
     stage_label: String,
     context: Option<ProviderExecutionContext>,
 ) -> Result<String, String> {
-    // A retired runtime refuses before any adapter is chosen or a blocking task is spawned.
-    crate::services::provider_hosting::ensure_runtime_executable(&provider, None)?;
     let cancel_for_timeout = Arc::new(CancelToken::new());
     let cancel_for_exec = Arc::clone(&cancel_for_timeout);
     let mut handle = tokio::task::spawn_blocking(move || {
@@ -167,7 +165,6 @@ pub async fn execute_structured_with_context(
     stage_label: &'static str,
     context: Option<ProviderExecutionContext>,
 ) -> Result<String, String> {
-    crate::services::provider_hosting::ensure_runtime_executable(&provider, None)?;
     let Some(adapter) = provider.execution_adapter() else {
         return Err(format!("Provider '{}' is not installed", provider.as_str()));
     };
@@ -354,46 +351,4 @@ fn collect_stream_result(
         return Ok(text);
     }
     Err(error.unwrap_or_else(|| "Empty response from provider".to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::provider_hosting::{RetiredRuntimeError, retired_runtime_for_tests};
-
-    /// One-shot execution refuses a retired runtime before any adapter is chosen or a blocking
-    /// task runs; the same call on a supported runtime still reaches the adapter lookup.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_retired_runtime_refuses_one_shot_execution_before_the_adapter() {
-        let provider = ProviderKind::Unsupported("retired-fixture".to_string());
-        let simple = || {
-            let timeout = Duration::from_secs(5);
-            execute_simple_with_timeout(provider.clone(), "status?".into(), timeout, "t".into())
-        };
-        let structured = || {
-            let (prompt, dir) = ("status?".to_string(), ".".to_string());
-            execute_structured(
-                provider.clone(),
-                prompt,
-                dir,
-                None,
-                Vec::new(),
-                None,
-                5,
-                "t",
-            )
-        };
-
-        {
-            let _retired = retired_runtime_for_tests::retire(&provider, None);
-            for refused in [simple().await, structured().await] {
-                let error = refused.unwrap_err();
-                assert!(error.contains(RetiredRuntimeError::CODE), "{error}");
-            }
-        }
-        for reached in [simple().await, structured().await] {
-            let error = reached.unwrap_err();
-            assert!(error.contains("is not installed"), "{error}");
-        }
-    }
 }

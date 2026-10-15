@@ -57,9 +57,7 @@ pub(crate) fn resolve_host_kind(evidence: HostEvidence<'_>) -> HostKindResolutio
 // No wildcard arm: a new runtime kind must choose its host here.
 fn kind_hint(kind: RuntimeHandoffKind) -> HostKind {
     match kind {
-        RuntimeHandoffKind::ProcessBackend | RuntimeHandoffKind::ClaudeEAdapter => {
-            HostKind::Process
-        }
+        RuntimeHandoffKind::ProcessBackend => HostKind::Process,
         RuntimeHandoffKind::LegacyTmuxWrapper
         | RuntimeHandoffKind::ClaudeTui
         | RuntimeHandoffKind::CodexTui => HostKind::Tmux,
@@ -500,7 +498,7 @@ mod tests {
     #[test]
     fn agreeing_votes_report_the_first_source() {
         let evidence = HostEvidence {
-            durable_runtime_kind: Some(R::ClaudeEAdapter),
+            durable_runtime_kind: Some(R::ProcessBackend),
             runtime_kind_marker: Some(R::ProcessBackend),
             process_registry_hit: true,
             ..named()
@@ -549,7 +547,6 @@ mod tests {
     fn kind_hint_maps_every_runtime_kind() {
         for (runtime, host) in [
             (R::ProcessBackend, HostKind::Process),
-            (R::ClaudeEAdapter, HostKind::Process),
             (R::LegacyTmuxWrapper, HostKind::Tmux),
             (R::ClaudeTui, HostKind::Tmux),
             (R::CodexTui, HostKind::Tmux),

@@ -49,8 +49,7 @@ pub(in crate::services::discord) use self::identity_gate::{
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
     save_stream_tick_state_if_bridge_authority,
     save_stream_tick_state_preserving_current_message_races,
-    stamp_claude_e_process_if_matches_identity, stamp_runtime_handoff_if_matches_identity,
-    touch_inflight_state_if_matches_identity,
+    stamp_runtime_handoff_if_matches_identity, touch_inflight_state_if_matches_identity,
 };
 pub(in crate::services::discord) use self::rebind_adoption::{
     save_existing_inflight_rebind_adoption_if_matches_episode,
