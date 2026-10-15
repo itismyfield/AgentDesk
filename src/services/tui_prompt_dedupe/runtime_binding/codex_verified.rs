@@ -112,6 +112,15 @@ pub(super) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
+#[cfg(test)]
+fn before_commit() {
+    BEFORE_COMMIT.with(|action| {
+        if let Some(action) = action.borrow_mut().take() {
+            action();
+        }
+    });
+}
+
 pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
     #[cfg(test)]
     if let Some(value) =
@@ -301,11 +310,7 @@ fn commit(
         }
     };
     #[cfg(test)]
-    BEFORE_COMMIT.with(|action| {
-        if let Some(action) = action.borrow_mut().take() {
-            action();
-        }
-    });
+    before_commit();
     // A path hint cannot split a retry of the same opened native descriptor.
     let persisted_claim = match (&previous, &decision) {
         (Some(proof), Decision::Verified(source))
@@ -509,11 +514,13 @@ pub(super) fn publish_proof(
     Ok(true)
 }
 
-/// Records the source a successful resume spawn executed as that execution's ExplicitResume proof.
+/// Records the source a successful resume spawn executed as that execution's ExplicitResume proof;
+/// the published native cursor then starts at the resume point instead of replaying history.
 pub(crate) fn record_executed_resume(
     context: &BindingContext,
     selected_session_id: &str,
     selected_rollout_path: &Path,
+    start_offset: u64,
 ) -> io::Result<bool> {
     tc::with_tmux_source_authority(&context.tmux_session, |authority| {
         validate_context(authority, context)?;
@@ -523,7 +530,21 @@ pub(crate) fn record_executed_resume(
             selected_session_id,
             Some(selected_rollout_path),
         )?;
-        publish_proof(authority, context, &fold)
+        let published = publish_proof(authority, context, &fold)?;
+        if let Some(proof) = fold.verified.as_ref().filter(|_| published)
+            && !super::codex_cursor::advance_tmux_runtime_binding_offset_under_source_authority(
+                authority,
+                &proof.source.path.display().to_string(),
+                start_offset,
+            )
+        {
+            tracing::warn!(
+                tmux = context.tmux_session,
+                start_offset,
+                "Codex resume cursor stayed at the proof start"
+            );
+        }
+        Ok(published)
     })
 }
 
@@ -553,6 +574,8 @@ fn executed_resume(
             .and_then(|source| source_id(&source))
     };
     let source = descriptor(&probe)?;
+    #[cfg(test)]
+    before_commit();
     let same = |claim: &Claim| {
         (descriptor(claim)? == source)
             .then_some(())

@@ -11,9 +11,13 @@ use std::sync::{Arc, mpsc::Sender};
 use std::time::SystemTime;
 
 #[cfg(test)]
+type SelectionEdit = Box<dyn FnOnce(&mut CodexTuiSessionSelection)>;
+#[cfg(test)]
+type ProofBoundary = Box<dyn FnOnce(&BindingContext)>;
+#[cfg(test)]
 thread_local! {
-    pub(crate) static SELECTION_FOR_TESTS: std::cell::RefCell<Option<Box<dyn FnOnce(&mut CodexTuiSessionSelection)>>> = Default::default();
-    pub(crate) static BEFORE_RESUME_PROOF: std::cell::RefCell<Option<Box<dyn FnOnce(&BindingContext)>>> = Default::default();
+    pub(crate) static SELECTION_FOR_TESTS: std::cell::RefCell<Option<SelectionEdit>> = Default::default();
+    pub(crate) static BEFORE_RESUME_PROOF: std::cell::RefCell<Option<ProofBoundary>> = Default::default();
 }
 
 /// A resume carries `(rollout_path, start_offset, selected_session_id)`; `None` tails fresh.
@@ -72,7 +76,7 @@ pub(crate) fn record_resume_proof(
     context: &BindingContext,
     tail: &ValidatedTail,
 ) -> Result<(), String> {
-    let Some((rollout_path, _, selected_session_id)) =
+    let Some((rollout_path, start_offset, selected_session_id)) =
         tail.resume.as_ref().filter(|_| verified(context))
     else {
         return Ok(());
@@ -87,6 +91,7 @@ pub(crate) fn record_resume_proof(
         context,
         selected_session_id,
         rollout_path,
+        *start_offset,
     ) {
         Ok(true) => Ok(()),
         Ok(false) => Err("Codex TUI resume proof is still pending".to_string()),

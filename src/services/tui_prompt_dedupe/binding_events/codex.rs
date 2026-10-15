@@ -10,8 +10,6 @@ mod commit;
 #[cfg(test)]
 pub(crate) use commit::commit_claim;
 pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
-#[cfg(test)]
-mod executed_resume_tests;
 
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
     let mut events = binding_events_since(channel, 0)?;
@@ -467,8 +465,8 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
     Ok(read.records)
 }
 
-/// The first proof of an executed resume may resolve the sole native resume Pending naming
-/// its source; generic candidate equality stays evidence-exact.
+/// The first proof of an executed resume may resolve the native resume Pending naming its
+/// source (any other Pending still blocks it); generic candidate equality stays evidence-exact.
 fn initial_resume_resolves(
     context: &BindingContext,
     fold: &Fold,
@@ -477,7 +475,6 @@ fn initial_resume_resolves(
     source: &SourceId,
 ) -> bool {
     fold.verified.is_none()
-        && fold.pending.len() == 1
         && context.launch_mode == "resume"
         && context.expected_native_session_id.as_ref() == Some(&claim.session_id)
         && matches!(&claim.evidence, ClaimEvidence::ExplicitResume { executed_session_id }

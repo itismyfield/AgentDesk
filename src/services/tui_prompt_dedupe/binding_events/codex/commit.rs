@@ -50,13 +50,15 @@ pub(crate) fn commit_executed_resume_published(
     )
 }
 
+type PendingCheck<'a> = &'a dyn Fn(&Claim) -> io::Result<()>;
+
 fn commit(
     context: &BindingContext,
     claim: &Claim,
     decision: Decision,
     published_at: Option<DateTime<Utc>>,
     validate_current: impl FnOnce() -> io::Result<()>,
-    executed: Option<&dyn Fn(&Claim) -> io::Result<()>>,
+    executed: Option<PendingCheck<'_>>,
 ) -> io::Result<Fold> {
     let channel = ownership_context(context)?;
     let mut failure = None;
@@ -103,8 +105,8 @@ fn commit(
             let initial = match (executed, &decision) {
                 (Some(validate_pending), Decision::Verified(source)) => fold
                     .pending
-                    .first()
-                    .filter(|p| initial_resume_resolves(context, &fold, p, claim, source))
+                    .iter()
+                    .find(|p| initial_resume_resolves(context, &fold, p, claim, source))
                     .map(|p| validate_pending(&p.claim).map(|()| p))
                     .transpose()?,
                 _ => None,
