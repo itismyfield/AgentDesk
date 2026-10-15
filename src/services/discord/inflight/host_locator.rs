@@ -136,14 +136,12 @@ mod tests {
             RuntimeHandoffKind::ClaudeTui,
             RuntimeHandoffKind::CodexTui,
             RuntimeHandoffKind::ProcessBackend,
-            RuntimeHandoffKind::ClaudeEAdapter,
         ];
         let literals = [
             "legacy_tmux_wrapper",
             "claude_tui",
             "codex_tui",
             "process_backend",
-            "claude_e_adapter",
         ];
         for (kind, literal) in kinds
             .into_iter()

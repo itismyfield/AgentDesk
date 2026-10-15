@@ -34,9 +34,7 @@ pub(crate) enum SteeringOutcome {
 pub(crate) fn route_input_by_session_driver(selection: &ProviderSessionSelection) -> SteeringRoute {
     match selection.driver {
         ProviderSessionDriver::TuiHosting => SteeringRoute::NativeTui,
-        ProviderSessionDriver::LegacyPrompt | ProviderSessionDriver::ClaudeE => {
-            SteeringRoute::ExistingMailbox
-        }
+        ProviderSessionDriver::LegacyPrompt => SteeringRoute::ExistingMailbox,
     }
 }
 

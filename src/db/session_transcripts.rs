@@ -301,11 +301,11 @@ async fn native_clear_row(pool: &PgPool, channel_id: &str) -> Result<Option<Nati
         .await
         .map_err(|error| anyhow!("native channel clear state lookup failed: {error}"))
 }
-
 #[path = "session_transcripts_native_clear_record.rs"]
 mod native_clear_record;
-pub(crate) use native_clear_record::{NativeClearRecord, native_channel_clear_record};
-
+pub(crate) use native_clear_record::NativeClearRecord;
+#[cfg(test)]
+pub(crate) use native_clear_record::native_channel_clear_record;
 // A generation mismatch means another writer (or an older binary) cleared after this ticket; the
 // frontier check is sound because, at an equal generation, the native write set the frontier.
 fn classify_native_clear_boundary(row: Option<NativeClearStateRow>) -> Result<NativeClearBoundary> {

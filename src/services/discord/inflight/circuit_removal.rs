@@ -10,12 +10,6 @@ impl CircuitDiscardGuard for super::store::InflightStateFileLock {
     }
 }
 
-impl CircuitDiscardGuard for super::store::BorrowedInflightRow<'_> {
-    fn state_path(&self) -> &Path {
-        self.state_path()
-    }
-}
-
 pub(super) fn handoff_before_discard_locked(
     guard: &impl CircuitDiscardGuard,
 ) -> Result<(), String> {
