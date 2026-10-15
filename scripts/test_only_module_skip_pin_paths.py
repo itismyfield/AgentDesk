@@ -3,6 +3,7 @@
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/tui_prompt_relay/relay_e2e/idle_phase_split_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/claude_idle_o_host_fixture_tests.rs",
         "src/services/discord/tui_prompt_relay/relay_e2e/claude_idle_o_transition_tests.rs",
         "src/services/tui_o/store/codex_provenance/p5a2_projection_tests.rs",

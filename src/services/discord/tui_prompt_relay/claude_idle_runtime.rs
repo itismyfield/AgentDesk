@@ -2,53 +2,36 @@
 use super::super::recovery_engine::recover_idle_partial_response;
 use super::*;
 
-/// #2843: when the background idle relay loop discovers that a session's
-/// transcript path changed, scan this many bytes back from EOF (not from EOF
-/// itself) so a prompt already written to the freshly-resolved transcript is
-/// still observed and its response relayed.
-const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
+use super::source_tick::CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES;
 
 #[cfg(unix)]
 pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
     if CLAUDE_IDLE_TRANSCRIPT_RELAY_STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
+    #[cfg(test)]
+    RELAY_SPAWNS.fetch_add(1, Ordering::AcqRel);
     super::super::task_supervisor::spawn_observed(
         "claude_idle_transcript_relay",
         async move {
             let mut next_rehydrate = tokio::time::Instant::now();
             loop {
-                let now = tokio::time::Instant::now();
-                if now >= next_rehydrate {
-                    // #3105 (codex P2): `rehydrate_existing_claude_tui_bindings` is a
-                    // fully BLOCKING pass (synchronous `tmux` subprocess calls + a
-                    // `std::thread::sleep` between multi-sample pane probes); running it
-                    // inline would stall the executor for samples×delay plus tmux latency.
-                    // Move it onto the blocking pool via `spawn_blocking` (the sync core
-                    // and its unit-testable logic are unchanged).
-                    let shared_for_rehydrate = shared.clone();
-                    let rehydrate_result = tokio::task::spawn_blocking(move || {
-                        rehydrate_existing_claude_tui_bindings(&shared_for_rehydrate);
-                    })
+                super::source_tick::claude_rehydrate_source_phase(&shared, &mut next_rehydrate)
                     .await;
-                    if let Err(error) = rehydrate_result {
-                        tracing::warn!(
-                            error = %error,
-                            "Claude TUI binding rehydrate task panicked or was cancelled"
-                        );
-                    }
-                    next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
-                }
-                // #5188 (R2): the tick's two phases, dispatched in the declared
-                // order. See `CLAUDE_IDLE_TICK_PHASES` for why the order is an
-                // invariant rather than a coincidence of statement placement.
+                #[cfg(test)]
+                RELAY_TICKS.fetch_add(1, Ordering::AcqRel);
+                let mut candidates = Vec::new();
                 for phase in CLAUDE_IDLE_TICK_PHASES {
                     match phase {
                         ClaudeIdleTickPhase::SettleSessionRotations => {
                             settle_claude_session_rotations(&shared).await;
                         }
-                        ClaudeIdleTickPhase::RelayIdleBindings => {
-                            relay_idle_claude_bindings(&shared).await;
+                        ClaudeIdleTickPhase::Source => {
+                            candidates = super::source_tick::claude_source_phase(&shared).await;
+                        }
+                        ClaudeIdleTickPhase::LegacyBody => {
+                            relay_legacy_claude_bodies(&shared, std::mem::take(&mut candidates))
+                                .await;
                         }
                     }
                 }
@@ -63,90 +46,47 @@ pub(super) fn spawn_claude_idle_transcript_relay(shared: Arc<SharedData>) {
         )),
     );
 }
-/// #5188 (R2): the ordered phases of one Claude idle tick.
-///
-/// The ORDER is a correctness invariant, not an accident of statement placement.
-/// [`ClaudeIdleTickPhase::RelayIdleBindings`] skips any pane that still holds an
-/// inflight row, and a pane stranded by a session rotation is exactly a pane
-/// holding an inflight row that can never be finalized. Settling second would
-/// therefore make every tick observe the wedged pane, skip it, and only then
-/// unwedge it — so the pane that the tick was looking at is never the pane the
-/// tick can help.
-///
-/// Declared as data so the ordering is assertable; the dispatch in
-/// `spawn_claude_idle_transcript_relay` is the only place either phase runs.
+/// Settle rotations before discovery and inflight recovery so a stranded row cannot block source work.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClaudeIdleTickPhase {
     /// Drain/settle whatever a Claude session rotation left behind.
     SettleSessionRotations,
-    /// Relay the idle transcript tail of every live ClaudeTui binding.
-    RelayIdleBindings,
+    Source,
+    LegacyBody,
 }
 
 #[cfg(unix)]
-pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 2] = [
+pub(super) const CLAUDE_IDLE_TICK_PHASES: [ClaudeIdleTickPhase; 3] = [
     ClaudeIdleTickPhase::SettleSessionRotations,
-    ClaudeIdleTickPhase::RelayIdleBindings,
+    ClaudeIdleTickPhase::Source,
+    ClaudeIdleTickPhase::LegacyBody,
 ];
 
-/// The [`ClaudeIdleTickPhase::RelayIdleBindings`] phase: walk every ClaudeTui
-/// runtime binding, discover its source, then relay its idle transcript tail.
-///
-/// Moved verbatim out of the tick body so the two phases are separately named
-/// and their order is expressible as data. A live inflight row skips body
-/// scanning after discovery, so the preceding settle phase remains load-bearing.
-#[cfg(unix)]
+#[cfg(test)]
 pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
-    for (tmux_session_name, binding) in
-        super::background_child_completion::claude_bindings_after_child_completions(shared).await
+    let candidates = super::source_tick::claude_source_phase(shared).await;
+    relay_legacy_claude_bodies(shared, candidates).await;
+}
+
+#[cfg(unix)]
+async fn relay_legacy_claude_bodies(
+    shared: &Arc<SharedData>,
+    candidates: Vec<super::source_tick::ClaudeLegacyBodyCandidate>,
+) {
+    for super::source_tick::ClaudeLegacyBodyCandidate {
+        tmux_session_name,
+        channel_id,
+        binding,
+        transcript_path,
+    } in candidates
     {
-        let Some(channel_id) = owner_channel_for_tmux_session(
-            &shared,
-            &ProviderKind::Claude,
-            &tmux_session_name,
-            RelayEmissionKind::Poll,
-        ) else {
-            // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
+        #[cfg(test)]
+        if super::source_tick::skip_body_for_test(&tmux_session_name) {
             continue;
-        };
-        let transcript_turns =
-            crate::services::tui_o::turn_mode::transcript_turns(channel_id.get());
-        // Keep an unconsumed Legacy prompt available after the original inflight finishes.
-        let transcript_path = super::claude_source::resolve_idle_relay_transcript_with_scan_offset(
-            &shared,
-            &tmux_session_name,
-            channel_id,
-            &binding,
-            !session_bound_discord_delivery_enabled(),
-            |path| {
-                let eof = claude_tui_rehydrate_start_offset(path);
-                if transcript_turns {
-                    return Some(eof);
-                }
-                match scan_claude_idle_transcript_for_last_prompt(
-                    path,
-                    eof.saturating_sub(CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES),
-                ) {
-                    Ok(ClaudeIdleTranscriptScan::Prompt {
-                        prompt_start_offset,
-                        ..
-                    }) => Some(prompt_start_offset),
-                    Ok(
-                        ClaudeIdleTranscriptScan::NoPrompt { offset }
-                        | ClaudeIdleTranscriptScan::CompactionReanchor { offset },
-                    ) => Some(offset),
-                    Err(error) => {
-                        tracing::debug!(%error, transcript_path = %path.display(),
-                            "deferred Claude source registration until its initial prompt scan succeeds");
-                        None
-                    }
-                }
-            },
-        );
+        }
         if let Some(row) =
             super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
-            && (!transcript_turns || !super::super::inflight::is_synthetic_create_state(&row))
         {
             // Recovery offsets belong to the retained row's source, even after rebinding.
             let Some(source) = row.output_path.as_deref().map(Path::new) else {
@@ -324,9 +264,6 @@ pub(super) async fn relay_idle_claude_bindings(shared: &Arc<SharedData>) {
                     &transcript_path,
                     line_end_offset,
                 );
-                if transcript_turns {
-                    continue;
-                }
                 let observed_at = chrono::Utc::now();
                 // Row uuid and `promptId` suppress replay; otherwise use the content window.
                 let observation =
@@ -453,22 +390,15 @@ pub(super) const DEAD_ORPHANED_PANE_PROBE_DELAY: Duration = Duration::from_milli
 mod tests {
     use super::*;
 
-    /// #5188 (R2). The settle phase must lead the tick.
-    ///
-    /// `RelayIdleBindings` `continue`s past any pane holding an inflight row,
-    /// and a rotation-stranded pane holds an inflight row that can never be
-    /// finalized. Settling afterwards still unwedges the pane eventually, which
-    /// is why a purely positional version of this rule changed no observable
-    /// behaviour and no test noticed when the call moved — but it means the tick
-    /// that SEES the wedge is never the tick that clears it, and the relay work
-    /// for that pane is deferred a full poll every time.
+    // Rotation settle must run before source and Legacy inflight work.
     #[test]
     fn the_idle_tick_settles_session_rotations_before_relaying_bindings() {
         assert_eq!(
             CLAUDE_IDLE_TICK_PHASES,
             [
                 ClaudeIdleTickPhase::SettleSessionRotations,
-                ClaudeIdleTickPhase::RelayIdleBindings,
+                ClaudeIdleTickPhase::Source,
+                ClaudeIdleTickPhase::LegacyBody,
             ],
             "the rotation settle phase must run FIRST; the binding relay phase \
              skips panes with a live inflight row, which is exactly the state a \
@@ -480,7 +410,7 @@ mod tests {
             .expect("settle phase is dispatched");
         let relay = CLAUDE_IDLE_TICK_PHASES
             .iter()
-            .position(|phase| *phase == ClaudeIdleTickPhase::RelayIdleBindings)
+            .position(|phase| *phase == ClaudeIdleTickPhase::LegacyBody)
             .expect("relay phase is dispatched");
         assert!(
             settle < relay,
@@ -606,3 +536,10 @@ pub(super) fn advance_claude_tmux_runtime_binding_offset(
 #[cfg(all(test, unix))]
 #[path = "claude_source_idle_tests.rs"]
 mod source_idle_tests;
+
+#[cfg(test)]
+pub(super) static RELAY_TICKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) static RELAY_SPAWNS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);

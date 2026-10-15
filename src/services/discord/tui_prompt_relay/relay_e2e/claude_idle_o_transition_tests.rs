@@ -1,7 +1,7 @@
 //! Unknown hot replacements open only with content continuity and a durable output anchor.
 #[cfg(test)]
 #[path = "claude_idle_o_host_fixture_tests.rs"]
-mod fixture;
+pub(crate) mod fixture;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::rotation::Boundary;

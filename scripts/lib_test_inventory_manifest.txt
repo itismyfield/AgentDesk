@@ -9051,6 +9051,9 @@ services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7_co
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::m2t_t7u_o_actor_unsealed_survives_rotation_stall_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e::real::a_p11_m2_last_pane_close_and_exact_retire
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e::act_route_disconnect_after_close_still_settles_pg
+services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::bootstrap_keeps_confirmation_and_adoption_before_the_existing_relay
+services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::codex_reconciles_a_late_marker_while_legacy_recovery_is_busy
+services::discord::tui_prompt_relay::relay_e2e::idle_phase_split::late_claude_source_posts_with_body_disabled_while_legacy_still_relays
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::a_real_empty_payload_exclusion_is_a_durable_anchor
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::a_tail_written_during_held_post_remains_owed_after_b_discovery
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::already_spooled_n_opens_after_late_a_post_without_more_b_bytes
@@ -9073,7 +9076,7 @@ services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_tra
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::running_host_discovers_unknown_b_during_a_post_and_posts_each_piece_once
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_claude_idle_binding_does_not_resume_its_synthetic_row
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_direct_prompt_posts_only_its_notice
-services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_preserves_footer_reanchor_and_offset_maintenance
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_idle_skips_legacy_footer_and_offset_maintenance
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_confirmed_slash_raw_and_wrapper_post_one_notice
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1a_manual_rebind_creates_rows_only_on_unconfirmed_channels
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_without_a_lease

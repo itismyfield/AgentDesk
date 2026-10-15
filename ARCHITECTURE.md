@@ -1849,6 +1849,7 @@ src/
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
+│   │   │   │   ├── idle_phase_split_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── pending_admission_e2e_tests.rs
@@ -1918,6 +1919,7 @@ src/
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── session_rotation_settle.rs
+│   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs

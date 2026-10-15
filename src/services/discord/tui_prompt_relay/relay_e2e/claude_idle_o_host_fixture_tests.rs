@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) type Writer = ChannelWriter<GatewayPort, AnyLease, Alarms>;
+pub(crate) type Writer = ChannelWriter<GatewayPort, AnyLease, Alarms>;
 struct BindingRoot;
 impl BindingRoot {
     fn at(root: &Path) -> Self {
@@ -35,17 +35,17 @@ impl Drop for BindingRoot {
     }
 }
 
-pub(super) struct Pane {
-    pub(super) tmux: String,
-    pub(super) channel: ChannelId,
-    pub(super) a: String,
-    pub(super) b: String,
-    pub(super) path: PathBuf,
-    pub(super) shared: Arc<SharedData>,
+pub(crate) struct Pane {
+    pub(crate) tmux: String,
+    pub(crate) channel: ChannelId,
+    pub(crate) a: String,
+    pub(crate) b: String,
+    pub(crate) path: PathBuf,
+    pub(crate) shared: Arc<SharedData>,
     _home: crate::config::TestEnvVarGuard,
 }
 
-pub(super) fn modified(path: &Path, seconds_ago: u64) {
+pub(crate) fn modified(path: &Path, seconds_ago: u64) {
     std::fs::File::options()
         .write(true)
         .open(path)
@@ -54,7 +54,7 @@ pub(super) fn modified(path: &Path, seconds_ago: u64) {
         .unwrap();
 }
 
-pub(super) fn record(session: &str, key: &str, at: &str, body: &str, sdk: bool) -> String {
+pub(crate) fn record(session: &str, key: &str, at: &str, body: &str, sdk: bool) -> String {
     let entrypoint = if sdk { "sdk-cli" } else { "cli" };
     format!(
         "{}\n",
@@ -65,10 +65,13 @@ pub(super) fn record(session: &str, key: &str, at: &str, body: &str, sdk: bool) 
 }
 
 impl Pane {
-    pub(super) fn new(root: &Path, channel: u64) -> Self {
+    pub(crate) fn new(root: &Path, channel: u64) -> Self {
         Self::with_tmux(root, channel, format!("scope-source-{channel}"))
     }
-    pub(super) fn with_tmux(root: &Path, channel: u64, tmux: String) -> Self {
+    pub(crate) fn with_tmux(root: &Path, channel: u64, tmux: String) -> Self {
+        Self::build(root, channel, tmux, false)
+    }
+    fn build(root: &Path, channel: u64, tmux: String, pending: bool) -> Self {
         let (a, b) = (
             uuid::Uuid::new_v4().to_string(),
             uuid::Uuid::new_v4().to_string(),
@@ -118,18 +121,25 @@ impl Pane {
         std::fs::write(tc::session_temp_path(&tmux, tc::CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT),
             serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{"command":format!("adk hook --session-id {a}")}]}]}}).to_string()).unwrap();
         modified(Path::new(&script), 1800);
-        std::fs::write(
-            &path,
-            record(&a, "a1", "2026-10-01T01:00:00Z", "A_BODY", false),
-        )
-        .unwrap();
-        modified(&path, 1200);
-        let binding =
+        if pending {
+            let mut binding = crate::services::discord::tui_prompt_relay::launch_script::claude_tui_rehydrated_binding(&a, &path);
+            binding.output_path = root.join("not-written.jsonl").display().to_string();
+            dedupe::register_tmux_runtime_binding(&tmux, binding);
+            dedupe::register_tmux_channel(&tmux, channel);
+        } else {
+            dedupe::register_tmux_channel(&tmux, channel);
+            std::fs::write(
+                &path,
+                record(&a, "a1", "2026-10-01T01:00:00Z", "A_BODY", false),
+            )
+            .unwrap();
+            modified(&path, 1200);
+            let binding =
             crate::services::discord::tui_prompt_relay::launch_script::claude_tui_rehydrated_binding(&a, &path);
-        dedupe::register_tmux_channel(&tmux, channel);
-        assert!(dedupe::register_rehydrated_tmux_runtime_binding(
-            "claude", &tmux, channel, binding
-        ));
+            assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+                "claude", &tmux, channel, binding
+            ));
+        }
         let shared = crate::services::discord::make_shared_data_for_tests();
         shared
             .tmux_watchers
@@ -144,10 +154,10 @@ impl Pane {
             _home: home_env,
         }
     }
-    pub(super) fn b_path(&self) -> PathBuf {
+    pub(crate) fn b_path(&self) -> PathBuf {
         self.path.with_file_name(format!("{}.jsonl", self.b))
     }
-    pub(super) fn row(&self) -> crate::services::discord::inflight::InflightTurnState {
+    pub(crate) fn row(&self) -> crate::services::discord::inflight::InflightTurnState {
         crate::services::discord::inflight::InflightTurnState::new(
             ProviderKind::Claude,
             self.channel.get(),
@@ -163,7 +173,7 @@ impl Pane {
             17,
         )
     }
-    pub(super) async fn idle(&self) {
+    pub(crate) async fn idle(&self) {
         crate::services::discord::tui_prompt_relay::claude_idle_runtime::relay_idle_claude_bindings(
             &self.shared,
         )
@@ -171,7 +181,7 @@ impl Pane {
     }
 }
 
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     pub root: PathBuf,
     pub pane: Pane,
     pub store: OStore,
@@ -182,7 +192,7 @@ pub(super) struct Fixture {
     _server: AbortOnDrop<()>,
     _bindings: BindingRoot,
 }
-pub(super) struct HttpIo {
+pub(crate) struct HttpIo {
     pub base: Arc<TestHost>,
     port: Arc<GatewayPort>,
 }
@@ -225,8 +235,16 @@ impl HostIo for HttpIo {
 }
 impl Fixture {
     pub async fn new(root: &Path) -> Self {
+        Self::with_pending(root, false).await
+    }
+    async fn with_pending(root: &Path, pending: bool) -> Self {
         let bindings = BindingRoot::at(root);
-        let pane = Pane::new(root, discord_mock::CHANNEL_ID);
+        let pane = Pane::build(
+            root,
+            discord_mock::CHANNEL_ID,
+            format!("scope-source-{}", discord_mock::CHANNEL_ID),
+            pending,
+        );
         let tmux = FakeTmux::install(&pane.tmux);
         let mock = discord_mock::DiscordMockState::new();
         mock.park_first_placeholder
@@ -362,7 +380,7 @@ impl Fixture {
         }
     }
 }
-pub(super) struct Engine {
+pub(crate) struct Engine {
     pub writer: Writer,
     pub sources: Sources<ChannelBindingLog>,
     pub deriver: UnitDeriver,
@@ -387,7 +405,7 @@ impl Engine {
         }
     }
 }
-pub(super) fn append(path: &Path, bytes: &str) {
+pub(crate) fn append(path: &Path, bytes: &str) {
     use std::io::Write;
     std::fs::OpenOptions::new()
         .append(true)
@@ -396,7 +414,10 @@ pub(super) fn append(path: &Path, bytes: &str) {
         .write_all(bytes.as_bytes())
         .unwrap();
 }
-pub(super) fn run(scenario: impl AsyncFnOnce(Fixture)) {
+pub(crate) fn run(scenario: impl AsyncFnOnce(Fixture)) {
+    run_with_pending(scenario, false);
+}
+pub(crate) fn run_with_pending(scenario: impl AsyncFnOnce(Fixture), pending: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -406,7 +427,12 @@ pub(super) fn run(scenario: impl AsyncFnOnce(Fixture)) {
         .build()
         .unwrap()
         .block_on(async {
-            scenario(Fixture::new(root.path()).await).await;
+            let fixture = if pending {
+                Fixture::with_pending(root.path(), true).await
+            } else {
+                Fixture::new(root.path()).await
+            };
+            scenario(fixture).await;
         });
     dedupe::reset_state_for_tests();
 }
