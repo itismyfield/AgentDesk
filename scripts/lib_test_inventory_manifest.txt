@@ -12829,6 +12829,10 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::uns
 services::tui_o::writer::tests::actor::host_start::deferred::stall::handoff::zombie_markers_expire_soft_at_exact_boundary
 services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intake_open_when_the_stall_ends_restarts_it
 services::tui_o::writer::tests::actor::host_start::f6_every_hosted_actor_runs_the_hosts_repost_turn
+services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_source_holding_only_metadata_starts_at_its_end
+services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_source_that_already_holds_output_gets_no_init
+services::tui_o::writer::tests::actor::host_start::first_init::a_legacy_claim_before_the_activation_lock_leaves_no_init_and_legacy_sends
+services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_channel_commits_an_empty_init_and_posts_a_late_source_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
 services::tui_o::writer::tests::actor::host_start::home::a_delegated_channel_waits_on_and_is_ready_by_its_home_gate

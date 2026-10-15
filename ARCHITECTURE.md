@@ -2793,6 +2793,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
+│   │   │   │   ├── first_init.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
@@ -2832,6 +2833,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_first_init_tests.rs
 │   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs
 │   │   │   ├── host_managed_tests.rs
