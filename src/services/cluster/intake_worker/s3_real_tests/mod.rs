@@ -50,6 +50,8 @@ fn s3_node_child() {
             "th6_role_gateway" => holder_pg::role_gateway_node(&env).await,
             "th6_both_holder" => holder_pg::both_holder_node(&env).await,
             "th6_both_gateway" => holder_pg::both_gateway_node(&env).await,
+            "th6_return_gateway" => holder_pg::return_gateway_node(&env).await,
+            "th6_return_worker" => holder_pg::return_worker_node(&env).await,
             "th8_holder" => route_pg::holder_node(&env).await,
             "th8_gateway" => route_pg::gateway_node(&env).await,
             "th8_branches" => route_pg::branches_node(&env).await,

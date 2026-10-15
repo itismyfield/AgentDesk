@@ -752,3 +752,104 @@ pub(super) async fn applied_then_released(
     );
     assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }
+
+/// T-H6 return: one gateway watch follows a delegation from no row through the worker's reclaim.
+/// Its writer ends with the release, and once the reclaimed row is gone a new gateway writer is
+/// ready and posts again; no two processes' POSTs overlap.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_gateway_reclaim_roundtrip_restores_writer_pg() {
+    let scene = Scene::new().await;
+    let channel = C.to_string();
+    let mut gateway = Node::spawn(&scene, "th6_return_gateway", GW);
+    gateway
+        .wait_signal("return.before", Duration::from_secs(180))
+        .await;
+    assert_eq!(scene.row().await, None, "the gateway booted with no row");
+    applied(o_channel_homes::delegate(&scene.pool, &channel, "claude", GW, MINI).await);
+    let released = || async {
+        let row = scene.row().await;
+        row.is_some_and(|row| row.state == HomeState::Released)
+    };
+    until_async("the gateway's watch releases", WITHIN * 3, released).await;
+    let mut worker = Node::spawn(&scene, "th6_return_worker", MINI);
+    worker
+        .wait_signal("return.worker", Duration::from_secs(180))
+        .await;
+    let (state, holder, epoch) = home(&scene).await;
+    assert_eq!((state, holder.as_deref()), (HomeState::Worker, Some(MINI)));
+    applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
+    worker.finish(Duration::from_secs(180)).await;
+    gateway.finish(Duration::from_secs(240)).await;
+    assert_eq!(
+        scene.row().await,
+        None,
+        "the gateway's watch removed the row"
+    );
+    let spans = post_spans(&lifecycle(scene.dir()).unwrap()).unwrap();
+    let posts: Vec<_> = spans
+        .iter()
+        .map(|span| (span.node.as_str(), span.content.as_str()))
+        .collect();
+    let expected = [(GW, "gw-before"), (MINI, "mini-out"), (GW, "gw-after")];
+    assert_eq!(posts, expected);
+    scene.drop_db().await;
+}
+
+/// The gateway: its writer posts with no row, the delegation's drain releases through its watch and
+/// ends that writer, and after the reclaim the same watch starts a writer that posts once more.
+pub(super) async fn return_gateway_node(env: &Env) {
+    let dir = env.dir.as_path();
+    let (node, writers) = Booted::boot_gateway(env, Discord::default().recording(env)).await;
+    assert!(node.gates.is_empty(), "no row mounts no gate");
+    until("the gateway writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("b1", "gw-before"));
+    node.until_posts(&["gw-before"]).await;
+    signal(dir, "return.before");
+    let released = || async { node.state().await == Some(HomeState::Released) };
+    until_async("the delegation is released", WITHIN * 3, released).await;
+    for _ in 0..2400 {
+        if !node.accepts() && node.gate().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let ended = (node.accepts(), node.gate().is_some(), writers.phase(C));
+    assert_eq!(
+        ended,
+        (false, false, None),
+        "the released channel's writer ends"
+    );
+    let returned = || async { node.state().await.is_none() };
+    until_async("the reclaimed row is gone", WITHIN * 4, returned).await;
+    assert!(
+        crate::services::cluster::channel_home_boot::running(&C.to_string()).0,
+        "the same watch"
+    );
+    until("the returned channel's writer takes work", WITHIN, || {
+        node.accepts() && node.gate().is_none()
+    })
+    .await;
+    append(&node.transcript, &row("a1", "gw-after"));
+    node.until_posts(&["gw-before", "gw-after"]).await;
+    writers.stop(C).await;
+    node.stop().await;
+}
+
+/// The worker: it adopts the released channel through its own watch, posts, then drains the
+/// reclaim and leaves.
+pub(super) async fn return_worker_node(env: &Env) {
+    let node = Booted::boot_adopting(env, Discord::default().recording(env)).await;
+    let adopted = || async { node.state().await == Some(HomeState::Worker) };
+    until_async("the worker adopts", WITHIN, adopted).await;
+    until("the worker writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("w1", "mini-out"));
+    node.until_posts(&["mini-out"]).await;
+    signal(&env.dir, "return.worker");
+    let left = || async {
+        let state = node.state().await;
+        !matches!(state, Some(HomeState::Worker | HomeState::Reclaiming))
+    };
+    until_async("the reclaim drains and leaves", WITHIN * 3, left).await;
+    until("the worker writer stops", WITHIN, || !node.accepts()).await;
+    node.stop().await;
+}
