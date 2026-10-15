@@ -288,20 +288,55 @@ fn resolved_codex_idle_relay_binding_inner(
                     .exists()
                     .then_some((binding, false));
             };
+            if crate::services::codex_tui::rollout_index::rollout_is_subagent(&marker.rollout_path)
+            {
+                return None;
+            }
+            let observed_session =
+                super::rehydration::codex_marker::codex_rollout_session_id(&marker.rollout_path);
+            let session = marker
+                .session_id
+                .clone()
+                .or_else(|| observed_session.clone());
+            if session
+                .as_ref()
+                .zip(observed_session.as_ref())
+                .is_some_and(|(a, b)| a != b)
+            {
+                return None;
+            }
+            if crate::services::codex_tui::session::codex_tui_rollout_paths_same(
+                &marker.rollout_path,
+                Path::new(&binding.output_path),
+            ) && session == binding.session_id
+            {
+                // Polling an already published source must not install a restore scope.
+                let (source, _file) =
+                    crate::services::codex_tui::session::checkpoint::Source::open(
+                        tmux_session_name,
+                        &marker.rollout_path,
+                        session,
+                    )
+                    .ok()?;
+                source.check(tmux_session_name).ok()?;
+                if !crate::services::tui_prompt_dedupe::codex_restore_source_current(
+                    tmux_session_name,
+                    &marker.rollout_path,
+                ) {
+                    let fresh = codex_tui_rehydrated_binding_from_rollout_path(
+                        tmux_session_name,
+                        &marker.rollout_path,
+                        marker.session_id,
+                    )?;
+                    return Some((fresh, true));
+                }
+                return Some((binding, false));
+            }
             let fresh = codex_tui_rehydrated_binding_from_rollout_path(
                 tmux_session_name,
                 &marker.rollout_path,
                 marker.session_id,
             )?;
-            if crate::services::codex_tui::session::codex_tui_rollout_paths_same(
-                &marker.rollout_path,
-                Path::new(&binding.output_path),
-            ) && fresh.session_id == binding.session_id
-            {
-                return Path::new(&binding.output_path)
-                    .exists()
-                    .then_some((binding, false));
-            }
             tracing::info!(
                 tmux_session_name = %tmux_session_name,
                 channel_id = channel_id.get(),
