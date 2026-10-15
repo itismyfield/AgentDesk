@@ -2463,6 +2463,9 @@ services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
+services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
+services::cluster::channel_home_boot::tests::writer_return::a_returned_writer_that_ends_after_its_start_is_started_again_pg
+services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -2641,6 +2644,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::harness::route_as_a
 services::cluster::intake_worker::home_route_tests::s3_real::harness::scripted_reset_holds_each_call_and_never_succeeds_past_its_script
 services::cluster::intake_worker::home_route_tests::s3_real::harness::two_processes_append_whole_steps_to_one_lifecycle
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_reclaim_roundtrip_restores_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg

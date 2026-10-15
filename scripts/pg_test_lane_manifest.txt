@@ -419,6 +419,7 @@ services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::channel_home::tests
 services::cluster::channel_home_boot::tests
+services::cluster::channel_home_boot::tests::writer_return
 services::cluster::channel_home_drain::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
@@ -1326,6 +1327,8 @@ services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaim
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
+services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
+services::cluster::channel_home_boot::tests::writer_return::a_returned_writer_that_ends_after_its_start_is_started_again_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1436,6 +1439,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_reclaim_roundtrip_restores_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
@@ -1805,6 +1809,7 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::retired_notice_failure_is_retried_by_the_duplicate_only_pg
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg
