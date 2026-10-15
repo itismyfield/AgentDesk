@@ -22,7 +22,7 @@ pub enum Custody {
 }
 
 impl Custody {
-    /// A pending start or a terminal delivery: strict callers refuse both, as one value before.
+    /// A pending start or a terminal delivery; strict callers read both as the former `Active`.
     pub fn active(self) -> bool {
         matches!(self, Self::PendingStart | Self::Active)
     }

@@ -31,7 +31,7 @@ pub(in crate::services::discord) fn confirm_codex_channel(
     }
     let provider = ProviderKind::Codex;
     let lock = channel_lock(provider.as_str(), channel);
-    // Start claims hold this lock, so none can add an inflight row between the read and the confirm.
+    // Synthetic start claims take this lock, so none lands between the population read and confirm.
     let Ok(_claims) = lock.try_lock() else {
         return Confirmation::Retry("a start claim holds the channel".into());
     };

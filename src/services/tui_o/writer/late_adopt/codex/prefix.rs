@@ -53,7 +53,7 @@ fn judged(source: &SourceId) -> Result<Verdict, Verdict> {
     if complete != bytes.len() {
         return Err(Verdict::Wait("the rollout ends inside a record".into()));
     }
-    // A read failure may pass; an identity the header does not prove refuses this rollout.
+    // A failed read waits; a header that does not prove the bound session refuses the rollout.
     strict_parent_session(&source.path, &source.session_id).map_err(|error| {
         match error.kind() {
             std::io::ErrorKind::Other => Verdict::Refuse(error.to_string()),
