@@ -13,8 +13,8 @@ use crate::services::tui_prompt_dedupe::{
     self as dedupe,
     binding_context::{BindingContext, PreparedIncarnation},
 };
+use dedupe::codex_verified::VerifiedSourceSnapshot;
 use dedupe::codex_verified::provenance::decisions::PersistenceReason as P;
-use dedupe::codex_verified::{DeliveryPermission, VerifiedSourceSnapshot};
 use std::{path::Path, sync::MutexGuard};
 
 fn enabled(root: &Path) -> OStore {
@@ -95,7 +95,7 @@ pub(crate) struct Fixture {
     _isolation: Isolation,
 }
 impl Fixture {
-    pub(crate) async fn new(allowed: bool) -> Self {
+    pub(crate) async fn new(current_proof: bool) -> Self {
         use crate::services::claude_tui::hook_server::observation_ingress::observe_binding_hook;
         use dedupe::binding_context::{
             BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
@@ -114,7 +114,7 @@ impl Fixture {
         let id = "019e660d-4859-7522-9cee-8ba7c4e7c743";
         let tmux = format!("p5a2-{}", uuid::Uuid::new_v4().simple());
         let path = root.path().join(format!("rollout-{id}.jsonl"));
-        let context = BindingContext {
+        let mut context = BindingContext {
             schema: 1,
             provider: "codex".into(),
             created_at: chrono::Utc::now() - chrono::Duration::seconds(60),
@@ -132,10 +132,9 @@ impl Fixture {
         PreparedIncarnation::create(context.clone()).unwrap();
         let marker = crate::services::tmux_common::session_temp_path(&tmux, "spawn_nonce");
         std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
-        std::fs::write(marker, &context.execution_nonce).unwrap();
+        std::fs::write(&marker, &context.execution_nonce).unwrap();
         dedupe::register_tmux_channel(&tmux, channel);
         dedupe::binding_events::set_test_root(Some(root.path()));
-        dedupe::codex_verified::set_permission_for_tests(&context, DeliveryPermission::Allowed);
         let fake =
             crate::services::provider_teardown::tests::test_support::FakeTmux::install(&tmux);
         let at = chrono::Utc::now().to_rfc3339();
@@ -162,8 +161,16 @@ impl Fixture {
             VerifiedSourceSnapshot::capture,
         )
         .unwrap();
-        if !allowed {
-            dedupe::codex_verified::set_permission_for_tests(&context, DeliveryPermission::Unknown);
+        if !current_proof {
+            context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+            PreparedIncarnation::create(context.clone()).unwrap();
+            std::fs::write(&marker, &context.execution_nonce).unwrap();
+            assert!(
+                dedupe::binding_events::codex::read_ownership(&context)
+                    .unwrap()
+                    .verified
+                    .is_none()
+            );
         }
         let owner = enabled(root.path());
         let bytes = std::fs::read(&path).unwrap();
@@ -204,7 +211,7 @@ impl Fixture {
         );
         assert_eq!(handles.len(), 1);
         tokio::time::sleep(POLL_INTERVAL * 3).await;
-        if allowed {
+        if current_proof {
             assert!(ready.accepts(channel));
         } else {
             assert!(ready.is_hosted(channel));
@@ -389,18 +396,20 @@ async fn p5a2_source_snapshot_is_rechecked_after_actor_await() {
     f.stop().await;
 }
 
-#[tokio::test(start_paused = true)]
-async fn p5a2_dormant_actor_entrypoint_keeps_legacy_trace() {
-    let f = Fixture::new(false).await;
+async fn source_read_trace(current_proof: bool) {
+    let f = Fixture::new(current_proof).await;
     assert!(
         !dedupe::codex_verified::provenance::admission::owed_delivery_ready(
             f.launch.episode.channel_id
         )
     );
-    assert!(!dedupe::codex_verified_o_source_allowed(
-        f.launch.episode.channel_id,
-        &f.source.execution().source
-    ));
+    assert_eq!(
+        dedupe::codex_verified_o_source_allowed(
+            f.launch.episode.channel_id,
+            &f.source.execution().source
+        ),
+        current_proof
+    );
     let before = f.io.calls.lock().unwrap().clone();
     let path = f
         .root
@@ -421,8 +430,29 @@ async fn p5a2_dormant_actor_entrypoint_keeps_legacy_trace() {
         .clone();
     crate::services::tui_o::store::codex_provenance::SIDECAR_IO.with(|io| io.set((0, 0)));
     f.append("task_started", "t1");
-    f.append("agent_message", "t1");
-    f.append("task_complete", "t1");
+    let text = "verified source with Unknown delivery permission";
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&reader.path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"response_item","payload":{
+            "type":"message","role":"assistant","id":"unknown-output",
+            "content":[{"type":"output_text","text":text}]}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"event_msg","payload":{
+            "type":"task_complete","turn_id":"t1","last_agent_message":text}})
+        )
+        .unwrap();
+    }
     tokio::time::sleep(POLL_INTERVAL * 4).await;
     assert_eq!(
         crate::services::tui_o::store::codex_provenance::SIDECAR_IO.with(std::cell::Cell::get),
@@ -435,14 +465,50 @@ async fn p5a2_dormant_actor_entrypoint_keeps_legacy_trace() {
         .cursor(&reader)
         .unwrap()
         .clone();
-    assert_eq!(
-        after, original,
-        "commands.is_some() does not bypass Unknown source permission"
-    );
-    assert_eq!(*f.io.calls.lock().unwrap(), before);
-    assert!(f.io.port.posts().is_empty());
+    if current_proof {
+        assert!(after.captured_through > original.captured_through);
+        assert_eq!(
+            after.captured_through,
+            std::fs::metadata(&reader.path).unwrap().len()
+        );
+        assert_eq!(f.io.port.posts(), [text]);
+        let channel = owner
+            .open_channel(&era, f.launch.episode.channel_id)
+            .unwrap()
+            .unwrap();
+        let ledger = channel.ledger();
+        assert_eq!(
+            (0..ledger.next_serial())
+                .filter_map(|serial| ledger.piece(serial))
+                .filter(|piece| matches!(
+                    piece.outcome,
+                    Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                        _
+                    ))
+                ))
+                .count(),
+            1
+        );
+    } else {
+        assert_eq!(
+            after, original,
+            "actor commands cannot bypass a missing current proof"
+        );
+        assert_eq!(*f.io.calls.lock().unwrap(), before);
+        assert!(f.io.port.posts().is_empty());
+    }
     assert!(!path.exists());
     f.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn p5a2_verified_source_reads_with_unknown_delivery_permission() {
+    source_read_trace(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn p5a2_actor_without_current_proof_keeps_legacy_trace() {
+    source_read_trace(false).await;
 }
 
 #[tokio::test(start_paused = true)]

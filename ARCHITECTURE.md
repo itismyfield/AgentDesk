@@ -833,6 +833,7 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── following_source.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
@@ -2811,6 +2812,7 @@ src/
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
+│   │   │   │   ├── retained_capture.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── activation.rs
@@ -2877,6 +2879,7 @@ src/
 │   │   │   ├── round_trip.rs
 │   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── source_read_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
