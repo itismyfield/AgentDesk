@@ -95,7 +95,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::commands::cancel_backstop_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
-  --skip services::discord::commands::control::input_clear::tests
   --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
@@ -104,6 +103,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::health::turn_deliver::inject::herdr::tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::herdr_terminate::exit_tests
@@ -168,7 +168,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
-  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::injected_watcher_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
@@ -425,7 +424,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
   services::discord::commands::control::home_fence::tests::d2b_reset_sink_refuses_claimed_turn_and_drain_reset_remains_allowed
   services::discord::commands::control::home_fence::tests::d2b_slash_stop_reply_keeps_permit_until_finish_and_dormant_is_unchanged
-  services::discord::commands::control::input_clear::tests::without_postgres_the_adapter_refuses_with_the_retry_notice
   services::discord::health::recovery::stall_alert::tests::owner_zero_and_tui_sentinel_never_render_mentions
   services::discord::health::recovery::stall_alert::tests::producer_liveness_suppresses_stall_page
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_clear_refusal_preserves_mailbox_and_session
@@ -437,6 +435,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
   services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
+  services::discord::health::turn_deliver::inject_codex_tests::codex_input_on_a_listed_herdr_channel_stays_refused
   services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox

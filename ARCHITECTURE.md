@@ -833,11 +833,13 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── following_source.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
 │   │   ├── session/
+│   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
@@ -888,11 +890,10 @@ src/
 │   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── clear_wait_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
-│   │   │   │   ├── input_clear.rs
-│   │   │   │   ├── input_clear_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── native_herdr_e2e_tests.rs
@@ -1020,8 +1021,11 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
+│   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
-│   │   │   │   │   └── queued_support.rs
+│   │   │   │   │   ├── queued_support.rs
+│   │   │   │   │   └── test_hook.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -1441,9 +1445,6 @@ src/
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
 │   │   ├── replay_policy/
-│   │   │   ├── injected/
-│   │   │   │   └── test_support_tests.rs
-│   │   │   ├── injected.rs
 │   │   │   ├── live.rs
 │   │   │   ├── live_tests.rs
 │   │   │   ├── permit.rs
@@ -1758,8 +1759,6 @@ src/
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
 │   │   │   ├── inherited_fixture_tests.rs
-│   │   │   ├── injected_bridge_tests.rs
-│   │   │   ├── injected_watcher_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── legacy_state.rs
@@ -2243,8 +2242,6 @@ src/
 │   │   ├── inject_disposition.rs
 │   │   ├── inject_disposition_test_support.rs
 │   │   ├── inject_disposition_tests.rs
-│   │   ├── input_transition.rs
-│   │   ├── input_transition_tests.rs
 │   │   ├── internal_api.rs
 │   │   ├── jsonl_watcher.rs
 │   │   ├── live_bridge.rs
@@ -2807,6 +2804,7 @@ src/
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
+│   │   │   │   ├── retained_capture.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── activation.rs
@@ -2873,6 +2871,7 @@ src/
 │   │   │   ├── round_trip.rs
 │   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── source_read_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
@@ -2990,8 +2989,6 @@ src/
 │   │   ├── injected_inputs_tests.rs
 │   │   ├── input_fence.rs
 │   │   ├── input_fence_tests.rs
-│   │   ├── input_handback.rs
-│   │   ├── input_handback_tests.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs

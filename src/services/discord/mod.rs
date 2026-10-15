@@ -35,6 +35,7 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
+#[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
 };
@@ -177,8 +178,6 @@ mod tmux_watcher_registry;
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
 pub(crate) mod input_runtime;
-#[allow(dead_code)]
-mod input_transition;
 #[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
@@ -209,7 +208,6 @@ mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
-
 #[allow(unused_imports)]
 pub(in crate::services::discord) use tmux_watcher_registry::{
     TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,

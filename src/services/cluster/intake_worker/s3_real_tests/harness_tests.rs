@@ -1924,10 +1924,8 @@ impl Booted {
 
     /// As [`Booted::boot_on`], its watch adopting a released row as a restored runtime's does.
     pub(super) async fn boot_adopting(env: &Env, discord: Discord) -> Self {
-        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
-        let reset = no_reset();
-        let (provider, ports) = (ShadowProvider::Claude, Some(worker_restored()));
-        Self::boot_ports_on(env, reads, reset, discord, provider, GW, ports).await
+        let port = |id| BootPort::reading(id, worker_restored(), no_reset());
+        Self::boot_port_on(env, port, discord, ShadowProvider::Claude, GW).await
     }
 
     async fn boot_with_on<R>(
@@ -1954,17 +1952,24 @@ impl Booted {
     where
         R: DrainPort + Send + Sync + 'static,
     {
-        Self::boot_ports_on(env, reads, reset, discord, provider, gateway, None).await
+        let port = move |id| BootPort::new(reads(id), Arc::clone(&reset));
+        Self::boot_port_on(env, port, discord, provider, gateway).await
     }
 
-    async fn boot_ports_on<R>(
+    /// As [`Booted::boot`], each port built by the runtime's own `BootPort::reading` with `restored`
+    /// as the runtime's "persisted turns restored" flag.
+    pub(super) async fn boot_reading(env: &Env, restored: Arc<AtomicBool>) -> Self {
+        let port = move |id| BootPort::reading(id, Arc::clone(&restored), no_reset());
+        let (discord, provider) = (Discord::default(), ShadowProvider::Claude);
+        Self::boot_port_on(env, port, discord, provider, GW).await
+    }
+
+    async fn boot_port_on<R>(
         env: &Env,
-        reads: impl Fn(u64) -> R,
-        reset: channel_home_boot::LegacyReset,
+        port: impl Fn(u64) -> BootPort<R>,
         discord: Discord,
         provider: ShadowProvider,
         gateway: &str,
-        restored: Option<Arc<AtomicBool>>,
     ) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
@@ -1977,13 +1982,6 @@ impl Booted {
         let pool = env.pool().await;
         let rows = channel_home_boot::listed(&pool);
         let (local, boot_pool) = (role.clone(), pool.clone());
-        let port = move |id| {
-            let port = BootPort::new(reads(id), Arc::clone(&reset));
-            match &restored {
-                Some(restored) => port.restored_by(Arc::clone(restored)),
-                None => port,
-            }
-        };
         let prepare = move || {
             Some(Boot {
                 provider: provider_name(provider).into(),

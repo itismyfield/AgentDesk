@@ -291,11 +291,39 @@ pub(super) fn refuse_destructive(
     reap(&mut state.queued_head);
     if let Some(head) = &state.queued_head.meta.head_injection {
         return Err(format!(
-            "channel {channel} queued head is {:?}; clear/purge refused",
+            "channel {channel} queued head is {:?}; purge refused",
             head.phase
         ));
     }
     Ok(())
+}
+
+/// An explicit clear drops the head and its lease, and takes the disk record as read even when it
+/// changed outside its owner, so the clear's write replaces it. Returns the ledger to restore.
+pub(super) fn release_for_clear(
+    state: &mut ChannelMailboxState,
+    channel: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<HeadLedger, String> {
+    adopt(state, channel, persistence)?;
+    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
+        .ok_or("pending queue root unavailable")?;
+    let disk = read_snapshot_meta(&path)?.unwrap_or_default();
+    let previous = std::mem::take(&mut state.queued_head);
+    let mut meta = disk.clone();
+    meta.head_injection = None;
+    // Sources the owner recorded as submitted stay recorded, so none of them can replay.
+    let owned = previous.meta.terminal_identities.iter();
+    let missing = owned.filter(|t| !disk.terminal_identities.contains(t));
+    meta.terminal_identities
+        .extend(missing.cloned().collect::<Vec<_>>());
+    state.queued_head = HeadLedger {
+        adopted: previous.adopted.clone(),
+        meta,
+        lease: None,
+        persisted_meta: meta_value(&disk),
+    };
+    Ok(previous)
 }
 
 /// A head nobody owns, after a restart or a dropped ticket: a reservation never pasted is
@@ -662,7 +690,7 @@ mod claim {
     }
 
     /// Moves the ticket's head on. A write that may have landed after a paste could have started
-    /// leaves the head Unknown in memory, which only a restart or an operator resolves.
+    /// leaves the head Unknown, which holds the queue until an explicit clear discards it.
     fn settle(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
