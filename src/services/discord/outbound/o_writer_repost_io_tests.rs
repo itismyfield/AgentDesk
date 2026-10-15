@@ -945,5 +945,6 @@ mod settle_over_http {
     }
 }
 
+#[cfg(unix)]
 #[path = "local_retry_io_tests.rs"]
 mod local_retry_io_tests;
