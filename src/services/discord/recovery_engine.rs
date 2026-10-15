@@ -411,12 +411,6 @@ fn runtime_handoff_for_recovery(
             session_name: tmux_session_name,
             last_offset,
         },
-        RuntimeHandoffKind::ClaudeEAdapter => RuntimeHandoff::ClaudeEAdapter {
-            output_path,
-            session_name: tmux_session_name,
-            last_offset,
-            pid: 0,
-        },
     }
 }
 

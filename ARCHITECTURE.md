@@ -1099,7 +1099,6 @@ src/
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
 │   │   │   │   │   │   └── herdr_terminal_restart_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
-│   │   │   │   │   ├── claude_e_stamp.rs
 │   │   │   │   │   ├── completion_preserve.rs
 │   │   │   │   │   ├── guarded_read.rs
 │   │   │   │   │   ├── heartbeat.rs
@@ -1976,7 +1975,6 @@ src/
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
 │   │   │   ├── runtime_handoff_loop/
-│   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── tests.rs

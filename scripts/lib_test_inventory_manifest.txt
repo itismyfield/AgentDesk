@@ -4734,10 +4734,6 @@ services::discord::inflight::save_store::create_monotonic_observer::tests::unobs
 services::discord::inflight::save_store::create_monotonic_observer::tests::witness_io_is_outside_mutex_and_revision_blocks_stale_install
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::placeholder_clear_effect_reports_only_the_bridge_winner
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::slice_a_pair_contention
-services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::claude_e_stamp_preserves_concurrent_progress_and_adopts_exact_persisted_row
-services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::divergent_claude_e_response_is_non_retryable_and_preserves_process_frame
-services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::stale_claude_e_stamp_cannot_overwrite_newer_runtime_or_process_group
-services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::transient_claude_e_stamp_read_error_is_retryable_and_preserves_process_frame
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_failed_receipt_write_publishes_nothing
@@ -4791,7 +4787,6 @@ services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_merges_same_authority_current_message_epoch
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_rejects_foreign_delegated_owner_projection
 services::discord::inflight::save_store::identity_gate::stream_loop_patch::tests::strict_visible_fence_rejects_watcher_before_local_delta_and_adopts_durable
-services::discord::inflight::save_store::identity_gate::tests::claude_e_handoff_stamp_accepts_stale_memory_generation_but_guards_identity
 services::discord::inflight::save_store::identity_gate::tests::completion_preserve_merges_forward_response_and_adopts_exact_durable_row
 services::discord::inflight::save_store::identity_gate::tests::identity_guarded_mut_target_adopts_generation_for_sequential_post_loop_saves
 services::discord::inflight::save_store::identity_gate::tests::identity_refresh_generation_cas_preserves_same_turn_durable_progress
@@ -5926,11 +5921,6 @@ services::discord::placeholder_live_events::turn_anchor::tests::request_anchor_u
 services::discord::placeholder_live_events::turn_anchor::tests::synthetic_headless_id_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::synthetic_voice_id_omits_link
 services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
-services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_live_process_preserves_retry
-services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_missing_or_legacy_identity_preserves_retry
-services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_pid_reuse_evidence_allows_cleanup
-services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_probe_error_preserves_retry
-services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe
 services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
 services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete
 services::discord::placeholder_sweeper::abandon_guard::tests::dead_pane_without_runtime_files_converges_to_cleanup
@@ -5948,8 +5938,6 @@ services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_e
 services::discord::placeholder_sweeper::abandon_guard::tests::runtime_activity_zero_and_negative_are_unknown
 services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placeholder_stops_before_mailbox_finish_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::terminal_marker_owner_death_evicts_without_constructing_message_id_zero
-services::discord::placeholder_sweeper::abandon_guard::tests::tmux_present_path_is_unchanged_by_claude_e_process_evidence
-services::discord::placeholder_sweeper::abandon_guard::tests::tmuxless_wrong_runtime_kind_preserves_retry
 services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
 services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
 services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
@@ -5969,7 +5957,6 @@ services::discord::placeholder_sweeper::panel_shape::tests::legacy_markerless_pr
 services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync
 services::discord::placeholder_sweeper::probe_classification_tests::permanent_statuses_classified_as_gone
 services::discord::placeholder_sweeper::probe_classification_tests::transient_statuses_classified_as_retryable
-services::discord::placeholder_sweeper::retirement_tests::inline_panel_rechecks_retirement_after_owner_probe
 services::discord::placeholder_sweeper::retirement_tests::tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg
 services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
 services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
@@ -9832,9 +9819,6 @@ services::discord::turn_bridge::retry_state::tests::retry_state_rmw_error_preser
 services::discord::turn_bridge::retry_state::tests::retry_state_terminal_error_reset_persists_without_debug_panic
 services::discord::turn_bridge::retry_state::tests::same_turn_refresh_preserves_transient_intake_settlement_authority
 services::discord::turn_bridge::retry_state::tests::watcher_relay_error_frame_reclaims_bridge_delivery_frontier
-services::discord::turn_bridge::runtime_handoff_loop::claude_e::tests::process_evidence_body_divergence_is_non_retryable_and_preserves_durable
-services::discord::turn_bridge::runtime_handoff_loop::claude_e::tests::process_evidence_callsite_uses_pre_mutation_baseline_and_adopts_exact_row
-services::discord::turn_bridge::runtime_handoff_loop::claude_e::tests::recovery_pid_sentinel_preserves_existing_process_evidence
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_dirty_marking_follows_guarded_save_outcome
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_restamps_output_path_when_this_turn_still_owns_the_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_skips_and_does_not_clobber_a_re_owned_row
