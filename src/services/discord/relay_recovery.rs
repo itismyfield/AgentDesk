@@ -46,7 +46,6 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
-#[path = "relay_recovery/apply.rs"]
 mod apply;
 #[path = "relay_recovery_auto_heal_apply.rs"]
 mod auto_heal_apply;
@@ -56,9 +55,10 @@ mod auto_heal_attempts;
 mod auto_heal_confirm;
 #[path = "relay_recovery_circuit_breaker.rs"]
 mod circuit_breaker;
+#[path = "relay_recovery_circuit_evidence.rs"]
+pub(in crate::services::discord) mod circuit_evidence;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
-#[path = "relay_recovery/decision.rs"]
 mod decision;
 #[cfg(unix)]
 #[path = "relay_recovery/destructive_warrant.rs"]
@@ -75,11 +75,7 @@ pub(super) mod leaked_row_sweep;
 mod reattach_apply;
 #[path = "relay_recovery_circuit_alert_producer.rs"]
 mod relay_recovery_circuit_alert_producer;
-
 pub(super) use apply::*;
-pub(in crate::services::discord) use decision::*;
-pub(crate) use idle_tmux::*;
-
 use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
 use auto_heal_attempts::{
@@ -91,6 +87,8 @@ use auto_heal_attempts::{
     AUTO_HEAL_WINDOW_SECS, auto_heal_key, max_attempts_per_window_for_snapshot,
     remaining_auto_heal_attempts,
 };
+pub(in crate::services::discord) use decision::*;
+pub(crate) use idle_tmux::*;
 
 /// Protect probe and manual cleanup across the #4569 incident window: mailbox
 /// admission at 05:16:44.468 was misclassified at 05:16:47.320 (~2.9 seconds).

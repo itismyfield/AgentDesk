@@ -151,7 +151,7 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
         parser.add_argument('--promote', action='append', default=[], metavar='PATH',
                             help='explicitly remove this existing production module from the skip pin')
-        parser.add_argument('--remove-deleted', action='append', default=[], metavar='PATH',
+        parser.add_argument('--remove-deleted', '--delete-pin', action='append', default=[], metavar='PATH',
                             help='explicitly remove this deleted file from the skip pin')
         args = parser.parse_args(sys.argv[2:])
         sync_skips(Path.cwd(), args.promote, args.remove_deleted)

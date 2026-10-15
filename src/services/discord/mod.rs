@@ -146,12 +146,6 @@ mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(all(test, unix))]
-pub use tmux::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
-#[cfg(unix)]
-pub use tmux::{RetiredOWatcherRestore, restore_retired_o_watchers};
-#[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,
     existing_channel_id: ChannelId,
