@@ -1030,8 +1030,7 @@ src/
 │   │   │   │   ├── idle_relay_absence.rs
 │   │   │   │   ├── input_fence_tests.rs
 │   │   │   │   ├── live_bridge_guard.rs
-│   │   │   │   ├── o_only_retry.rs
-│   │   │   │   └── o_only_retry_tests.rs
+│   │   │   │   └── live_bridge_guard_tests.rs
 │   │   │   ├── headless_turn.rs
 │   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
@@ -1199,8 +1198,6 @@ src/
 │   │   │   ├── command.rs
 │   │   │   ├── effect.rs
 │   │   │   ├── effect_tests.rs
-│   │   │   ├── effects.rs
-│   │   │   ├── effects_tests.rs
 │   │   │   ├── external.rs
 │   │   │   ├── external_tests.rs
 │   │   │   ├── fence.rs
@@ -2199,15 +2196,12 @@ src/
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── n4d2_o_writer_test.rs
-│   │   │   │   ├── n4d2_restore_tests.rs
-│   │   │   │   ├── o_only_install.rs
-│   │   │   │   ├── o_only_install_tests.rs
-│   │   │   │   ├── o_only_restore.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
 │   │   │   │   ├── restore.rs
 │   │   │   │   ├── restore_core.rs
+│   │   │   │   ├── restore_legacy_tests.rs
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
@@ -2742,9 +2736,6 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── channel_gate.rs
 │   │   │   └── intake_route.rs
-│   │   ├── n1_observation/
-│   │   │   ├── sink.rs
-│   │   │   └── sink_tests.rs
 │   │   ├── repost/
 │   │   │   ├── admission.rs
 │   │   │   ├── admission_tests.rs
@@ -2931,8 +2922,6 @@ src/
 │   │   ├── gates_m1_compact_tests.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
-│   │   ├── n1_observation.rs
-│   │   ├── n1_observation_tests.rs
 │   │   ├── ownership.rs
 │   │   ├── shadow_host.rs
 │   │   ├── topology.rs

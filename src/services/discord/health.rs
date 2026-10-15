@@ -71,15 +71,9 @@ pub(in crate::services::discord) mod transcript_turn;
 mod turn_deliver;
 mod unpaired_active_token;
 pub(in crate::services::discord) mod watcher_respawn;
-pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use watcher_respawn::{
-    lock_watcher_absence_for_test, n4d2_absence, n4d2_arm_absence, retry_pending_watcher_respawn,
-};
-#[cfg(unix)]
-pub(in crate::services::discord) use watcher_respawn::{
-    record_retired_o_install_outcome, retired_o_install_due,
-};
+pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
+pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
@@ -463,6 +457,7 @@ impl HealthRegistry {
                 .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord) async fn provider_entries_guard(
         &self,
     ) -> tokio::sync::MutexGuard<'_, Vec<ProviderEntry>> {
