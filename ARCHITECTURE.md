@@ -2987,8 +2987,6 @@ src/
 │   │   │   └── tests/
 │   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
-│   │   │   ├── queue_exit_debt.rs
-│   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
@@ -3012,7 +3010,6 @@ src/
 │   │   ├── input_fence_tests.rs
 │   │   ├── input_handback.rs
 │   │   ├── input_handback_tests.rs
-│   │   ├── installed_actor_handoff.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs
@@ -3032,8 +3029,6 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
-│   │   ├── scoped_claim.rs
-│   │   ├── scoped_claim_tests.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
