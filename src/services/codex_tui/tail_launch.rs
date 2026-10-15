@@ -54,7 +54,12 @@ pub(crate) fn validate_selection(
     };
     let executed = resume.as_ref().map(|(_, _, id)| id.as_str());
     if verified(context)
-        && (context.launch_mode != if executed.is_some() { "resume" } else { "fresh" }
+        && (context.launch_mode
+            != if executed.is_some() {
+                "resume"
+            } else {
+                "fresh"
+            }
             || context.expected_native_session_id.as_deref() != executed)
     {
         return Err("Codex TUI resume selection does not match its verified launch".to_string());

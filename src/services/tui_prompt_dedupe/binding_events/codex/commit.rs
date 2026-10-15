@@ -21,7 +21,14 @@ pub(crate) fn commit_claim_published(
     published_at: Option<DateTime<Utc>>,
     validate_current: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Fold> {
-    commit(context, claim, decision, published_at, validate_current, None)
+    commit(
+        context,
+        claim,
+        decision,
+        published_at,
+        validate_current,
+        None,
+    )
 }
 
 /// Appends an executed resume's initial proof, resolving the sole native resume Pending only
