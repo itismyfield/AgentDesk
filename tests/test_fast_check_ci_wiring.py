@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7"
+    "6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -500,6 +500,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
         mutated = workflow.replace(original, changed, 1)
         gate = self._repin_job_hash(hardening, mutated, "test_fast")
         self.assertNotEqual(self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate).returncode, 0)
+        # The gate pins the 60-minute library sweep budget on PR and main, even after a job re-pin.
+        sweep = job_block(workflow, "library_sweep")
+        mutated = workflow.replace(sweep, sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
+        self.assertNotEqual(mutated, workflow)
+        gate = self._repin_job_hash(hardening, mutated, "library_sweep")
+        result = self.run_hardening_fixture(mutated.replace(CI_RUNNER_HARDENING_SHA256, hashlib.sha256(gate.encode()).hexdigest()), hardening_script=gate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"Library sweep (selection-set gated)" must retain exact timeout policy', result.stderr)
+        main = MAIN_WORKFLOW.read_text(encoding="utf-8")
+        main_sweep = step_block(job_block(main, "full_non_pg"), "Library sweep (selection-set gated)")
+        main_mutated = main.replace(main_sweep, main_sweep.replace("timeout-minutes: 60", "timeout-minutes: 45", 1), 1)
+        self.assertNotEqual(main_mutated, main)
+        result = self.run_hardening_fixture(workflow, extra_workflows={"ci-main.yml": main_mutated})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("full_non_pg Library sweep (selection-set gated) must keep timeout-minutes: 60", result.stderr)
         download = step_block(original, "Download shared lib tests")
         changed = original.replace(download, download.replace("download-artifact@v4", "upload-artifact@v4"), 1)
         self.assertNotEqual(self.run_hardening_fixture(workflow.replace(original, changed, 1)).returncode, 0)

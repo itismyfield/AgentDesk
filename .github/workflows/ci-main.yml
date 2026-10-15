@@ -86,8 +86,10 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
+      # Same budget as ci-pr.yml; this step ran 35-40 min on main and a 45 min
+      # cap cut a run whose lib tests had all passed, during the filter replay.
       - name: Library sweep (selection-set gated)
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
