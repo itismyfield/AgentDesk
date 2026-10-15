@@ -80,11 +80,19 @@ pub(crate) fn renderer_with(
     fs::create_dir(&root).unwrap();
     for (file, bytes) in [
         ("before", before),
+        ("empty", view("", false)),
         ("stashed", view("", true)),
-        ("own", view(prompt, true)),
+        ("own", view(prompt, mode != "fresh")),
         (
             "after",
-            view(if mode == "never" { "" } else { "js" }, mode == "never"),
+            view(
+                if matches!(mode, "never" | "fresh") {
+                    ""
+                } else {
+                    "js"
+                },
+                mode == "never",
+            ),
         ),
         ("transcript", transcript.into()),
         ("mode", mode.into()),
@@ -92,7 +100,7 @@ pub(crate) fn renderer_with(
         fs::write(root.join(file), bytes).unwrap();
     }
     let script = f.root.path().join("idle-renderer.py");
-    fs::write(&script, r#"import json, os, pathlib, sys, tty
+    fs::write(&script, r#"import json, os, pathlib, sys, time, tty
 tty.setraw(0)
 root = pathlib.Path(sys.argv[1])
 mode = (root / 'mode').read_text()
@@ -105,6 +113,10 @@ def record(content):
         out.write(json.dumps({'type':'user','message':{'content':content}})+'\n')
 render('before')
 (root/'ready').write_text('ready')
+if mode == 'fresh':
+    while not (root/'release').exists(): time.sleep(0.01)
+    render('empty')
+    (root/'composer-ready').write_text('ready')
 pending = b''
 while True:
     pending += os.read(0, 65536)
@@ -146,9 +158,11 @@ while True:
     f.tmux(&["set-window-option", "-t", &pane, "window-size", "manual"]);
     f.tmux(&["resize-window", "-t", &pane, "-x", "160", "-y", "40"]);
     wait("renderer-started", || root.join("ready").exists());
-    wait("renderer-capture", || {
-        f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("❯")
-    });
+    if mode != "fresh" {
+        wait("renderer-capture", || {
+            f.tmux(&["capture-pane", "-p", "-t", &pane]).contains("❯")
+        });
+    }
     root
 }
 pub(crate) fn events(root: &Path) -> Vec<String> {
@@ -157,6 +171,208 @@ pub(crate) fn events(root: &Path) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+#[test]
+fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::claude_tui::busy_inject::StashChannelGuard;
+    use crate::services::claude_tui::submission_fence::IdleStashContext;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Attempt {
+        session: String,
+        channel: u64,
+        root: PathBuf,
+        fenced: AtomicUsize,
+        outcomes: Mutex<Vec<InputRun>>,
+    }
+    impl SubmissionFence for Attempt {
+        fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
+            assert!(
+                self.root.join("composer-ready").exists(),
+                "payload preceded readiness"
+            );
+            self.fenced.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn refusal(&self) -> Option<PreSubmitPersistenceRefused> {
+            None
+        }
+        fn idle_stash_context(&self) -> Option<IdleStashContext> {
+            Some(IdleStashContext {
+                channel: self.channel,
+                target: self.session.clone(),
+                available: true,
+            })
+        }
+        fn idle_stash_admits(&self, target: &str) -> bool {
+            target == self.session
+        }
+        fn claim_idle_stash(&self, _: &str) -> Result<(), PreSubmitPersistenceRefused> {
+            panic!("no person draft was observed, so no stash may claim this attempt")
+        }
+    }
+    impl guarded_outcome::Owner for Attempt {
+        fn started(&self) {}
+        fn finished(&self, run: &InputRun) {
+            self.outcomes.lock().unwrap().push(run.clone());
+        }
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::after_shared_test_env_lock();
+    let shim = f.root.path().join("tmux");
+    let original = fs::read_to_string(&shim).unwrap();
+    for listed in [true, false] {
+        for (i, fault) in [
+            "capture",
+            "pin",
+            "unpainted",
+            "partial",
+            "banner",
+            "continuation",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if !listed && fault == "continuation" {
+                continue;
+            }
+            let channel = 6_899_950 + i as u64 + if listed { 0 } else { 10 };
+            let _listed = StashChannelGuard::new(if listed { channel } else { channel + 100 });
+            let name = format!("fresh-{listed}-{fault}");
+            let root = renderer_with(
+                &f,
+                &name,
+                if fault == "continuation" {
+                    "person"
+                } else {
+                    "fresh"
+                },
+                match fault {
+                    "partial" => "❯ \n",
+                    "banner" => "Ready for input (type message + Enter)\n",
+                    "continuation" => "❯ human text\n  ❯\n",
+                    _ => "Claude is starting…\n",
+                }
+                .into(),
+                "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+                PROMPT,
+            );
+            let hook = format!(
+                "pin=0; capture=0\nfor arg in \"$@\"; do\n case \"$arg\" in *'#{{window_panes}}'*) pin=1;; capture-pane) capture=1;; esac\ndone\n\
+                 if [ \"$pin\" = 1 ] && [ ! -f {failed} ]; then\n\
+                  if [ '{fault}' = pin ] || {{ [ '{fault}' = capture ] && [ \"$capture\" = 1 ]; }}; then touch {failed}; exit 1; fi\nfi\n\
+                 if [ \"$capture\" = 1 ] && [ \"$pin\" = 0 ] && [ ! -f {release} ]; then\n\
+                  {real} -L {socket} -f /dev/null \"$@\"\n touch {release}\n\
+                  readiness_polls=0\n while [ ! -f {ready} ]; do\n\
+                   readiness_polls=$((readiness_polls + 1))\n [ \"$readiness_polls\" -lt 400 ] || exit 1\n sleep 0.01\n done\n exit 0\nfi\n",
+                failed = quote(&root.join("read-failed")),
+                release = quote(&root.join("release")),
+                ready = quote(&root.join("composer-ready")),
+                real = quote(&f.real),
+                socket = f.socket,
+            );
+            fs::write(
+                &shim,
+                if fault == "continuation" {
+                    original.clone()
+                } else {
+                    original.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{hook}"), 1)
+                },
+            )
+            .unwrap();
+            let transcript = root.join("transcript");
+            let attempt = Arc::new(Attempt {
+                session: name.clone(),
+                channel,
+                root: root.clone(),
+                fenced: AtomicUsize::new(0),
+                outcomes: Mutex::new(Vec::new()),
+            });
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                &name,
+                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: transcript.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: None,
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+            let token = Arc::new(CancelToken::new());
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let timer_token = token.clone();
+            let timer = std::thread::spawn(move || {
+                if stopped.recv_timeout(Duration::from_secs(4)).is_err() {
+                    timer_token
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            let result = guarded_outcome::with_owner(Some(attempt.clone()), || {
+                with_scope(Some(attempt.clone()), || {
+                    input::send_prompt_with_readiness(
+                        &name,
+                        PROMPT,
+                        input::PromptReadinessKind::FreshTurn,
+                        Some(&token),
+                    )
+                })
+            });
+            let _ = stop.send(());
+            timer.join().unwrap();
+            eprintln!(
+                "fresh entry listed={listed} fault={fault} effects={:?} result={result:?}",
+                events(&root)
+            );
+            if fault == "continuation" {
+                assert!(matches!(
+                    result,
+                    Err(guarded_outcome::SubmissionError::Guarded(
+                        InputRun::Refused(InputRefusal::Composer(Refusal::NotReady))
+                    ))
+                ));
+                assert!(events(&root).is_empty());
+                assert_eq!(attempt.fenced.load(Ordering::SeqCst), 0);
+                let visible = f.tmux(&["capture-pane", "-p", "-t", &format!("={name}:")]);
+                assert!(visible.contains("❯ human text"));
+                assert!(visible.lines().any(|row| row.starts_with("  ❯")));
+                continue;
+            }
+            assert!(result.is_ok(), "listed={listed}, fault={fault}: {result:?}");
+            assert!(
+                attempt
+                    .outcomes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|run| *run == InputRun::Applied),
+                "fresh pane must not report a held owner"
+            );
+            assert_eq!(attempt.fenced.load(Ordering::SeqCst), 1);
+            wait("fresh-submit", || {
+                events(&root).contains(&"Enter".to_string())
+            });
+            assert_eq!(events(&root), ["paste", "Enter"], "{name}");
+            assert_eq!(fs::read_to_string(root.join("body")).unwrap(), PROMPT);
+            let users: Vec<serde_json::Value> = fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|record| record["type"] == "user")
+                .map(|record| record["message"]["content"].clone())
+                .collect();
+            assert_eq!(users, [serde_json::Value::String(PROMPT.into())]);
+            assert!(
+                root.join("composer-ready").exists(),
+                "payload preceded readiness"
+            );
+            fs::write(&shim, &original).unwrap();
+        }
+    }
 }
 
 #[test]

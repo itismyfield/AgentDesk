@@ -2187,6 +2187,7 @@ services::claude_tui::host_input::guarded_submission::idle_stash::tests::cancel_
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::each_lost_acknowledgement_stops_without_retry_or_cleanup
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::exact_receipt_rejects_first_foreign_mixed_partial_and_replaced_records
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::fence_and_revoked_authority_precede_any_stash_effect
+services::claude_tui::host_input::guarded_submission::idle_stash::tests::fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::managed_admission_rejects_busy_stash_modal_agentdesk_and_nonflat_without_fence
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::missing_capability_and_off_do_no_preparation_or_io
 services::claude_tui::host_input::guarded_submission::idle_stash::tests::pinned_idle_stash_preserves_delivery_and_protects_unrestored_draft
