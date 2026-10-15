@@ -5076,9 +5076,7 @@ services::discord::input_runtime::supervisor::intake::classify::tests::c1_empty_
 services::discord::input_runtime::supervisor::intake::classify::tests::c1_every_protected_target_blocks_legacy_and_foreign_provider_execution
 services::discord::input_runtime::supervisor::intake::classify::tests::c1_terminal_is_only_a_scan_classification_and_receipt_close_is_explicit
 services::discord::input_runtime::supervisor::intake::classify::tests::c1_unknown_facts_never_approve_or_settle_and_unprotected_stays_legacy
-services::discord::input_runtime::supervisor::intake::skills::c2b_skill_tests::c2b_actual_slash_skill_and_cc_do_not_ack_without_durable_receipt
 services::discord::input_runtime::supervisor::intake::skills::c2b_skill_tests::c2b_actual_text_skill_aliases_hold_original_before_confirmation_and_keep_controls
-services::discord::input_runtime::supervisor::intake::skills::c2b_skill_tests::c2b_slash_registered_and_unknown_aliases_preserve_entire_original_source
 services::discord::input_runtime::supervisor::intake::source::tests::c1_attachment_only_is_content_but_reply_or_voice_metadata_and_boilerplate_are_not
 services::discord::input_runtime::supervisor::intake::source::tests::c1_rich_source_preserves_original_identity_text_reply_voice_and_all_staged_bytes
 services::discord::input_runtime::supervisor::intake::source::tests::c1_slash_origin_is_fixed_actual_interaction_and_keeps_original_execution_channels
@@ -6768,7 +6766,6 @@ services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_loca
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
-services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
 services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch

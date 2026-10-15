@@ -5,7 +5,6 @@ use super::super::outbound::confirmation::send_command_confirmation_message;
 use super::super::router::{IntakeDeps, IntakeOrigin, dispatch_skill_intake};
 use super::super::turn_bridge::CommandStop;
 use super::super::{Context, Error, auto_restore_session, check_auth, mailbox_has_active_turn};
-use crate::services::discord::input_runtime::intake::skills::hold_slash_skill;
 use crate::services::provider::ProviderKind;
 
 // Keep provider-specific skill wording in one helper so /skill, /cc, !skill,
@@ -272,10 +271,6 @@ async fn run_skill_slash_command(
             return Ok(());
         }
         _ => {}
-    }
-
-    if Box::pin(hold_slash_skill(ctx, invoked_as, &skill, args_str)).await? {
-        return Ok(());
     }
 
     // Auto-restore session (must run before skill check to refresh skills_cache with project path)
