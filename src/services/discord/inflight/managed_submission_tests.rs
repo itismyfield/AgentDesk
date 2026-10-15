@@ -448,6 +448,7 @@ fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
         provider: ProviderKind::Claude,
         channel_id: channel,
         birth,
+        target: row.tmux_session_name.clone().unwrap(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
     }));
