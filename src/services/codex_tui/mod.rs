@@ -5,6 +5,7 @@ pub mod input;
 pub mod rollout_index;
 pub mod rollout_tail;
 pub mod session;
+pub(crate) mod tail_launch;
 pub(crate) mod verified_hold;
 pub(crate) mod verified_tail;
 pub(crate) mod warm_followup;

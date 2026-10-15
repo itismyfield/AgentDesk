@@ -940,3 +940,6 @@ fn posted(store: &ChannelStore) -> usize {
         .filter(|piece| matches!(piece.outcome, Some(PieceOutcome::Posted(_))))
         .count()
 }
+
+#[path = "executed_resume_tests.rs"]
+mod executed_resume;
