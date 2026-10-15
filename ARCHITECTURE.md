@@ -970,7 +970,6 @@ src/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
 │   │   │   ├── legacy_supervision/
-│   │   │   │   ├── boot_status.rs
 │   │   │   │   └── test_support.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
@@ -1486,8 +1485,6 @@ src/
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
-│   │   │   │   ├── ledger.rs
-│   │   │   │   ├── ledger_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -1581,13 +1578,6 @@ src/
 │   │   │   ├── thread_binding.rs
 │   │   │   └── turn_start.rs
 │   │   ├── runtime_bootstrap/
-│   │   │   ├── boot_retirement/
-│   │   │   │   ├── cohort.rs
-│   │   │   │   ├── cohort_tests.rs
-│   │   │   │   ├── completion.rs
-│   │   │   │   ├── completion_tests.rs
-│   │   │   │   ├── publication.rs
-│   │   │   │   └── publication_tests.rs
 │   │   │   ├── intake_delivery_capability/
 │   │   │   │   ├── cache.rs
 │   │   │   │   └── tests.rs
@@ -1600,7 +1590,6 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── relay_dlq_redelivery/
 │   │   │   │   └── tests.rs
-│   │   │   ├── boot_retirement.rs
 │   │   │   ├── channel_homes_tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
@@ -2152,15 +2141,8 @@ src/
 │   │   │   │   └── tail_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
-│   │   │   ├── admission.rs
-│   │   │   ├── admission_tests.rs
 │   │   │   ├── entrypoints.rs
-│   │   │   ├── entrypoints_tests.rs
-│   │   │   ├── lifecycle.rs
-│   │   │   ├── lifecycle_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── strict_runtime.rs
-│   │   │   ├── strict_supervisor_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
