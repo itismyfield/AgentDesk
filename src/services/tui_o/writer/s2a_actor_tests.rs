@@ -364,7 +364,7 @@ async fn actual_driver_case(mode: &'static str) {
         _ => 0,
     };
     std::fs::write(&binary, format!(
-        "#!/bin/sh\nif [ \"$1 $2\" = 'resume --help' ]; then echo probe >> '{}'; n=$(wc -l < '{}'); if [ \"$n\" = '{}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.002; done; fi; if [ -f '{}' ]; then echo unsupported; else echo --dangerously-bypass-hook-trust; fi; else echo 'codex-cli 0.157.1'; fi\n",
+        "#!/bin/sh\nif [ \"$1 $2\" = 'resume --help' ]; then echo probe >> '{}'; n=$(wc -l < '{}' | tr -d ' '); if [ \"$n\" = '{}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.002; done; fi; if [ -f '{}' ]; then echo unsupported; else echo --dangerously-bypass-hook-trust; fi; else echo 'codex-cli 0.157.1'; fi\n",
         probes.display(), probes.display(), target, signal.display(), ack.display(), unsupported.display())).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
