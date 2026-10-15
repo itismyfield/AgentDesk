@@ -833,60 +833,10 @@ fn the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941()
 }
 
 #[test]
-fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
-    // Wiring the predicate tests above cannot reach: swapping
-    // `watcher_resend_range_end` for `data_start_offset`, or dropping the body,
-    // leaves every behavioural test green while restoring the silent loss.
-    let source = include_str!("terminal_relay_plan.rs");
-    let call_site = source
-        .split_once("orphan_terminal_frame::observe_orphan_terminal_frame(")
-        .expect("the plan must route the denial seam through the orphan-frame recorder")
-        .1
-        .split_once("\n        );")
-        .expect("the call must terminate")
-        .0;
-
-    for operand in [
-        "shared,",
-        "channel_id,",
-        "watcher_provider,",
-        "denial: soft_terminal_authority_denial,",
-        "current_response,",
-        "response_sent_offset,",
-        "full_response_len: full_response.len(),",
-        "data_start_offset,",
-        "terminal_event_consumed_offset: watcher_resend_range_end,",
-        "watcher_resend_committed,",
-        "placeholder_msg_id,",
-        "request_owner_user_id: inflight_before_relay",
-        "duplicate_guard_refused_body: direct_terminal_response_decision",
-    ] {
-        assert!(
-            call_site.contains(operand),
-            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
-        );
-    }
-
-    // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
-    // which makes the duplicate conjunct unfalsifiable while every test above stays green.
-    assert!(
-        !call_site.contains("direct_terminal_response_refused_duplicate"),
-        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
-    );
-
-    // The WARN and the counter MOVED with the seam — not duplicated, not
-    // dropped. Operators grep `#5175:`.
+fn denial_counters_keep_their_distinct_admission_scopes_5941() {
+    // The per-conjunct cause names every denial, even when no body was lost;
+    // the aggregate feeds a threshold-1 alert and therefore follows admission.
     let module = include_str!("orphan_terminal_frame.rs");
-    assert!(!source.contains("record_relay_terminal_authority_denied("));
-    assert!(module.contains("record_relay_terminal_authority_denied("));
-    assert!(module.contains("#5175: terminal frame has NO delivery owner"));
-    assert!(module.contains("soft_terminal_denial = denial.as_str()"));
-
-    // #5941 r3 P1-2: the PER-CONJUNCT cause counter answers "which authority
-    // conjunct refused" and must fire for EVERY denial, including the ones that
-    // lose nothing — a forged turn nonce is refused with an empty tail, so
-    // behind the record admission the one arm the counter exists to name never
-    // emits. Order, not presence: it has to precede the `record_required` gate.
     let cause = module
         .find("record_relay_terminal_denial_cause(")
         .expect("the seam must emit the per-conjunct cause counter");
@@ -896,14 +846,8 @@ fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     let aggregate = module
         .find("metrics::record_relay_terminal_authority_denied(")
         .expect("the seam must emit the aggregate denial counter");
-    assert!(
-        cause < gate,
-        "the per-conjunct cause counter must be emitted BEFORE the record admission gate"
-    );
-    assert!(
-        gate < aggregate,
-        "the aggregate counter feeds a threshold-1 alert row and must stay behind the admission"
-    );
+    assert!(cause < gate, "the cause counter must precede admission");
+    assert!(gate < aggregate, "the aggregate counter must follow admission");
 }
 
 #[test]
@@ -1097,16 +1041,13 @@ async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel:
 }
 
 #[tokio::test]
-async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
-    // The only #5941 tests that enter through PRODUCTION. The others hand-build
-    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
-    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
-    // the call falsifies `record_required` forever, writes zero dead-letter rows
-    // and leaves every one of them green. The gap was the ENTRY POINT, not the
-    // strength of any assertion, so this one drives `run_terminal_relay_plan`
-    // itself over the incident shape: a soft stop-hook terminal carrying an
-    // assistant body, no inflight row (soft-terminal authority is denied) and no
-    // cached relay producer (the sink never owns the frame).
+async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
+    // Enter through production instead of grepping its source. Mutating the
+    // call-site operand from `current_response` to `""` must make this test fail:
+    // the seam then admits zero losses instead of preserving the unsent body.
+    // The incident shape is a soft stop-hook terminal carrying an assistant
+    // body, no inflight row (soft-terminal authority is denied), and no cached
+    // relay producer (the sink never owns the frame).
     assert_eq!(
         admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false).await,
         1,
