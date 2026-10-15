@@ -635,9 +635,8 @@ async fn finish_exactly(close: &Close, user_msg_id: u64, nonce: Option<String>) 
     );
 }
 
-/// A's token went by a channel-wide finish that names no episode, so A's ledger entry finalizes
-/// without an exact release. B's later exact release raises the shared fence over A, yet A's late
-/// close on the purged actor keeps its receipt: the fence only says a successor came after.
+/// A finalized after a finish that named no episode, then B released exactly: the fence refuses A,
+/// yet A's late close on the purged actor keeps its receipt, as A's own release was never exact.
 #[tokio::test(flavor = "current_thread")]
 async fn s2f_finalized_without_an_exact_release_never_reconciles() {
     for wide in ["finish_turn", "hard_stop", "finish_cancelled_turn"] {
