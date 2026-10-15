@@ -2,6 +2,7 @@
 //! pane, and the paste and Enter go only through that execution's gate, never to local tmux.
 
 use std::path::Path;
+use std::time::Instant;
 
 use super::names::{unconfirmed_name, veto_name};
 use super::{InjectAttempt, Input, unconfirmed};
@@ -56,7 +57,8 @@ pub(super) async fn bound_pane(
 }
 
 /// One gated paste and Enter into an empty composer under a live turn, as a Herdr turn sends its
-/// prompt; a refusal before the paste sends nothing, and after it nothing is sent again.
+/// prompt; a refusal before the paste sends nothing, nothing is sent twice, and only the exact
+/// frame in the transcript makes it injected.
 pub(super) fn run(
     pane: &HerdrTarget,
     session: &str,
@@ -72,9 +74,24 @@ pub(super) fn run(
         if let Err(veto) = judge(pane, session, transcript) {
             return InjectAttempt::NotSent(veto_name(veto));
         }
-        let plan = [TuiInputAction::PasteBuffer(text), TuiInputAction::Enter];
+        let Ok(offset) = std::fs::metadata(transcript).map(|meta| meta.len()) else {
+            return InjectAttempt::NotSent(veto_name(Veto::TranscriptUnavailable));
+        };
+        let plan = [
+            TuiInputAction::PasteBuffer(text.clone()),
+            TuiInputAction::Enter,
+        ];
         match run_herdr(pane, &plan, None) {
+            // The server's write ACK is not Claude's receipt; the transcript decides, as on tmux.
             InputRun::Applied => {
+                let timing = &busy_inject::TIMING;
+                let deadline = Instant::now() + timing.confirm_window;
+                let receipt = (transcript, offset, input.nonce.as_str(), text.as_str());
+                if let Err(detail) =
+                    busy_inject::await_receipt(receipt, deadline, timing.confirm_poll)
+                {
+                    return unconfirmed(input, session, turn_id, unconfirmed_name(detail));
+                }
                 tracing::info!(
                     channel_id = input.channel,
                     pane = pane.pane_id(),
