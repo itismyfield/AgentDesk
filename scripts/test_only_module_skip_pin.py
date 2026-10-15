@@ -688,6 +688,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/before_start_stop_disk_gate_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_clear_order_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_policy_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_reconcile_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_protected_tests.rs",
         "src/services/discord/inflight/managed_submission_tests.rs",
         "src/services/discord/router/message_handler/provider_dispatch_submission_tests.rs",
