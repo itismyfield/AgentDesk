@@ -8,6 +8,9 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::turn_mode::TurnConfig;
 use std::path::{Path, PathBuf};
 
+#[path = "turn_retirement/codex.rs"]
+pub(in crate::services::discord) mod codex;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct Retirement {
     pub removed: usize,

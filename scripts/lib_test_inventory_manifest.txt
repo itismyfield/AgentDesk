@@ -7210,6 +7210,7 @@ services::discord::runtime_bootstrap::gateway_lease::tests::standby_retry_delay_
 services::discord::runtime_bootstrap::gateway_lease::tests::yields_only_to_a_preferred_node_that_wants_this_gateway
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::codex_custody::codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::existing_marker_cancel_restores_promotion_fence_for_retry
@@ -8782,6 +8783,8 @@ services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_cancel_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_complete_mailbox_preserves_real_reclaim_and_pending_start
 services::discord::tui_direct_pending_start::retirement_recheck_tests::retirement_after_runtime_lookup_preserves_writing_loader
+services::discord::tui_direct_pending_start::state::turn_retirement::codex::tests::codex_confirmation_retires_nothing_while_legacy_holds_an_unfinished_turn
+services::discord::tui_direct_pending_start::state::turn_retirement::codex::tests::codex_confirmation_waits_for_the_takeover_turn_to_end_in_its_rollout
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::boot_confirmation_preserves_retirement_order_and_repeated_results
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_covers_monitor_rebind_and_watcher_synthetics
 services::discord::tui_direct_pending_start::state::turn_retirement::tests::n1a_retirement_delete_contention_returns_residue_for_retry
@@ -12698,6 +12701,9 @@ services::tui_o::writer::input_facts::tests::halted_reader_preserves_resume_and_
 services::tui_o::writer::input_facts::tests::ordered_events_keep_abort_start_and_input_in_record_order
 services::tui_o::writer::input_facts::tests::reactions_converge_on_replay_and_propagate_partial_failure
 services::tui_o::writer::input_facts::tests::strict_codex_parent_header_rejects_absence_mismatch_child_and_poll_changes
+services::tui_o::writer::late_adopt::codex::prefix::tests::a_captured_first_turn_stays_eligible_until_its_first_output
+services::tui_o::writer::late_adopt::codex::prefix::tests::takeover_prefix_refuses_output_other_turns_and_unmatched_input
+services::tui_o::writer::late_adopt::codex::prefix::tests::the_environment_codex_writes_before_the_prompt_is_not_a_prompt
 services::tui_o::writer::owed::tests::a_codex_bind_with_an_empty_session_does_not_take_the_stored_cursor
 services::tui_o::writer::owed::tests::a_repeated_unit_keeps_every_source_it_was_owed_from
 services::tui_o::writer::owed::tests::rotation_writes_between_span_open_close_and_deny_keep_the_sidecar_and_never_halt

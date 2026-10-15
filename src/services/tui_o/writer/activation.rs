@@ -100,6 +100,28 @@ pub fn activate_with(
     result
 }
 
+/// As `activate_with` for a Codex takeover whose first prompt Legacy already took in: that turn's
+/// open intake rows stay Legacy's, so only they stop blocking. Queued bodies refuse under the lock.
+pub fn activate_codex_takeover(
+    store: &OStore,
+    channel: u64,
+    facts: ActivationFacts,
+    queued_bodies: i64,
+    local_custody: impl FnOnce() -> Result<bool, String>,
+    candidate: &Candidate,
+    sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
+) -> Result<(), String> {
+    let facts = ActivationFacts {
+        open_intake: 0,
+        ..facts
+    };
+    let sources = || match queued_bodies {
+        0 => sources(),
+        queued => Err(format!("{queued} queued Legacy bodies")),
+    };
+    activate_with(store, channel, Ok(facts), local_custody, candidate, sources)
+}
+
 /// Microseconds spent under the lock on the checks, the store write and a failed write's settling.
 #[derive(Default)]
 struct Spent {

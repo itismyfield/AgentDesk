@@ -11,6 +11,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
+mod codex;
+
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
 pub(super) struct Wake {
     binding: watch::Receiver<u64>,

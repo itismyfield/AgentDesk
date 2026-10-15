@@ -202,6 +202,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/runtime_bootstrap/o_writer_host.rs
+src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs
 src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs
 src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs
 src/services/discord/session_idle_cleanup_tests.rs
@@ -519,6 +520,7 @@ services::discord::router::message_handler::watchdog::host_tests
 services::discord::runtime_bootstrap::channel_homes_tests
 services::discord::runtime_bootstrap::gateway_handback_integration_tests
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::codex_custody
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
@@ -1813,6 +1815,7 @@ services::discord::runtime_bootstrap::gateway_handback_integration_tests::observ
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::preferred_node_takes_the_lease_once_a_silent_holder_session_expires_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_only_the_published_self_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::activation_facts_use_the_configured_home_id_and_local_starts_hold_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::codex_custody::codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg

@@ -1603,6 +1603,7 @@ src/
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
+│   │   │   ├── o_writer_host_custody_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
@@ -1839,6 +1840,9 @@ src/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── turn_retirement/
+│   │   │   │   ├── codex.rs
+│   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── retirement_recheck_tests.rs
@@ -2793,6 +2797,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
+│   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -2801,6 +2806,11 @@ src/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── late_adopt/
+│   │   │   │   ├── codex/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   └── codex.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
