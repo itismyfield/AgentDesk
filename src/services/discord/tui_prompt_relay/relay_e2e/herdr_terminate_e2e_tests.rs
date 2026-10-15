@@ -460,6 +460,21 @@ fn a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg() {
         module_path!(),
         "::a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg"
     );
+    run_bound(path, false);
+}
+
+/// A mapped Bound channel whose Herdr turn switch is off: the refused kickoff leaves the queued
+/// input in place, and once the switch is on the same execution gets it once.
+#[test]
+fn a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg() {
+    let path = concat!(
+        module_path!(),
+        "::a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg"
+    );
+    run_bound(path, true);
+}
+
+fn run_bound(path: &str, refused_first: bool) {
     if !herdr::in_child(path, CHANNEL_ID) {
         return;
     }
@@ -472,10 +487,10 @@ fn a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg() {
         .on_thread_start(install)
         .build()
         .unwrap()
-        .block_on(registered_bound(rig));
+        .block_on(registered_bound(rig, refused_first));
 }
 
-async fn registered_bound(rig: herdr::P11TerminationRig) {
+async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
     use super::registered_bootstrap_e2e::{
         FALLBACK, kick_off, recent_message_id, register_channel,
     };
@@ -556,10 +571,6 @@ async fn registered_bound(rig: herdr::P11TerminationRig) {
         .map(|i| i.message_id.get())
         .collect();
     assert_eq!(queued, vec![id], "catch-up queued the input");
-    let started = kick_off(&harness).await;
-    let depth = harness.mailbox().await.intervention_queue.len();
-    assert!(started, "the kickoff held the queue at depth {depth}");
-
     let sends = || -> Vec<(String, serde_json::Value)> {
         let all = rig.writes_with_params();
         all.into_iter()
@@ -573,6 +584,49 @@ async fn registered_bound(rig: herdr::P11TerminationRig) {
         let acted = calls.lines().filter(|call| !call.ends_with("-V"));
         acted.map(str::to_owned).collect()
     };
+    if refused_first {
+        let map = crate::services::discord::host_defer_gate::tests::map_channel;
+        map(&shared, channel, FALLBACK).await;
+        let turn_switch = |on| {
+            let mut config = (*crate::config_live_reload::current().unwrap()).clone();
+            config.runtime.herdr_turn_enabled = Some(on);
+            crate::config_live_reload::install(config);
+        };
+        turn_switch(false);
+        let input = |queue: &[crate::services::discord::Intervention]| -> Vec<_> {
+            let fields = |i: &crate::services::discord::Intervention| {
+                let sources = i.source_message_ids.clone();
+                (
+                    i.message_id,
+                    i.text.clone(),
+                    sources,
+                    i.pending_uploads.clone(),
+                )
+            };
+            queue.iter().map(fields).collect()
+        };
+        let before = input(&harness.durable_queue());
+        assert!(!kick_off(&harness).await, "the refused kickoff started");
+        let held = harness.mailbox().await.intervention_queue;
+        assert_eq!(input(&held), before, "refused input left the queue");
+        assert_eq!(
+            input(&harness.durable_queue()),
+            before,
+            "left the durable queue"
+        );
+        assert_eq!(sends(), Vec::new(), "the refused kickoff prompted");
+        assert_eq!(tmux_calls(), Vec::<String>::new(), "no local tmux call");
+        assert_eq!(
+            harness.provider_starts(),
+            0,
+            "no driver took the refused turn"
+        );
+        turn_switch(true);
+    }
+    let started = kick_off(&harness).await;
+    let depth = harness.mailbox().await.intervention_queue.len();
+    assert!(started, "the kickoff held the queue at depth {depth}");
+
     let prompted = wait_until(Duration::from_secs(60), || {
         let done = sends().len() >= 2 || !tmux_calls().is_empty();
         Box::pin(async move { done })
