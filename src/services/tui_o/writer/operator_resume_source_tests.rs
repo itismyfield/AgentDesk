@@ -83,7 +83,8 @@ fn local_retry_managed_verified_host_drains_budget_before_following_exact_work()
             io.sessions.lock().unwrap().insert(CANARY_CHANNEL, CANARY_TMUX.into());
             harness.gate.acquired();
             let ready = Arc::new(Readiness::default());
-            assert!(!admission::owed_delivery_ready(CANARY_CHANNEL), "actor mode must come from managed host proof");
+            assert!(!admission::owed_delivery_ready(CANARY_CHANNEL), "exact delivery starts disabled");
+            admission::set_ready_for_tests(CANARY_CHANNEL, true);
             let mut hosts = host::start_managed(ShadowProvider::Codex, true,
                 crate::services::tui_o::cutover::boot_ownership(), || HostParts {
                     io: io.clone(), runtime_root: Some(harness._runtime.path().into()),
@@ -92,7 +93,6 @@ fn local_retry_managed_verified_host_drains_budget_before_following_exact_work()
             assert_eq!(hosts.len(), 1);
             polls(3).await;
             assert!(ready.submission(CANARY_CHANNEL).is_some(), "real host installed commands receiver");
-            admission::set_ready_for_tests(CANARY_CHANNEL, true);
             let token = Arc::new(crate::services::provider::CancelToken::from_persisted_turn_nonce(Some(episode.turn_nonce.clone())));
             admission::issue_for_tests(proof.execution().clone(), episode, &token).unwrap();
             polls(20).await;
