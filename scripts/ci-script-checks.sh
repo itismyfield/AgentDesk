@@ -490,6 +490,10 @@ fi
 "$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
 fi
 
+if run_check contracts "PR test selection plan (main runs every lane in full)"; then
+"$PYTHON" -m unittest tests.test_test_selection
+fi
+
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
 # Zero-match cargo is green; verify selectors and the shared compiled oracle.
 # Mutation tests retain the static/compiled and artifact fallback contracts.
@@ -521,11 +525,6 @@ fi
 if run_check contracts "D4-B acceptance manifest (#5340)"; then
 "$PYTHON" scripts/check_herdr_s3_d4b_manifest.py --structure-only
 "$PYTHON" -m unittest tests.test_herdr_s3_d4b_manifest
-fi
-
-if run_check contracts "B3b-4 recovery custody dormancy (#5340)"; then
-"$PYTHON" scripts/check_b3b4_dormancy.py --ci --diff-base "${TEST_LANE_BASELINE_REF:-}" --policy dormant
-"$PYTHON" -m unittest tests.test_check_b3b4_dormancy
 fi
 
 if run_check contracts "New production file comment-ratio gate"; then

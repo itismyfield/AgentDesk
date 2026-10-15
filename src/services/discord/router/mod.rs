@@ -47,4 +47,6 @@ pub(crate) use turn_start::{
 // Re-export items used across submodules
 use thread_binding::{link_dispatch_thread, lookup_dispatch_info, verify_thread_accessible};
 
-pub(in crate::services::discord) use intake_gate::busy_inject::covers as queued_head_inject_covers;
+pub(in crate::services::discord) use intake_gate::busy_inject::{
+    covers as live_intake_inject_covers, queued_head_covers as queued_head_inject_covers,
+};

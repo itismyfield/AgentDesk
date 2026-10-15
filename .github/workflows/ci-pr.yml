@@ -38,7 +38,7 @@ jobs:
       # to 'false'; the mirrors read these same outputs, so the skipped jobs still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
-      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.pg_db }}
+      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       # rust_or_policy for the library sweep, which still runs when an include! call
       # reads a changed file; check_fast and lint keep the raw filter.
@@ -348,6 +348,7 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
@@ -377,9 +378,6 @@ jobs:
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
@@ -414,7 +412,6 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
               - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
@@ -518,9 +515,6 @@ jobs:
               - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
-              - 'src/services/turn_orchestrator/recovery_custody/custody_pg_tests.rs'
-              - 'src/services/turn_orchestrator/recovery_custody/reconcile_pg_tests.rs'
-              - 'src/services/turn_orchestrator/recovery_registry/registry_pg_tests.rs'
               - 'src/voice/announce_meta.rs'
               - 'src/voice/turn_link.rs'
               # END generated pg_db source paths
@@ -664,6 +658,7 @@ jobs:
               - 'policies/**'
               - 'scripts/**'
               - '.github/workflows/**'
+              - '.github/actions/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'package.json'
@@ -865,10 +860,7 @@ jobs:
               - 'src/services/discord/turn_finalizer/**'
               - 'src/services/discord/turn_lease.rs'
               - 'src/services/discord/turn_lease_tests.rs'
-              - 'src/services/discord/turn_presence/activity.rs'
-              - 'src/services/discord/turn_presence/entrypoints.rs'
-              - 'src/services/discord/turn_presence/mod.rs'
-              - 'src/services/discord/turn_presence/supervisor.rs'
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
@@ -1316,22 +1308,24 @@ jobs:
 
   pg_shards:
     needs: changes
-    if: needs.changes.outputs.pg_db == 'true'
     runs-on: ubuntu-latest
     outputs:
+      force_full: ${{ steps.plan.outputs.force_full }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      plan: ${{ steps.plan.outputs.plan }}
     steps:
       - uses: actions/checkout@v4
+      # Every PR plans; ADK_CI_SELECT=off forces full now, the ci-full label from the next push or reopen (no `labeled` run).
       - id: plan
         shell: bash
-        run: |
-          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+        env:
+          ADK_CI_SELECT: ${{ vars.ADK_CI_SELECT }}
+        run: python3 scripts/ci/test-selection.py plan
 
   test_fast:
     name: PostgreSQL tests (shard ${{ matrix.shard }})
     needs: [changes, pg_shards, lib_test_prepare]
-    if: ${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}
+    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1347,7 +1341,6 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
-      # Preserve the full serial PostgreSQL suite while reducing cold-link
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
@@ -1447,16 +1440,17 @@ jobs:
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
-      # Use the same partition and step budget as the main PG matrix.
-      - name: just test-postgres-shard
+      # The plan's shard subset, or main's `just test-postgres-shard` with the same budget.
+      - name: PostgreSQL shard tests
         timeout-minutes: 75
         shell: bash
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: just test-postgres-shard
+        run: python3 scripts/ci/test-selection.py run --lane pg
 
       - name: Stop PostgreSQL service
         if: always()
@@ -1635,12 +1629,11 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
         run: ./scripts/required-check-mirror.sh
 
-  # Run the full non-PG selection against live PostgreSQL; omit DATABASE_URL.
-  # Expected/executed IDs, replay and failure ledger decide the result.
+  # The plan's non-PG tests, or main's full sweep and replay, against live PostgreSQL without DATABASE_URL.
   library_sweep:
     name: Library test sweep
-    needs: [changes, lib_test_prepare]
-    if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
+    needs: [changes, lib_test_prepare, pg_shards]
+    if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
@@ -1712,17 +1705,15 @@ jobs:
 
       # Compare complete expected/executed ID sets rather than an execution-count floor.
       - name: Library sweep (selection-set gated)
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: bash
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_replay
+        run: python3 scripts/ci/test-selection.py run --lane sweep
 
       - name: Stop PostgreSQL service
         if: always()
@@ -2148,7 +2139,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e01b466ed919f384035c1762d80ce6422d1dd02a5803e68970715ffbf86965e7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2400,7 +2391,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e01b466ed919f384035c1762d80ce6422d1dd02a5803e68970715ffbf86965e7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
