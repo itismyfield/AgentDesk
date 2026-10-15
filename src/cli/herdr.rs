@@ -75,7 +75,6 @@ fn terminate(base: &str, body: &Value) -> Result<(), String> {
     ))
 }
 
-#[cfg(unix)]
 pub(crate) fn confirmed_ended(
     record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
     reading: &crate::services::session_host::PaneReading,

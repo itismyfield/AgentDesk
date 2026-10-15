@@ -40,6 +40,7 @@ mod tmux_host;
 mod traits;
 
 pub(crate) use herdr::contract::ServerWitness;
+pub(crate) use herdr_gate::legacy_return;
 // A channel clear's Herdr side, run by the clear command through the native clear helper.
 #[cfg(unix)]
 pub(crate) use herdr_clear_adapter::{

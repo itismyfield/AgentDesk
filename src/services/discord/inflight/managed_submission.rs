@@ -100,6 +100,7 @@ pub(super) fn carry_forward(
 enum Gate {
     Open,
     Fenced,
+    IdleStashFenced,
     Refused(PreSubmitPersistenceRefused),
 }
 
@@ -113,6 +114,7 @@ struct Attempt {
     provider: ProviderKind,
     channel_id: u64,
     birth: InflightEpisodePin,
+    target: String,
     gate: Mutex<Gate>,
     guarded: Mutex<GuardedState>,
 }
@@ -137,6 +139,7 @@ pub(in crate::services::discord) enum SubmissionFailure {
     PreSubmitPersistenceRefused(PreSubmitPersistenceRefused),
     /// The fence passed, so the prompt may have reached the pane.
     SubmissionIndeterminate,
+    IdleStashObserved,
     /// The attempt failed before it reached the fence.
     ProviderExecutionFailed,
 }
@@ -163,24 +166,34 @@ impl ManagedSubmission {
             GuardedState::Dormant | GuardedState::Finished(InputRun::Applied)
         )
     }
+    pub(in crate::services::discord) fn idle_stash_entered(&self) -> bool {
+        matches!(
+            *self.0.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            Gate::IdleStashFenced
+        )
+    }
     pub(in crate::services::discord) fn classify_failure(&self) -> SubmissionFailure {
-        match &*self
+        let guarded = self
             .0
             .guarded
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-        {
+            .unwrap_or_else(PoisonError::into_inner);
+        let observed = matches!(*guarded, GuardedState::Finished(InputRun::Applied));
+        match &*guarded {
             GuardedState::Running => return SubmissionFailure::GuardedRunning,
             GuardedState::Finished(run) if *run != InputRun::Applied => {
                 return SubmissionFailure::GuardedStopped(run.clone());
             }
             _ => {}
         }
+        drop(guarded);
         match &*self.0.gate.lock().unwrap_or_else(PoisonError::into_inner) {
             Gate::Refused(refused) => {
                 SubmissionFailure::PreSubmitPersistenceRefused(refused.clone())
             }
             Gate::Fenced => SubmissionFailure::SubmissionIndeterminate,
+            Gate::IdleStashFenced if observed => SubmissionFailure::IdleStashObserved,
+            Gate::IdleStashFenced => SubmissionFailure::SubmissionIndeterminate,
             Gate::Open => SubmissionFailure::ProviderExecutionFailed,
         }
     }
@@ -188,7 +201,14 @@ impl ManagedSubmission {
 
 impl Owner for Attempt {
     fn started(&self) {
+        let idle = matches!(
+            *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            Gate::IdleStashFenced
+        );
         let mut state = self.guarded.lock().unwrap_or_else(PoisonError::into_inner);
+        if idle && matches!(*state, GuardedState::Finished(_)) {
+            return;
+        }
         if matches!(
             *state,
             GuardedState::Dormant | GuardedState::Finished(InputRun::Applied)
@@ -197,7 +217,15 @@ impl Owner for Attempt {
         }
     }
     fn finished(&self, run: &InputRun) {
+        let idle = matches!(
+            *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+            Gate::IdleStashFenced
+        );
         let mut state = self.guarded.lock().unwrap_or_else(PoisonError::into_inner);
+        // An idle claim authorizes one submission; a refused re-entry cannot replace its result.
+        if idle && matches!(*state, GuardedState::Finished(_)) {
+            return;
+        }
         if !matches!(&*state, GuardedState::Finished(stopped) if *stopped != InputRun::Applied) {
             *state = GuardedState::Finished(run.clone());
         }
@@ -205,14 +233,72 @@ impl Owner for Attempt {
 }
 
 impl SubmissionFence for Attempt {
+    fn idle_stash_context(
+        &self,
+    ) -> Option<crate::services::claude_tui::submission_fence::IdleStashContext> {
+        Some(
+            crate::services::claude_tui::submission_fence::IdleStashContext {
+                channel: self.channel_id,
+                target: self.target.clone(),
+                available: matches!(
+                    *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
+                    Gate::Open
+                ),
+            },
+        )
+    }
+    fn idle_stash_admits(&self, target: &str) -> bool {
+        let gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        let phase = match *gate {
+            Gate::Open => SubmissionPhase::Waiting,
+            Gate::IdleStashFenced => SubmissionPhase::MayHaveSubmitted,
+            _ => return false,
+        };
+        let Ok(row) = super::episode_guard::lock_inflight_birth_episode(
+            &self.provider,
+            self.channel_id,
+            &self.birth,
+        ) else {
+            return false;
+        };
+        target == self.target
+            && row.state().tmux_session_name.as_deref() == Some(target)
+            && row.state().runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+            && row
+                .state()
+                .managed_submission
+                .as_ref()
+                .is_some_and(|record| {
+                    record.protocol == MANAGED_SUBMISSION_PROTOCOL && record.phase == phase
+                })
+    }
+    fn claim_idle_stash(&self, target: &str) -> Result<(), PreSubmitPersistenceRefused> {
+        let mut gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        if !matches!(*gate, Gate::Open) || target != self.target {
+            return Err(PreSubmitPersistenceRefused {
+                reason: "idle-stash attempt already consumed or target changed".into(),
+            });
+        }
+        match mark_may_have_submitted(&self.provider, self.channel_id, &self.birth, Some(target)) {
+            Ok(()) => {
+                *gate = Gate::IdleStashFenced;
+                Ok(())
+            }
+            Err(reason) => {
+                let refusal = PreSubmitPersistenceRefused { reason };
+                *gate = Gate::Refused(refusal.clone());
+                Err(refusal)
+            }
+        }
+    }
     fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused> {
         let mut gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
         match &*gate {
-            Gate::Fenced => return Ok(()),
+            Gate::Fenced | Gate::IdleStashFenced => return Ok(()),
             Gate::Refused(refused) => return Err(refused.clone()),
             Gate::Open => {}
         }
-        match mark_may_have_submitted(&self.provider, self.channel_id, &self.birth) {
+        match mark_may_have_submitted(&self.provider, self.channel_id, &self.birth, None) {
             Ok(()) => {
                 *gate = Gate::Fenced;
                 Ok(())
@@ -244,9 +330,16 @@ fn mark_may_have_submitted(
     provider: &ProviderKind,
     channel_id: u64,
     birth: &InflightEpisodePin,
+    target: Option<&str>,
 ) -> Result<(), String> {
     let mut guard = super::episode_guard::lock_inflight_birth_episode(provider, channel_id, birth)
         .map_err(|error| format!("inflight row unavailable: {error:?}"))?;
+    if target.is_some_and(|target| {
+        guard.state().tmux_session_name.as_deref() != Some(target)
+            || guard.state().runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+    }) {
+        return Err("managed idle-stash target changed".into());
+    }
     if !guard
         .state()
         .managed_submission
@@ -281,7 +374,12 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
         && state.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
         && state.tmux_session_name.is_some()
         && matches!(host, TurnHost::Tmux);
-    if !managed {
+    if !managed
+        || state
+            .managed_submission
+            .as_ref()
+            .is_some_and(|record| !record.is_waiting())
+    {
         return None;
     }
     state.managed_submission = Some(ManagedSubmissionRecord::at(SubmissionPhase::Waiting));
@@ -289,6 +387,7 @@ pub(in crate::services::discord) fn install_managed_submission_boundary(
         provider,
         channel_id: state.channel_id,
         birth: InflightEpisodePin::from_state(state),
+        target: state.tmux_session_name.clone().unwrap(),
         gate: Mutex::new(Gate::Open),
         guarded: Mutex::new(GuardedState::Dormant),
     }));

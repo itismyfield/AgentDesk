@@ -27,3 +27,20 @@ tui_o:
 ```
 
 `tui_o.turn.channels` (or `all_owned: true`) selects channels whose direct and autonomous TUI turns stop creating Legacy synthetic turns: no inflight row, pending start, prompt anchor or lease, only the prompt notice, and a `/stop` with no Discord turn interrupts the session's open transcript turn. Discord-originated turns stay on Legacy. The list is read at boot; an empty or omitted list changes nothing. A selected channel is confirmed only when O owns its output: at boot for a channel whose store was committed, otherwise right after its first activation commits. Confirmation first retires the channel's synthetic rows, pending starts and abort markers; a channel whose retirement fails or leaves residue keeps Legacy turns until the next restart and logs `[tui_o] turn mode refused; Legacy keeps turns`. To turn it off, remove the channel and restart.
+
+## Claude TUI follow-up retry boundary
+
+Claude TUI warm follow-ups are automatically requeued by default when the
+failure is proven to be a pre-submit busy timeout: the readiness wait timed out
+before AgentDesk sent the prompt into the pane. That path is safe to retry
+because the provider never received the follow-up text. Set
+`AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE=0` (also accepts `false`, `off`, `no`,
+`disable`, or `disabled`) only as an emergency opt-out.
+
+Do not auto-requeue post-submit or ambiguous failures as a fresh prompt. Once
+the prompt may have reached the pane, retrying can double-send user input; those
+paths must keep the existing terminal/finalize or manual-recovery behavior.
+
+This applies to Claude TUI follow-ups regardless of writer channel selection.
+The flag is parsed in `src/services/claude.rs`; the pre-submit retry gate is
+`claude_tui_followup_wait_error_requeue_for_retry` in `src/services/claude_tui/hosting/warm_followup.rs`.

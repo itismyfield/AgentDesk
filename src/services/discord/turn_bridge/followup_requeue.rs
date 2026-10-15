@@ -23,7 +23,7 @@ fn retry_present_or_accepted(outcome: &crate::services::discord::MailboxEnqueueO
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct FollowupRequeueOutcome {
+pub(in crate::services::discord) struct FollowupRequeueOutcome {
     pub(super) requeued: bool,
     pub(super) retry_capped: bool,
     pub(super) notice_message_id: MessageId,
@@ -86,12 +86,12 @@ fn schedule_retry_if_eligible(
 /// One submission that failed before reaching the pane: its turn and the bridge-active time it
 /// cost, frozen once when the stream loop ended.
 #[derive(Clone, Copy)]
-pub(super) struct BusyAttempt<'a> {
-    pub(super) turn_id: &'a str,
-    pub(super) cost: std::time::Duration,
+pub(in crate::services::discord) struct BusyAttempt<'a> {
+    pub(in crate::services::discord) turn_id: &'a str,
+    pub(in crate::services::discord) cost: std::time::Duration,
 }
 
-pub(super) async fn requeue_if_needed(
+pub(in crate::services::discord) async fn requeue_if_needed(
     outcome: &mut Option<FollowupRequeueOutcome>,
     requeue_candidate: bool,
     already_pending: bool,
@@ -103,7 +103,16 @@ pub(super) async fn requeue_if_needed(
     adk_session_key: Option<&str>,
     attempt: BusyAttempt<'_>,
 ) {
-    if !requeue_candidate || already_pending {
+    if !requeue_candidate
+        || already_pending
+        || inflight_state
+            .managed_submission
+            .as_ref()
+            .is_some_and(|record| !record.is_waiting())
+        || inflight_state
+            .managed_submission_capability()
+            .is_some_and(|cap| cap.idle_stash_entered())
+    {
         return;
     }
     *outcome = Some(
@@ -120,7 +129,7 @@ pub(super) async fn requeue_if_needed(
     );
 }
 
-pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
+pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -298,70 +307,10 @@ pub(super) async fn requeue_claude_tui_followup_pre_submit_timeout(
     }
 }
 
-/// How often an input held by a person's draft looks for that protection to lift.
-const DRAFT_RELEASE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-/// A stalled pane is watched for at most one day; unobserved holds stay persisted.
-const DRAFT_RELEASE_WATCH: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
-static DRAFT_RELEASE_WATCHES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<(u64, String)>>,
-> = std::sync::LazyLock::new(Default::default);
-
-fn draft_release_watches()
--> std::sync::MutexGuard<'static, std::collections::HashSet<(u64, String)>> {
-    DRAFT_RELEASE_WATCHES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-}
-
-/// One watch per channel and pane: once the pane protects no draft, the held inputs get a fresh
-/// budget and the queue one kickoff.
-fn watch_draft_release(
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
-    channel_id: ChannelId,
-    session: String,
-) {
-    let key = (channel_id.get(), session.clone());
-    if !draft_release_watches().insert(key.clone()) {
-        return;
-    }
-    tokio::spawn(async move {
-        let started = tokio::time::Instant::now();
-        let mut any_released = false;
-        while started.elapsed() < DRAFT_RELEASE_WATCH {
-            tokio::time::sleep(DRAFT_RELEASE_POLL).await;
-            if !draft_lifted(&session).await {
-                continue;
-            }
-            let pass = super::super::busy_followup_retry_store::release_draft_holds(
-                &provider,
-                channel_id.get(),
-            );
-            any_released |= pass.released > 0;
-            tracing::info!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                released = pass.released,
-                retry = pass.retry,
-                "claude_tui draft protection lifted; releasing held follow-ups"
-            );
-            // A failed step leaves held inputs behind, so the watch stays for the next poll.
-            if pass.retry {
-                continue;
-            }
-            if any_released {
-                let reason = "claude_tui_draft_hold_released";
-                let (shared, provider) = (shared.clone(), provider.clone());
-                super::super::schedule_deferred_idle_queue_kickoff(
-                    shared, provider, channel_id, reason,
-                );
-            }
-            break;
-        }
-        draft_release_watches().remove(&key);
-    });
-}
+pub(in crate::services::discord) mod draft_release;
+use draft_release::watch_draft_release;
+#[cfg(test)]
+use draft_release::{DRAFT_RELEASE_POLL, draft_release_watches};
 
 /// Re-protects saved panes, resolving legacy holds through the current watcher binding.
 /// Holds without a binding keep their input and budget for a later recovery.
@@ -418,17 +367,6 @@ fn rewatch_matching_draft_holds(
             watch_draft_release(shared.clone(), provider.clone(), channel_id, session);
         }
     }
-}
-
-/// A pane still marked protected is read off the runtime, between composer mutations.
-async fn draft_lifted(session: &str) -> bool {
-    use crate::services::claude_tui::composer_lock::{draft_guarded, draft_released};
-    if !draft_guarded(session) {
-        return true;
-    }
-    let session = session.to_string();
-    let released = tokio::task::spawn_blocking(move || draft_released(&session)).await;
-    released.unwrap_or(false)
 }
 
 #[cfg(test)]

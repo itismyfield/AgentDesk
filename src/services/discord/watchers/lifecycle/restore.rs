@@ -180,21 +180,6 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
             continue;
         };
 
-        if crate::services::discord::health::legacy_supervision::is_retired(
-            provider.as_str(),
-            channel_id.get(),
-        ) {
-            super::o_only_restore::install_mapped_retired_o_watcher(
-                http,
-                shared,
-                &provider,
-                *channel_id,
-                session_name,
-            )
-            .await;
-            continue;
-        }
-
         // #148: Do NOT register in owned_sessions yet — QUARANTINE check below may
         // skip this session. Registering early blocks new session creation for the channel.
         let is_dm = matches!(

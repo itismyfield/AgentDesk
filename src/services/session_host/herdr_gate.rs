@@ -2,6 +2,9 @@
 //! execution are checked on one server before every input, which goes only to that server.
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[path = "herdr_gate/legacy_return.rs"]
+pub(crate) mod legacy_return;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
