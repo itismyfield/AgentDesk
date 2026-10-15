@@ -2461,7 +2461,6 @@ services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
-services::cluster::channel_home_boot::tests::an_unregister_during_the_adopt_leaves_one_holder_that_a_restart_renews_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
@@ -2645,6 +2644,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_unregister_during_the_adopt_leaves_one_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_accepts_rechecks_home_after_ready_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_both_select_branches_make_progress_pg

@@ -801,3 +801,89 @@ pub(super) async fn adopt_target_node(env: &Env) {
     until("the writer takes work", WITHIN, || node.accepts()).await;
     node.stop().await;
 }
+
+/// T-H6 adopt against unregister: the target's gate unregisters while its adopt UPDATE waits on a
+/// row lock; the adopt lands once, no lease runs, and the next boot holds and renews the row.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
+    use crate::services::cluster::channel_home::{self, HomeIntake};
+    use crate::services::cluster::channel_home_boot::{self, Boot, BootPort, ResetRefused};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let scene = Scene::new().await;
+    let (channel, provider) = (C.to_string(), provider_name(scene.provider));
+    let delegated = o_channel_homes::delegate(&scene.pool, &channel, provider, GW, MINI).await;
+    let delegated = applied(delegated);
+    let released =
+        o_channel_homes::finish_release(&scene.pool, &channel, GW, delegated.epoch).await;
+    let epoch = applied(released).epoch;
+    let url = scene.url();
+    let pool = crate::db::postgres::connect_test_pool_with_max_connections(url, "s3 target", 2);
+    let pool = pool.await.expect("target pool");
+    let restored = Arc::new(AtomicBool::new(true));
+    let boot = || {
+        let restored = Arc::clone(&restored);
+        let reset: channel_home_boot::LegacyReset =
+            Arc::new(|| Box::pin(async { Err(ResetRefused::NotWired) }));
+        let port = move |id| BootPort::reading(id, Arc::clone(&restored), reset.clone());
+        Some(Boot {
+            provider: provider.into(),
+            local: MINI.into(),
+            pool: pool.clone(),
+            rows: channel_home_boot::listed(&pool),
+            candidates: vec![],
+            port,
+        })
+    };
+    let lock = lock_home_row(&scene.pool).await;
+    let gates = channel_home_boot::start(Some(true), boot).await;
+    assert_eq!(gates.len(), 1, "the released row names MINI");
+    // The watch's only query that holds a connection across two samples is the blocked adopt.
+    let in_use = || pool.size() as usize > pool.num_idle();
+    let mut held = 0;
+    for _ in 0..400 {
+        held = if in_use() { held + 1 } else { 0 };
+        if held >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(held >= 3, "the adopt never waited on the row lock");
+    assert!(channel_home::unregister(&channel).is_some());
+    lock.commit().await.unwrap();
+
+    let worker = || async { scene.row().await.map(|row| row.state) == Some(HomeState::Worker) };
+    until_async("the adopt lands", WITHIN, worker).await;
+    let row = scene.row().await.expect("the home row");
+    let one = (row.holder.as_deref(), row.target.as_deref(), row.epoch);
+    assert_eq!(
+        one,
+        (Some(MINI), None, epoch),
+        "one adopt for the one target"
+    );
+    let ended = || channel_home_boot::running(&channel) == (false, None);
+    until("the withdrawn watch ends without a lease", WITHIN, ended).await;
+    assert_eq!(
+        gates[0].ownership(),
+        HomeOwnership::Lost,
+        "a withdrawn gate opened"
+    );
+    assert!(channel_home::registered_channel(C).is_none());
+
+    channel_home_boot::stop(&channel).await;
+    channel_home_boot::start(Some(true), boot).await;
+    let open = || {
+        let gate = channel_home::registered_channel(C);
+        matches!(gate.map(|gate| gate.ownership()), Some(HomeOwnership::Owned { home_epoch, intake: HomeIntake::Open, .. }) if home_epoch == epoch)
+    };
+    until("the restart's lease opens the home", WITHIN, open).await;
+    assert_eq!(channel_home_boot::running(&channel), (true, Some(epoch)));
+    assert_eq!(
+        home(&scene).await,
+        (HomeState::Worker, Some(MINI.to_string()), epoch)
+    );
+    channel_home_boot::stop(&channel).await;
+    channel_home::unregister(&channel);
+    pool.close().await;
+    scene.drop_db().await;
+}
