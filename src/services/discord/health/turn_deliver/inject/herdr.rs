@@ -56,9 +56,8 @@ pub(super) async fn bound_pane(
         .flatten()
 }
 
-/// One gated paste and Enter into an empty composer under a live turn, as a Herdr turn sends its
-/// prompt; a refusal before the paste sends nothing, nothing is sent twice, and only the exact
-/// frame in the transcript makes it injected.
+/// One gated paste and Enter into an empty composer under a live turn, never sent twice; only the
+/// exact frame in the transcript makes it injected, and a refusal before the paste sends nothing.
 pub(super) fn run(
     pane: &HerdrTarget,
     session: &str,

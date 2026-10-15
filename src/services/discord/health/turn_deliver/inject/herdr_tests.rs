@@ -332,9 +332,8 @@ async fn try_busy(shared: &Arc<SharedData>, channel: u64) -> bool {
     try_busy(&deps, &ProviderKind::Claude, channel, gate, "herdr_test").await
 }
 
-/// Live intake keeps passing over a Herdr channel, but the queued head there reaches the Bound
-/// pane once through the gate and, once Claude logs it, only the head leaves the queue; a tmux
-/// channel types as before.
+/// Live intake passes over a Herdr channel, but its queued head reaches the Bound pane once and,
+/// logged by Claude, only the head leaves the queue; a tmux channel types as before.
 #[test]
 fn queued_herdr_head_reaches_the_bound_pane_once_and_tmux_types_as_before_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
