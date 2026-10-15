@@ -133,6 +133,9 @@ src/
 │   ├── campaigns/
 │   │   └── tests.rs
 │   ├── dispatched_sessions/
+│   │   ├── hosted_execution/
+│   │   │   ├── legacy_return.rs
+│   │   │   └── legacy_return_tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── hosted_execution.rs
@@ -2635,6 +2638,9 @@ src/
 │   │   │   ├── transport.rs
 │   │   │   ├── transport_tests.rs
 │   │   │   └── wire.rs
+│   │   ├── herdr_gate/
+│   │   │   ├── legacy_return.rs
+│   │   │   └── legacy_return_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_clear_adapter.rs
 │   │   ├── herdr_clear_adapter_tests.rs
