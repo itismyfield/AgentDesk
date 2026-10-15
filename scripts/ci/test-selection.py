@@ -4,9 +4,10 @@
 main always runs both lanes in full. A PR runs the tests whose source sits in a
 directory its diff touches, or in the directory of a file that names a changed
 module (`crate::<path>`), file or top-level directory literally. A full-run
-trigger, the kill switch, an error, an empty selection or one of at least 40% of
-a lane runs that lane in full. `plan` decides once; `run` replays the decision
-in each consumer and refuses a plan it cannot reproduce.
+trigger, an inclusion or module path this cannot resolve, the kill switch, an
+error, an empty selection or one of at least 40% of a lane runs that lane in
+full. `plan` decides once; `run` replays the decision in each consumer, refuses
+a plan it cannot reproduce and has run_test_lane prove every planned id ran.
 """
 
 from __future__ import annotations
@@ -31,34 +32,46 @@ THRESHOLD = 0.40
 KILL_LABEL = "ci-full"
 PLAN_ENV = "ADK_TEST_SELECTION_PLAN"
 MAX_PLAN_BYTES = 60_000
-# Shared fixtures, build inputs, lane definitions and the selector's own code.
+# Files holding a `#[cfg(test)]` test_support module re-exported under another path, whose
+# consumers never name the file; tests/test_test_selection.py keeps this equal to the source.
+SHARED_TEST_HELPERS = (
+    "src/services/discord/recovery_engine/rebind_runtime.rs",
+    "src/services/discord/recovery_engine/restore_persist_outcome.rs",
+    "src/services/discord/router/intake_gate/busy_inject_test_support.rs",
+    "src/services/discord/router/message_handler/provider_dispatch/producer_error_test_support.rs",
+    "src/services/discord/tmux_output_stream/native_codex.rs",
+    "src/services/observability/test_support.rs",
+    "src/services/tui_o/writer/actor.rs",
+)
+# Shared fixtures, build inputs, lane definitions with their authorities, and this code.
 FULL_TRIGGERS = (
     "migrations/*", "build.rs", "Cargo.toml", "Cargo.lock", ".cargo/*", "rust-toolchain*",
     "justfile", ".github/workflows/*", ".github/actions/*", "tests/*", "scripts/ci/*",
     "scripts/ci-script-checks.sh", "scripts/ci-timeout.py", "scripts/rust_lex.py",
-    "scripts/pg_test_lane_*", "scripts/known_test_failures.txt", "scripts/run_test_lane.py",
+    "scripts/lib_test_inventory_manifest.txt", "scripts/pg_test_lane_*",
+    "scripts/known_test_failures.txt", "scripts/run_test_lane.py",
     "scripts/check_pg_test_lane_membership.py", "scripts/check_test_target_integrity.py",
-    "scripts/check_test_lane_coverage.py", "scripts/lane_source_parity.py",
-    "scripts/lane_new_id_registration.py", "scripts/check-ci-runner-hardening.sh",
-    "scripts/test_lane_*", "scripts/test_target_integrity_*",
+    "scripts/check_test_lane_coverage.py", "scripts/lane_*",
+    "scripts/check-ci-runner-hardening.sh", "scripts/test_lane_*",
+    "scripts/test_target_integrity_*",
     "src/db/mod.rs", "src/db/postgres.rs", "src/db/postgres/*", "src/db/fixture_target.rs",
     "src/db/intake_delivery_required_migrations.rs", "src/db/auto_queue/test_support.rs",
     "src/dispatch/test_support.rs", "src/config.rs", "src/config/test_env.rs",
     "src/config/test_env/*", "src/services/turn_orchestrator.rs",
     "src/services/cluster/intake_worker/s3_real_tests/harness_tests.rs",
     # Re-exported as `busy_inject_support`; its e2e consumer never names this path.
-    "src/services/discord/router/intake_gate/busy_inject.rs",
-    "src/services/discord/router/intake_gate/busy_inject_test_support.rs",
+    "src/services/discord/router/intake_gate/busy_inject.rs", *SHARED_TEST_HELPERS,
 )
-# Changed by most PRs yet read by neither lane runner nor selector rule: new-ID exception
-# rows, and the CI script unit tests at the top of tests/ (a Rust reader still names them).
-EXEMPT = re.compile(r"scripts/test_lane_required_id_exceptions\.txt|tests/[^/]+\.(?:py|sh)")
 FULL_PG = ("just", "test-postgres-shard")
+CONTINUITY = ("just", "test-postgres-continuity")
+PREPARED = "source scripts/ci/non-pg-test-filter.sh && run_prepared_lib_test cargo test --lib --"
 GENERIC_NAMES = frozenset({"lib.rs", "main.rs", "mod.rs", "tests.rs"})
 FULL_SWEEP = """source scripts/ci/non-pg-test-filter.sh
 python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
 run_non_pg_filter_replay
 """
+SELECTED = (f"directory selection; full via ADK_CI_SELECT=off now, or label {KILL_LABEL} "
+            "from the next push or reopen")
 
 
 def _module(name: str, path: Path):
@@ -108,22 +121,35 @@ class Inventory:
         pg = frozenset(t for t in runtime if any(value in t for value in values))
         self.population = {"pg": pg, "sweep": (runtime - pg) | replay}
         self.aliases: dict = {}
-        cov.discover_test_inventory(root, self.aliases)
+        decls: dict = {}
+        cov.discover_test_inventory(root, self.aliases, decls)
+        self.root = root
         self.src = (root / "src").resolve()
         self.texts: dict[str, str] = {}
         self.files: dict[str, list[str]] = {}
+        self.undeclared: set[str] = set()  # No `mod` names them: an include! target or orphan.
         for path in sorted(self.src.rglob("*.rs")):
             rel = path.relative_to(self.src)
             name = f"src/{rel.as_posix()}"
             self.texts[name] = path.read_text("utf-8", errors="replace")
             if rel.name != "main.rs" and rel.parts[0] != "bin":
-                self.files.setdefault(self.module(name), []).append(name)
+                self.files.setdefault(module := self.module(name), []).append(name)
+                if module and module not in decls:
+                    self.undeclared.add(name)
 
     def module(self, name: str) -> str:
         """The logical module path of a `src/` file, which need not exist any more."""
         cov = tools()[1]
         physical = cov.file_module_path(self.src, self.src / name.removeprefix("src/"))
         return "::".join(cov._normalize_alias_path(physical, self.aliases))
+
+    def unresolved(self, site) -> bool:
+        """An include call left unresolved, or a `use … as` alias of the macro; a variable
+        that is merely named `include` is neither."""
+        if site.target is not None or site.tail:
+            return site.target is None
+        line = (self.root / site.path).read_text("utf-8", errors="replace").splitlines()
+        return bool(re.search(rf"\b{site.macro}\s*(?:!|as\b)", line[site.line - 1]))
 
     def owners(self, test_id: str) -> list[str]:
         parts = test_id.split("::")[:-1]
@@ -145,10 +171,15 @@ def scopes(inv: Inventory, changed: list[str], sites) -> tuple[set[str], str]:
     """Source scopes whose tests a change can reach, or a full-run reason."""
     owners = {path for site in sites if site.macro == "include" and site.target
               for path in (site.path, site.target)}
+    unsure = [site for site in sites if inv.unresolved(site)]
     for path in changed:
-        if path in owners or not EXEMPT.fullmatch(path) and any(
-                fnmatch.fnmatchcase(path, glob) for glob in FULL_TRIGGERS):
+        if path in owners or any(fnmatch.fnmatchcase(path, glob) for glob in FULL_TRIGGERS):
             return set(), f"full-trigger: {path}"
+        # An inclusion or a module path this cannot resolve may reach any test.
+        if site := next((site for site in unsure if site.reads(path)), None):
+            return set(), f"full-trigger: unresolved-inclusion:{site.path}:{site.line}"
+        if path in inv.undeclared:
+            return set(), f"full-trigger: unresolved-module:{path}"
     found: set[str] = set()
     readers: set[str] = set()
     needles: set[str] = set()
@@ -163,10 +194,8 @@ def scopes(inv: Inventory, changed: list[str], sites) -> tuple[set[str], str]:
                 needles.add(re.escape(f"crate::{inv.module(path)}") + r"(?![A-Za-z0-9_])")
         elif "/" in path:
             needles.add(re.escape(f'"{path.split("/")[0]}"'))
-        # Resolved include_str!/include_bytes! readers, and unresolved ones with a known tail.
-        readers.update(site.path for site in sites if site.path.startswith("src/") and (
-            site.target == path or site.target is None and len(site.tail) >= 3
-            and site.reads(path)))
+        readers.update(site.path for site in sites
+                       if site.path.startswith("src/") and site.target == path)
     pattern = re.compile("|".join(sorted(needles)))
     readers.update(name for name, text in inv.texts.items() if pattern.search(text))
     # One hop: a reader's own directory files and its child modules, not their readers.
@@ -176,13 +205,18 @@ def scopes(inv: Inventory, changed: list[str], sites) -> tuple[set[str], str]:
 
 
 def kill_switch() -> str:
-    """The repository variable, or the label on the event that started this run."""
-    if os.environ.get("ADK_CI_SELECT", "").strip().lower() == "off":
-        return "kill-switch: ADK_CI_SELECT=off"
-    event = os.environ.get("GITHUB_EVENT_PATH")
-    pull = json.loads(Path(event).read_text("utf-8")).get("pull_request", {}) if event else {}
-    labels = {label.get("name") for label in pull.get("labels", [])}
-    return f"kill-switch: label {KILL_LABEL}" if KILL_LABEL in labels else ""
+    """The repository variable, else the label on the PR event that started this run; adding
+    the label starts no run, so it applies from the next push or reopen."""
+    value = os.environ.get("ADK_CI_SELECT", "").strip().lower()
+    if value not in ("", "on"):
+        return f"kill-switch: ADK_CI_SELECT={value}"
+    try:
+        pull = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text("utf-8"))
+        labels = {label["name"] for label in pull["pull_request"]["labels"]}
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        return f"kill-switch: no pull_request payload ({type(error).__name__})"
+    return (f"kill-switch: label {KILL_LABEL}, read at this push or reopen"
+            if KILL_LABEL in labels else "")
 
 
 def merge_parent(root: Path, head: str) -> str | None:
@@ -206,9 +240,11 @@ def verdict(ids: list[str], population, reason: str = "") -> str:
 
 def make_plan(root: Path, base: str | None, head: str) -> dict:
     head = git(root, "rev-parse", head).strip()
-    plan = {"version": 1, "sha": head, "base": "", "inventory": "", "scopes": [], "lanes": {}}
+    plan = {"version": 1, "sha": head, "base": "", "inventory": "", "force_full": False,
+            "scopes": [], "lanes": {}}
     try:
         reason = kill_switch()
+        plan["force_full"] = bool(reason)  # Opens lanes whose path gate is closed, too.
         if not reason and base is None:
             base = merge_parent(root, head)
             reason = "" if base else "no-merge-parent"
@@ -225,7 +261,7 @@ def make_plan(root: Path, base: str | None, head: str) -> dict:
             ids = [] if reason else inv.selected(plan["scopes"], lane)
             why = verdict(ids, inv.population[lane], reason)
             plan["lanes"][lane] = {
-                "mode": "full" if why else "selected", "reason": why or "directory selection",
+                "mode": "full" if why else "selected", "reason": why or SELECTED,
                 "selected": len(ids), "population": len(inv.population[lane]),
                 "ids": digest("\n".join(ids).encode()), "shards": shards(ids, bool(why))}
     except Exception as error:  # Any failure runs every lane in full, with its reason.
@@ -243,9 +279,10 @@ def make_plan(root: Path, base: str | None, head: str) -> dict:
 
 
 def shards(ids: list[str], full: bool) -> list[int]:
+    """Every shard in full; else the planned ids' shards and shard 0, which runs continuity."""
     pgm = tools()[2]
     return list(range(pgm.PG_SHARD_COUNT)) if full else sorted(
-        {pgm.pg_test_shard(test_id) for test_id in ids})
+        {0, *(pgm.pg_test_shard(test_id) for test_id in ids)})
 
 
 def log(plan: dict, lane: str) -> None:
@@ -275,35 +312,44 @@ def load_plan(root: Path, lane: str):
     return entry, ids
 
 
+def run_lane(root: Path, lane: str, ids: list[str], command: list[str], env=None) -> int:
+    """run_test_lane over exactly `ids`: a missing, extra, undeclared-ignored id or a
+    summary that disagrees is red, and so is an empty expectation."""
+    with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as handle:
+        handle.write("\n".join(ids) + "\n")
+    return subprocess.run(
+        [sys.executable, "scripts/run_test_lane.py", "--lane", lane, "--max-summaries", "4",
+         "--expected-ids", handle.name, "--", *command], cwd=root, env=env,
+        check=False).returncode
+
+
 def run_pg(root: Path, ids: list[str]) -> int:
-    """The shard's planned ids; shard 0's continuity commands are sweep-population tests."""
+    """The shard's planned ids under run_test_lane, then shard 0's continuity recipe."""
     pgm = tools()[2]
     shard = pgm.validate_pg_shard(os.environ.get("PG_INCLUDE_SHARD", ""))
     mine = [test_id for test_id in ids if pgm.pg_test_shard(test_id) == shard]
-    if not mine or not os.environ.get("POSTGRES_TEST_DATABASE_URL_BASE"):
+    if not (mine or shard == 0) or not os.environ.get("POSTGRES_TEST_DATABASE_URL_BASE"):
         raise ValueError(f"shard {shard} selects no test, or no PostgreSQL test server is named")
-    # The shared partition lists the compiled tests; every planned id must be among them.
-    listed = subprocess.run(
-        ["bash", "-c", 'source scripts/ci/non-pg-test-filter.sh && printf "%s\\n" '
-         '"${PG_INCLUDE_ARGS[@]}"'], cwd=root, check=True, stdout=subprocess.PIPE,
-        text=True).stdout.split()
-    if missing := sorted(set(mine) - set(listed[1:])):
-        raise ValueError(f"{len(missing)} planned id(s) are not compiled tests: {missing[:3]}")
     env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
-    return subprocess.run(
-        ["bash", "-c", 'source scripts/ci/non-pg-test-filter.sh && run_prepared_lib_test '
-         'cargo test --lib -- --exact "$@" --nocapture --test-threads=1', "bash", *mine],
-        cwd=root, env=env, check=False).returncode
+    if mine:
+        # #[ignore] tests stay out as in the full lane; a shard left with none is red.
+        listed = subprocess.run(
+            ["bash", "-c", PREPARED + ' --exact "$@" --list --ignored', "bash", *mine],
+            cwd=root, env=env, check=True, stdout=subprocess.PIPE, text=True).stdout
+        ignored = set(pgm.partition_pg_test_list(listed, str(shard), allow_empty=True))
+        if not (runnable := [test_id for test_id in mine if test_id not in ignored]):
+            raise ValueError(f"shard {shard}: every planned id is #[ignore]")
+        command = ["bash", "-c", PREPARED + ' --exact "$@" --test-threads=1', "bash", *runnable]
+        if rc := run_lane(root, "pg-selected", runnable, command, env):
+            return rc
+    return subprocess.run([*CONTINUITY], cwd=root, env=env, check=False).returncode \
+        if shard == 0 else 0
 
 
 def run_sweep(root: Path, ids: list[str]) -> int:
-    with tempfile.NamedTemporaryFile("w", suffix=".ids", delete=False) as handle:
-        handle.write("\n".join(ids) + "\n")
-    command = [sys.executable, "scripts/run_test_lane.py", "--lane", "non-pg-sweep",
-               "--max-summaries", "4", "--expected-ids", handle.name, "--", "env", "-u",
-               "AGENTDESK_ROOT_DIR", "python3", "scripts/ci/lib-test-artifact.py", "run", "--",
-               "cargo", "test", "--lib", "--", "--exact", *ids]
-    return subprocess.run(command, cwd=root, check=False).returncode
+    return run_lane(root, "non-pg-sweep", ids, [
+        "env", "-u", "AGENTDESK_ROOT_DIR", "python3", "scripts/ci/lib-test-artifact.py", "run",
+        "--", "cargo", "test", "--lib", "--", "--exact", *ids])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -324,9 +370,10 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         text = json.dumps(plan, separators=(",", ":"), sort_keys=True)
         matrix = json.dumps({"shard": plan["lanes"]["pg"]["shards"]}, separators=(",", ":"))
+        force = str(plan["force_full"]).lower()
         if output := os.environ.get("GITHUB_OUTPUT"):
             with open(output, "a", encoding="utf-8") as handle:
-                handle.write(f"matrix={matrix}\nplan={text}\n")
+                handle.write(f"matrix={matrix}\nplan={text}\nforce_full={force}\n")
         else:
             print(text)
         return 0

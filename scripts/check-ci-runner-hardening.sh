@@ -893,9 +893,9 @@ targets = {
     "label" => "PostgreSQL job",
     "name" => "PostgreSQL tests (shard ${{ matrix.shard }})",
     "needs" => ["changes", "pg_shards", "lib_test_prepare"],
-    "if" => "${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}",
+    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "2132193b2fc65e1e61ef1abdf1a4d35fd494cce6a8bf6daa34aee527c2933fd1",
+    "job_sha256" => "cbbadf7bad4f8c631281b6a686f614e1c75a18c9388720c12a87a3fbd3840e47",
     "cargo_steps" => {
       "Footer-only marker regressions" => {
         "commands" => [
@@ -932,9 +932,9 @@ targets = {
     "label" => "PR library sweep job",
     "name" => "Library test sweep",
     "needs" => %w[changes lib_test_prepare pg_shards],
-    "if" => "${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}",
+    "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "3bc9c964c7e42ba4e4e71428605701038650d056788eb83338465d0eb2bb4c28",
+    "job_sha256" => "1ef62eee071110ae20706eac36868adae901ca8225bc29808f5298cd1062a04d",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
         "commands" => ["python3 scripts/ci/test-selection.py run --lane sweep"],
@@ -1408,7 +1408,7 @@ plan = {
     { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
   ],
 }
-plan.merge!("needs" => "changes", "if" => "needs.changes.outputs.pg_db == 'true' || needs.changes.outputs.rust_tests == 'true'", "outputs" => plan["outputs"].merge("plan" => "${{ steps.plan.outputs.plan }}"),
+plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}"),
             "steps" => [plan["steps"][0], { "id" => "plan", "shell" => "bash", "env" => { "ADK_CI_SELECT" => "${{ vars.ADK_CI_SELECT }}" }, "run" => "python3 scripts/ci/test-selection.py plan" }]) if pr
 recipe, recipe_step = pr ? ["python3 scripts/ci/test-selection.py run --lane pg", "PostgreSQL shard tests"] : ["just test-postgres-shard"] * 2
 job = document.dig("jobs", job_id)
@@ -1420,7 +1420,7 @@ errors << "#{main_path}: pg_shards must emit the canonical matrix" unless docume
 errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
 errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
 errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards", "lib_test_prepare"] : "pg_shards")
-errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}" : !job.key?("if"))
+errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}" : !job.key?("if"))
 errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
 errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
 env = job["env"] || {}

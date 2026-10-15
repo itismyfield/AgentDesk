@@ -1307,14 +1307,14 @@ jobs:
 
   pg_shards:
     needs: changes
-    if: needs.changes.outputs.pg_db == 'true' || needs.changes.outputs.rust_tests == 'true'
     runs-on: ubuntu-latest
     outputs:
+      force_full: ${{ steps.plan.outputs.force_full }}
       matrix: ${{ steps.plan.outputs.matrix }}
       plan: ${{ steps.plan.outputs.plan }}
     steps:
       - uses: actions/checkout@v4
-      # One plan per PR for the PG matrix and both lanes; `off` or the ci-full label runs them in full.
+      # Every PR plans; ADK_CI_SELECT=off forces full now, the ci-full label from the next push or reopen (no `labeled` run).
       - id: plan
         shell: bash
         env:
@@ -1324,7 +1324,7 @@ jobs:
   test_fast:
     name: PostgreSQL tests (shard ${{ matrix.shard }})
     needs: [changes, pg_shards, lib_test_prepare]
-    if: ${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}
+    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1632,7 +1632,7 @@ jobs:
   library_sweep:
     name: Library test sweep
     needs: [changes, lib_test_prepare, pg_shards]
-    if: ${{ !cancelled() && needs.changes.outputs.rust_tests == 'true' }}
+    if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
@@ -2138,7 +2138,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=f712848cf01d8e1ab89706ae0c2c6478d547514a8edf63f8b93ea952e1524dae
+          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2390,7 +2390,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=f712848cf01d8e1ab89706ae0c2c6478d547514a8edf63f8b93ea952e1524dae
+          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

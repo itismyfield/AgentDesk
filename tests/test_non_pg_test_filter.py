@@ -298,12 +298,14 @@ bash -euo pipefail -c "$1"
     def test_prepared_pg_shards_and_replay_dispatch_without_extra_cargo(self) -> None:
         membership = load_membership_module()
         coverage = membership._load_coverage_module(ROOT)
-        program = "\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), "test-postgres-shard"))
+        program, continuity = ("\n".join(coverage.just_recipe_commands((ROOT / "justfile").read_text(), name))
+                               for name in ("test-postgres-shard", "test-postgres-continuity"))
         skips = membership.load_non_pg_skip_args(ROOT)[1::2]
         ids = sorted(name for name in membership.load_lib_test_inventory(ROOT)
                      if any(value in name for value in skips))
         script = r'''
 cargo() { printf 'unexpected cargo\n' >&2; return 99; }
+just() { [[ "$*" == test-postgres-continuity ]] && bash -euo pipefail -c "$CONTINUITY"; }
 python3() {
   if [[ "$1" == scripts/ci/lib-test-artifact.py ]]; then
     shift 3
@@ -313,7 +315,7 @@ python3() {
     command python3 "$@"
   fi
 }
-export -f cargo python3
+export -f cargo python3 just
 bash -euo pipefail -c "$PROGRAM"
 '''
         with tempfile.TemporaryDirectory() as temp:
@@ -323,7 +325,7 @@ bash -euo pipefail -c "$PROGRAM"
             for shard in ("0", "1"):
                 log.write_text("")
                 env = {**os.environ, "ADK_LIB_TEST_ARTIFACT": temp, "PG_LIST": str(listed),
-                       "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard,
+                       "LOG": str(log), "PROGRAM": program, "PG_INCLUDE_SHARD": shard, "CONTINUITY": continuity,
                        "POSTGRES_TEST_DATABASE_URL_BASE": "postgresql://stub:1"}
                 result = subprocess.run(["bash", "-c", script], cwd=ROOT, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)

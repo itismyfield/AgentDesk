@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "f712848cf01d8e1ab89706ae0c2c6478d547514a8edf63f8b93ea952e1524dae"
+    "1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -527,7 +527,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         test_job = job_block(workflow, "test_fast")
         self.assertRegex(
             test_job,
-            r"(?m)^    if: " + re.escape("${{ !cancelled() && needs.changes.outputs.pg_db == 'true' }}") + "$",
+            r"(?m)^    if: " + re.escape("${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}") + "$",
         )
         command = (
             "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib "
