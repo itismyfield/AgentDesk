@@ -390,6 +390,8 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
   services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
+  services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
+  services::cluster::channel_home_boot::tests::writer_return::unreadable_boot_rows_start_no_first_writer
   services::cluster::execution_capacity::tests::execution_capacity_ranking_uses_ratio_fairness_and_preserves_legacy_selector
   services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
   services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
