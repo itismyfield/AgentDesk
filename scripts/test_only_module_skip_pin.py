@@ -34,6 +34,9 @@ from pathlib import Path
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/engine/ops/exec_ops/circuit_evidence_tests.rs",
+        "src/services/discord/inflight/circuit_evidence_tests.rs",
+        "src/services/discord/relay_recovery_circuit_evidence_tests.rs",
         "src/services/cluster/stream_relay/source_read_proof_tests.rs",
         "src/db/intake_outbox/owner_fence_pg_tests.rs",
         "src/db/intake_outbox/postgres_tests.rs",
@@ -513,7 +516,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/body_mutation_telemetry_tests.rs",
         "src/services/discord/turn_bridge/chunk_compose_tests.rs",
         "src/services/discord/turn_bridge/completion_guard/span_tests.rs",
-        "src/services/discord/turn_bridge/completion_postlude/o_panel_below_tests.rs",
         "src/services/discord/turn_bridge/finalize_epilogue/r1_transition_busy_tests.rs",
         "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
         "src/services/discord/turn_bridge/intake_settlement/tests.rs",
@@ -562,6 +564,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/tui_prompt_dedupe/pending_history_tests.rs",
         "src/services/claude_tui/hook_server/observation_ingress_tests.rs",
         "src/services/claude_tui/hook_server/rehydration_ingress_tests.rs",
+        "src/services/claude_tui/hook_server/o_restart_preservation_tests.rs",
         "src/services/discord/tui_prompt_relay/rehydration_pending_tests.rs",
         "src/services/discord/tui_prompt_relay/headless_tests.rs",
         "src/services/discord/tui_direct_pending_start/tests/headless_row_tests.rs",

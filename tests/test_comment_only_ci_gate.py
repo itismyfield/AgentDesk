@@ -338,10 +338,41 @@ class GateProcessTests(unittest.TestCase):
 TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'((?:[^']|'')*)'|([A-Za-z_][\w.-]*))")
 
 
+def cancelled_path_gate(expr: str, lookup) -> bool:
+    """Only the status-first cancellation guard and one path output are shared gates."""
+    def unparen(value: str) -> str:
+        value = value.strip()
+        while value.startswith("(") and value.endswith(")"):
+            depth = 0
+            for index, char in enumerate(value):
+                depth += (char == "(") - (char == ")")
+                if depth == 0:
+                    break
+            if depth or index != len(value) - 1:
+                break
+            value = value[1:-1].strip()
+        return value
+
+    terms = unparen(expr).split("&&")
+    status = unparen(terms[0])
+    assert len(terms) == 2 and "||" not in expr and status.startswith("!"), expr
+    assert re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])), expr
+    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'", unparen(terms[1]))
+    assert output, expr
+    return not truthy(lookup("cancelled()")) and str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
+
+
 def evaluate(expr: str, lookup) -> object:
     """The subset of GitHub expression syntax ci-pr.yml uses in if/outputs/env."""
+    expr = expr.strip()
+    whole = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
+    if whole:
+        expr = whole.group(1).strip()
+    guarded_needs = re.search(r"\b[A-Za-z_][\w]*\s*\(", expr) and re.search(r"\bneeds\.", expr)
+    if guarded_needs:
+        return cancelled_path_gate(expr, lookup)
     tokens: list[tuple[str, str]] = []
-    pos, expr = 0, expr.strip()
+    pos = 0
     while pos < len(expr):
         match = TOKEN.match(expr, pos)
         if not match:
@@ -490,7 +521,7 @@ class WorkflowSimulation:
         """A job-level `if:`; one without a status function implies success(), as in Actions."""
         whole = re.fullmatch(r"\$\{\{(.*)\}\}", str(job.get("if", "")).strip(), re.S)
         condition = (whole.group(1) if whole else str(job.get("if", ""))).strip()
-        if re.search(r"\b(?:always|cancelled)\(", condition):
+        if re.search(r"\b(?:always|cancelled)\s*\(", condition):
             return truthy(evaluate(condition, self.lookup))
         needs = job.get("needs", [])
         needs = [needs] if isinstance(needs, str) else needs
@@ -504,6 +535,77 @@ HEAVY_RAW = outputs(
     relay_contract=[], cross_os_rust=[RS], win32_build_token=[],
 )
 OVERRIDDEN = {"pg_db": "pg_db", "high_risk_recovery": "high_risk_recovery", "cross_os_rust": "cross_os_rust", "rust_tests": "rust_or_policy"}
+
+
+class CancelledPathExpressionTests(unittest.TestCase):
+    def test_cancelled_path_gate_tracks_only_run_cancellation_and_path_truth(self) -> None:
+        output = "needs.changes.outputs.pg_db == 'true'"
+        variants = (
+            "${{ !cancelled() && " + output + " }}",
+            "!cancelled() && " + output,
+            "${{ ((!cancelled()) && (" + output + ")) }}",
+            "${{ ( ! ( cancelled ( ) ) ) && ((" + output + ")) }}",
+            "${{\n (! cancelled ( )) && (needs.changes.outputs.pg_db=='true')\n }}",
+        )
+        for cancelled in (False, True):
+            for selected in ("true", "false", "", None):
+                def lookup(name):
+                    self.assertIn(name, ("cancelled()", "needs.changes.outputs.pg_db"))
+                    return cancelled if name == "cancelled()" else selected
+                for expr in variants:
+                    with self.subTest(cancelled=cancelled, selected=selected, expression=expr):
+                        self.assertEqual(evaluate(expr, lookup), not cancelled and selected == "true")
+
+    def test_unsupported_status_path_expressions_remain_assertions(self) -> None:
+        output = "needs.changes.outputs.pg_db == 'true'"
+        for expr in (
+            "always() && " + output,
+            "!always() && " + output,
+            "!success() && " + output,
+            "!other() && " + output,
+            "!cancelled() && needs.other.outputs.pg_db == 'true'",
+            "!cancelled() && " + output + " && " + output,
+            "!cancelled() && " + output + " || needs.changes.outputs.rust_tests == 'true'",
+            "(!cancelled() || always()) && " + output,
+            output + " && !cancelled()",
+            "!cancelled(false) && " + output,
+            "(!cancelled() && " + output,
+        ):
+            with self.subTest(expression=expr), self.assertRaises(AssertionError):
+                evaluate("${{ " + expr + " }}", lambda name: False if name == "cancelled()" else "true")
+
+    def test_existing_output_boolean_parser_and_standalone_status_are_preserved(self) -> None:
+        lookup = lambda name: False if name == "cancelled()" else "true"
+        self.assertTrue(evaluate("needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'", lookup))
+        self.assertEqual(evaluate("steps.comment_only.outcome == 'true' && 'false' || 'true'", lookup), "false")
+        self.assertTrue(evaluate("${{ !cancelled() }}", lookup))
+        self.assertTrue(evaluate("always()", lookup))
+        self.assertTrue(evaluate("always() && runner.os != 'macOS'", lookup))
+
+    def test_spaced_status_guard_bypasses_failed_prepare_but_respects_cancellation(self) -> None:
+        run = WorkflowSimulation(HEAVY_RAW, "false", forced={"lib_test_prepare": "failure"})
+        job = {"needs": ["changes", "lib_test_prepare"], "if": "${{ ! (cancelled ( )) && needs.changes.outputs.pg_db == 'true' }}"}
+        self.assertTrue(run.job_runs(job))
+        run.run_cancelled = True
+        self.assertFalse(run.job_runs(job))
+
+    def test_removing_wrapper_recognition_makes_named_workflow_tests_red(self) -> None:
+        source = Path(__file__).read_text(encoding="utf-8")
+        old = '    if whole:\n        expr = whole.group(1).strip()'
+        self.assertEqual(source.count(old), 1)
+        namespace = {"__name__": "comment_only_evaluator_mutant", "__file__": __file__}
+        exec(compile(source.replace(old, '    if False and whole:\n        expr = whole.group(1).strip()'), __file__, "exec"), namespace)
+        names = (
+            "test_comment_only_skips_heavy_lanes_and_every_required_context_is_green",
+            "test_gate_false_unset_or_failed_keeps_the_raw_filters",
+        )
+        suite = unittest.TestSuite(namespace["WorkflowWiringTests"](name) for name in names)
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual(result.errors, [])
+        for name in names:
+            self.assertTrue(any(name in test.id() for test, _ in result.failures), name)
 
 
 class WorkflowWiringTests(unittest.TestCase):
