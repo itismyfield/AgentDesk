@@ -2256,6 +2256,15 @@ fn codex_6903_markerless_discovery_without_custody_keeps_complete_boundary() {
     run(|root| Box::pin(markerless_saved_custody(root, false)));
 }
 
+/// Direct prompts are admitted once; seeing one again after its admission is a duplicate.
+fn assert_direct_admission_unique(fx: &Fixture, event: &ObservedTuiPrompt) {
+    assert!(
+        event.tmux_session_name != fx.codex.tmux
+            || !event.prompt.starts_with("DIRECT_6903_PROMPT_"),
+        "direct admission is unique: {event:?}"
+    );
+}
+
 fn terminal_only(native: &str, answer: &str) -> String {
     rollout_line(serde_json::json!({"type":"event_msg", "payload":{
         "type":"task_complete", "turn_id":native, "last_agent_message":answer}}))
@@ -2265,9 +2274,18 @@ async fn deliver_direct_terminal(fx: &mut Fixture, n: u32) {
     let prompt = format!("DIRECT_6903_PROMPT_{n}");
     let answer = format!("DIRECT_6903_ANSWER_{n}");
     fx.append(&opening(&turn(n), &prompt));
-    let mut events = events_for(fx, &prompt, Duration::from_secs(5)).await;
-    assert_eq!(events.len(), 1, "direct admission is unique");
-    super::super::super::super::relay_observed_prompt(&fx.shared, events.remove(0)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let event = loop {
+        let event = tokio::time::timeout_at(deadline, fx.observed.recv())
+            .await
+            .expect("direct admission is published")
+            .expect("observation channel open");
+        if event.tmux_session_name == fx.codex.tmux && event.prompt == prompt {
+            break event;
+        }
+        assert_direct_admission_unique(fx, &event);
+    };
+    super::super::super::super::relay_observed_prompt(&fx.shared, event).await;
     let end = fx.append(&terminal_only(&turn(n), &answer));
     assert!(fx.delivered(&answer).await);
     assert!(
@@ -2283,6 +2301,10 @@ async fn deliver_direct_terminal(fx: &mut Fixture, n: u32) {
         wait_for(Duration::from_secs(5), || fx.lease().is_none()).await,
         "completed direct lease must release"
     );
+    // The delivery needed a later scan past the terminal, so any re-admission is queued by now.
+    while let Ok(event) = fx.observed.try_recv() {
+        assert_direct_admission_unique(fx, &event);
+    }
     assert_eq!(fx.sent(&answer).len(), 1);
     fx.assert_answer(&answer, fx.anchor_of(&answer));
 }
