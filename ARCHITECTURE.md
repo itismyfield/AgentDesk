@@ -1818,7 +1818,8 @@ src/
 │   │   │   ├── utf8_chunk_decoder.rs
 │   │   │   └── utf8_chunk_decoder_tests.rs
 │   │   ├── tmux_watcher_registry/
-│   │   │   └── fences.rs
+│   │   │   ├── fences.rs
+│   │   │   └── session_binding.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── drain.rs

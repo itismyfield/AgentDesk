@@ -7,6 +7,13 @@ use super::*;
 // `let _guard = set_...(..)` and never names the type, so re-exporting them
 // would only add an import nothing uses.
 mod fences;
+mod session_binding;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use session_binding::owner_stop_mutant;
+pub(in crate::services::discord) use session_binding::{
+    AuthoritativeSessionBinding, TmuxWatcherBinding,
+};
 
 use fences::commit_under_delivery_fence;
 pub(in crate::services::discord) use fences::{
@@ -169,8 +176,7 @@ impl IdentityFencedRegistry<'_> {
             expected_tmux_session_name,
             expected_output_path,
             expected_cancel,
-            Some(&self.fence),
-            Some(&self.delivery),
+            (Some(&self.fence), Some(&self.delivery)),
         )
     }
 }
@@ -216,49 +222,8 @@ pub(in crate::services) struct TmuxWatcherRegistry {
     tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::services::discord) struct TmuxWatcherBinding {
-    pub(in crate::services::discord) owner_channel_id: ChannelId,
-    pub(in crate::services::discord) tmux_session_name: String,
-    /// #5071 T4-B0 (#4987 S0): the transcript the LIVE watcher handle for this
-    /// session is tailing, read off the same registry lookup that resolved the
-    /// binding.
-    ///
-    /// [`TmuxWatcherHandle::output_path`] has always carried this, and two
-    /// existing reads already reach it: [`TmuxWatcherRegistry::watcher_output_path`]
-    /// for a caller who already knows the tmux session name, and
-    /// [`TmuxWatcherRegistry::get`] for one keyed by `ChannelId` —
-    /// `health::relay_auto_heal` gates its redrive nudge on exactly that
-    /// `get(&owner_channel_id)` → `.output_path` hop. So the claim here is
-    /// narrower than "no route existed": what `channel_binding` did not carry
-    /// was the coordinate. It is the lock-free VALUE snapshot of a watcher slot
-    /// — owner channel and session name, cloned out, holding nothing borrowed
-    /// once it returns — whereas `get` hands back a `dashmap::mapref::one::Ref`
-    /// that borrows the entry and holds a read guard on its shard for as long
-    /// as the caller keeps it. This field puts the transcript on the snapshot
-    /// side of that split; it is populated by, and stays equal to,
-    /// `watcher_output_path` for the same session.
-    ///
-    /// It is worth its own coordinate because it is sourced independently of
-    /// the in-flight row's `output_path`. `watchers::lifecycle::claims` keeps a
-    /// watcher that has been promoted to a provider-native TUI transcript from
-    /// being demoted back to the prelaunch wrapper file; the row carries no
-    /// such guard, so the two can name different files for one channel.
-    ///
-    /// `None` means no live handle was keyed under `tmux_session_name` at the
-    /// instant of the read, NOT that the watcher has no output path — a live
-    /// handle always has one. The mutating helpers keep the channel index and
-    /// the handle map in step under the registry mutex, but `channel_binding`
-    /// takes no lock, so its two reads can straddle a concurrent mutation.
-    pub(in crate::services::discord) output_path: Option<String>,
-}
-
 #[rustfmt::skip]
 impl TmuxWatcherRegistry {
-    pub(in crate::services::discord) fn new() -> Self {
-        Self::new_with_coords(Arc::new(dashmap::DashMap::new()))
-    }
-
     pub(in crate::services::discord) fn new_with_coords(
         tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
     ) -> Self {
@@ -581,8 +546,7 @@ impl TmuxWatcherRegistry {
             expected_tmux_session_name,
             expected_output_path,
             expected_cancel,
-            None,
-            None,
+            (None, None),
         )
     }
 
@@ -601,9 +565,9 @@ impl TmuxWatcherRegistry {
         expected_tmux_session_name: &str,
         expected_output_path: &str,
         expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
-        identity: Option<&WatcherIdentityFence>,
-        delivery: Option<&TerminalDeliveryFence>,
+        fences: (Option<&WatcherIdentityFence>, Option<&TerminalDeliveryFence>),
     ) -> bool {
+        let (identity, delivery) = fences;
         let Some(tmux_session_name) = self
             .tmux_session_by_channel
             .get(channel_id)
@@ -669,40 +633,6 @@ impl TmuxWatcherRegistry {
 
     pub(in crate::services::discord) fn iter(&self) -> dashmap::iter::Iter<'_, String, TmuxWatcherHandle> {
         self.by_tmux_session.iter()
-    }
-
-    pub(in crate::services::discord) fn channel_binding(&self, channel_id: &ChannelId) -> Option<TmuxWatcherBinding> {
-        let tmux_session_name = self.tmux_session_by_channel.get(channel_id)?.clone();
-        let owner_channel_id = self
-            .owner_channel_by_tmux_session
-            .get(&tmux_session_name)
-            .map(|entry| *entry.value())
-            .unwrap_or(*channel_id);
-        let output_path = self.watcher_output_path(&tmux_session_name);
-        Some(TmuxWatcherBinding {
-            owner_channel_id,
-            tmux_session_name,
-            output_path,
-        })
-    }
-
-    pub(in crate::services::discord) fn owner_channel_for_tmux_session(
-        &self,
-        tmux_session_name: &str,
-    ) -> Option<ChannelId> {
-        // The live watcher-handle binding is the primary authority. When no live
-        // watcher owns the session (e.g. a TUI-direct session whose slot was
-        // evicted by compact/restart/rebind), fall back to the #3105 restored
-        // owner map — still authoritative (settings-derived), unlike the dedupe
-        // mirror, which is never consulted here.
-        self.owner_channel_by_tmux_session
-            .get(tmux_session_name)
-            .map(|entry| *entry.value())
-            .or_else(|| {
-                self.restored_owner_by_tmux_session
-                    .get(tmux_session_name)
-                    .map(|entry| *entry.value())
-            })
     }
 
     /// #3105: re-register the authoritative owner channel for a LIVE tmux
@@ -863,13 +793,13 @@ impl WatcherClaimIncarnation {
         watchers: &TmuxWatcherRegistry,
         adopt: impl FnOnce(&Self) -> T,
     ) -> Option<T> {
-        let guard = lock_tmux_watcher_registry();
+        let _guard = lock_tmux_watcher_registry();
         #[cfg(test)]
         if EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
             self.owner_channel_id.get(), 0,
             std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
         ).is_ok() {
-            let _ = watchers.remove_locked(&guard, &self.owner_channel_id);
+            let _ = watchers.remove_locked(&_guard, &self.owner_channel_id);
         }
         let current = watchers.get(&self.owner_channel_id)?;
         if !Arc::ptr_eq(&current.cancel, &self.cancel)
