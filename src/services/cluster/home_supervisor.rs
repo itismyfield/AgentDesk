@@ -170,6 +170,14 @@ impl<B: HomeBundle> Supervisor<B> {
         self.with_slots(|slots| slots.get(&channel).map(Slot::phase))
     }
 
+    /// What `read` makes of the channel's running bundle; `None` unless one runs.
+    pub fn running<R>(&self, channel: u64, read: impl FnOnce(&B) -> R) -> Option<R> {
+        self.with_slots(|slots| match slots.get(&channel) {
+            Some(Slot::Running { bundle, .. }) => Some(read(bundle)),
+            _ => None,
+        })
+    }
+
     /// Reserves the channel's next generation now, before the returned future is polled; a
     /// running one is stopped and joined before `build` runs. Starting or stopping, it is `Busy`.
     pub fn start<F, Fut>(

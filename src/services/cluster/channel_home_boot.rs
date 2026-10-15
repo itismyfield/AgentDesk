@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
@@ -16,10 +16,13 @@ pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
 pub(crate) use super::channel_home_port::PersistedInput;
+use super::home_supervisor::{HomeBundle, Phase, Settled, StopReason, Supervisor};
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
 use crate::services::tui_o::cutover;
+use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::tui_o::writer::host::{ManagedWriterHandle, Readiness};
 
 type ResetFuture = Pin<Box<dyn Future<Output = Result<(), ResetRefused>> + Send>>;
 
@@ -130,6 +133,112 @@ pub(crate) fn restore_mutant(name: &str) -> bool {
     std::env::var("ADK_S3A_RESTORE_MUTANT").ok().as_deref() == Some(name)
 }
 
+/// One channel's managed writer as the supervisor runs it.
+pub(crate) struct WriterBundle(ManagedWriterHandle);
+
+impl HomeBundle for WriterBundle {
+    fn stop_and_join(self, _: StopReason) -> impl Future<Output = Settled> + Send {
+        let stopped = self.0.stop_and_join();
+        async move {
+            match stopped.await {
+                Ok(_) => Settled::Joined,
+                Err(detail) => Settled::Stuck(detail),
+            }
+        }
+    }
+}
+
+/// Starts a channel's writer under the gateway's authority; `None` when none is hosted.
+pub(crate) type StartWriter = Arc<dyn Fn(u64) -> Option<ManagedWriterHandle> + Send + Sync>;
+
+/// A gateway runtime's writers, one per channel under one supervisor: a home's watch ends the
+/// channel's writer before the row returns and starts the gateway's one only after it.
+pub(crate) struct ChannelWriters {
+    supervisor: Arc<Supervisor<WriterBundle>>,
+    gateway: Arc<OwnershipGate>,
+    readiness: Arc<Readiness>,
+    start: OnceLock<Option<StartWriter>>,
+}
+
+impl ChannelWriters {
+    pub(crate) fn new(gateway: Arc<OwnershipGate>, readiness: Arc<Readiness>) -> Self {
+        let supervisor = Arc::default();
+        let start = OnceLock::new();
+        Self {
+            supervisor,
+            gateway,
+            readiness,
+            start,
+        }
+    }
+
+    /// Supervises the writers the boot started and arms later starts; `None` (no gateway lease)
+    /// starts none.
+    pub(crate) fn arm(&self, start: Option<StartWriter>, started: Vec<ManagedWriterHandle>) {
+        for handle in started {
+            let (channel, bundle) = (handle.channel(), WriterBundle(handle));
+            drop(
+                self.supervisor
+                    .start(channel, move |_| async move { Ok(bundle) }),
+            );
+        }
+        let _ = self.start.set(start);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase(&self, channel: u64) -> Option<Phase> {
+        self.supervisor.phase(channel)
+    }
+
+    /// Stops and joins the channel's writer; false while its end is not confirmed.
+    pub(crate) async fn stop(&self, channel: u64) -> bool {
+        let stopped = self.supervisor.stop(channel, None, StopReason::RowGone);
+        stopped.await.is_none()
+    }
+
+    /// Whether a live writer runs the channel under the gateway's authority, starting one when
+    /// none does: a running slot whose host ended or that posts under a home is replaced.
+    pub(crate) async fn ensure(&self, channel: u64) -> bool {
+        let Some(Some(start)) = self.start.get() else {
+            return false;
+        };
+        if channel_home::registered_channel(channel).is_some() {
+            return false;
+        }
+        let gateway = Arc::as_ptr(&self.gateway) as usize;
+        #[cfg(test)]
+        let any = writer_mutant("return_keeps_home_bound_writer");
+        #[cfg(not(test))]
+        let any = false;
+        let ours = |bundle: &WriterBundle| any || bundle.0.authority() == gateway;
+        let running = self.supervisor.running(channel, ours) == Some(true);
+        #[cfg(test)]
+        if running && writer_mutant("running_slot_counts_as_alive") {
+            return true;
+        }
+        if running && self.readiness.is_hosted(channel) {
+            return true;
+        }
+        if let Some(Phase::Blocked(..) | Phase::Starting(_) | Phase::Stopping(_)) =
+            self.supervisor.phase(channel)
+        {
+            return false;
+        }
+        let start = Arc::clone(start);
+        let build = move |_| async move {
+            let started = start(channel).map(WriterBundle);
+            started.ok_or_else(|| "no writer started".to_owned())
+        };
+        self.supervisor.start(channel, build).await.is_ok()
+    }
+}
+
+/// Test-only mutants of the watch's writer return.
+#[cfg(test)]
+pub(crate) fn writer_mutant(name: &str) -> bool {
+    std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some(name)
+}
+
 impl BootPort {
     /// The channel's reads against this process's writer, with `restored` as its runtime sets it.
     pub(crate) fn reading(channel: u64, restored: Arc<AtomicBool>, reset: LegacyReset) -> Self {
@@ -184,14 +293,17 @@ pub(crate) struct Boot<P> {
     pub(crate) local: String,
     pub(crate) pool: PgPool,
     pub(crate) rows: Rows,
-    /// Channels that may be delegated here (writer selection with a local Herdr endpoint): held
-    /// `Lost` when the rows cannot be read.
+    /// This provider's channels that may be delegated here (writer selection with a local Herdr
+    /// endpoint): watched for a row naming this node, and held `Lost` when the rows cannot be read.
     pub(crate) candidates: Vec<u64>,
     pub(crate) port: P,
+    /// The gateway runtime's writers a reclaimed channel returns to; none on other roles.
+    pub(crate) writers: Option<Arc<ChannelWriters>>,
 }
 
 /// Registers a gate for each of this provider's rows naming this node holder or target, and starts
-/// its watch and, for the holder, its lease. `prepare` runs only with the switch on.
+/// its watch and, for the holder, its lease; a candidate with no such row is watched without a
+/// gate. `prepare` runs only with the switch on.
 pub(crate) async fn start<P, R>(
     switch: Option<bool>,
     prepare: impl FnOnce() -> Option<Boot<P>>,
@@ -207,15 +319,22 @@ where
         tracing::error!("channel homes need a PG pool and cluster.instance_id; none started");
         return Vec::new();
     };
-    let (channels, unreadable) = match boot.rows.await {
+    let (mut channels, unreadable) = match boot.rows.await {
         Ok(rows) => (named(&rows, &boot.provider, &boot.local), false),
         Err(error) => {
             tracing::error!(%error, "channel home rows unreadable at boot; candidates held");
             (boot.candidates.iter().map(u64::to_string).collect(), true)
         }
     };
+    let mounted = channels.len();
+    for candidate in &boot.candidates {
+        let candidate = candidate.to_string();
+        if !channels.contains(&candidate) {
+            channels.push(candidate);
+        }
+    }
     let mut started = Vec::new();
-    for channel in channels {
+    for (index, channel) in channels.into_iter().enumerate() {
         let Ok(id) = channel.parse::<u64>() else {
             tracing::error!(
                 channel,
@@ -224,22 +343,25 @@ where
             continue;
         };
         stop(&channel).await;
-        let home = Arc::new(HomeGate::new(&channel, &boot.local));
-        if unreadable {
-            home.note_drain(Some(Blocker::RowUnreadable.as_str()));
+        let home = (index < mounted).then(|| Arc::new(HomeGate::new(&channel, &boot.local)));
+        if let Some(home) = &home {
+            if unreadable {
+                home.note_drain(Some(Blocker::RowUnreadable.as_str()));
+            }
+            channel_home::register(Arc::clone(home));
+            started.push(Arc::clone(home));
         }
-        channel_home::register(Arc::clone(&home));
         let lease = Arc::new(LeaseSlot::default());
-        let port = (boot.port)(id);
-        let watching = watch(
-            boot.pool.clone(),
-            Arc::clone(&home),
-            port,
-            Arc::clone(&lease),
-        );
-        let watch = tokio::spawn(watching);
+        let seen = Seen {
+            pool: boot.pool.clone(),
+            id,
+            local: boot.local.clone(),
+            mounted: home,
+            candidate: boot.candidates.contains(&id),
+            writers: boot.writers.clone(),
+        };
+        let watch = tokio::spawn(watch(seen, (boot.port)(id), Arc::clone(&lease)));
         live(|live| live.insert(channel, Watched { watch, lease }));
-        started.push(home);
     }
     started
 }
@@ -293,23 +415,120 @@ async fn end(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
+/// What one watch follows: its channel, the gate it has mounted while a row names this node, and
+/// whether it outlives the row (a candidate does).
+struct Seen {
+    pool: PgPool,
+    id: u64,
+    local: String,
+    mounted: Option<Arc<HomeGate>>,
+    candidate: bool,
+    writers: Option<Arc<ChannelWriters>>,
+}
+
+impl Seen {
+    /// The mounted gate, registering a fresh one when none is.
+    fn mount(&mut self) -> Arc<HomeGate> {
+        let (channel, local) = (self.id.to_string(), self.local.as_str());
+        let home = self.mounted.get_or_insert_with(|| {
+            let home = Arc::new(HomeGate::new(&channel, local));
+            channel_home::register(Arc::clone(&home));
+            home
+        });
+        Arc::clone(home)
+    }
+
+    fn unmount(&mut self) {
+        if let Some(home) = self.mounted.take() {
+            channel_home::unregister_if_same(&home);
+        }
+    }
+
+    async fn stop_writer(&self) -> bool {
+        match &self.writers {
+            Some(writers) => writers.stop(self.id).await,
+            None => true,
+        }
+    }
+
+    async fn ensure_writer(&self) -> bool {
+        match &self.writers {
+            Some(writers) => writers.ensure(self.id).await,
+            None => true,
+        }
+    }
+
+    /// Reclaimed to this node: the channel's writer is joined before the row goes, and only once
+    /// it is gone does the gateway's writer start.
+    async fn give_back(&mut self, home: &Arc<HomeGate>, epoch: i64) {
+        #[cfg(test)]
+        if writer_mutant("return_starts_writer_before_old_join")
+            && let Some(start) = self
+                .writers
+                .as_ref()
+                .and_then(|writers| writers.start.get())
+            && let Some(start) = start
+        {
+            drop(start(self.id));
+        }
+        #[cfg(test)]
+        let joined = writer_mutant("return_keeps_home_bound_writer") || self.stop_writer().await;
+        #[cfg(not(test))]
+        let joined = self.stop_writer().await;
+        if joined
+            && finish_return(&self.pool, home, epoch)
+                .await
+                .unwrap_or(false)
+        {
+            self.mounted = None;
+            self.ensure_writer().await;
+        }
+    }
+}
+
 /// Follows the row each renewal period: renews and drains as holder, adopts a release or ends a
-/// reclaim as target, and returns the channel to the gateway rules once the row names it no more.
-async fn watch<R>(pool: PgPool, home: Arc<HomeGate>, port: BootPort<R>, lease: Arc<LeaseSlot>)
+/// reclaim as target, and while another node holds the channel keeps watching without a gate.
+async fn watch<R>(mut seen: Seen, port: BootPort<R>, lease: Arc<LeaseSlot>)
 where
     R: DrainPort + Send + Sync + 'static,
 {
-    while !home.withdrawn() {
-        match o_channel_homes::read_home(&pool, home.channel_id()).await {
-            Err(_) => home.note_drain(Some(Blocker::RowUnreadable.as_str())),
-            Ok(row) => {
-                let local = Some(home.holder());
-                let row = row
-                    .filter(|row| row.holder.as_deref() == local || row.target.as_deref() == local);
-                let Some(row) = row else {
-                    channel_home::unregister_if_same(&home);
+    while !seen.mounted.as_ref().is_some_and(|home| home.withdrawn()) {
+        let read = o_channel_homes::read_home(&seen.pool, &seen.id.to_string()).await;
+        #[cfg(test)]
+        let read = match read {
+            Err(_) if writer_mutant("return_read_error_as_absence") => Ok(None),
+            read => read,
+        };
+        let name = seen.local.clone();
+        let local = Some(name.as_str());
+        match read {
+            // An unreadable row is not its absence: nothing returns and no writer starts.
+            Err(_) => {
+                if let Some(home) = &seen.mounted {
+                    home.note_drain(Some(Blocker::RowUnreadable.as_str()));
+                }
+            }
+            Ok(None) => {
+                seen.unmount();
+                lease.end().await;
+                if seen.ensure_writer().await && !seen.candidate {
                     break;
-                };
+                }
+            }
+            Ok(Some(row)) if row.holder.as_deref() != local && row.target.as_deref() != local => {
+                lease.end().await;
+                #[cfg(test)]
+                if writer_mutant("watch_ends_when_row_names_other_holder") {
+                    seen.unmount();
+                    break;
+                }
+                // Another node's channel: the gate goes only once this runtime's writer has ended.
+                if seen.stop_writer().await {
+                    seen.unmount();
+                }
+            }
+            Ok(Some(row)) => {
+                let home = seen.mount();
                 home.note_drain(None);
                 if row.holder.as_deref() != local {
                     lease.end().await;
@@ -318,22 +537,17 @@ where
                         row.state == HomeState::Released && row.target.as_deref() == local;
                     if releases_here && port.restored() {
                         let (channel, holder) = (home.channel_id(), home.holder());
-                        let adopted = o_channel_homes::adopt(&pool, channel, holder, row.epoch);
+                        let adopted =
+                            o_channel_homes::adopt(&seen.pool, channel, holder, row.epoch);
                         if let Ok(HomeWrite::Applied(_)) = adopted.await {
                             continue;
                         }
                     }
-                    // The reclaim's target ends it: the row goes and the channel unregisters.
-                    let reclaimed = row.state == HomeState::Reclaimed;
-                    if reclaimed
-                        && finish_return(&pool, &home, row.epoch)
-                            .await
-                            .unwrap_or(false)
-                    {
-                        break;
+                    if row.state == HomeState::Reclaimed {
+                        seen.give_back(&home, row.epoch).await;
                     }
                 } else {
-                    lease.renew_at(&pool, &home, row.epoch).await;
+                    lease.renew_at(&seen.pool, &home, row.epoch).await;
                     // The boot restore runs before any drain round reads the channel's turns.
                     let settled = port.restore_settled(&home, row.epoch).await;
                     let draining =
@@ -341,7 +555,11 @@ where
                     if draining && !settled {
                         home.note_drain(Some(Blocker::TurnUnreadable.as_str()));
                     } else if draining {
-                        drain::run_drain(pool.clone(), Arc::clone(&home), port.clone()).await;
+                        let blocker = match drain::drain_round(&seen.pool, &home, &port).await {
+                            drain::DrainStep::Waiting(blocker) => Some(blocker.as_str()),
+                            drain::DrainStep::Left(_) | drain::DrainStep::NotDraining => None,
+                        };
+                        home.note_drain(blocker);
                     }
                 }
             }
