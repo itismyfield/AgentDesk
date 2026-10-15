@@ -83,8 +83,6 @@ pub(crate) use store::lock_inflight_state_path;
 #[cfg(test)]
 use store::second_handle_try_lock;
 pub(crate) use store::try_lock_inflight_state_path;
-#[cfg(all(test, unix))]
-pub(crate) use store::{TryLockRefusal, try_lock_inflight_state_path_typed};
 
 // #3715 / #3835: the rebind-origin dead-watcher helpers, staleness predicates,
 // and stale data-row cleanup live in this capped sibling. Canonical lock sidecars
