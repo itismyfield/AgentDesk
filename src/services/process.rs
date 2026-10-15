@@ -256,12 +256,12 @@ impl ProcessIdentity {
         }
         ProcessIdentityProbe::ProbeError
     }
-
-    pub(crate) fn from_persisted(starttime: Option<u128>, macos_lstart_hash: Option<u128>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_persisted(starttime: Option<u128>, _lstart_hash: Option<u128>) -> Self {
         Self {
             starttime,
             #[cfg(target_os = "macos")]
-            macos_lstart_hash,
+            macos_lstart_hash: _lstart_hash,
         }
     }
 

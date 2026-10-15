@@ -470,3 +470,159 @@ async fn a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels() {
     assert!(!unavailable(turn(HERDR).await));
     assert_eq!(writers(), (2, 0));
 }
+
+/// What `channel`'s drain waits on, as health shows it.
+fn blocker(channel: u64) -> Option<String> {
+    let health = channel_home::health()?;
+    let (draining, channel) = (
+        health["home_draining"].as_array()?.iter(),
+        channel.to_string(),
+    );
+    let mut named = draining.filter(|entry| entry["channel"].as_str() == Some(channel.as_str()));
+    named.next()?["blocker"].as_str().map(str::to_owned)
+}
+
+/// Polls `channel`'s blocker until it reads `want`, recording each distinct value seen.
+async fn blocker_reaches(channel: u64, want: &str, seen: &mut Vec<String>) -> bool {
+    for _ in 0..1_000 {
+        let now = blocker(channel);
+        if let Some(now) = now.filter(|now| seen.last() != Some(now)) {
+            seen.push(now);
+        }
+        if seen.last().map(String::as_str) == Some(want) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// A standby restarted as a reclaim's holder restores each channel's input before its drain reads
+/// turns: a restored queue is busy until cleared, a failed restore stays unknown; neither leaves.
+#[tokio::test]
+async fn th6_standby_reclaim_restart_restores_turns_pg() {
+    use crate::services::turn_orchestrator::{InterventionMode, save_channel_queue};
+    const QUEUED: u64 = 9_300_000_000_000_021;
+    const BROKEN: u64 = 9_300_000_000_000_022;
+    const ITEM: u64 = 9_300_000_000_000_031;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::runtime_root().expect("runtime root");
+    let config = crate::runtime_layout::config_file_path(&root);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let agent = |id: u64| {
+        let channel = format!("    channels:\n      claude:\n        id: \"{id}\"\n");
+        format!("  - id: s3a-{id}\n    name: \"s3a {id}\"\n    provider: claude\n{channel}")
+    };
+    let agents = [QUEUED, BROKEN].map(agent).concat();
+    std::fs::write(config, format!("server:\n  port: 8791\nagents:\n{agents}")).unwrap();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let applied = |write: Result<HomeWrite<o_channel_homes::ChannelHome>, _>| match write {
+        Ok(HomeWrite::Applied(row)) => row,
+        other => panic!("{other:?}"),
+    };
+    for channel in [QUEUED, BROKEN].map(|id| id.to_string()) {
+        let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
+        let row = applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
+        let row = applied(o_channel_homes::adopt(&pool, &channel, "mini", row.epoch).await);
+        applied(o_channel_homes::begin_reclaim(&pool, &channel, row.epoch, "gw").await);
+    }
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    shared.restart.reconcile_done.store(false, Ordering::SeqCst);
+    let provider = ProviderKind::Claude;
+    let item = Intervention {
+        author_id: UserId::new(7),
+        author_is_bot: false,
+        message_id: MessageId::new(ITEM),
+        queued_generation: 1,
+        source_message_ids: vec![MessageId::new(ITEM)],
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: "left by the last process".into(),
+        mode: InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    };
+    let queued = ChannelId::new(QUEUED);
+    save_channel_queue(&provider, &shared.token_hash, queued, &[item], None).unwrap();
+    let placeholders = crate::services::discord::runtime_store::discord_queued_placeholders_root();
+    let broken = placeholders
+        .unwrap()
+        .join("claude")
+        .join(&shared.token_hash);
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join(format!("{BROKEN}.json")), "not json").unwrap();
+    let _hosts = crate::config::session_hosts::force_for_test(
+        Some("mini"),
+        &[(QUEUED, "mini"), (BROKEN, "mini")],
+    );
+    let (_log, _rest) = super::super::shared_state::test_rest::recording_mock(1, QUEUED).await;
+
+    // The production standby order: the provider reconcile settles before the homes start.
+    let registry = Arc::new(health::HealthRegistry::new());
+    register_standby_and_settle_reconcile(&registry, &provider, &shared).await;
+    let on = settings(Some(true));
+    let started = start_channel_homes(&shared, &provider, HomeRole::Standby, &on);
+    assert_eq!(started.await.len(), 2);
+
+    let mut seen = Vec::new();
+    let busy = blocker_reaches(QUEUED, "turn_running", &mut seen).await;
+    assert_eq!(
+        seen,
+        ["turn_unreadable", "turn_running"],
+        "unknown until restored"
+    );
+    assert!(busy);
+    let mailbox = shared.mailbox(queued).try_snapshot().await.unwrap();
+    let restored = mailbox
+        .intervention_queue
+        .iter()
+        .map(|item| item.message_id.get());
+    assert_eq!(
+        restored.collect::<Vec<_>>(),
+        [ITEM],
+        "the persisted queue is in the mailbox"
+    );
+    let mut unread = Vec::new();
+    assert!(blocker_reaches(BROKEN, "turn_unreadable", &mut unread).await);
+
+    let persistence =
+        crate::services::discord::queue_persistence_context(&shared, &provider, queued);
+    let mailbox = shared.mailbox(queued);
+    let cleared = mailbox
+        .cancel_queued_primary_message(MessageId::new(ITEM), persistence)
+        .await;
+    assert!(
+        cleared.removed.is_some(),
+        "the mailbox clears the restored item"
+    );
+    assert!(
+        blocker_reaches(QUEUED, "owed_unreadable", &mut seen).await,
+        "{seen:?}"
+    );
+    assert_eq!(seen, ["turn_unreadable", "turn_running", "owed_unreadable"]);
+    assert_eq!(
+        blocker(BROKEN).as_deref(),
+        Some("turn_unreadable"),
+        "a failed restore stays unknown"
+    );
+    assert_eq!(unread, ["turn_unreadable"]);
+    for channel in [QUEUED, BROKEN].map(|id| id.to_string()) {
+        let row = o_channel_homes::read_home(&pool, &channel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.state, row.holder.as_deref()),
+            (o_channel_homes::HomeState::Reclaiming, Some("mini"))
+        );
+        channel_home_boot::stop(&channel).await;
+        channel_home::unregister(&channel);
+    }
+    pool.close().await;
+    db.drop().await;
+}

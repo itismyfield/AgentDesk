@@ -12,9 +12,7 @@
 
 mod abandon;
 mod identity;
-pub(in crate::services::discord) use identity::{
-    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
-};
+pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;
 #[cfg(unix)]
 pub(in crate::services::discord) use identity::clear_admitted_restart_terminal;
