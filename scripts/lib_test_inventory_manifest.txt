@@ -3523,6 +3523,7 @@ services::discord::commands::control::clear_persist_failure_tests::failed_clear_
 services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+services::discord::commands::control::clear_wait_tests::a_clear_waits_out_a_held_pane_effect_and_then_discards_the_live_head
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_low_level_reset_and_unavailable_context_preserve_evidence
 services::discord::commands::control::codex_verified_clear_tests::codex_verified_managed_reset_refuses_history_reset_and_recreation
@@ -13948,6 +13949,8 @@ services::turn_orchestrator::queued_head::s2a_tests::s2a_terminal_sources_drop_o
 services::turn_orchestrator::queued_head::s2a_tests::s2a_unknown_head_cannot_be_skipped_to_dispatch_its_tail
 services::turn_orchestrator::queued_head::tests::a_claim_and_a_dispatch_never_both_own_the_queue_front
 services::turn_orchestrator::queued_head::tests::a_clear_discards_an_unknown_head_from_disk_and_a_failed_write_keeps_it
+services::turn_orchestrator::queued_head::tests::a_clear_leaves_memory_and_disk_alike_when_a_parent_fsync_fails
+services::turn_orchestrator::queued_head::tests::a_clear_reclaims_a_dequeued_input_and_a_failed_marker_removal_keeps_it_once
 services::turn_orchestrator::queued_head::tests::a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes
 services::turn_orchestrator::queued_head::tests::a_not_sent_head_keeps_its_place_and_payload
 services::turn_orchestrator::queued_head::tests::a_possibly_sent_head_found_by_a_restart_is_unknown_and_never_resubmitted

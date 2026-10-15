@@ -308,14 +308,20 @@ fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
             assert_eq!(cleared.persistence_error, None, "{phase}");
             assert!(cleared.removed_token.is_some());
             let (head_id, behind) = (head.message_id, MessageId::new(230 + index as u64));
-            for id in [head_id, behind, MessageId::new(901)] {
+            let reclaimed = MessageId::new(999);
+            for id in [head_id, behind, MessageId::new(901), reclaimed] {
                 assert!(cleared.discarded_message_ids.contains(&id), "{phase}: {id}");
             }
             let kinds: Vec<_> = cleared.queue_exit_events.iter().map(|e| e.kind).collect();
-            assert_eq!(kinds, [QueueExitKind::Superseded; 2], "{phase}");
+            assert_eq!(kinds, [QueueExitKind::Superseded; 3], "{phase}");
             assert!(
-                !path(channel).exists(),
-                "{phase}: the cleared snapshot holds nothing"
+                !marker.exists(),
+                "{phase}: the marker's input left with the queue"
+            );
+            assert_eq!(
+                bytes(channel),
+                b"[]",
+                "{phase}: the cleared snapshot is empty"
             );
             assert_eq!(std::fs::read(&other).unwrap(), b"[]");
             tokio::time::timeout(Duration::from_millis(25), signal.wait())
@@ -330,7 +336,7 @@ fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
                 assert!(matches!(settled, HeadSettle::Stale), "{phase}");
             }
             assert!(queue(&handle).await.is_empty(), "{phase}");
-            assert!(!path(channel).exists(), "{phase}");
+            assert_eq!(bytes(channel), b"[]", "{phase}");
             let next = human(240 + index as u64, 8, "next");
             assert!(handle.enqueue(next.clone(), ctx()).await.enqueued);
             let taken = handle.take_next_soft(ctx()).await.intervention;

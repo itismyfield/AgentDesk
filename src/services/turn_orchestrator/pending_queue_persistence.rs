@@ -1042,7 +1042,7 @@ pub(super) mod save_fault {
             .push(channel_id);
     }
 
-    pub(super) fn take(channel_id: ChannelId) -> bool {
+    pub(in crate::services::turn_orchestrator) fn take(channel_id: ChannelId) -> bool {
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         let index = armed.iter().position(|armed| *armed == channel_id);
         index.map(|index| armed.swap_remove(index)).is_some()
