@@ -716,7 +716,6 @@ def run_smoke_profile(profile: str, runner: Runner, *, strict: bool = True) -> l
     simple = {
         "claude": ("claude", "--version"),
         "codex": ("codex", "--version"),
-        "claude-e": ("claude-e", "--version"),
         "tmux": ("tmux", "-V"),
         "gh": ("gh", "--version"),
         "python-3-14": ("python3.14", "--version"),
