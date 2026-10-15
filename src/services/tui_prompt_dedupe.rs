@@ -376,9 +376,11 @@ pub use prompt_identity::{
     record_announced_prompt_id, withdraw_unannounced_prompt_id,
 };
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
-#[cfg(all(test, unix))]
-pub(crate) use runtime_binding::codex_restore_observation_for_tests;
 pub use runtime_binding::*;
+#[cfg(all(test, unix))]
+pub(crate) use runtime_binding::{
+    codex_restore_observation_for_tests, codex_restore_settled_for_tests,
+};
 
 #[cfg(test)]
 mod injected_steer_tests;

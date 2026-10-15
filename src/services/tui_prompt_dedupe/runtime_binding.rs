@@ -7,14 +7,16 @@ pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, befor
 pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
-#[cfg(all(test, unix))]
-pub(crate) use codex_cursor::codex_restore_observation_for_tests;
 #[cfg(unix)]
 pub(crate) use codex_cursor::{
     codex_parked_owner_source, codex_restore_checkpoint, codex_restore_observed_end,
     codex_restore_parked_owners, codex_restore_scan_floor, codex_restore_source_current,
     complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
     prepare_codex_restore, record_codex_unknown_span,
+};
+#[cfg(all(test, unix))]
+pub(crate) use codex_cursor::{
+    codex_restore_observation_for_tests, codex_restore_settled_for_tests,
 };
 #[cfg(unix)]
 pub(super) use codex_cursor::{remember_codex_restored_origin, settle_codex_restored_join};

@@ -25,7 +25,7 @@ use crate::services::tui_prompt_dedupe::pane_registration::{
 use std::collections::HashMap;
 
 #[cfg(unix)]
-pub(super) mod codex_marker;
+pub(in crate::services::discord) mod codex_marker;
 #[cfg(unix)]
 use codex_marker::{CodexTuiMarkerRehydrateDecision, codex_tui_marker_rehydrate_decision};
 #[cfg(unix)]

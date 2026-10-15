@@ -29,6 +29,9 @@ enum ParkedRace {
     Rotation,
     PendingRotation,
     RotationSteer,
+    ReceiptLimit,
+    DirectPending,
+    ReceiptFailure,
 }
 
 fn native_receipts(
@@ -66,6 +69,9 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         Some(ParkedRace::Rotation) => 16,
         Some(ParkedRace::PendingRotation) => 17,
         Some(ParkedRace::RotationSteer) => 18,
+        Some(ParkedRace::ReceiptLimit) => 101,
+        Some(ParkedRace::DirectPending) => 102,
+        Some(ParkedRace::ReceiptFailure) => 103,
     };
     let tmux_name = format!("{base_tmux}-{case}");
     let tmux = tmux_name.as_str();
@@ -106,7 +112,12 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         + &opening_record(&turn(12), "legacy L2")
         + &answer_for(&turn(12), "LEGACY_6903_L2");
     let boundary = fx.append(&records);
-    fx.append(user_record("next partial 6903", &turn(3)).trim_end_matches('\n'));
+    if !matches!(
+        race,
+        Some(ParkedRace::ReceiptLimit | ParkedRace::DirectPending | ParkedRace::ReceiptFailure)
+    ) {
+        fx.append(user_record("next partial 6903", &turn(3)).trim_end_matches('\n'));
+    }
     if matches!(race, Some(ParkedRace::Expired)) {
         let path = root
             .join("runtime/codex_handoff_held")
@@ -305,6 +316,20 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
                         assert_parked_gate_denies(&fx, row, actor.clone(), case).await;
                         actor.cancelled.store(true, Ordering::Release);
                     }
+                    Some(ParkedRace::ReceiptFailure) => {
+                        assert_eq!(
+                            dedupe::codex_restore_settled_for_tests(tmux),
+                            Some(0),
+                            "ACK must precede settlement"
+                        );
+                        let path = crate::services::discord::outbound::delivery_record::delivery_record_path(&ProviderKind::Codex, row.delivery_record_owner_channel_id()).unwrap();
+                        *prepare.after_send.lock().unwrap() = Some(Box::new(move || {
+                            if path.is_file() {
+                                std::fs::remove_file(&path).unwrap();
+                            }
+                            std::fs::create_dir_all(&path).unwrap();
+                        }));
+                    }
                     Some(ParkedRace::PendingRotation) => {
                         assert!(native_receipts(fx.codex.channel.get()).is_empty());
                         let previous = dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
@@ -350,11 +375,28 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
                         | ParkedRace::Expired
                         | ParkedRace::NextAnswer
                         | ParkedRace::Rotation
-                        | ParkedRace::RotationSteer,
+                        | ParkedRace::RotationSteer
+                        | ParkedRace::ReceiptLimit
+                        | ParkedRace::DirectPending,
                     )
                     | None => {}
                 }
                 prepare.release.notify_one();
+                if matches!(race, Some(ParkedRace::ReceiptFailure)) {
+                    assert!(fx.delivered(STEER_ANSWER).await);
+                    fx.polls(3).await;
+                    assert!(native_receipts(fx.codex.channel.get()).is_empty());
+                    assert_eq!(
+                        dedupe::codex_restore_settled_for_tests(tmux),
+                        Some(0),
+                        "failed receipt must not settle custody"
+                    );
+                    *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
+                        .lock()
+                        .unwrap() = None;
+                    fx.finish();
+                    return;
+                }
                 if matches!(
                     race,
                     Some(
@@ -485,8 +527,31 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         );
         assert_eq!(native_receipts(fx.codex.channel.get()).len(), 2);
     }
-    if matches!(race, Some(ParkedRace::Rotation | ParkedRace::RotationSteer)) {
-        assert_eq!(native_receipts(fx.codex.channel.get()).len(), 1);
+    if matches!(race, Some(ParkedRace::ReceiptLimit)) {
+        let parked_receipt = native_receipts(fx.codex.channel.get())[0].clone();
+        for n in 100..132 {
+            deliver_direct_terminal(&mut fx, n).await;
+        }
+        let receipts = native_receipts(fx.codex.channel.get());
+        assert_eq!(receipts.len(), 32);
+        assert!(
+            !receipts
+                .iter()
+                .any(|receipt| receipt.source == parked_receipt.source),
+            "P receipt must actually be drained"
+        );
+    }
+    if matches!(race, Some(ParkedRace::DirectPending)) {
+        assert_eq!(dedupe::codex_restore_settled_for_tests(tmux), Some(1));
+        direct_pending_rotation(&root, &mut fx).await;
+        fx.finish();
+        return;
+    }
+    if matches!(
+        race,
+        Some(ParkedRace::Rotation | ParkedRace::RotationSteer | ParkedRace::ReceiptLimit)
+    ) {
+        let prior_receipts = native_receipts(fx.codex.channel.get()).len();
         let old = fx.codex.rollout.clone();
         let next = root.join("completed-rotation.jsonl");
         std::fs::write(
@@ -533,7 +598,10 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
             fx.anchor_of("AFTER_ROTATION_6903_ANSWER"),
         );
         assert_eq!(fx.sent(STEER_ANSWER).len(), 1);
-        assert_eq!(native_receipts(fx.codex.channel.get()).len(), 2);
+        assert_eq!(
+            native_receipts(fx.codex.channel.get()).len(),
+            (prior_receipts + 1).min(32)
+        );
     }
     fx.finish();
 }
@@ -2152,5 +2220,188 @@ fn codex_6903_markerless_discovery_restores_saved_parked_input() {
 #[test]
 fn codex_6903_markerless_discovery_without_custody_keeps_complete_boundary() {
     run(|root| Box::pin(markerless_saved_custody(root, false)));
+}
 
+fn terminal_only(native: &str, answer: &str) -> String {
+    rollout_line(serde_json::json!({"type":"event_msg", "payload":{
+        "type":"task_complete", "turn_id":native, "last_agent_message":answer}}))
+}
+
+async fn deliver_direct_terminal(fx: &mut Fixture, n: u32) {
+    let prompt = format!("DIRECT_6903_PROMPT_{n}");
+    let answer = format!("DIRECT_6903_ANSWER_{n}");
+    fx.append(&opening(&turn(n), &prompt));
+    let mut events = events_for(fx, &prompt, Duration::from_secs(5)).await;
+    assert_eq!(events.len(), 1, "direct admission is unique");
+    super::super::super::super::relay_observed_prompt(&fx.shared, events.remove(0)).await;
+    let end = fx.append(&terminal_only(&turn(n), &answer));
+    assert!(fx.delivered(&answer).await);
+    assert!(
+        wait_for(Duration::from_secs(5), || native_receipts(
+            fx.codex.channel.get()
+        )
+        .iter()
+        .any(|r| r.source.range.1 == end))
+        .await,
+        "actual receipt must commit"
+    );
+    assert!(
+        wait_for(Duration::from_secs(5), || fx.lease().is_none()).await,
+        "completed direct lease must release"
+    );
+    assert_eq!(fx.sent(&answer).len(), 1);
+    fx.assert_answer(&answer, fx.anchor_of(&answer));
+}
+
+async fn direct_pending_rotation(root: &Path, fx: &mut Fixture) {
+    let prompt = "DIRECT_Q_6903";
+    let answer = "DIRECT_Q_6903_ANSWER";
+    let tmux = fx.codex.tmux.clone();
+    fx.append(&opening(&turn(80), prompt));
+    let mut events = events_for(fx, prompt, Duration::from_secs(5)).await;
+    assert_eq!(events.len(), 1);
+    let pause = Arc::new(
+        crate::services::discord::turn_bridge::TerminalPrepareTestHook {
+            channel_id: fx.codex.channel.get(),
+            before_admission: true,
+            ..Default::default()
+        },
+    );
+    *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
+        .lock()
+        .unwrap() = Some(pause.clone());
+    super::super::super::super::relay_observed_prompt(&fx.shared, events.remove(0)).await;
+    fx.append(&terminal_only(&turn(80), answer));
+    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
+        .await
+        .expect("actual adapter admission pause");
+    assert!(
+        fx.sent(answer).is_empty(),
+        "terminal-only Q cannot publish before admission"
+    );
+    let previous = dedupe::runtime_binding_for_tmux_session(&tmux).unwrap();
+    let lease = fx.lease();
+    assert!(lease.is_some());
+    let next = root.join("direct-pending-rotation.jsonl");
+    std::fs::write(
+        &next,
+        rollout_line(
+            serde_json::json!({"type":"session_meta", "payload":{"id":"direct-rotation-6903"}}),
+        ),
+    )
+    .unwrap();
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        &tmux,
+        &next,
+        Some("direct-rotation-6903"),
+    )
+    .unwrap();
+    assert!(
+        super::super::super::super::rehydration::rehydrate_codex_tui_binding_for_tests(
+            &tmux,
+            fx.codex.channel.get()
+        )
+        .is_none(),
+        "unfinished direct lease must block source replacement"
+    );
+    assert_eq!(
+        dedupe::runtime_binding_for_tmux_session(&tmux).unwrap(),
+        previous
+    );
+    assert_eq!(fx.lease(), lease);
+    pause.release.notify_one();
+    assert!(fx.delivered(answer).await);
+    assert!(
+        wait_for(Duration::from_secs(5), || native_receipts(
+            fx.codex.channel.get()
+        )
+        .iter()
+        .any(|r| r.source.range.1 > previous.last_offset))
+        .await
+    );
+    assert!(wait_for(Duration::from_secs(5), || fx.lease().is_none()).await);
+    *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
+        .lock()
+        .unwrap() = None;
+    fx.polls(3).await;
+    let after_ack =
+        crate::services::codex_tui::session::read_codex_tui_rollout_marker(&tmux).unwrap();
+    assert_eq!(
+        after_ack.rollout_path.display().to_string(),
+        previous.output_path,
+        "the current source checkpoints its ACK before a successor is published"
+    );
+    // Reoffer the successor after the current source has finished its checkpoint.
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        &tmux,
+        &next,
+        Some("direct-rotation-6903"),
+    )
+    .unwrap();
+    let fresh = super::super::super::super::rehydration::rehydrate_codex_tui_binding_for_tests(
+        &tmux,
+        fx.codex.channel.get(),
+    )
+    .expect("ACK and receipt release source replacement");
+    assert_eq!(fresh.output_path, next.display().to_string());
+    fx.codex.rollout = next;
+    deliver_direct_terminal(fx, 81).await;
+    fx.polls(3).await;
+    assert_eq!(fx.sent(answer).len(), 1);
+    fx.assert_answer(answer, fx.anchor_of(answer));
+}
+
+#[test]
+fn codex_6903_parked_completion_survives_receipt_limit_rotation() {
+    run(|root| {
+        Box::pin(restored_historical_answer(
+            root,
+            true,
+            Some(ParkedRace::ReceiptLimit),
+        ))
+    });
+}
+
+#[test]
+fn codex_6903_failed_receipt_keeps_parked_custody_unsettled() {
+    run(|root| {
+        Box::pin(restored_historical_answer(
+            root,
+            true,
+            Some(ParkedRace::ReceiptFailure),
+        ))
+    });
+}
+
+#[test]
+fn codex_6903_settled_custody_still_protects_pending_direct_lease() {
+    run(|root| {
+        Box::pin(restored_historical_answer(
+            root,
+            true,
+            Some(ParkedRace::DirectPending),
+        ))
+    });
+}
+
+#[test]
+fn codex_6903_custody_free_restore_protects_pending_direct_lease() {
+    run(|root| {
+        Box::pin(async move {
+            let _tmux = live_pane_tmux(&root);
+            let mut fx =
+                Fixture::start(&root, 6_903_991, "AgentDesk-codex-6903-direct-pending").await;
+            dedupe::reset_state_for_tests();
+            let binding =
+                super::super::super::super::codex_tui_rehydrated_binding_from_rollout_path(
+                    &fx.codex.tmux,
+                    &fx.codex.rollout,
+                    Some("s-5704".into()),
+                )
+                .unwrap();
+            dedupe::register_tmux_runtime_binding(&fx.codex.tmux, binding);
+            direct_pending_rotation(&root, &mut fx).await;
+            fx.finish();
+        })
+    });
 }

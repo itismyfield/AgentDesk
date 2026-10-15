@@ -601,9 +601,13 @@ pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
     current: &super::super::handoff::CodexRestore,
     source: &crate::services::codex_tui::session::checkpoint::Source,
 ) -> bool {
-    current.held.as_ref().is_none_or(|held| {
-        (0..held.parked.len()).all(|index| current.settled_inputs.contains(&index))
-    }) && !current.source.matches_path(&source.path)
+    !state
+        .external_input_relay_lease_by_tmux
+        .contains_key(&PromptKey::new("codex", tmux))
+        && current.held.as_ref().is_none_or(|held| {
+            (0..held.parked.len()).all(|index| current.settled_inputs.contains(&index))
+        })
+        && !current.source.matches_path(&source.path)
         && source.session_id.is_some()
         && state
             .handoff_by_tmux
@@ -899,4 +903,14 @@ pub(crate) fn finish_codex_restore(
     );
     state.codex_restore_by_tmux.insert(tmux.to_string(), scope);
     Ok(input_start)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn codex_restore_settled_for_tests(tmux: &str) -> Option<usize> {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .codex_restore_by_tmux
+        .get(tmux)
+        .map(|scope| scope.settled_inputs.len())
 }

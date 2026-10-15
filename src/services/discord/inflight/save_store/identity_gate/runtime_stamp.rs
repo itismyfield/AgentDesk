@@ -485,53 +485,6 @@ impl TuiTerminalRange {
             exact.then(|| self.clone())
         })
     }
-
-    /// Consume an existing ACK after process-local bindings disappear. This
-    /// never returns publication authority or installs a replacement binding.
-    pub(in crate::services::discord) fn confirmed_receipt_for_captured_row(
-        &self,
-        local: &InflightTurnState,
-        message_id: u64,
-    ) -> bool {
-        use crate::services::{discord::outbound::delivery_record, tui_prompt_dedupe as dedupe};
-        self.with_revalidated_row(local, |fresh| {
-            let source = &self.source;
-            if !source.is_authoritative()
-                || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&self.session_id))
-                || (self.source_file_identity.is_some()
-                    && fresh.tui_terminal_source_file_identity != self.source_file_identity)
-            {
-                return false;
-            }
-            crate::services::tmux_common::with_tmux_source_authority(
-                &source.tmux_session_name,
-                |authority| {
-                    let Some(path) = self.receipt_source_path() else {
-                        return false;
-                    };
-                    if !self.matches_durable_terminal(fresh, &path)
-                        || tmux_generation_file_mtime_ns(&source.tmux_session_name)
-                            != source.generation_mtime_ns
-                    {
-                        return false;
-                    }
-                    if dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
-                        .is_some()
-                        && !self.source_receipt_is_live(authority)
-                    {
-                        return false;
-                    }
-                    delivery_record::confirmed_delivery_receipt_exists(
-                        &ProviderKind::from_str_or_unsupported(&source.provider),
-                        poise::serenity_prelude::ChannelId::new(fresh.channel_id),
-                        message_id,
-                        source,
-                    )
-                },
-            )
-        })
-        .unwrap_or(false)
-    }
 }
 
 pub(in crate::services::discord) fn stamp_runtime_handoff_if_matches_identity<
@@ -1393,6 +1346,19 @@ impl InflightTurnState {
             return self
                 .admit_herdr_terminal(baseline, expected, can_deliver_directly, captured, frame)
                 .await;
+        }
+        #[cfg(test)]
+        let hook = crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
+            .lock()
+            .unwrap()
+            .clone();
+        #[cfg(test)]
+        if let Some(hook) = hook
+            && hook.channel_id == self.channel_id
+            && hook.before_admission
+        {
+            hook.entered.notify_one();
+            hook.release.notified().await;
         }
         let admission = captured_terminal_admission::CapturedTerminalAdmission {
             provider,

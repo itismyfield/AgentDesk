@@ -9172,7 +9172,9 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_actual_markerless_watcher_starts_before_the_partial_user
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_completed_parked_owner_also_releases_its_held_steer_on_rotation
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_completed_parked_receipt_allows_actual_marker_rotation
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_custody_free_restore_protects_pending_direct_lease
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_expired_restore_keeps_and_delivers_its_parked_answer
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_failed_receipt_keeps_parked_custody_unsettled
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_idle_prompt_preserves_unknown_prefix_statistics
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_idle_unknown_prefix_is_counted_once_and_leaves_partial_input
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_main_writer_first_rejects_completed_parked_answer
@@ -9180,6 +9182,7 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_markerless_discovery_without_custody_keeps_complete_boundary
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_matching_receipt_is_consumed_by_actual_retained_recovery
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_native_receipt_does_not_suppress_the_next_sealed_answer
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_parked_completion_survives_receipt_limit_rotation
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_parked_gate_keeps_nonbridge_authority_closed
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_parked_gate_rejects_a_current_successor_without_owner_handoff
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_parked_gate_rejects_another_valid_generation
@@ -9195,6 +9198,7 @@ services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_t
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_pending_parked_owner_blocks_actual_marker_rotation
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_rebind_writer_stores_the_complete_record_end
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_restore_recovers_only_the_parked_historical_answer
+services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_settled_custody_still_protects_pending_direct_lease
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_6903_writer_checkpoint_does_not_consume_parked_input_replay
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_bound_handoff_keeps_a_turnless_input_across_restart_in_its_turn
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::handoff_tests::codex_bound_handoff_keeps_a_turnless_input_across_restart_in_the_next_turn

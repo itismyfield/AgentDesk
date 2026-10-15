@@ -328,3 +328,65 @@ pub(super) fn captured_binding_matches(
             || (runtime == RuntimeHandoffKind::CodexTui
                 && parked.is_some_and(|proof| proof.permits(path, session, (start, end)))))
 }
+
+impl TuiTerminalRange {
+    pub(in crate::services::discord) fn complete_parked_delivery(&self) {
+        #[cfg(unix)]
+        if self.source.provider == ProviderKind::Codex.as_str() {
+            crate::services::discord::tui_prompt_relay::rehydration::codex_marker::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
+        }
+    }
+    /// Consume an existing ACK after process-local bindings disappear. This
+    /// never returns publication authority or installs a replacement binding.
+    pub(in crate::services::discord) fn confirmed_receipt_for_captured_row(
+        &self,
+        local: &InflightTurnState,
+        message_id: u64,
+    ) -> bool {
+        use crate::services::{discord::outbound::delivery_record, tui_prompt_dedupe as dedupe};
+        let confirmed = self
+            .with_revalidated_row(local, |fresh| {
+                let source = &self.source;
+                if !source.is_authoritative()
+                    || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&self.session_id))
+                    || (self.source_file_identity.is_some()
+                        && fresh.tui_terminal_source_file_identity != self.source_file_identity)
+                {
+                    return false;
+                }
+                crate::services::tmux_common::with_tmux_source_authority(
+                    &source.tmux_session_name,
+                    |authority| {
+                        let Some(path) = self.receipt_source_path() else {
+                            return false;
+                        };
+                        if !self.matches_durable_terminal(fresh, &path)
+                            || tmux_generation_file_mtime_ns(&source.tmux_session_name)
+                                != source.generation_mtime_ns
+                        {
+                            return false;
+                        }
+                        if dedupe::runtime_binding_for_tmux_session_under_source_authority(
+                            authority,
+                        )
+                        .is_some()
+                            && !self.source_receipt_is_live(authority)
+                        {
+                            return false;
+                        }
+                        delivery_record::confirmed_delivery_receipt_exists(
+                            &ProviderKind::from_str_or_unsupported(&source.provider),
+                            poise::serenity_prelude::ChannelId::new(fresh.channel_id),
+                            message_id,
+                            source,
+                        )
+                    },
+                )
+            })
+            .unwrap_or(false);
+        if confirmed {
+            self.complete_parked_delivery();
+        }
+        confirmed
+    }
+}

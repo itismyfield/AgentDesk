@@ -97,7 +97,7 @@ pub(super) fn bootstrap(tmux: &str, path: &Path, session: Option<String>) -> Opt
         }
         #[cfg(test)]
         super::idempotency_tests::bootstrap_pause(tmux);
-        finish_confirmed_parked_owners(tmux);
+        finish_confirmed_parked_owners(tmux, None);
         let plan = dedupe::prepare_codex_restore(tmux, source.clone(), custody).ok()?;
         let mut offset = 0;
         let mut total = ScanStats::default();
@@ -387,21 +387,40 @@ pub(in crate::services::discord::tui_prompt_relay) fn span_delivery_kind(
     }
 }
 
-fn finish_confirmed_parked_owners(tmux: &str) {
+pub(in crate::services::discord) fn finish_confirmed_parked_owners(
+    tmux: &str,
+    expected: Option<&crate::services::discord::inflight::CodexRange>,
+) {
     use crate::services::{discord::outbound::delivery_record as dr, tui_prompt_dedupe as dedupe};
     for (turn, owner, source) in dedupe::codex_restore_parked_owners(tmux) {
-        let authority = dr::watcher_owner_channel_for_delivery_channel(
-            &ProviderKind::Codex,
-            ChannelId::new(owner.0),
-            tmux,
-        )
-        .map_or(owner.0, |channel| channel.get());
+        if expected.is_some_and(|range| {
+            !source.matches_path(Path::new(&range.rollout_path))
+                || source.session_id.as_deref() != Some(range.session_id.as_str())
+                || owner.0 != range.source.delivery_channel_id
+                || owner.1 != range.source.turn_nonce
+                || owner.4 != range.identity.user_msg_id
+                || owner.5 != range.source.range.0
+        }) {
+            continue;
+        }
+        let authority = expected.map_or_else(
+            || {
+                dr::watcher_owner_channel_for_delivery_channel(
+                    &ProviderKind::Codex,
+                    ChannelId::new(owner.0),
+                    tmux,
+                )
+                .map_or(owner.0, |channel| channel.get())
+            },
+            |range| range.source.offset_authority_channel_id,
+        );
         let Some(record) = dr::read_record(&ProviderKind::Codex, authority) else {
             continue;
         };
         let delivered = record.confirmed_deliveries.iter().find(|receipt| {
             let exact = &receipt.source;
-            exact.is_authoritative()
+            expected.is_none_or(|range| exact == &range.source)
+                && exact.is_authoritative()
                 && receipt.message_id != 0
                 && receipt.delivery_channel_id == owner.0
                 && exact.provider == ProviderKind::Codex.as_str()
