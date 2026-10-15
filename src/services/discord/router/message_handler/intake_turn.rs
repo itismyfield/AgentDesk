@@ -43,7 +43,7 @@ mod input_effect_tests {
         let body = source.split_once(handler_marker.as_str()).unwrap().1;
         let start = body
             .find(
-                "    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit))",
+                "    let Some((route, bootstrapped_fresh_thread_session, redirected_permit))",
             )
             .unwrap();
         let end = body[start..]
