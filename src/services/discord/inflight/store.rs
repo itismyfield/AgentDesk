@@ -239,31 +239,6 @@ pub(crate) fn try_lock_unfenced_inflight_state_path(
     }
 }
 
-pub(in crate::services::discord) struct BorrowedInflightRow<'a> {
-    path: PathBuf,
-    _guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-}
-impl<'a> BorrowedInflightRow<'a> {
-    pub(in crate::services::discord) fn new(
-        guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-        root: &Path,
-        provider: &ProviderKind,
-        channel: u64,
-    ) -> std::io::Result<Self> {
-        guard.borrowed(root, provider, channel, || Ok(()))?;
-        Ok(Self {
-            path: root
-                .join("discord_inflight")
-                .join(provider.as_str())
-                .join(format!("{channel}.json")),
-            _guard: guard,
-        })
-    }
-    pub(super) fn state_path(&self) -> &Path {
-        &self.path
-    }
-}
-
 fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
     let lock_path = inflight_state_lock_path(path);
     if let Some(parent) = lock_path.parent() {

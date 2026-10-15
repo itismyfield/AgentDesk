@@ -21,8 +21,6 @@ pub(in crate::services::discord) use managed_reset::reset_managed_process_sessio
 pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
-#[allow(dead_code)]
-pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 
