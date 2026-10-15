@@ -1,5 +1,5 @@
 //! Source rotation state: the consumed binding seq and each bound source's start boundary.
-//! Both files are replaced atomically; a decided boundary changes only by `BoundaryResolved`.
+//! Both files are replaced atomically; only resolution or explicit provisional refinement changes a decided boundary.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
 use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
-use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvent, BindingRecord, BindingTarget,
+};
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
@@ -152,6 +155,80 @@ impl ChannelStore {
         }
         let bytes = serde_json::to_vec(next)?;
         self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))
+    }
+
+    /// Refines only a later explicit re-pin of this exact provisional Unknown attachment.
+    pub(crate) fn refine_provisional_hot_link(
+        &mut self,
+        expected: &SourceLink,
+        event: &BindingEvent,
+    ) -> Result<Option<Rotation>, StoreError> {
+        let BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            cause,
+            parent_hint,
+            ..
+        } = &event.record
+        else {
+            return Ok(None);
+        };
+        let Some(candidate) = &expected.hot_candidate else {
+            return Ok(None);
+        };
+        if !matches!(expected.boundary, Boundary::Pending { .. })
+            || *cause == BindingCause::Unknown
+            || event.seq <= expected.seq
+            || event.channel_id != self.init.channel
+            || event.channel_id != candidate.channel
+            || event.provider != ShadowProvider::Claude
+            || event.tmux_session != candidate.pane
+            || event.execution_nonce != candidate.nonce
+            || *source != expected.source
+            || candidate.parent == *source
+            || candidate.pane.is_empty()
+            || candidate.nonce.is_empty()
+            || self.cursor(&candidate.parent).is_none()
+        {
+            return Ok(None);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(LEDGER_FILE))?;
+        let mut file = durable::LockedFile::try_lock(file)?;
+        if ledger::resolution(&mut file, source)?.is_some() {
+            return Err(StoreError::Rejected(
+                "boundary already resolved; reopen the writer".into(),
+            ));
+        }
+        let mut rotation = self.rotation()?;
+        let Some(link) = rotation.links.get_mut(&source_key(source)) else {
+            return Ok(None);
+        };
+        if link != expected {
+            return Ok(None);
+        }
+        let parent = match cause {
+            BindingCause::Fork | BindingCause::Continuation | BindingCause::Compact => {
+                Some(candidate.parent.clone())
+            }
+            BindingCause::Resume => parent_hint
+                .clone()
+                .filter(|p| p != source && self.cursor(p).is_some()),
+            _ => None,
+        };
+        link.boundary = match cause {
+            BindingCause::Clear | BindingCause::Startup => Boundary::Owed { from: 0 },
+            _ if parent.is_some() => Boundary::Undecided,
+            _ => expected.boundary.clone(),
+        };
+        link.parent = parent;
+        link.hot_candidate = None;
+        link.seq = event.seq;
+        link.committed_at = event.committed_at;
+        let bytes = serde_json::to_vec(&rotation)?;
+        self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))?;
+        Ok(Some(rotation))
     }
 
     /// Only a source whose owed start is known may lose spool segments.

@@ -375,33 +375,26 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     Ok(log.notify.subscribe())
 }
 
-#[cfg(all(test, unix))]
-pub(crate) use presence_admission::admit_committed_seq;
+/// Runs the hand-off under the append/apply mutex only while the healthy committed seq matches.
+pub(crate) fn admit_committed_seq<R>(
+    channel_id: u64,
+    expected: u64,
+    hand_off: impl FnOnce() -> R,
+) -> io::Result<Option<R>> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(None);
+    };
+    let mut logs = lock_logs();
+    let Some(log) = logs.get_mut(&path) else {
+        return Ok(None);
+    };
+    let writer = ensure_writer_loaded(log, &path)?;
+    Ok((!writer.poisoned && !writer.tainted && writer.last_seq == expected).then(hand_off))
+}
 
 #[cfg(all(test, unix))]
-mod presence_admission {
-    use super::*;
-
-    /// Hands off synchronously under the append/apply/committed-seq mutex without writing the log.
-    pub(crate) fn admit_committed_seq<R>(
-        channel_id: u64,
-        expected: u64,
-        hand_off: impl FnOnce() -> R,
-    ) -> io::Result<Option<R>> {
-        let Some(path) = log_path(channel_id)? else {
-            return Ok(None);
-        };
-        let logs = lock_logs();
-        let Some(log) = logs.get(&path) else {
-            return Ok(None);
-        };
-        // A seq restored without its writer, or left after a poisoned one, proves no healthy log.
-        let healthy = log
-            .writer
-            .as_ref()
-            .is_some_and(|writer| !writer.poisoned && !writer.tainted);
-        Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
-    }
+pub(crate) fn admission_mutex_held_for_tests() -> bool {
+    matches!(LOGS.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }
 
 /// What a commit left in the log for its proposal.
@@ -532,6 +525,22 @@ fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
     commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))
 }
 
+fn ensure_writer_loaded<'a>(log: &'a mut ChannelLog, path: &Path) -> io::Result<&'a mut Writer> {
+    if log.writer.is_none() {
+        let writer = Writer::load(path)?;
+        let last = writer.last_seq;
+        log.notify.send_if_modified(|seen| {
+            let moved = *seen < last;
+            *seen = (*seen).max(last);
+            moved
+        });
+        log.writer = Some(writer);
+    }
+    log.writer
+        .as_mut()
+        .ok_or_else(|| io::Error::other("binding writer was not loaded"))
+}
+
 /// Runs `plan` on the channel's writer and appends the record it returns.
 fn commit_with(
     channel_id: u64,
@@ -545,19 +554,7 @@ fn commit_with(
         notify: watch::channel(0).0,
         writer: None,
     });
-    if log.writer.is_none() {
-        let writer = Writer::load(&path)?;
-        let last = writer.last_seq;
-        log.notify.send_if_modified(|seen| {
-            let moved = *seen < last;
-            *seen = (*seen).max(last);
-            moved
-        });
-        log.writer = Some(writer);
-    }
-    let Some(writer) = log.writer.as_mut() else {
-        return Ok(Committed::Unchanged);
-    };
+    let writer = ensure_writer_loaded(log, &path)?;
     let (record, verified, published_at, codex_ownership) = match plan(writer) {
         Planned::Append(record, verified, published_at) => (record, verified, published_at, None),
         Planned::CodexAppend(record, ownership) => (record, false, None, Some(ownership)),

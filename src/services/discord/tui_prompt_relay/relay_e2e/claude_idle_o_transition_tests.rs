@@ -7,6 +7,8 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::rotation::Boundary;
 use crate::services::tui_o::writer::host::{self, HostParts, Readiness};
 use fixture::*;
+#[path = "claude_idle_o_late_hook_tests.rs"]
+mod late_hook;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -673,8 +675,6 @@ fn automatic_parent_comparison_failure_halts_hot_and_blocks_startup_without_post
         e.capture().unwrap();
         e.deliver(100).await;
         e.writer.store().set_retired(&f.a(), true).unwrap();
-        let a_path = f.pane.path.clone();
-        std::fs::rename(&a_path, a_path.with_extension("saved")).unwrap();
         let copied = record(
             &f.pane.b,
             "history",
@@ -683,10 +683,12 @@ fn automatic_parent_comparison_failure_halts_hot_and_blocks_startup_without_post
             false,
         );
         append(&f.pane.b_path(), &copied);
-        assert!(
-            e.capture().is_err(),
-            "unreadable parent must halt the live reader"
-        );
+        late_hook::fail_parent_comparison_after_a_poll(&f, &mut e);
+        assert!(e.owed.iter().any(|d| matches!(d,
+            crate::services::tui_o::writer::pieces::Derived::Blocked { reason }
+                if reason == "automatic parent content comparison failed")));
+        e.deliver(100).await;
+        assert!(e.writer.is_stopped());
         drop(e);
         let mut e = f.engine();
         e.capture().unwrap();

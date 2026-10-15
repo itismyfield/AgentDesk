@@ -132,6 +132,8 @@ pub struct Sources<B> {
     lineage: HashMap<String, Lineage>,
     /// Undecided sources that have shown at least one inherited row.
     prefix_seen: HashSet<String>,
+    /// Retained Pending bytes to derive once after an explicit hot refinement; resume replays them normally.
+    refined: Vec<SourceId>,
     /// Boundary decisions and alarms made while deriving, flushed before delivery.
     dirty: bool,
     raised: Vec<WriterAlarm>,
@@ -294,6 +296,7 @@ impl<B: BindingEvents> Sources<B> {
             readers: Vec::new(),
             lineage: HashMap::new(),
             prefix_seen: HashSet::new(),
+            refined: Vec::new(),
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
@@ -641,6 +644,7 @@ impl<B: BindingEvents> Sources<B> {
             }
             self.rotation.links.insert(key.clone(), link);
         }
+        self.refine_provisional(writer, event, &new, parent_hint)?;
         self.rotation.successors.remove(&key);
         // A source bound again leaves its old rotation, so a next one measures its own quiet.
         if let Some(r) = self.readers.iter_mut().find(|r| r.source == new) {
