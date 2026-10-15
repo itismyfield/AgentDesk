@@ -7,6 +7,7 @@ use sqlx::PgPool;
 
 use super::super::o_writer_host::test_host;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::intake_outbox::{InsertPendingPayload, insert_pending};
 use crate::services::discord::tui_direct_pending_start::{
     PendingStartState, TuiDirectPendingStart, delete, persist,
 };
@@ -17,20 +18,34 @@ use crate::services::tui_o::store::{OStore, StoreConfig};
 use crate::services::tui_o::writer::activation::{activate_codex_takeover, activate_with};
 use crate::services::tui_o::writer::host::{Custody, FencedFacts, HostIo};
 
+/// One open intake row through the production insert, as an accepted Discord message leaves it.
 async fn open_intake(pool: &PgPool, channel: u64, provider: &str) -> i64 {
-    sqlx::query_scalar(
-        "INSERT INTO intake_outbox (
-            target_instance_id, forwarded_by_instance_id, channel_id, user_msg_id,
-            request_owner_id, user_text, turn_kind, agent_id, provider, status, admission_kind
-         ) VALUES ('worker', 'leader', $1, $2, 'user', 'hi', 'standard', 'agent', $3,
-            'pending', 'local') RETURNING id",
-    )
-    .bind(channel.to_string())
-    .bind(format!("message-{channel}"))
-    .bind(provider)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+    let payload = InsertPendingPayload {
+        target_instance_id: "worker".into(),
+        forwarded_by_instance_id: "leader".into(),
+        required_labels: json!([]),
+        execution_requirements: json!({}),
+        attachment_refs: json!([]),
+        channel_id: channel.to_string(),
+        user_msg_id: format!("message-{channel}"),
+        replay_source_message_ids: None,
+        request_owner_id: "user".into(),
+        request_owner_name: None,
+        user_text: "hi".into(),
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: None,
+        turn_kind: "standard".into(),
+        merge_consecutive: false,
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        preserve_on_cancel: false,
+        agent_id: "agent".into(),
+        provider: provider.into(),
+        home_epoch: None,
+    };
+    insert_pending(pool, &payload, 1, None).await.unwrap()
 }
 
 fn pending(provider: ShadowProvider, channel: u64) -> TuiDirectPendingStart {
@@ -90,6 +105,7 @@ async fn takeover() {
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, stores.path());
     let store = store.unwrap().unwrap();
     let (codex, claude, terminal, queued) = (64_700_401, 64_700_402, 64_700_403, 64_700_404);
+    let held = 64_700_405;
     for (channel, provider) in [(codex, Codex), (claude, Claude), (terminal, Codex)] {
         open_intake(
             &pool,
@@ -104,6 +120,7 @@ async fn takeover() {
         );
     }
     persist(&pending(Codex, queued)).unwrap();
+    persist(&pending(Claude, held)).unwrap();
     let body = OutboxMessage {
         target: &format!("channel:{queued}"),
         content: "body",
@@ -138,16 +155,12 @@ async fn takeover() {
         );
         assert_eq!(candidate.peek(), Adoption::Deferred);
     }
-    sqlx::query("DELETE FROM intake_outbox WHERE channel_id = $1")
-        .bind(claude.to_string())
-        .execute(&pool)
-        .await
-        .unwrap();
-    let FencedFacts { hold, facts, .. } = fenced(&host, claude, Claude).await;
+    let FencedFacts { hold, facts, .. } = fenced(&host, held, Claude).await;
     hold.release().await.unwrap();
+    assert_eq!(facts.open_intake, 0);
     let candidate = Candidate::new(Adoption::Deferred);
-    let custody = || Ok(host.local_custody(claude, Claude)?.active());
-    let strict = activate_with(&store, claude, Ok(facts), custody, &candidate, || {
+    let custody = || Ok(host.local_custody(held, Claude)?.active());
+    let strict = activate_with(&store, held, Ok(facts), custody, &candidate, || {
         Ok(Vec::new())
     });
     assert!(
