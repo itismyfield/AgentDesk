@@ -906,6 +906,9 @@ engine::ops::exec_ops::bridge_deadline_tests::clamp_shortens_to_remaining_budget
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_is_unbounded_without_armed_deadline
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_returns_error_after_deadline_elapses
 engine::ops::exec_ops::bridge_deadline_tests::session_tmux_timeout_uses_remaining_budget_when_armed
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_handoffs_without_observer
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_receipt_and_busy_precede_handoff
+engine::ops::exec_ops::circuit_evidence_tests::alpha_policy_storage_failure_is_not_ok
 engine::ops::exec_ops::exec_allowlist_tests::public_and_raw_exec_enforce_allowlist_before_runner
 engine::ops::exec_ops::inflight_list_tests::inflight_list_exposes_synthetic_rebind_fields
 engine::ops::exec_ops::inflight_list_tests::inflight_remove_refuses_receipt_rows_and_never_reports_a_failed_unlink_as_removed
@@ -4470,6 +4473,16 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::circuit_evidence_tests::alpha_abandon_handoffs_without_observer
+services::discord::inflight::circuit_evidence_tests::alpha_conflicting_identity_cannot_fork_into_escrow
+services::discord::inflight::circuit_evidence_tests::alpha_distinct_unresolved_evidence_retained
+services::discord::inflight::circuit_evidence_tests::alpha_journal_failure_escrows
+services::discord::inflight::circuit_evidence_tests::alpha_no_evidence_eviction
+services::discord::inflight::circuit_evidence_tests::alpha_no_retroactive_binding
+services::discord::inflight::circuit_evidence_tests::alpha_origin_and_range_survive_path_reuse
+services::discord::inflight::circuit_evidence_tests::alpha_pending_carry_forward_keeps_origin
+services::discord::inflight::circuit_evidence_tests::alpha_storage_failure_preserves_row
+services::discord::inflight::circuit_evidence_tests::alpha_unknown_evidence_version_preserved
 services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_pin_mismatch_never_unlinks
 services::discord::inflight::clear_store::identity::operator_disposition::tests::operator_disposition_rereads_guarded_bytes_and_removes_rebind_row
 services::discord::inflight::clear_store::identity::tests::captured_episode_clears_its_matching_row
@@ -6616,6 +6629,7 @@ services::discord::relay_recovery::axis_b_tests::automatic_reattach_sources_keep
 services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers
 services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
 services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
+services::discord::relay_recovery::circuit_breaker::circuit_evidence_tests::alpha_existing_open_identity_preserved
 services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
 services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
 services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
@@ -9027,6 +9041,7 @@ services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::a
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::a_restart_leaves_a_log_verified_headless_source_for_the_tui_transcript
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::the_idle_relay_tails_the_tui_transcript_instead_of_a_bound_headless_one
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::headless::the_rehydrate_pass_moves_a_live_headless_binding_back_to_the_tui_transcript
+services::discord::tui_prompt_relay::rehydration::claude_pass_tests::o_restart::a_restarted_o_writer_sends_owed_once_and_follows_a_hook_switch_without_legacy
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_corrupt_log_keeps_the_pass_from_registering_launch_a
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_deferred_b_outlives_a_poll_that_finds_its_channel_mapping_lapsed
 services::discord::tui_prompt_relay::rehydration::claude_pass_tests::pending::a_file_less_restored_b_gives_way_to_the_next_session_with_a_file
@@ -9707,11 +9722,6 @@ services::discord::turn_bridge::completion_postlude::channel_writeback::tests::n
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::sa2_suppressed_transcript_requires_attempt_and_plan
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
-services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_ends_below_the_last_of_many_late_o_posts
-services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_completed_o_panel_moves_below_a_body_o_posts_after_completion
-services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_failed_old_panel_delete_goes_to_the_orphan_drain
-services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_late_completion_of_a_moved_panel_sends_no_second_panel
-services::discord::turn_bridge::completion_postlude::o_panel_below::tests::a_legacy_completed_panel_is_never_moved
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded
 services::discord::turn_bridge::context_window::tests::a_declined_done_records_nothing
@@ -9972,10 +9982,9 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
-services::discord::turn_bridge::stream_tick::o_adoption_tests::a_failed_old_panel_delete_is_retried_until_the_panel_is_gone
-services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_goes_into_a_panel_below_o_posts
+services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_is_edited_into_the_panel_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::legacy_channel_placeholder_is_never_moved
-services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_shows_the_last_tool_and_moves_below_o_posts
+services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent_anchor_becomes_real_only_after_guarded_bind
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate
@@ -10107,8 +10116,8 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_survives_newer_frontier_at_another_anchor_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521
-services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_after_done_handoff_completes_below_o_body_on_a_direct_gateway
-services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_after_done_handoff_completes_below_o_body_on_a_headless_gateway
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_after_done_handoff_completes_its_panel_in_place_on_a_direct_gateway
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_after_done_handoff_completes_its_panel_in_place_on_a_headless_gateway
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_keeps_the_bridge_terminal_in_either_frame_order
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_after_done_chain_tests::o_turn_without_an_after_done_body_stays_delegated
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::o_delegated_foreign_custody_follows_destination_membership
@@ -10127,7 +10136,8 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_postloop_preserves_raw_proof_and_session_status_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::receipted_rowless_turn_never_patches_active_card_before_terminal_gate_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::preloop_cleanup_tests::unreceipted_rowless_turn_keeps_active_card_and_terminal_delivery_5521
-services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::the_postlude_moves_a_completed_o_panel_below_a_later_o_post
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::the_postlude_completes_a_legacy_panel_in_place_whatever_o_posts_later
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::the_postlude_completes_an_o_panel_in_place_below_which_o_posts_later
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::terminal_delivery_epilogue_routes_identity_mismatch_to_warn
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
@@ -10289,6 +10299,7 @@ services::discord::turn_end_wip_warning::tests::dropped_reservation_can_be_claim
 services::discord::turn_end_wip_warning::tests::final_wire_bounds_oversized_worktree_warning_5325
 services::discord::turn_end_wip_warning::tests::final_wire_reserves_normal_warning_after_full_panel_and_metadata_5325
 services::discord::turn_end_wip_warning::tests::zero_expected_user_msg_id_never_matches_inflight
+services::discord::turn_finalizer::cleanup::terminal_release::tests::release_counts_once_and_keeps_the_followup_turn_state
 services::discord::turn_finalizer::cleanup::tests::already_finalized_loser_does_not_claim_reaction_cleanup
 services::discord::turn_finalizer::cleanup::tests::backstop_reaction_cleanup_keeps_thread_origin_when_original_succeeds
 services::discord::turn_finalizer::cleanup::tests::backstop_reaction_cleanup_targets_dispatch_parent_channel

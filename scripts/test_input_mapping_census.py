@@ -267,7 +267,7 @@ RELEASES = {
     },
     "kick_thread_parents_after_turn_release": {
         "turn_finalizer/finalize.rs": 1,
-        "tmux_watcher/completion_producer.rs": 1,
+        "turn_finalizer/cleanup/terminal_release.rs": 1,
         "health/recovery.rs": 2,
         "turn_finalizer/guarded_finish_residue.rs": 1,
         "turn_finalizer/cleanup.rs": 1,

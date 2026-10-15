@@ -93,8 +93,16 @@ async fn hand_off_after_done(
     (delegated, claim)
 }
 
-/// One turn whose body O consumed and posts after completion: the final panel and the REST log.
-async fn finish_turn(headless: bool) -> (TerminalDeliveryDriver, u64, Option<Vec<(String, u64)>>) {
+/// One turn whose body O consumed and posts after completion: the panel the channel keeps, the
+/// gateway calls from the postlude on and the REST log.
+async fn finish_turn(
+    headless: bool,
+) -> (
+    TerminalDeliveryDriver,
+    Option<u64>,
+    Vec<DriverCall>,
+    Option<Vec<(String, u64)>>,
+) {
     crate::services::discord::turn_bridge::single_message_footer::SEPARATE_PANEL_FOR_TESTS
         .set(true);
     let _separate = SeparatePanel;
@@ -136,62 +144,50 @@ async fn finish_turn(headless: bool) -> (TerminalDeliveryDriver, u64, Option<Vec
         output.terminal_delivery_committed,
         "the bridge ends the turn"
     );
+    let from = driver.observations().len();
     run_postlude_for_owner(&driver, output, false, false, owner).await;
     let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
     let path = inflight::inflight_state_path(&root, &ProviderKind::Claude, channel);
     let _ = std::fs::remove_file(path);
     deliver::note_posted_for_tests(channel, LATE_BODY);
-
-    let panel =
-        || singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while panel() == Some(PANEL) && std::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    let moved = panel().expect("a singleton panel");
-    // Let the follow's window end while this test still holds the runtime root.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Well past the quiet time and polls a panel re-post below that body would take.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let panel = singleton::load(&ProviderKind::Claude, &token, channel).map(|b| b.panel_message_id);
+    let calls = driver.observations()[from..]
+        .iter()
+        .map(|o| o.call)
+        .collect();
     let log = rest.map(|(log, _guard)| log.lock().unwrap().clone());
-    (driver, moved, log)
+    (driver, panel, calls, log)
 }
 
-/// A direct gateway: the completed panel ends below O's later body and the bridge posts no body.
+/// A direct gateway: the postlude completes the panel with one edit under its own id above O's
+/// later body, and the bridge posts neither the body nor a second panel.
 #[tokio::test]
-async fn o_turn_after_done_handoff_completes_below_o_body_on_a_direct_gateway() {
-    let (driver, moved, _) = finish_turn(false).await;
-    assert!(
-        moved > LATE_BODY,
-        "panel {moved} stays above O's body {LATE_BODY}"
-    );
+async fn o_turn_after_done_handoff_completes_its_panel_in_place_on_a_direct_gateway() {
+    let (driver, panel, calls, _) = finish_turn(false).await;
+    assert_eq!(panel, Some(PANEL));
+    assert_eq!(calls, [DriverCall::Edit]);
     let posted = driver.published_bodies.lock().unwrap().clone();
     assert!(
-        !posted.is_empty() && posted.iter().all(|text| !text.contains(DRIVER_BODY)),
+        posted.iter().all(|text| !text.contains(DRIVER_BODY)),
         "{posted:?}"
     );
 }
 
-/// An API-injected turn: the completed panel is edited, re-posted below O's body and the old one
-/// deleted over bot REST, and the channel's panel is that real message.
+/// An API-injected turn: the completed panel is edited over bot REST under its own id, and no
+/// panel is posted or deleted after O's later body.
 #[tokio::test]
-async fn o_turn_after_done_handoff_completes_below_o_body_on_a_headless_gateway() {
-    let (_driver, moved, log) = finish_turn(true).await;
+async fn o_turn_after_done_handoff_completes_its_panel_in_place_on_a_headless_gateway() {
+    let (_driver, panel, _, log) = finish_turn(true).await;
     let log = log.expect("REST log");
-    assert!(
-        moved > LATE_BODY,
-        "panel {moved} stays above O's body {LATE_BODY}"
-    );
-    assert!(
-        !crate::services::discord::is_synthetic_headless_message_id_raw(moved),
-        "{moved}"
-    );
-    let posts: Vec<u64> = log
-        .iter()
-        .filter(|(m, _)| m == "POST")
-        .map(|r| r.1)
-        .collect();
-    assert_eq!(posts, vec![moved], "{log:?}");
+    assert_eq!(panel, Some(PANEL));
     assert!(log.contains(&("PATCH".into(), PANEL)), "{log:?}");
-    assert!(log.contains(&("DELETE".into(), PANEL)), "{log:?}");
+    assert!(
+        log.iter()
+            .all(|(method, _)| method != "POST" && method != "DELETE"),
+        "{log:?}"
+    );
 }
 
 const ORDER_BODY: &str = "[E2E:E1:OK]";

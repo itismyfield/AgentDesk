@@ -253,6 +253,27 @@ def _activation(condition: str, needs: set[str], filters: dict, outputs: dict):
     expr = condition.strip()
     if expr.startswith("${{") and expr.endswith("}}"):
         expr = expr[3:-2].strip()
+    def unparen(value: str) -> str:
+        value = value.strip()
+        while value.startswith("(") and value.endswith(")"):
+            depth = 0
+            for index, char in enumerate(value):
+                depth += (char == "(") - (char == ")")
+                if depth == 0:
+                    break
+            if depth or index != len(value) - 1:
+                break
+            value = value[1:-1].strip()
+        return value
+
+    # Only a cancellation guard plus one changes output preserves the original path gate.
+    if "&&" in expr:
+        terms = unparen(expr).split("&&")
+        status = unparen(terms[0])
+        if len(terms) != 2 or "||" in expr or not status.startswith("!") or \
+                re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])) is None:
+            return f"job-level `if: {condition}` is not a cancellation guard and one changes output"
+        expr = unparen(terms[1])
     patterns: list[str] = []
     for term in expr.split("||"):
         match = _OUTPUT_IF.match(term.strip())
