@@ -28,7 +28,6 @@ pub(super) struct RedirectDispatch<'a> {
     pub dispatch_info_cached:
         &'a Option<crate::services::discord::router::thread_binding::DispatchInfo>,
     pub dispatch_type_str: Option<&'a str>,
-    pub dispatch_uses_thread_routing: bool,
     pub is_already_thread: bool,
     pub user_text: &'a str,
     pub dispatch_effective_path: &'a str,
@@ -58,7 +57,6 @@ pub(super) async fn redirect_dispatch(
         dispatch_id_for_thread,
         dispatch_info_cached,
         dispatch_type_str,
-        dispatch_uses_thread_routing,
         is_already_thread,
         user_text,
         dispatch_effective_path,
@@ -69,7 +67,7 @@ pub(super) async fn redirect_dispatch(
     let mut bootstrapped_fresh_thread_session = false;
     let mut redirected_permit = None;
     let channel_id = if let Some(did) = dispatch_id_for_thread {
-        if !dispatch_uses_thread_routing {
+        if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
@@ -390,7 +388,6 @@ mod tests {
             dispatch_id_for_thread: &Some("c1b-refused-dispatch".into()),
             dispatch_info_cached: &Some(info),
             dispatch_type_str: Some("review"),
-            dispatch_uses_thread_routing: true,
             is_already_thread: true,
             user_text: "review",
             dispatch_effective_path: "/unreachable",
@@ -469,7 +466,6 @@ mod tests {
             dispatch_id_for_thread: &Some("dispatch-test".into()),
             dispatch_info_cached: &Some(info),
             dispatch_type_str: None,
-            dispatch_uses_thread_routing: true,
             is_already_thread: false,
             user_text: "input",
             dispatch_effective_path: "/unreachable",

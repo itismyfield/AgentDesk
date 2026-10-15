@@ -895,8 +895,6 @@ async fn handle_text_message_admitted(
             );
         }
     }
-    let dispatch_uses_thread_routing =
-        crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str.as_deref());
     let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit)) =
         adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
             http,
@@ -908,7 +906,6 @@ async fn handle_text_message_admitted(
             dispatch_id_for_thread: &dispatch_id_for_thread,
             dispatch_info_cached: &dispatch_info_cached,
             dispatch_type_str: dispatch_type_str.as_deref(),
-            dispatch_uses_thread_routing,
             is_already_thread,
             user_text,
             dispatch_effective_path: &dispatch_effective_path,
