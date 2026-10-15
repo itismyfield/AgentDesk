@@ -233,12 +233,12 @@ pub(super) fn load_queued_placeholders(
     load_entries(store_root(), provider, token_hash)
 }
 
-#[cfg(test)]
 pub(super) fn load_channel_queued_placeholders_checked(
     provider: &ProviderKind,
     token_hash: &str,
     channel: ChannelId,
 ) -> Result<HashMap<(ChannelId, MessageId), MessageId>, String> {
+    #[cfg(test)]
     if crate::services::discord::inflight::scoped_restore_mutant("post-filter") {
         return Ok(load_queued_placeholders(provider, token_hash)
             .into_iter()
@@ -274,7 +274,6 @@ pub(super) fn load_channel_queued_placeholders_checked(
     Ok(loaded)
 }
 
-#[cfg(test)]
 pub(super) fn persist_channel_from_map_checked(
     map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     provider: &ProviderKind,
@@ -290,6 +289,7 @@ pub(super) fn persist_channel_from_map_checked(
             &snapshot_map(map, channel),
         )
     });
+    #[cfg(test)]
     if crate::services::discord::inflight::scoped_restore_mutant("persist-error-complete") {
         return Ok(());
     }

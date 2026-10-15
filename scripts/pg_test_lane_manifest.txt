@@ -130,7 +130,6 @@ src/services/discord/catch_up/too_old_drop_pg_tests.rs
 src/services/discord/commands/cancel_backstop_tests.rs
 src/services/discord/commands/control.rs
 src/services/discord/commands/control/home_fence_tests.rs
-src/services/discord/commands/control/input_clear_tests.rs
 src/services/discord/commands/control/native_herdr_e2e_tests.rs
 src/services/discord/commands/control/native_herdr_tests.rs
 src/services/discord/commands/control/native_policy_tests.rs
@@ -447,7 +446,6 @@ services::discord::catch_up::classification_order_tests::too_old_drop_pg_tests
 services::discord::commands::cancel_backstop_tests
 services::discord::commands::control::clear_persist_failure_tests
 services::discord::commands::control::home_fence::tests
-services::discord::commands::control::input_clear::tests
 services::discord::commands::control::native::herdr_tests
 services::discord::commands::control::native::herdr_tests::e2e
 services::discord::commands::control::native::herdr_tests::e2e::o_actor
@@ -1021,7 +1019,6 @@ db::session_transcripts::native_clear_pg_tests::existing_boundary_readers_treat_
 db::session_transcripts::native_clear_pg_tests::native_columns_split_counterexamples_the_legacy_markers_cannot_pg
 db::session_transcripts::native_clear_pg_tests::native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg
 db::session_transcripts::native_clear_pg_tests::older_boundary_writers_keep_native_columns_and_supersede_them_pg
-db::session_transcripts::native_clear_pg_tests::record_keeps_the_ticket_after_resolve_and_supersession_pg
 db::session_transcripts::native_clear_pg_tests::resolve_marks_only_the_current_unresolved_generation_pg
 db::session_transcripts::native_clear_pg_tests::transcript_past_frontier_supersedes_and_uncorrelated_rows_are_legacy_pg
 dispatch::dispatch_cancel::pg_observability_tests::cancel_emits_dispatch_result_observability_event
@@ -1490,13 +1487,6 @@ services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hol
 services::discord::commands::control::clear_persist_failure_tests::clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg
 services::discord::commands::control::clear_persist_failure_tests::clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg
 services::discord::commands::control::home_fence::tests::a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open_pg
-services::discord::commands::control::input_clear::tests::a_fenced_channel_clears_without_a_legacy_population_write_pg
-services::discord::commands::control::input_clear::tests::a_lost_commit_reply_is_read_back_from_postgres_pg
-services::discord::commands::control::input_clear::tests::a_resume_host_admits_no_reset_until_its_ticket_needs_one_pg
-services::discord::commands::control::input_clear::tests::a_superseded_ticket_holds_until_a_new_clear_cuts_its_inputs_pg
-services::discord::commands::control::input_clear::tests::a_wal_failure_keeps_the_postgres_ticket_unresolved_until_resume_pg
-services::discord::commands::control::input_clear::tests::postgres_lost_mid_commit_holds_until_the_stored_ticket_replays_pg
-services::discord::commands::control::input_clear::tests::the_production_adapter_cuts_resets_and_resolves_for_both_providers_pg
 services::discord::commands::control::native::herdr_tests::a_clear_waiting_on_the_guard_commits_only_on_its_own_pending_pg
 services::discord::commands::control::native::herdr_tests::a_configured_channel_clears_its_pane_with_one_line_and_saves_the_pending_session_pg
 services::discord::commands::control::native::herdr_tests::a_configured_clear_without_its_database_or_switch_changes_nothing_pg
@@ -1812,6 +1802,7 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
 services::discord::runtime_bootstrap::gateway_handback_integration_tests::backend_exit_removes_home_waiter_until_live_home_takes_handback_pg

@@ -114,26 +114,12 @@ impl ActiveRelays {
 
     fn remove(&mut self, session: &str) -> Option<StreamRelayHandle> {
         let handle = self.by_session.remove(session)?;
-        withdraw_relay(&handle);
         Some(handle)
     }
 
     fn drain(&mut self) -> Vec<(String, StreamRelayHandle)> {
         let drained: Vec<_> = self.by_session.drain().collect();
         drained
-            .iter()
-            .for_each(|(_, handle)| withdraw_relay(handle));
-        drained
-    }
-}
-
-/// Every relay leaves through `remove` or `drain`; its channel's typing approvals are taken back
-/// for a fresh reading, while its Home stays as it is.
-fn withdraw_relay(handle: &StreamRelayHandle) {
-    let matched = handle.matched();
-    if let Ok(channel) = matched.channel_id.parse() {
-        let withdraw = crate::services::discord::presence_withdraw_target;
-        withdraw(&matched.provider, channel, "relay_removed");
     }
 }
 

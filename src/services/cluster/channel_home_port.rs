@@ -18,10 +18,14 @@ use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 /// An owed read waits this long for the actor's next poll; none by then reads as unknown.
 const FRESH_WITHIN: Duration = Duration::from_secs(5 * POLL_INTERVAL.as_secs());
 
+/// Whether the channel still has persisted input on disk; `None` when it cannot be read.
+pub(crate) type PersistedInput = Arc<dyn Fn() -> Option<bool> + Send + Sync>;
+
 pub(crate) struct ChannelHomePort {
     channel: u64,
     readiness: Arc<Readiness>,
     restored: Arc<AtomicBool>,
+    persisted: Option<PersistedInput>,
 }
 
 impl ChannelHomePort {
@@ -32,18 +36,31 @@ impl ChannelHomePort {
             channel,
             readiness,
             restored,
+            persisted: None,
         }
+    }
+
+    /// Also reads the channel's persisted queue and marker, so a missing actor is not empty.
+    pub(crate) fn persisted_by(mut self, persisted: PersistedInput) -> Self {
+        self.persisted = Some(persisted);
+        self
     }
 }
 
 impl DrainPort for ChannelHomePort {
-    /// A turn running or queued in the channel's mailbox, or one only its inflight row still names;
-    /// unknown until this process restored its persisted turns, since a mailbox may still be missing.
+    /// A turn running or queued in the channel's mailbox, persisted input, or one only its inflight
+    /// row still names; unknown until this process restored its persisted turns.
     fn turn_running(&self) -> impl Future<Output = Option<bool>> + Send {
         let channel = (self.channel != 0).then(|| ChannelId::new(self.channel));
         let restored = self.restored.load(Ordering::Acquire);
+        let persisted = self.persisted.clone();
         async move {
             let channel = channel.filter(|_| restored)?;
+            if let Some(persisted) = persisted
+                && persisted()?
+            {
+                return Some(true);
+            }
             let queued = match ChannelMailboxRegistry::global_handle(channel) {
                 Some(mailbox) => {
                     let mailbox = mailbox.try_snapshot().await.ok()?;
