@@ -1,6 +1,6 @@
 //! Native span evidence; fixed source and byte boundaries never select a live binding.
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 use super::{
     Arc, CancelToken, CodexTuiTailResult, Sender, StreamMessage, discord_handoff_tail_options,
     tail_rollout_file_until_assistant_response_with_pane_busy_probe,
@@ -212,6 +212,7 @@ fn records(
 
 /// Native evidence is observed before the delivery permission wait, without emitting a body.
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn submitted_native_span(
     submitted: &crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::construction::SubmittedEpisode,
     floor: &crate::services::tui_o::store::codex_provenance::submit_floor::NativeFloor,
@@ -250,6 +251,7 @@ pub(crate) fn submitted_native_span(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn tail_closed_episode(
     span: &crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan,
     prompt: &str,

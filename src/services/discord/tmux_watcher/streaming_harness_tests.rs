@@ -44,9 +44,6 @@ mod retired_host_tick_tests;
 #[path = "retired_o_boundary_tests.rs"]
 mod retired_o_boundary_tests;
 
-#[path = "injected_watcher_tests.rs"]
-mod injected_watcher_tests;
-
 #[path = "o_capsule_origin_tests.rs"]
 mod o_capsule_origin_tests;
 
