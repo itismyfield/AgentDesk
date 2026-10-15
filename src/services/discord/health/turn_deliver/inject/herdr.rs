@@ -123,3 +123,7 @@ fn judge(pane: &HerdrTarget, session: &str, transcript: &Path) -> Result<(), Vet
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "herdr_tests.rs"]
+mod tests;
