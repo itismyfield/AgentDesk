@@ -428,11 +428,15 @@ class ReplayTests(unittest.TestCase):
         shard_recipe = (REPO_ROOT / "justfile").read_text("utf-8").split("\ntest-postgres-shard:", 1)[1]
         self.assertIn("&& just test-postgres-continuity", shard_recipe.split("\n\n", 1)[0])
 
-    def run_sweep(self, ids: list[str], reported=None, replay_rc=0):
+    def run_sweep(self, ids: list[str], reported=None, replay_rc=0, ignored=(), ledger=None):
         """run_sweep with both runs faked: the ids run_test_lane judges, the ids replayed outside
-        it, and the replay run exiting `replay_rc` with a verdict for `reported` (default: all)."""
+        it, and the replay run exiting `replay_rc` with a verdict for `reported` (default: all),
+        `ignored` reported ignored, against `ledger` as the repository's ledger text."""
         judged, replayed, real = [], [], subprocess.run
         runner = ts.tools()[0]
+        if ledger is not None:
+            (self.repo.root / ts.LEDGER).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo.root / ts.LEDGER).write_text(ledger)
 
         def fake_run(command, *args, **kwargs):
             if command[0] == "git":
@@ -445,7 +449,9 @@ class ReplayTests(unittest.TestCase):
             asked = command[command.index("bash", 1) + 1:]
             replayed.append(asked)
             outcome = runner.Outcome()
-            outcome.executed.update(asked if reported is None else reported)
+            outcome.executed.update(i for i in (asked if reported is None else reported)
+                                    if i not in ignored)
+            outcome.ignored.update(i for i in asked if i in ignored)
             return replay_rc, outcome
 
         with mock.patch.object(ts.subprocess, "run", fake_run), \
@@ -464,6 +470,21 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(self.run_sweep(ids, replay_rc=101)[0], 101)  # a failing replay test
         self.assertEqual(self.run_sweep([replay])[1:], ([], [[replay]]))
         self.assertEqual(self.run_sweep(rest)[1:], ([(rest, rest)], []))
+
+    def test_a_replay_id_may_report_ignored_only_where_the_ledger_declares_it(self) -> None:
+        replay = "alpha::changed::tests::pg_named_but_free"
+        ids = self.repo.selected(self.plan, "sweep")
+        held = {"ignored": [replay]}
+        self.assertEqual(self.run_sweep(ids, **held, ledger="")[0], 1)  # a new #[ignore]
+        for lane in ("pg", "non-pg-sweep"):  # a declared helper, as s3_node_child is for pg
+            self.assertEqual(self.run_sweep(ids, **held, ledger=ledger_rows(lane, [replay]))[0], 0)
+        other = ledger_rows("pg", ["alpha::changed::tests::own"])
+        self.assertEqual(self.run_sweep(ids, **held, ledger=other)[0], 1)
+        with self.assertRaises(ValueError):
+            self.run_sweep(ids, **held, ledger=f"ignored | {replay} | lane=pg\n")
+        child = "services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child"
+        self.assertIn(child, set(ts.tools()[1].load_non_pg_filter_replay(REPO_ROOT)))
+        self.assertIn(child, ts.declared_ignored(REPO_ROOT))
 
     def test_full_mode_runs_mains_commands_and_plan_writes_its_outputs(self) -> None:
         full = json.loads(json.dumps(self.plan))

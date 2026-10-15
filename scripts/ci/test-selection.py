@@ -14,6 +14,7 @@ except main's non-PG filter replay ids, which run outside the ledger as on main.
 from __future__ import annotations
 
 import argparse
+import datetime
 import fnmatch
 import hashlib
 import importlib.util
@@ -33,6 +34,7 @@ LANES = ("pg", "sweep")
 THRESHOLD = 0.40
 KILL_LABEL = "ci-full"
 PLAN_ENV = "ADK_TEST_SELECTION_PLAN"
+LEDGER = "scripts/known_test_failures.txt"
 MAX_PLAN_BYTES = 60_000
 # Files holding a `#[cfg(test)]` test_support module re-exported under another path, whose
 # consumers never name the file; tests/test_test_selection.py keeps this equal to the source.
@@ -351,7 +353,8 @@ def run_pg(root: Path, ids: list[str]) -> int:
 
 def run_sweep(root: Path, ids: list[str]) -> int:
     """Planned ids under run_test_lane, except NON_PG_FILTER_REPLAY ids: main replays those
-    outside the ledger, so they run the same way here and each must still report a verdict."""
+    outside the failure ledger, so they run that way here; each must still report a verdict
+    and may report `ignored` only if the ledger declares that id ignored."""
     runner, coverage = tools()[:2]
     replay = set(coverage.load_non_pg_filter_replay(root))
     judged = [test_id for test_id in ids if test_id not in replay]
@@ -365,10 +368,25 @@ def run_sweep(root: Path, ids: list[str]) -> int:
     rc, outcome = runner.run_and_capture(
         ["bash", "-c", f'cd {shlex.quote(str(root))} && {PREPARED} --exact "$@"', "bash",
          *replayed], None)
-    if missing := sorted(set(replayed) - outcome.executed - outcome.ignored):
-        print(f"ERROR test-selection sweep: replayed ids without a verdict: {' '.join(missing)}",
-              file=sys.stderr)
-    return rc or int(bool(missing))
+    missing = sorted(set(replayed) - outcome.executed - outcome.ignored)
+    held = outcome.ignored & set(replayed)
+    undeclared = sorted(held - declared_ignored(root)) if held else []
+    for what, bad in (("without a verdict", missing), ("ignored without a ledger row", undeclared)):
+        if bad:
+            print(f"ERROR test-selection sweep: replayed ids {what}: {' '.join(bad)}",
+                  file=sys.stderr)
+    return rc or int(bool(missing or undeclared))
+
+
+def declared_ignored(root: Path) -> set[str]:
+    """Ids the ledger declares `ignored` for the pg or non-pg-sweep lane; malformed is red."""
+    runner, today, declared = tools()[0], datetime.date.today(), set()
+    for lane in ("pg", "non-pg-sweep"):
+        entries, errors = runner.parse_ledger(root / LEDGER, lane, today)
+        if errors:
+            raise ValueError(f"{LEDGER}: {errors[0]}")
+        declared.update(entry.pattern for entry in entries if entry.mode == "ignored")
+    return declared
 
 
 def main(argv: list[str] | None = None) -> int:
