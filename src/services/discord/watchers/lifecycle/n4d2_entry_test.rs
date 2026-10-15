@@ -10,6 +10,17 @@ use crate::services::tui_prompt_dedupe::{self as binding, TuiRuntimeBinding};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+static READER_STARTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
+    std::sync::LazyLock::new(std::sync::Mutex::default);
+
+pub(in crate::services::discord) fn record_reader_start(channel: u64, offset: u64) {
+    READER_STARTS.lock().unwrap().insert(channel, offset);
+}
+
+pub(in crate::services::discord) fn reader_start(channel: u64) -> Option<u64> {
+    READER_STARTS.lock().unwrap().get(&channel).copied()
+}
+
 pub(in crate::services::discord) struct InstallFixture {
     pub shared: Arc<SharedData>,
     pub registry: Arc<HealthRegistry>,

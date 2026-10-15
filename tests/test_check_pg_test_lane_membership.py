@@ -21,6 +21,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts/check_pg_test_lane_membership.py"
 INTEGRITY_SCRIPT = REPO_ROOT / "scripts/check_test_target_integrity.py"
 FIXTURES = REPO_ROOT / "tests/fixtures/pg_lane"
+SELECTOR = REPO_ROOT / "scripts/ci/test-selection.py"
+PG_SELECTOR_RUN = "python3 scripts/ci/test-selection.py run --lane pg"
 
 
 def load_module(name: str, path: Path):
@@ -2286,8 +2288,7 @@ class PgDbCiWiring(unittest.TestCase):
         job = self.workflow["jobs"]["test_fast"]
         self.assertIn("needs.changes.outputs.pg_db", job["if"])
         self.assertEqual(str(job["env"]["AGENTDESK_REQUIRE_PG"]), "1")
-        self.assertTrue(any("just test-postgres" in step.get("run", "")
-                            for step in job["steps"]))
+        self.assertTrue(any(PG_SELECTOR_RUN == step.get("run", "") for step in job["steps"]))
 
     def test_repost_test_consumers_install_and_preflight_ripgrep(self) -> None:
         consumers = {
@@ -2311,7 +2312,8 @@ class PgDbCiWiring(unittest.TestCase):
                     self.assertTrue(preflights, "require rg --version before executing rollback tests")
                     tests = [index for index, step in enumerate(steps)
                              if "cargo test" in step.get("run", "")
-                             or "just test-postgres" in step.get("run", "")]
+                             or "just test-postgres" in step.get("run", "")
+                             or "test-selection.py run" in step.get("run", "")]
                     self.assertTrue(tests, "the consumer must still execute its test suite")
                     self.assertLess(min(installs), min(preflights))
                     self.assertLess(min(preflights), min(tests))
@@ -2363,10 +2365,12 @@ class PgDbCiWiring(unittest.TestCase):
         # link on to the recipe that runs the PG tests is asserted here.
         job = self.workflow["jobs"]["test_fast"]
         self.assertIn("needs.changes.outputs.pg_db", job["if"])
+        # The PR runs the selector, whose full mode is main's `just test-postgres-shard`.
         self.assertTrue(
-            any("just test-postgres" in str(step.get("run", "")) for step in job["steps"]),
-            "the pg_db-gated job must invoke `just test-postgres`",
+            any(PG_SELECTOR_RUN == str(step.get("run", "")) for step in job["steps"]),
+            "the pg_db-gated job must invoke the PG selector",
         )
+        self.assertIn('FULL_PG = ("just", "test-postgres-shard")', SELECTOR.read_text("utf-8"))
         recipe = self.justfile.partition("\ntest-postgres:")[2].partition("\n\n")[0]
         for marker in ("source scripts/ci/non-pg-test-filter.sh", "cargo test", '"${PG_INCLUDE_ARGS[@]}"'):
             self.assertIn(marker, recipe, f"just test-postgres must select {marker}")

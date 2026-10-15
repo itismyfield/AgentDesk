@@ -104,6 +104,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::health::recovery::live_agent_recovery::host_guard_tests
   --skip services::discord::health::recovery::stall_alert::tests
   --skip services::discord::health::recovery::stall_watchdog_auto_heal_tests
+  --skip services::discord::health::turn_deliver::inject::herdr::tests
   --skip services::discord::health::turn_deliver::inject_codex_tests
   --skip services::discord::health::turn_deliver::inject_tests
   --skip services::discord::herdr_terminate::exit_tests
@@ -424,9 +425,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
-  services::discord::commands::control::home_fence::tests::b2b1_a_clear_whose_persist_fails_still_withdraws_and_keeps_its_session
-  services::discord::commands::control::home_fence::tests::b2b1_clear_and_reset_withdraw_only_once_admitted_and_restore_nothing
-  services::discord::commands::control::home_fence::tests::b2b1_queued_cancel_and_drain_reset_keep_the_active_turn_scope
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
   services::discord::commands::control::home_fence::tests::d2b_clear_reply_stays_counted_after_clear_body_finishes
   services::discord::commands::control::home_fence::tests::d2b_queued_cancel_keeps_scope_and_never_cancels_active_successor
@@ -444,6 +442,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_keeps_orphan_pending_token_without_measured_death
   services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
+  services::discord::health::turn_deliver::inject_codex_tests::codex_input_on_a_listed_herdr_channel_stays_refused
   services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
@@ -902,7 +901,6 @@ NON_PG_FILTER_REPLAY=(
   services::turn_host::tests::a_close_right_after_the_check_finds_the_turn_in_its_mailbox
   services::turn_host::tests::a_delegated_channel_runs_a_turn_only_where_its_home_is_held_with_intake_open
   services::turn_host::tests::configured_turn_refuses_provider_and_remote_endpoint_before_the_row_and_an_unread_row
-  services::turn_orchestrator::registry_purge::recovery_registry::registry_pg_tests::s3act_b3b4a2a_r01_every_default_and_resolve_sees_one_core_slot_and_attempt
   utils::async_bridge::tests::block_on_pg_result_fails_fast_when_bridge_deadline_already_passed
   utils::redact::tests::dsn_password_extracts_postgres_password_only
   utils::redact::tests::mask_dsn_password_redacts_postgres_password

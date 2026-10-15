@@ -7,6 +7,30 @@ use crate::services::{
 use poise::serenity_prelude::ChannelId;
 
 #[cfg(unix)]
+pub(super) fn native_initial_offset(
+    tmux: &str,
+    output: &str,
+    offset: u64,
+    binding: Option<&TuiRuntimeBinding>,
+    continuation: bool,
+) -> Option<u64> {
+    let native = binding.is_none_or(|binding| binding.output_path == output);
+    if !native || continuation || dedupe::codex_verified_requires_proof(tmux) {
+        return crate::services::codex_tui::session::checkpoint::at(
+            std::path::Path::new(output),
+            offset,
+        )
+        .ok();
+    }
+    let _ = codex_tui_rehydrated_binding_from_rollout_path(
+        tmux,
+        std::path::Path::new(output),
+        binding.and_then(|binding| binding.session_id.clone()),
+    )?;
+    dedupe::codex_restore_checkpoint(tmux, std::path::Path::new(output))
+}
+
+#[cfg(unix)]
 use crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path;
 
 #[derive(Debug)]
@@ -106,6 +130,14 @@ pub(super) fn commit_live_direct_resume_fallback(
     {
         let Some(fallback) = fallback else {
             return tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+                if candidate.as_ref().is_some_and(|binding| {
+                    !dedupe::codex_restore_source_current(
+                        tmux_session_name,
+                        std::path::Path::new(&binding.output_path),
+                    )
+                }) {
+                    return false;
+                }
                 let unresolved = TuiRuntimeBinding {
                     runtime_kind: RuntimeHandoffKind::CodexTui,
                     output_path: String::new(),
@@ -143,6 +175,12 @@ pub(super) fn commit_live_direct_resume_fallback(
             });
         };
         tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
+            if !dedupe::codex_restore_source_current(
+                tmux_session_name,
+                std::path::Path::new(&fallback.binding.output_path),
+            ) {
+                return false;
+            }
             let Some(current) = rollout_fallback_for_live_direct_resume(
                 &ProviderKind::Codex,
                 tmux_session_name,
