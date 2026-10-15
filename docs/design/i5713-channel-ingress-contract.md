@@ -162,7 +162,6 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/commands/text_commands.rs` | admission | `current_command` :37, `admit_command` :389·:1300 |
 | `src/services/discord/meeting_orchestrator/lifecycle.rs` | admission | `admit_command` :399 |
 | `src/services/discord/router/message_handler/goal_lifecycle.rs` | admission | `admit_command` :165 |
-| `src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs` | admission | `read_home` :462·:528, `registered_channel` :469 |
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
 | `src/services/discord/runtime_bootstrap.rs` | 생성·readiness | 역할별 boot 공급 :503–624(`HomeRole`, `turns_restored`, `HomeSettings`, `install_home_availability`, `start_channel_homes`) |
 | `src/services/discord/runtime_bootstrap/o_writer_host.rs` | admission | `delegated_boot_ownership` :336 |
