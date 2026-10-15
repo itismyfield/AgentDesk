@@ -343,21 +343,6 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &state.input_fifo_path,
         &mut updated.input_fifo_path,
     );
-    apply_local_change_if_durable_unchanged(
-        &persisted_baseline.claude_e_pid,
-        &state.claude_e_pid,
-        &mut updated.claude_e_pid,
-    );
-    apply_local_change_if_durable_unchanged(
-        &persisted_baseline.claude_e_process_starttime,
-        &state.claude_e_process_starttime,
-        &mut updated.claude_e_process_starttime,
-    );
-    apply_local_change_if_durable_unchanged(
-        &persisted_baseline.claude_e_macos_lstart_hash,
-        &state.claude_e_macos_lstart_hash,
-        &mut updated.claude_e_macos_lstart_hash,
-    );
     updated.last_offset = updated.last_offset.max(state.last_offset);
     apply_local_change_if_durable_unchanged(
         &persisted_baseline.current_tool_line,

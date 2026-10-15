@@ -103,6 +103,7 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_settings.rs
+│   ├── runtime_validation.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
@@ -620,12 +621,6 @@ src/
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
 │   │   └── tui_session_launch_geometry_tests.rs
-│   ├── claude_e/
-│   │   ├── cancellation.rs
-│   │   ├── jsonl_parser.rs
-│   │   ├── mod.rs
-│   │   ├── process.rs
-│   │   └── spawn_queue.rs
 │   ├── claude_tui/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
@@ -1106,7 +1101,6 @@ src/
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
 │   │   │   │   │   │   └── herdr_terminal_restart_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
-│   │   │   │   │   ├── claude_e_stamp.rs
 │   │   │   │   │   ├── completion_preserve.rs
 │   │   │   │   │   ├── guarded_read.rs
 │   │   │   │   │   ├── heartbeat.rs
@@ -1963,7 +1957,6 @@ src/
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
 │   │   │   ├── runtime_handoff_loop/
-│   │   │   │   ├── claude_e.rs
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
 │   │   │   │   ├── tests.rs
@@ -2147,8 +2140,7 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── voice_barge_in/
 │   │   │   ├── tests/
-│   │   │   │   ├── pcm_harness_tests.rs
-│   │   │   │   └── retired_text_reply_tests.rs
+│   │   │   │   └── pcm_harness_tests.rs
 │   │   │   ├── channel_state.rs
 │   │   │   ├── final_result_playback.rs
 │   │   │   ├── foreground_decision.rs

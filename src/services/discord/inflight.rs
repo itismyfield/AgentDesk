@@ -226,8 +226,7 @@ pub(in crate::services::discord) use self::save_store::{
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
     save_stream_tick_state_if_bridge_authority,
     save_stream_tick_state_preserving_current_message_races,
-    stamp_claude_e_process_if_matches_identity, stamp_runtime_handoff_if_matches_identity,
-    touch_inflight_state_if_matches_identity,
+    stamp_runtime_handoff_if_matches_identity, touch_inflight_state_if_matches_identity,
 };
 // Explicit-root save seams reached only by the parent's / siblings' test modules.
 #[cfg(test)]
@@ -2777,59 +2776,59 @@ mod stall_recovery_tests {
         );
     }
 
-    /// #2235: rows written by a newer binary may serialize an unknown
-    /// `runtime_kind` string. `deserialize_runtime_kind_tolerant` must
-    /// collapse the unknown value to `None` so the whole inflight row isn't
-    /// tossed as malformed JSON. The recovery engine layers the
-    /// version-aware silent-skip on top of this.
+    /// Removed wire kinds use the existing unknown-runtime policy without finalizer backfill.
     #[test]
     fn inflight_unknown_runtime_kind_string_deserializes_as_none() {
+        let content = include_str!(
+            "../../../tests/fixtures/discord_inflight/claude_e_adapter_v9_historical.json"
+        );
+        let (state, backfilled) =
+            super::parse_inflight_state_content_with_finalizer_backfill(content).unwrap();
+        assert_eq!(
+            (state.runtime_kind, state.runtime_kind_unknown_on_disk),
+            (None, true),
+            "removed wire kind must remain unknown rather than select a supported runtime"
+        );
+        assert!(
+            !backfilled,
+            "historical writer already supplied the finalizer ID"
+        );
+        assert_eq!(state.version, 9);
+        assert_eq!(state.finalizer_turn_id, 11);
+        let serialized = serde_json::to_value(&state).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(content).unwrap();
+        let removed: Vec<_> = raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with("claude_e_"))
+            .collect();
+        assert_eq!(removed.len(), 3);
+        for field in removed {
+            assert!(
+                serialized.get(field).is_none(),
+                "removed field {field} must be ignored"
+            );
+        }
+
         let temp = TempDir::new().unwrap();
         let dir = temp.path().join(ProviderKind::Claude.as_str());
         std::fs::create_dir_all(&dir).unwrap();
-
-        // Seed a JSON row whose `runtime_kind` is a variant string this
-        // binary does not know about (`"future_runtime"`). Without the
-        // tolerant deserializer this row would be deleted as malformed by
-        // `load_inflight_states_from_root`.
-        let valid_state = InflightTurnState::new(
-            ProviderKind::Claude,
-            444,
-            Some("adk-claude".to_string()),
-            7,
-            8,
-            99,
-            "hello".to_string(),
-            Some("session-1".to_string()),
-            Some("AgentDesk-claude-adk-claude".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        let mut value = serde_json::to_value(&valid_state).unwrap();
-        value["runtime_kind"] = serde_json::Value::String("future_runtime".to_string());
-        // Also bump the on-disk version to simulate a row authored by a
-        // newer binary, so the recovery-engine silent-skip guard would
-        // trigger downstream of this deserialization step.
-        value["version"] =
-            serde_json::Value::Number(serde_json::Number::from(super::INFLIGHT_STATE_VERSION + 1));
-        let path = dir.join("444.json");
-        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
-
+        let path = dir.join(format!("{}.json", state.channel_id));
+        std::fs::write(&path, content).unwrap();
         let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
-        assert_eq!(loaded.len(), 1, "tolerant deser must keep the row");
-        assert_eq!(loaded[0].channel_id, 444);
-        assert!(
-            loaded[0].runtime_kind.is_none(),
-            "unknown variant must collapse to None"
+        assert_eq!(loaded.len(), 1, "actual loader must keep a historical row");
+        assert_eq!(loaded[0].channel_id, state.channel_id);
+        assert_eq!(
+            (
+                loaded[0].runtime_kind,
+                loaded[0].runtime_kind_unknown_on_disk
+            ),
+            (None, true)
         );
         assert!(
-            loaded[0].version > super::INFLIGHT_STATE_VERSION,
-            "version stays forward-marked for the recovery silent-skip guard"
-        );
-        assert!(
-            loaded[0].runtime_kind_unknown_on_disk,
-            "present-but-unknown runtime_kind must be distinguishable from legacy absent-field None"
+            path.exists(),
+            "historical row must not be discarded as malformed"
         );
     }
 
