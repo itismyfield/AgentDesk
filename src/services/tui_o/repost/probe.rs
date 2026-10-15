@@ -12,7 +12,7 @@ pub(crate) mod tests;
 use std::collections::BTreeMap;
 use std::future::Future;
 
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 use crate::services::tui_o::repost::identity::payload_sha256;
 use crate::services::tui_o::writer::confirm::{bounded, first_proof};
