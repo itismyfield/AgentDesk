@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use super::{RelayRecoveryActionKind, RelayRecoveryApplySource, RelayRecoveryDecision, SharedData};
 use crate::services::provider::ProviderKind;
 
+#[cfg(test)]
+#[path = "relay_recovery_circuit_evidence_tests.rs"]
+mod circuit_evidence_tests;
+
 const CIRCUIT_VERSION: u32 = 1;
 const CIRCUIT_ALERT_DEDUPE_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
@@ -28,35 +32,8 @@ pub(super) struct RelayReattachEpisode {
 
 impl RelayReattachEpisode {
     fn from_state(state: &super::super::inflight::InflightTurnState) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        for part in [
-            state.provider.as_bytes(),
-            &state.channel_id.to_be_bytes(),
-            state.channel_name.as_deref().unwrap_or("").as_bytes(),
-            &state.request_owner_user_id.to_be_bytes(),
-            &state.user_msg_id.to_be_bytes(),
-            &state.current_msg_id.to_be_bytes(),
-            &state.finalizer_turn_id.to_be_bytes(),
-            state.started_at.as_bytes(),
-            state.tmux_session_name.as_deref().unwrap_or("").as_bytes(),
-            state.session_id.as_deref().unwrap_or("").as_bytes(),
-            state.output_path.as_deref().unwrap_or("").as_bytes(),
-            state.input_fifo_path.as_deref().unwrap_or("").as_bytes(),
-            state
-                .runtime_kind
-                .map(|kind| kind.as_str())
-                .unwrap_or("")
-                .as_bytes(),
-            state.effective_relay_owner_kind().as_str().as_bytes(),
-            &state.turn_start_offset.unwrap_or(u64::MAX).to_be_bytes(),
-            &state.born_generation.to_be_bytes(),
-            state.turn_nonce.as_deref().unwrap_or("").as_bytes(),
-        ] {
-            hasher.update(&(part.len() as u64).to_be_bytes());
-            hasher.update(part);
-        }
         Self {
-            key: hasher.finalize().to_hex().to_string(),
+            key: super::circuit_evidence::episode_key(state),
             owner_user_id: state.request_owner_user_id,
             pin: super::super::inflight::InflightEpisodePin::from_state(state),
         }
@@ -134,6 +111,8 @@ struct CircuitRecord {
     orphaned_staged_alert_ids: Vec<i64>,
     #[serde(default)]
     open_generation: u64,
+    #[serde(default)]
+    coordinate_binding: super::circuit_evidence::CircuitCoordinateBinding,
 }
 
 struct CircuitFileLock {
@@ -246,6 +225,7 @@ fn reserve_in_root(
             staged_alert_id: None,
             orphaned_staged_alert_ids: Vec::new(),
             open_generation: 1,
+            coordinate_binding: super::circuit_evidence::CircuitCoordinateBinding::Unresolved,
         },
         Err(_) => return CircuitReservation::IoError,
     };

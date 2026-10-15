@@ -380,3 +380,125 @@ async fn a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// The target's boot through the production row reader, its port carrying `restored`.
+fn target_boot(
+    pool: &PgPool,
+    restored: &Arc<AtomicBool>,
+) -> Option<Boot<impl Fn(u64) -> BootPort<Idle>>> {
+    let (restored, reset) = (Arc::clone(restored), counted(&Arc::default(), None));
+    let port = move |_| BootPort::new(Idle, Arc::clone(&reset)).restored_by(Arc::clone(&restored));
+    Some(Boot {
+        provider: "claude".into(),
+        local: "mini".into(),
+        pool: pool.clone(),
+        rows: listed(pool),
+        candidates: vec![],
+        port,
+    })
+}
+
+/// Waits up to `secs` for the channel's row to be in `state`, polling every 20ms.
+async fn row_in(pool: &PgPool, secs: u64, state: HomeState) -> ChannelHome {
+    for _ in 0..secs * 50 {
+        let row = o_channel_homes::read_home(pool, C)
+            .await
+            .unwrap()
+            .expect("row");
+        if row.state == state {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    o_channel_homes::read_home(pool, C)
+        .await
+        .unwrap()
+        .expect("row")
+}
+
+/// From the operator's delegate through the gateway's drain, the released channel's target adopts
+/// it and its own lease opens the gate, so the channel no longer stays released and held.
+#[tokio::test]
+async fn a_delegated_channel_is_adopted_by_its_target_after_the_gateway_drain_pg() {
+    use crate::cli::channel_home::{ChannelHomeCommand, execute};
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let mut config = crate::config::Config::default();
+    config.runtime.channel_home_delegation_enabled = Some(true);
+    config.cluster.instance_id = Some("gw".into());
+    let delegate = ChannelHomeCommand::Delegate {
+        channel: ID,
+        provider: "claude".into(),
+        to: "mini".into(),
+    };
+    let connect = || async {
+        let url = &pg_db.database_url;
+        crate::db::postgres::connect_test_pool_with_max_connections(url, "channel-home cli", 2)
+            .await
+    };
+    execute(&config, delegate, connect).await.expect("delegate");
+
+    let (ports, resets) = (Arc::default(), Arc::default());
+    let gw = boot(
+        &pool,
+        "gw",
+        rows(&pool).await,
+        vec![],
+        counted(&resets, None),
+        &ports,
+    );
+    start(Some(true), || gw).await;
+    let released = row_in(&pool, 15, HomeState::Released).await;
+    assert_eq!(
+        (released.state, released.holder, released.target.as_deref()),
+        (HomeState::Released, None, Some("mini")),
+        "the gateway drain leaves the channel released to mini"
+    );
+    assert!(eventually(8, || channel_home::registered(C).is_none()).await);
+    stop(C).await;
+
+    let restored = Arc::new(AtomicBool::new(true));
+    start(Some(true), || target_boot(&pool, &restored)).await;
+    let adopted = row_in(&pool, 8, HomeState::Worker).await;
+    assert_eq!(
+        (adopted.state, adopted.holder.as_deref(), adopted.epoch),
+        (HomeState::Worker, Some("mini"), released.epoch),
+        "the target adopts the released channel instead of holding it forever"
+    );
+    let epoch = released.epoch;
+    assert!(eventually(5, || owned(C) == Some((epoch, HomeIntake::Open))).await);
+    assert_eq!(running(C), (true, Some(epoch)));
+    stop(C).await;
+    channel_home::unregister(C);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A target whose runtime has not restored its turns leaves the released row alone, and adopts it
+/// once the flag turns true.
+#[tokio::test]
+async fn an_unrestored_target_adopts_a_released_channel_only_once_restored_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let delegated = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await);
+    let released = o_channel_homes::finish_release(&pool, C, "gw", delegated.epoch).await;
+    let released = applied(released);
+    let restored = Arc::new(AtomicBool::new(false));
+    start(Some(true), || target_boot(&pool, &restored)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let waiting = o_channel_homes::read_home(&pool, C).await.unwrap();
+    assert_eq!(waiting, Some(released.clone()), "unrestored: row untouched");
+    assert_eq!((running(C), owned(C)), ((true, None), None));
+
+    restored.store(true, Ordering::Release);
+    let adopted = row_in(&pool, 8, HomeState::Worker).await;
+    assert_eq!(
+        (adopted.holder.as_deref(), adopted.epoch),
+        (Some("mini"), released.epoch)
+    );
+    assert!(eventually(5, || owned(C).is_some()).await);
+    stop(C).await;
+    channel_home::unregister(C);
+    pool.close().await;
+    pg_db.drop().await;
+}

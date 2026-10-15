@@ -339,9 +339,7 @@ mod state;
 pub(crate) use session_rotation::*;
 #[cfg(test)]
 pub(crate) use shadow_peek::hold_binding_peek_lock_for_tests;
-pub(crate) use shadow_peek::{
-    BindingPeekBusy, peek_tmux_runtime_binding, try_peek_tmux_runtime_binding,
-};
+pub(crate) use shadow_peek::{peek_tmux_runtime_binding, try_peek_tmux_runtime_binding};
 
 #[cfg(test)]
 use extract::native_turn_is_open;
@@ -375,6 +373,8 @@ pub use prompt_identity::{
 };
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
+#[cfg(test)]
+pub(crate) use state::assert_marker_publication_unlocked_for_tests;
 
 #[cfg(test)]
 mod injected_steer_tests;

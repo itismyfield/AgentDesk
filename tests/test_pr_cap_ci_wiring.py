@@ -12,7 +12,9 @@ def validate(document):
     job = document["jobs"]["scripts"]
     steps = job["steps"]
     caps = [s for s in steps if s.get("name") == STEP["name"]]
-    return caps == [STEP] and not any(k in job for k in ("if", "continue-on-error")) and steps.index(STEP) == next(i for i, s in enumerate(steps) if s.get("name") == "Run script checks") + 1
+    # Cancellation alone may skip this job; producer failure must still run the cap.
+    active = "if" not in job or job["if"] == "${{ !cancelled() }}"
+    return caps == [STEP] and active and "continue-on-error" not in job and steps.index(STEP) == next(i for i, s in enumerate(steps) if s.get("name") == "Run script checks") + 1
 
 
 class CapWiringTest(unittest.TestCase):
@@ -40,3 +42,34 @@ class CapWiringTest(unittest.TestCase):
         steps = document["jobs"]["scripts"]["steps"]
         steps.insert(steps.index(STEP), {"run": 'echo PR_CAP_CI=0 >> "$GITHUB_ENV"'})
         self.assertFalse(validate(document))
+
+    def test_unconditional_job_is_accepted(self):
+        document = copy.deepcopy(self.document)
+        document["jobs"]["scripts"].pop("if", None)
+        self.assertTrue(validate(document))
+
+    def test_other_job_conditions_fail(self):
+        for condition in (
+            False,
+            None,
+            "false",
+            "${{ false }}",
+            "needs.changes.outputs.scripts == 'true'",
+            "${{ needs.changes.outputs.scripts == 'true' }}",
+            "${{ always() && false }}",
+            "${{ always() }}",
+            "!cancelled()",
+            "${{!cancelled()}}",
+            "${{ !cancelled() && true }}",
+        ):
+            with self.subTest(condition=condition):
+                document = copy.deepcopy(self.document)
+                document["jobs"]["scripts"]["if"] = condition
+                self.assertFalse(validate(document))
+
+    def test_job_continue_on_error_fails(self):
+        for value in (True, False, "${{ false }}"):
+            with self.subTest(value=value):
+                document = copy.deepcopy(self.document)
+                document["jobs"]["scripts"]["continue-on-error"] = value
+                self.assertFalse(validate(document))

@@ -8,9 +8,9 @@ use super::screen::{self, Composer, Stash};
 use super::{Attempt, Delivery, DraftState, Guard, Outcome, Report, Unconfirmed, Veto, modal};
 
 /// One stash transaction; recovery is decided before the caller releases the composer lock.
-pub(super) fn run(attempt: &Attempt<'_>, draft: &[String]) -> Report {
+pub(super) fn run(mut attempt: &Attempt<'_>, draft: &[String]) -> Report {
     let mut last = None;
-    let report = transact(attempt, draft, &mut last);
+    let report = transact(&mut attempt, draft, &mut last);
     protect(attempt, &report, last.as_deref());
     report
 }
@@ -28,34 +28,96 @@ pub(super) fn protect(attempt: &Attempt<'_>, report: &Report, last: Option<&str>
     }
 }
 
-fn transact(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) -> Report {
-    let stop = |veto, state| {
-        attempt.drop_buffer();
-        Report::new(Outcome::NotSent(veto), state)
-    };
-    match attempt.key("C-s") {
-        Guard::Applied => {}
-        Guard::Vetoed | Guard::Resized => return stop(Veto::HumanAttached, DraftState::Unchanged),
-        Guard::Gone => return stop(Veto::PaneUnavailable, DraftState::Unchanged),
-        // The key may still have landed.
-        Guard::Failed => return stop(Veto::PaneUnavailable, DraftState::Unknown),
+pub(in crate::services::claude_tui) trait StashEffects {
+    fn timing(&self) -> &super::Timing;
+    fn text(&self) -> &str;
+    fn stash(&mut self) -> Result<(), Report>;
+    fn paste(&mut self) -> Result<(), Report>;
+    fn drop_buffer(&self);
+    fn generation_unchanged(&self) -> bool;
+    fn capture(&self) -> Option<String>;
+    fn await_own(&mut self, last: &mut Option<String>) -> Result<(), Unconfirmed>;
+    fn enter(&mut self) -> Outcome;
+}
+
+impl StashEffects for &Attempt<'_> {
+    fn timing(&self) -> &super::Timing {
+        self.timing
+    }
+    fn text(&self) -> &str {
+        self.text
+    }
+    fn stash(&mut self) -> Result<(), Report> {
+        let report = match self.key("C-s") {
+            Guard::Applied => return Ok(()),
+            Guard::Vetoed | Guard::Resized => {
+                Report::new(Outcome::NotSent(Veto::HumanAttached), DraftState::Unchanged)
+            }
+            Guard::Gone => Report::new(
+                Outcome::NotSent(Veto::PaneUnavailable),
+                DraftState::Unchanged,
+            ),
+            Guard::Failed => {
+                Report::new(Outcome::NotSent(Veto::PaneUnavailable), DraftState::Unknown)
+            }
+        };
+        Attempt::drop_buffer(self);
+        Err(report)
+    }
+    fn paste(&mut self) -> Result<(), Report> {
+        let report = match Attempt::paste(self, None) {
+            Guard::Applied => return Ok(()),
+            Guard::Vetoed | Guard::Resized => Report::new(
+                Outcome::NotSent(Veto::HumanAttached),
+                DraftState::StashedVerified,
+            ),
+            Guard::Gone => Report::new(
+                Outcome::NotSent(Veto::PaneUnavailable),
+                DraftState::StashedVerified,
+            ),
+            Guard::Failed => {
+                return Err(Report::new(
+                    Outcome::Unconfirmed(Unconfirmed::PasteFailed),
+                    DraftState::Unknown,
+                ));
+            }
+        };
+        Attempt::drop_buffer(self);
+        Err(report)
+    }
+    fn drop_buffer(&self) {
+        Attempt::drop_buffer(self);
+    }
+    fn generation_unchanged(&self) -> bool {
+        Attempt::generation_unchanged(self)
+    }
+    fn capture(&self) -> Option<String> {
+        self.pane.capture()
+    }
+    fn await_own(&mut self, last: &mut Option<String>) -> Result<(), Unconfirmed> {
+        Attempt::await_own(self, |after| screen::owns(after, self.text()), last)
+    }
+    fn enter(&mut self) -> Outcome {
+        Attempt::enter(self)
+    }
+}
+
+pub(in crate::services::claude_tui) fn transact(
+    attempt: &mut impl StashEffects,
+    draft: &[String],
+    last: &mut Option<String>,
+) -> Report {
+    if let Err(report) = attempt.stash() {
+        return report;
     }
     if let Err(veto) = await_stash(attempt, last) {
-        return stop(veto, DraftState::Unknown);
+        attempt.drop_buffer();
+        return Report::new(Outcome::NotSent(veto), DraftState::Unknown);
     }
-    match attempt.paste(None) {
-        Guard::Applied => {}
-        Guard::Vetoed | Guard::Resized => {
-            return stop(Veto::HumanAttached, DraftState::StashedVerified);
-        }
-        Guard::Gone => return stop(Veto::PaneUnavailable, DraftState::StashedVerified),
-        Guard::Failed => {
-            let outcome = Outcome::Unconfirmed(Unconfirmed::PasteFailed);
-            return Report::new(outcome, DraftState::Unknown);
-        }
+    if let Err(report) = attempt.paste() {
+        return report;
     }
-    // Only the exact rows prove the bytes are ours; a folded placeholder never does here.
-    let outcome = match attempt.await_own(|after| screen::owns(after, attempt.text), last) {
+    let outcome = match attempt.await_own(last) {
         Ok(()) => attempt.enter(),
         Err(detail) => return Report::new(Outcome::Unconfirmed(detail), DraftState::Unknown),
     };
@@ -64,16 +126,16 @@ fn transact(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) 
 
 /// Rechecks after the C-s until Claude shows an empty composer under its stash marker. Only the
 /// composer, stash, modal and generation count: the turn may end meanwhile.
-fn await_stash(attempt: &Attempt<'_>, last: &mut Option<String>) -> Result<(), Veto> {
-    std::thread::sleep(attempt.timing.settle);
-    for check in 0..attempt.timing.rechecks {
+fn await_stash(attempt: &impl StashEffects, last: &mut Option<String>) -> Result<(), Veto> {
+    std::thread::sleep(attempt.timing().settle);
+    for check in 0..attempt.timing().rechecks {
         if check > 0 {
-            std::thread::sleep(attempt.timing.recheck_interval);
+            std::thread::sleep(attempt.timing().recheck_interval);
         }
         if !attempt.generation_unchanged() {
             return Err(Veto::HumanAttached);
         }
-        let Some(after) = attempt.pane.capture() else {
+        let Some(after) = attempt.capture() else {
             return Err(Veto::PaneUnavailable);
         };
         let (shown_modal, stashed) = (modal(&after), screen::stashed(&after));
@@ -89,10 +151,14 @@ fn await_stash(attempt: &Attempt<'_>, last: &mut Option<String>) -> Result<(), V
 }
 
 /// Read-only watch for the draft coming back after the submit.
-fn await_restore(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<String>) -> DraftState {
-    let deadline = Instant::now() + attempt.timing.restore_window;
+fn await_restore(
+    attempt: &impl StashEffects,
+    draft: &[String],
+    last: &mut Option<String>,
+) -> DraftState {
+    let deadline = Instant::now() + attempt.timing().restore_window;
     loop {
-        if let Some(capture) = attempt.pane.capture() {
+        if let Some(capture) = attempt.capture() {
             let back = screen::restored(&capture, draft);
             *last = Some(capture);
             if back {
@@ -103,7 +169,7 @@ fn await_restore(attempt: &Attempt<'_>, draft: &[String], last: &mut Option<Stri
         if left.is_zero() {
             return DraftState::Unknown;
         }
-        std::thread::sleep(attempt.timing.confirm_poll.min(left));
+        std::thread::sleep(attempt.timing().confirm_poll.min(left));
     }
 }
 

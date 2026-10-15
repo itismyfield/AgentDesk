@@ -1,12 +1,10 @@
 //! Canonical outbound-v3 message helpers extracted from the gateway root.
 
 use super::*;
-use crate::services::tui_o::n1_observation::{self as observation, Context};
 
 #[cfg(test)]
-mod n1_placeholder_tests {
+mod placeholder_tests {
     use super::*;
-    use crate::services::tui_o::n1_observation::tests as harness;
     use axum::{
         Json, Router,
         body::Bytes,
@@ -47,28 +45,16 @@ mod n1_placeholder_tests {
             axum::serve(listener, app).await.unwrap();
         });
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let context = || Context {
-            provider: "codex",
-            origin: "tui_direct_synthetic",
-            input_message_id: None,
-        };
         let post = send_intake_placeholder(
             http.clone(),
             shared.clone(),
             ChannelId::new(7),
             Some((ChannelId::new(7), MessageId::new(8))),
             false,
-            context(),
         )
         .await;
-        let patch = edit_intake_placeholder(
-            http,
-            shared,
-            ChannelId::new(7),
-            MessageId::new(99),
-            context(),
-        )
-        .await;
+        let patch =
+            edit_intake_placeholder(http, shared, ChannelId::new(7), MessageId::new(99)).await;
         server.abort();
         let result = vec![format!("{post:?}"), format!("{}", patch.is_ok())];
         let calls = calls.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -83,7 +69,7 @@ mod n1_placeholder_tests {
     }
 
     #[test]
-    fn n1_real_post_patch_effects_and_results_unchanged_for_all_observer_failures() {
+    fn real_post_patch_preserve_http_results_and_reply_reference() {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let _root = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
@@ -91,94 +77,55 @@ mod n1_placeholder_tests {
             dir.path().as_os_str(),
         );
         for fail in [false, true] {
-            let off = harness::scoped(None, || runtime().block_on(exercise(fail)));
-            assert_eq!(off.1.len(), 2);
-            assert_eq!(off.1[0].0, "POST");
-            assert_eq!(off.1[1].0, "PATCH");
-            for failure in ["full", "closed", "lock", "sink"] {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let worker = std::thread::spawn(move || {
-                    harness::faulted(failure, |_| {
-                        tx.send(runtime().block_on(exercise(fail))).unwrap();
-                    })
-                });
-                let on = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-                worker.join().unwrap();
-                assert_eq!(on, off, "{failure}, effect_error={fail}");
-            }
-            let (observer, events) = harness::fixture(16);
-            harness::scoped(Some(observer.clone()), || {
-                runtime().block_on(exercise(fail))
-            });
-            let events: Vec<_> = events
-                .try_iter()
-                .map(|e| serde_json::to_value(e).unwrap())
-                .collect();
-            assert_eq!(events.len(), 4);
-            assert_eq!(events[0]["phase"], "attempt");
-            assert_eq!(events[2]["phase"], "attempt");
-            assert_eq!(
-                events[1]["phase"],
-                if fail {
-                    "failed_or_uncertain"
-                } else {
-                    "succeeded"
-                }
-            );
-            assert_eq!(
-                events[3]["phase"],
-                if fail {
-                    "failed_or_uncertain"
-                } else {
-                    "succeeded"
-                }
-            );
-            assert_eq!(events[0]["op_id"], events[1]["op_id"]);
-            assert_eq!(events[2]["op_id"], events[3]["op_id"]);
+            let (results, calls) = runtime().block_on(exercise(fail));
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].0, "POST");
+            assert_eq!(calls[1].0, "PATCH");
+            assert_eq!(results[0].starts_with("Ok("), !fail, "{results:?}");
+            assert_eq!(results[1], (!fail).to_string());
+            let post: serde_json::Value = serde_json::from_str(&calls[0].2).unwrap();
+            assert_eq!(post["content"], "...");
+            assert_eq!(post["message_reference"]["message_id"], "8");
+            let patch: serde_json::Value = serde_json::from_str(&calls[1].2).unwrap();
+            assert_eq!(patch["content"], "...");
         }
     }
 
     #[test]
-    fn n1_queued_barrier_cancellation_leaves_attempt_before_any_http() {
-        let (observer, rx) = harness::fixture(16);
-        harness::scoped(Some(observer.clone()), || {
-            runtime().block_on(async {
-                let shared = crate::services::discord::make_shared_data_for_tests();
-                let channel = ChannelId::new(7);
-                let _flush = shared.answer_flush_barrier.begin_flush(channel);
-                let http = Arc::new(
-                    serenity::HttpBuilder::new("test-token")
-                        .proxy("http://127.0.0.1:1")
-                        .ratelimiter_disabled(true)
-                        .build(),
-                );
-                let mut send = Box::pin(send_intake_placeholder(
-                    http,
-                    shared,
-                    channel,
-                    None,
-                    true,
-                    Context {
-                        provider: "codex",
-                        origin: "discord_queued",
-                        input_message_id: Some(8),
-                    },
-                ));
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(10), &mut send)
-                        .await
-                        .is_err()
-                );
-                drop(send);
-            })
+    fn queued_barrier_cancellation_prevents_http() {
+        runtime().block_on(async {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(7);
+            let _flush = shared.answer_flush_barrier.begin_flush(channel);
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let recorded = calls.clone();
+            let app = Router::new().route(
+                "/{*path}",
+                any(move || {
+                    recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { StatusCode::BAD_REQUEST }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let http = Arc::new(
+                serenity::HttpBuilder::new("test-token")
+                    .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                    .ratelimiter_disabled(true)
+                    .build(),
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut send = Box::pin(send_intake_placeholder(http, shared, channel, None, true));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut send)
+                    .await
+                    .is_err()
+            );
+            drop(send);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            server.abort();
         });
-        let events: Vec<_> = rx
-            .try_iter()
-            .map(|e| serde_json::to_value(e).unwrap())
-            .collect();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["phase"], "attempt");
-        assert_eq!(harness::snapshot_value(&observer, 7)["open_attempts"], 1);
     }
 }
 
@@ -213,26 +160,8 @@ pub(in crate::services::discord) async fn edit_intake_placeholder(
     shared: Arc<SharedData>,
     channel_id: ChannelId,
     message_id: MessageId,
-    context: Context<'_>,
 ) -> Result<(), ClassifiedOutboundEditError> {
-    let attempt = observation::placeholder_attempt(
-        context,
-        channel_id.get(),
-        "patch_placeholder",
-        None,
-        Some(message_id.get()),
-    );
-    let result =
-        edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await;
-    observation::placeholder_result(
-        attempt,
-        match &result {
-            Ok(()) => Ok(message_id.get()),
-            Err(ClassifiedOutboundEditError::ConfirmedMissing(_)) => Err("confirmed_missing"),
-            Err(ClassifiedOutboundEditError::Other(_)) => Err("other_or_uncertain"),
-        },
-    );
-    result
+    edit_outbound_message_classified(http, shared, channel_id, message_id, "...").await
 }
 
 pub(in crate::services::discord) async fn send_intake_placeholder(
@@ -242,15 +171,7 @@ pub(in crate::services::discord) async fn send_intake_placeholder(
     reference: Option<(ChannelId, MessageId)>,
     // Only the queued-turn "📬" notice waits. Active placeholders pass false.
     is_queued_notice: bool,
-    context: Context<'_>,
 ) -> Result<MessageId, String> {
-    let attempt = observation::placeholder_attempt(
-        context,
-        channel_id.get(),
-        "post_placeholder",
-        reference.map(|(c, m)| (c.get(), m.get())),
-        None,
-    );
     await_answer_flush_if_queued_notice(&shared.answer_flush_barrier, channel_id, is_queued_notice)
         .await;
 
@@ -262,18 +183,8 @@ pub(in crate::services::discord) async fn send_intake_placeholder(
             reference_message,
         ));
     }
-    let result = outbound_delivery_error(
-        deliver_outbound(&client, shared_outbound_deduper(), msg, None).await,
-    )
-    .and_then(|id| id.ok_or_else(|| "intake placeholder delivery was skipped".to_string()));
-    observation::placeholder_result(
-        attempt,
-        result
-            .as_ref()
-            .map(|id| id.get())
-            .map_err(|_| "post_failed_or_uncertain"),
-    );
-    result
+    outbound_delivery_error(deliver_outbound(&client, shared_outbound_deduper(), msg, None).await)
+        .and_then(|id| id.ok_or_else(|| "intake placeholder delivery was skipped".to_string()))
 }
 
 pub(in crate::services::discord) async fn send_outbound_message(

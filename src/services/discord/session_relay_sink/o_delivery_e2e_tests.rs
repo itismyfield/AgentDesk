@@ -634,10 +634,7 @@ async fn retired_registered_supervisor_consumers_hold_legacy_while_o_delivers_on
     tokio::time::sleep(Duration::from_secs(3)).await;
     let initial_captured = writer.channel().cursors().next().unwrap().captured_through;
 
-    assert_eq!(
-        fixture.install().await,
-        crate::services::discord::OOnlyInstallOutcome::Spawned
-    );
+    fixture.spawn_watcher().await;
     for _ in 0..800 {
         if observations.snapshot().event_count("outer_eof") > 0 {
             break;

@@ -68,11 +68,7 @@ pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
         return None;
     }
     let presence = lock(&PRESENCE).get(&channel).cloned()?;
-    let mut status = { lock(&presence).json() };
-    status["n1_observation"] =
-        serde_json::to_value(crate::services::tui_o::n1_observation::snapshot(channel))
-            .unwrap_or_else(|_| serde_json::json!({"status": "unavailable"}));
-    Some(status)
+    Some(lock(&presence).json())
 }
 
 #[derive(Debug)]
