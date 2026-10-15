@@ -66,9 +66,8 @@ async fn fenced(host: &impl HostIo, channel: u64, provider: ShadowProvider) -> F
         .unwrap()
 }
 
-/// With Legacy's open intake row and pending start for the turn it keeps, only the Codex entry
-/// publishes; the strict entry still refuses both, and terminal custody or a queued body still
-/// refuse a Codex takeover.
+/// Legacy's open intake row and pending start stop only the strict entry; terminal custody or a
+/// queued body still stop the Codex entry.
 #[test]
 fn codex_takeover_passes_open_intake_and_a_pending_start_the_strict_entry_refuses_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
