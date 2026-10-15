@@ -8,6 +8,9 @@ use crate::services::turn_orchestrator::policy_close::{
 };
 use std::time::Duration;
 
+#[path = "route_queue_tests.rs"]
+mod queue;
+
 /// A receipt the step clears at once; the routing contract does not depend on its row.
 struct Cleared(u64);
 

@@ -273,6 +273,7 @@ pub(super) async fn handle_text_message(
     preserve_on_cancel: bool,
     request: IntakeRequest,
     _queued_drain: bool,
+    queued: Option<adk_thread::Route>,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -283,6 +284,7 @@ pub(super) async fn handle_text_message(
             preserve_on_cancel,
             request,
             _queued_drain,
+            queued,
             preloaded_uploads,
             gate_resolved_voice_announcement,
         ))
@@ -307,6 +309,7 @@ pub(super) async fn handle_text_message(
             preserve_on_cancel,
             request,
             _queued_drain,
+            queued,
             preloaded_uploads,
             gate_resolved_voice_announcement,
         ))
@@ -321,6 +324,7 @@ async fn handle_text_message_admitted(
     preserve_on_cancel: bool,
     request: IntakeRequest,
     _queued_drain: bool,
+    queued: Option<adk_thread::Route>,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     gate_resolved_voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -910,6 +914,7 @@ async fn handle_text_message_admitted(
             pending_uploads: &mut pending_uploads,
             session_was_cleared,
             queued_drain: _queued_drain,
+            queued,
         })
         .await?
     else {
@@ -957,7 +962,7 @@ async fn handle_text_message_admitted(
             &dispatch_id_for_thread,
             None,
             preserve_on_cancel,
-            _queued_drain,
+            (_queued_drain, route),
         ),
         (session_id, memento_context_loaded, current_path),
     )
@@ -1052,7 +1057,7 @@ async fn handle_text_message_admitted(
     let mut resolved_role_binding = {
         // For cross-channel dispatch reuse (e.g. review in implementation thread),
         // resolve role from the override channel instead of the thread's parent.
-        if let Some(alt_ch) = route.role() {
+        if let Some(alt_ch) = route.role {
             ResolvedThreadRoleBinding::direct(resolve_role_binding(alt_ch, None))
         } else {
             let data = shared.core.lock().await;
@@ -1073,7 +1078,7 @@ async fn handle_text_message_admitted(
 
     // For cross-channel dispatch reuse, override the provider so the turn
     // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
-    let provider = if route.role().is_some() {
+    let provider = if route.role.is_some() {
         role_binding
             .as_ref()
             .and_then(|rb| rb.provider.clone())
@@ -1355,7 +1360,7 @@ async fn handle_text_message_admitted(
         .await;
     // The claim owns the route: publish it before this turn can be observed.
     if started {
-        route.publish(shared);
+        route.publish(shared, &provider);
     }
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
@@ -1442,6 +1447,7 @@ async fn handle_text_message_admitted(
             None,
             preserve_on_cancel,
             race_loss::QueuedIntakeCause::RaceLoss,
+            route,
         )
         .await.map(|_| IntakeExecution::deferred(channel_id));
     }

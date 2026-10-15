@@ -242,7 +242,7 @@ EXPECTED = {
     "reaction_lifecycle.rs": {"declare": 1, "into_iter": 1, "iter": 1},
     "relay_recovery/apply.rs": {"len": 2, "retain": 1},
     "router/intake_gate.rs": {"get": 1, "remove": 1},
-    "router/message_handler/intake_turn/adk_thread.rs": {"contains_key": 1, "insert": 1},
+    "router/message_handler/intake_turn/adk_thread.rs": {"contains_key": 1, "insert": 1, "iter": 1, "retain": 1},
     "router/message_handler/intake_turn.rs": {"contains_key": 1},
     "runtime_bootstrap/shared_data.rs": {"initialize": 1},
     "shared_state.rs": {"declare": 1},
@@ -250,6 +250,9 @@ EXPECTED = {
 }
 
 RETAIN_ARGUMENTS = {
+    "router/message_handler/intake_turn/adk_thread.rs": [
+        "|parent,thread|{letremove=*thread==self.target&&Some(*parent)!=self.parent;ifremove{replaced.push(*parent);}!remove}",
+    ],
     "turn_finalizer/cleanup.rs": [
         "|parent,thread|{letremove=*thread==channel_id;ifremove{parents.push(*parent);}!remove}",
     ],
@@ -292,7 +295,7 @@ class Census(unittest.TestCase):
         }
         self.assertEqual(actual, {path: Counter(ops) for path, ops in EXPECTED.items()})
 
-    def test_all_twelve_release_paths_remain_in_the_census(self):
+    def test_all_thirteen_release_paths_remain_in_the_census(self):
         for helper, expected in RELEASES.items():
             actual = {}
             for path, source in self.sources.items():
@@ -303,7 +306,7 @@ class Census(unittest.TestCase):
             self.assertEqual(actual, expected, helper)
         self.assertEqual(sum(RELEASES["kick_thread_parents_after_turn_release"].values())
                          + sum(RELEASES["collect_and_clear_thread_parents"].values())
-                         - 1 + 2, 12)  # Remove the wrapper; add two direct deletions.
+                         - 1 + 3, 13)  # Remove the wrapper; add three direct deletions.
 
     def test_retain_predicates_only_remove_edges(self):
         # Retain exposes a mutable value, so operation counts alone miss edge replacement.
@@ -333,7 +336,10 @@ class Census(unittest.TestCase):
         # target is admitted and bootstrapped, and intake publishes it only once the claim succeeded.
         writes = [m.start() for m in re.finditer(r"thread_parents\.insert\(", compact)]
         self.assertEqual(len(writes), 1)
-        self.assertLess(compact.index("fnpublish(&self,shared:&SharedData)"), writes[0])
+        self.assertLess(compact.index("fnpublish(&self,shared:&Arc<SharedData>,provider:&ProviderKind)"), writes[0])
+        # A replaced parent edge is released with its queue kick, like every other edge removal.
+        kick = compact.index("cleanup::kickoff_thread_parents_after_finalize(shared,provider,replaced);")
+        self.assertLess(writes[0], kick)
         self.assertLess(writes[0], compact.index("asyncfnredirect_dispatch("))
         inserts = [m.start() for m in re.finditer(r"parent=Some\(channel_id\);", compact)]
         self.assertEqual(len(inserts), 2)
@@ -347,8 +353,8 @@ class Census(unittest.TestCase):
             self.assertNotIn("drop(redirected_permit", compact[start:inserts[index]])
         root = re.sub(r"\s+", "", self.sources[D + "router/message_handler/intake_turn.rs"])
         claim = root.index(".complete_mailbox_claim(")
-        self.assertEqual(root.count("route.publish(shared);"), 1)
-        self.assertLess(claim, root.index("ifstarted{route.publish(shared);}"))
+        self.assertEqual(root.count("route.publish(shared,&provider);"), 1)
+        self.assertLess(claim, root.index("ifstarted{route.publish(shared,&provider);}"))
         helper = re.sub(r"\s+", "", self.sources[D + "router/intake_gate/ledger.rs"])
         helper_start = helper.index("asyncfnlegacy_effect(")
         helper_end = helper.index("pub(incrate::services::discord)asyncfntry_text_reply(", helper_start)

@@ -279,6 +279,7 @@ pub(super) async fn finish_admitted_local(
     request: IntakeRequest,
     preserve_on_cancel: bool,
     queued_drain: bool,
+    queued: Option<crate::services::turn_orchestrator::QueuedRoute>,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -287,10 +288,31 @@ pub(super) async fn finish_admitted_local(
         preserve_on_cancel,
         request,
         queued_drain,
+        queued,
         preloaded_uploads,
         voice_announcement,
     )
     .await
+}
+
+/// Test seam: holds the next provider effect on `channel` until the returned sender fires.
+#[cfg(test)]
+pub(in crate::services::discord) fn hold_input_effect_for_tests(
+    channel: u64,
+) -> (
+    tokio::sync::oneshot::Receiver<(bool, bool)>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, at) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let probe = provider_dispatch::InputEffectProbe {
+        channel,
+        entered,
+        release: wait,
+        terminal_before_release: false,
+    };
+    *provider_dispatch::INPUT_EFFECT_PROBE.lock().unwrap() = Some(probe);
+    (at, release)
 }
 
 #[cfg(test)]

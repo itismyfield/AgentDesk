@@ -1268,7 +1268,8 @@ fn queued_b() -> crate::services::turn_orchestrator::Intervention {
     }
 }
 
-/// The new process restores B once into a free slot, with no routing, voice or ticket left over.
+/// The new process restores B once into a free slot, with no routing, voice or ticket left over,
+/// and the restart's queue kickoff runs it exactly once through its intake claim.
 async fn restore_queued_b_once(shared: &Arc<SharedData>) {
     let channel = ChannelId::new(CRASH_CHANNEL);
     let (queues, overrides) = crate::services::turn_orchestrator::load_pending_queues(
@@ -1306,4 +1307,89 @@ async fn restore_queued_b_once(shared: &Arc<SharedData>) {
             .any(|edge| *edge.value() == channel)
     );
     assert!(shared.voice_barge_in.deferred_for_test(channel).is_none());
+    run_restored_b_once(shared, channel, &persistence).await;
+}
+
+/// The restart's real kickoff takes B under a dispatch lease and runs it through intake: one
+/// claim, one provider effect, an empty queue; hydrating and kicking again adds neither.
+async fn run_restored_b_once(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    persistence: &crate::services::turn_orchestrator::QueuePersistenceContext,
+) {
+    let answer = move |_: &axum::http::Method, path: &str| {
+        let channel_path = format!("/channels/{CRASH_CHANNEL}");
+        path.ends_with(&channel_path).then(|| {
+            let id = CRASH_CHANNEL.to_string();
+            serde_json::json!({"id": id, "type": 0, "name": "coldstop-b", "position": 0})
+        })
+    };
+    let api =
+        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
+            .await;
+    let workspace = tempfile::tempdir().unwrap();
+    crate::services::discord::host_defer_gate::tests::map_channel(shared, channel, "").await;
+    if let Some(session) = shared.core.lock().await.sessions.get_mut(&channel) {
+        session.channel_name = None;
+        session.current_path = Some(workspace.path().display().to_string());
+    }
+    let root = std::path::PathBuf::from(std::env::var_os(CRASH_ROOT).unwrap());
+    let config = crate::runtime_layout::config_file_path(&root);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "server: {}\ndata: {dir: data}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
+    let deps = crate::services::discord::router::IntakeDeps {
+        http: &api.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared,
+        token: "",
+    };
+    let b = MessageId::new(CRASH_CHANNEL + 50);
+    let hold = crate::services::discord::router::message_handler::hold_input_effect_for_tests;
+    let (at, release) = hold(CRASH_CHANNEL);
+    let steps = async {
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(15), at).await;
+        assert!(matches!(entered, Ok(Ok(_))), "the restart runs B");
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(b),
+            "B holds the claim"
+        );
+        assert!(snapshot.intervention_queue.is_empty());
+        release.send(()).unwrap();
+    };
+    let kick = discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel);
+    let (_, ()) = tokio::join!(kick, steps);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_some()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    assert!(ended.await.is_ok(), "B ends");
+    let mailbox = shared.mailbox(channel);
+    let again = mailbox
+        .try_hydrate_pending_queue_from_disk(persistence.clone())
+        .await;
+    assert_eq!(
+        again.unwrap().absorbed,
+        0,
+        "the disk queue no longer holds B"
+    );
+    assert!(mailbox.snapshot().await.intervention_queue.is_empty());
+    let (at, _release) = hold(CRASH_CHANNEL);
+    let kick = discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel);
+    assert!(!kick.await.started);
+    let rerun = tokio::time::timeout(std::time::Duration::from_secs(1), at).await;
+    assert!(!matches!(rerun, Ok(Ok(_))), "B runs once");
 }

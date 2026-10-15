@@ -78,7 +78,9 @@ use inbound_order::{claim_yields, pause_inbound_stall_for_turn};
 pub(crate) use injected_inputs::{
     ExpectedClaim, HANDBACK_NOT_WRITTEN, InjectionSettlement, ReserveOutcome,
 };
-pub(crate) use intervention::{Intervention, InterventionMode, SourceMessageTextSegment};
+pub(crate) use intervention::{
+    Intervention, InterventionMode, QueuedRoute, SourceMessageTextSegment,
+};
 use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
@@ -252,16 +254,6 @@ fn push_unique_source_text_segments(
     }
 }
 
-fn should_merge_intervention(last: &Intervention, incoming: &Intervention) -> bool {
-    last.mode == InterventionMode::Soft
-        && incoming.mode == InterventionMode::Soft
-        && last.merge_consecutive
-        && incoming.merge_consecutive
-        && last.author_id == incoming.author_id
-        && !last.has_reply_boundary
-        && !incoming.has_reply_boundary
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct QueuePersistenceContext {
     pub(crate) provider: ProviderKind,
@@ -423,7 +415,7 @@ impl EnqueueRefusalReason {
 pub(crate) struct EnqueueInterventionResult {
     pub(crate) enqueued: bool,
     /// True when the incoming intervention was folded into the previous queue
-    /// entry via `should_merge_intervention` (text concatenated, source IDs
+    /// entry via `Intervention::merges_with` (text concatenated, source IDs
     /// accumulated). Callers use this to surface a different reaction emoji
     /// for merged messages so users can tell merged from standalone entries.
     pub(crate) merged: bool,

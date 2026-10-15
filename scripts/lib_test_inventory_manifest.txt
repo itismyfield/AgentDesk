@@ -6927,6 +6927,12 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_inherited_route_is_republished_by_its_claim
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_lost_claim_replays_its_resolved_route
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_old_queue_file_replays_by_resolving_again
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_only_inputs_with_one_route_merge
+services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_transition_busy_intake_replays_its_resolved_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_claimed_route_survives_a_later_tail
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_route_resolved_before_the_tail_is_published_by_its_claim
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider

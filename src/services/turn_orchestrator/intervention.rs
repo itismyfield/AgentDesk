@@ -1,7 +1,7 @@
 //! Queued message payloads and their per-source ownership metadata.
 use std::time::Instant;
 
-use poise::serenity_prelude::{MessageId, UserId};
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 
@@ -55,6 +55,15 @@ pub(crate) struct Intervention {
     pub(crate) voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 }
 
+/// Where a turn resolved to run and the routing its claim publishes, kept with a queued item so
+/// a replay uses this decision instead of resolving again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueuedRoute {
+    pub(crate) target: ChannelId,
+    pub(crate) parent: Option<ChannelId>,
+    pub(crate) role: Option<ChannelId>,
+}
+
 #[cfg(test)]
 thread_local! {
     static SOURCE_CLOCK_SAMPLE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -64,6 +73,34 @@ impl Intervention {
     #[cfg(test)]
     pub(crate) fn source_clock_sample_hook_for_tests(hook: impl FnOnce() + 'static) {
         SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// The route this item resolved before it was queued; `None` resolves again on replay.
+    pub(crate) fn queued_route(&self) -> Option<QueuedRoute> {
+        self.source_message_queued_generations.first()?.route
+    }
+
+    /// Stamps every source with the route, so merges and per-source exits keep it.
+    pub(crate) fn with_route(mut self, route: QueuedRoute) -> Self {
+        if self.source_message_queued_generations.is_empty() {
+            self.source_message_queued_generations = self.source_message_queued_generations();
+        }
+        for source in &mut self.source_message_queued_generations {
+            source.route = Some(route);
+        }
+        self
+    }
+
+    /// Consecutive soft inputs from one author merge unless a reply boundary or a route splits them.
+    pub(crate) fn merges_with(&self, incoming: &Intervention) -> bool {
+        self.mode == InterventionMode::Soft
+            && incoming.mode == InterventionMode::Soft
+            && self.merge_consecutive
+            && incoming.merge_consecutive
+            && self.author_id == incoming.author_id
+            && !self.has_reply_boundary
+            && !incoming.has_reply_boundary
+            && self.queued_route() == incoming.queued_route()
     }
 
     pub(crate) fn preserve_on_cancel(&self) -> bool {

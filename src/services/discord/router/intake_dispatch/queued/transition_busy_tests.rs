@@ -63,6 +63,7 @@ fn item(id: u64) -> Intervention {
             queued_generation: 7,
             enqueued_at_epoch_us: Some(123456),
             preserve_on_cancel: true,
+            route: None,
         }],
         source_text_segments: vec![SourceMessageTextSegment {
             message_id: MessageId::new(id),

@@ -35,61 +35,53 @@ pub(super) struct RedirectDispatch<'a> {
         &'a mut crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     pub session_was_cleared: Option<bool>,
     pub queued_drain: bool,
+    pub queued: Option<Route>,
 }
 
 /// Where a turn runs and the routing it owns. Nothing is written until its mailbox claim
 /// succeeds, so a turn that has not claimed cannot be taken for the channel's owner.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Route {
-    pub(super) target: ChannelId,
-    parent: Option<ChannelId>,
-    role: Role,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Role {
-    /// No routing decision: the channel's override as read at resolve time, left in place.
-    Inherited(Option<ChannelId>),
-    Set(ChannelId),
-    Cleared,
-}
+pub(super) type Route = crate::services::turn_orchestrator::QueuedRoute;
 
 impl Route {
-    fn inherited(shared: &SharedData, target: ChannelId) -> Self {
-        let current = shared.dispatch.role_overrides.get(&target).map(|v| *v);
-        let role = Role::Inherited(current);
-        Self {
-            target,
-            parent: None,
-            role,
-        }
+    /// The thread edge that points at `target` as read at resolve time.
+    fn parent_of(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
+        (shared.dispatch.thread_parents.iter())
+            .filter(|edge| *edge.value() == target)
+            .map(|edge| *edge.key())
+            .min()
     }
 
-    /// The role channel this turn resolves its binding and provider from.
-    pub(super) fn role(&self) -> Option<ChannelId> {
-        match self.role {
-            Role::Inherited(role) => role,
-            Role::Set(role) => Some(role),
-            Role::Cleared => None,
-        }
+    /// No routing decision: the channel's override as read at resolve time.
+    fn inherited_role(shared: &SharedData, target: ChannelId) -> Option<ChannelId> {
+        shared.dispatch.role_overrides.get(&target).map(|v| *v)
     }
 
     pub(super) fn provider(&self, provider: &ProviderKind) -> ProviderKind {
-        (self.role())
+        (self.role)
             .and_then(|role| resolve_role_binding(role, None))
             .and_then(|binding| binding.provider)
             .unwrap_or_else(|| provider.clone())
     }
 
-    /// Runs right after the claim: this turn's routing replaces whatever the channel held.
-    pub(super) fn publish(&self, shared: &SharedData) {
+    /// Runs right after the claim: this turn's parent edge and override replace the channel's.
+    /// A replaced parent loses its thread guard, so its queue is kicked like any edge release.
+    pub(super) fn publish(&self, shared: &Arc<SharedData>, provider: &ProviderKind) {
+        let mut replaced = Vec::new();
+        shared.dispatch.thread_parents.retain(|parent, thread| {
+            let remove = *thread == self.target && Some(*parent) != self.parent;
+            if remove {
+                replaced.push(*parent);
+            }
+            !remove
+        });
         if let Some(parent) = self.parent {
             shared.dispatch.thread_parents.insert(parent, self.target);
         }
+        use crate::services::discord::turn_finalizer::cleanup;
+        cleanup::kickoff_thread_parents_after_finalize(shared, provider, replaced);
         match self.role {
-            Role::Inherited(_) => {}
-            Role::Set(role) => _ = shared.dispatch.role_overrides.insert(self.target, role),
-            Role::Cleared => _ = shared.dispatch.role_overrides.remove(&self.target),
+            Some(role) => _ = shared.dispatch.role_overrides.insert(self.target, role),
+            None => _ = shared.dispatch.role_overrides.remove(&self.target),
         }
     }
 }
@@ -120,17 +112,18 @@ pub(super) async fn redirect_dispatch(
         pending_uploads,
         session_was_cleared,
         queued_drain,
+        queued,
     } = request;
     let mut bootstrapped_fresh_thread_session = false;
     let mut redirected_permit = None;
-    let (mut parent, mut role) = (None, Role::Cleared);
+    let (mut parent, mut role) = (None, None);
     let channel_id = if let Some(did) = dispatch_id_for_thread {
         if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
             );
-            role = Route::inherited(shared, channel_id).role;
+            role = Route::inherited_role(shared, channel_id);
             channel_id
         } else {
             // Use cached dispatch metadata for thread reuse and cross-channel role override
@@ -172,7 +165,7 @@ pub(super) async fn redirect_dispatch(
                             .unwrap_or_else(|| provider.clone());
                         redirected_permit =
                             final_admission(&final_provider, channel_id, redirected_permit.take())?;
-                        role = Role::Set(alt_ch);
+                        role = Some(alt_ch);
                     }
                 }
                 channel_id
@@ -244,7 +237,7 @@ pub(super) async fn redirect_dispatch(
                                     tid,
                                     redirected_permit.take(),
                                 )?;
-                                role = Role::Set(alt_ch);
+                                role = Some(alt_ch);
                             }
                         }
                         Some(tid)
@@ -321,7 +314,7 @@ pub(super) async fn redirect_dispatch(
                         Err(e) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
-                            role = Route::inherited(shared, channel_id).role;
+                            role = Route::inherited_role(shared, channel_id);
                             channel_id // fallback to main channel
                         }
                     }
@@ -329,13 +322,17 @@ pub(super) async fn redirect_dispatch(
             }
         }
     } else {
-        role = Route::inherited(shared, channel_id).role;
+        role = Route::inherited_role(shared, channel_id);
         channel_id
     };
-    let route = Route {
-        target: channel_id,
-        parent,
-        role,
+    // A replayed item keeps the route it resolved before it lost its claim.
+    let route = match queued {
+        Some(queued) if queued.target == channel_id => queued,
+        _ => Route {
+            target: channel_id,
+            parent: parent.or_else(|| Route::parent_of(shared, channel_id)),
+            role,
+        },
     };
     #[cfg(test)]
     route_reached(route.target).await;
@@ -508,6 +505,7 @@ mod tests {
             pending_uploads: &mut uploads,
             session_was_cleared: Some(false),
             queued_drain: false,
+            queued: None,
         })
         .await;
         assert!(result.err().unwrap().to_string().contains("Closing"));
@@ -586,6 +584,7 @@ mod tests {
             pending_uploads: &mut uploads,
             session_was_cleared: Some(false),
             queued_drain: false,
+            queued: None,
         })
         .now_or_never()
         .expect("closed thread cannot await network");
