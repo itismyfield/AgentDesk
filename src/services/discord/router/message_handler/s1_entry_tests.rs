@@ -1037,6 +1037,7 @@ thread_local! {
 #[test]
 fn s1_herdr_first_create_and_retired_use_herdr_pg() {
     use crate::services::session_host::herdr_socket_rig_tests::{self as rig, NativeHerdrRig};
+    use std::os::unix::fs::PermissionsExt;
     const TEST: &str = concat!(
         "services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::",
         "s1_herdr_first_create_and_retired_use_herdr_pg"
@@ -1047,6 +1048,14 @@ fn s1_herdr_first_create_and_retired_use_herdr_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _injection = injection_off();
     let root = tempfile::tempdir().unwrap();
+    // Resolve preparation against a local executable; the Herdr rig owns execution.
+    let cli = root.path().join("claude-fixture");
+    std::fs::write(&cli, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\nexit 1\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _cli = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CLAUDE_PATH",
+        &cli,
+    );
     let _namespace = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "TMUX_TMPDIR",
         root.path(),
