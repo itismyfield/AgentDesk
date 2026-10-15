@@ -328,3 +328,151 @@ impl Drop for HerdrRig {
         let _ = std::fs::remove_file(&self.path);
     }
 }
+
+/// A separate process keeps Linux peer provenance tied to its exec-time environment.
+pub(crate) struct NativeHerdrRig {
+    root: tempfile::TempDir,
+    child: std::process::Child,
+}
+
+impl NativeHerdrRig {
+    pub(crate) fn start(test: &str) -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("adk-hn-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("xdg")).unwrap();
+        let config = home.join("config.toml");
+        std::fs::write(&config, super::herdr::observe::CANONICAL_CONFIG).unwrap();
+        std::fs::File::open(&config)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600)),
+            )
+            .unwrap();
+        let output = std::fs::File::create(root.path().join("server.log")).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env("ADK_TEST_NATIVE_HERDR_DIR", root.path())
+            .env("HERDR_CONFIG_PATH", config)
+            .env("XDG_CONFIG_HOME", home.join("xdg"))
+            .stdout(output.try_clone().unwrap())
+            .stderr(output)
+            .spawn()
+            .unwrap();
+        let mut rig = Self { root, child };
+        for _ in 0..1000 {
+            if rig.socket().exists() {
+                return rig;
+            }
+            assert!(
+                rig.child.try_wait().unwrap().is_none(),
+                "native server exited"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("native server did not bind");
+    }
+
+    pub(crate) fn socket(&self) -> PathBuf {
+        self.root.path().join("herdr.sock")
+    }
+    pub(crate) fn home(&self) -> PathBuf {
+        self.root.path().join("home")
+    }
+    pub(crate) fn requests(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.root.path().join("requests.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+    pub(crate) fn prove_native_off(&self) {
+        let endpoint = HerdrEndpoint::new("test-node", "native", &self.socket(), SESSION)
+            .unwrap()
+            .with_herdr_home(&self.home())
+            .unwrap();
+        let transport =
+            HerdrSocketTransport::new(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
+        let reading = super::herdr::observe::read_restore_resume(&transport, &endpoint);
+        assert!(
+            matches!(&reading, RestoreResume::Off { witness } if witness.pid == self.child.id()),
+            "{reading:?}"
+        );
+    }
+}
+
+impl Drop for NativeHerdrRig {
+    fn drop(&mut self) {
+        eprintln!(
+            "S1_NATIVE_METHODS {:?}",
+            self.requests()
+                .iter()
+                .map(|r| r["method"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::write(self.root.path().join("stop"), b"stop");
+        for _ in 0..1000 {
+            if self.child.try_wait().unwrap().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+/// Installs the ordinary boot-built registry, including its production launch host.
+pub(crate) fn native_registry_on_this_thread(
+    boot: &crate::config::session_hosts::BootSessionHosts,
+) -> impl Drop + use<> {
+    herdr_registry::force_for_test(HerdrRegistry::build(boot))
+}
+
+pub(crate) fn native_server_child() -> bool {
+    let Some(root) = std::env::var_os("ADK_TEST_NATIVE_HERDR_DIR").map(PathBuf::from) else {
+        return false;
+    };
+    let listener = UnixListener::bind(root.join("herdr.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("requests.jsonl"))
+        .unwrap();
+    while !root.join("stop").exists() {
+        let Ok((stream, _)) = listener.accept() else {
+            thread::sleep(Duration::from_millis(2));
+            continue;
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut line = String::new();
+        let _ = BufReader::new(stream).read_line(&mut line);
+        let Ok(request) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        writeln!(log, "{request}").unwrap();
+        log.flush().unwrap();
+        let pane = json!({"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","revision":0,"cwd":request["params"]["cwd"],"foreground_cwd":null});
+        let result = match request["method"].as_str().unwrap() {
+            "ping" => json!({"type":"pong","version":"0.9.3","protocol":22}),
+            "workspace.create" => json!({"type":"workspace_created","root_pane":pane}),
+            "pane.process_info" => {
+                json!({"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":std::process::id(),"foreground_process_group_id":std::process::id(),"foreground_processes":[]}})
+            }
+            "session.snapshot" => {
+                json!({"type":"session_snapshot","snapshot":{"version":"0.9.3","protocol":22,"panes":[]}})
+            }
+            _ => json!({"type":"ok"}),
+        };
+        let response = json!({"id":request["id"],"result":result});
+        let _ = writeln!(writer, "{response}");
+    }
+    true
+}

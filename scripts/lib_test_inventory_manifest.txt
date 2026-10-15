@@ -7074,6 +7074,7 @@ services::discord::router::message_handler::session_strategy_lifecycle_tests::re
 services::discord::router::message_handler::session_strategy_lifecycle_tests::resolver_runtime_binding_beats_stale_exact_session_id_match
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_codex_unproven_and_changed_observations_hold_real_human_start_pg
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_herdr_first_create_and_retired_use_herdr_pg
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_kickoff_and_backstop_reach_selected_execution_pg
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_large_human_start_requires_selected_execution_pg
 services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_real_missing_namespace_reaches_selected_tmux_start_pg

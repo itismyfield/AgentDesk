@@ -1030,6 +1030,445 @@ fn injection_off() -> [crate::config::TestEnvVarGuard; 2] {
     ]
 }
 
+thread_local! {
+    static NATIVE_WORKER_GUARDS: std::cell::RefCell<Vec<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[test]
+fn s1_herdr_first_create_and_retired_use_herdr_pg() {
+    use crate::services::session_host::herdr_socket_rig_tests::{self as rig, NativeHerdrRig};
+    const TEST: &str = concat!(
+        "services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::",
+        "s1_herdr_first_create_and_retired_use_herdr_pg"
+    );
+    if rig::native_server_child() || !discord::admin_host_guard::tests::api_child(TEST) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _injection = injection_off();
+    let root = tempfile::tempdir().unwrap();
+    let _namespace = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "TMUX_TMPDIR",
+        root.path(),
+    );
+    let _binding = activity::BindingRoot::enter(root.path());
+    let _ = tracing_subscriber::fmt().with_env_filter("agentdesk::services::discord=debug,agentdesk::services::turn_host=debug,agentdesk::services::herdr_launch=debug,agentdesk::services::claude::herdr_turn=debug,agentdesk::services::session_host=debug").with_test_writer().try_init();
+    let rig = NativeHerdrRig::start(TEST);
+    rig.prove_native_off();
+    let ids = [
+        69_184_501, 69_184_502, 69_184_503, 69_184_504, 69_184_505, 69_184_506, 69_184_507,
+        69_184_508, 69_184_509, 69_184_510, 69_184_511, 69_184_512,
+    ];
+    let agents: Vec<_> = ids.iter().map(|id| serde_json::json!({"id":format!("fixture{id}"),"name":format!("fixture{id}"),"provider":"claude","channels":{"claude":{"id":id.to_string(),"name":format!("s1-entry-{id}"),"runtime":"tui"}}})).collect();
+    let channels: serde_json::Map<String, serde_json::Value> = ids
+        .iter()
+        .map(|id| (id.to_string(), serde_json::json!("native")))
+        .collect();
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server":{},"agents":agents,"cluster":{"instance_id":"test-node"},"runtime":{"herdr_turn_enabled":true},
+        "session_hosts":{"herdr":{"endpoints":{"native":{"execution_node":"test-node","socket_path":rig.socket(),"herdr_home":rig.home(),"herdr_session":"agentdesk"}},"channels":channels}}
+    })).unwrap();
+    crate::config::session_hosts::install(&config).unwrap();
+    crate::config_live_reload::install(config.clone());
+    crate::services::tui_o::channel_policy::install(&config).unwrap();
+    let config_path =
+        crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let boot = crate::config::session_hosts::BootSessionHosts::from_config(&config).unwrap();
+    let owned: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            )
+        })
+        .collect();
+    let _registry = rig::native_registry_on_this_thread(&boot);
+    let _owned = crate::services::tui_o::cutover::test_override::force_channels(&owned);
+    let _accepts = crate::services::herdr_launch::force_writer_accepts(Some(true));
+    let _intake_ready =
+        crate::services::tui_o::cutover::intake_route::test_probe::answer_with(|_| true);
+    let (store, era) = crate::services::herdr_launch::o_store_for_test(
+        &crate::config::runtime_root().unwrap(),
+        &ids,
+    );
+    for id in ids {
+        store
+            .open_channel(&era, id)
+            .unwrap()
+            .unwrap()
+            .set_binding_checkpoint(1)
+            .unwrap();
+    }
+    let worker_owned = owned.clone();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .on_thread_start(move || {
+            NATIVE_WORKER_GUARDS.with(|guards| {
+                guards.borrow_mut().extend([
+                    Box::new(rig::native_registry_on_this_thread(&boot)) as Box<dyn std::any::Any>,
+                    Box::new(
+                        crate::services::tui_o::cutover::test_override::force_channels(
+                            &worker_owned,
+                        ),
+                    ),
+                    Box::new(crate::services::herdr_launch::force_writer_accepts(Some(
+                        true,
+                    ))),
+                    Box::new(
+                        crate::services::tui_o::cutover::intake_route::test_probe::answer_with(
+                            |_| true,
+                        ),
+                    ),
+                ])
+            });
+        })
+        .on_thread_stop(|| NATIVE_WORKER_GUARDS.with(|guards| guards.borrow_mut().clear()))
+        .build()
+        .unwrap();
+    rt.block_on(native_herdr_cases(&rig, &root, ids));
+}
+
+async fn native_session_api(pool: &sqlx::PgPool) -> (u16, tokio::task::JoinHandle<()>) {
+    let config = crate::config::Config::default();
+    let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let state = crate::app_state::AppState {
+        pg_pool: Some(pool.clone()),
+        engine,
+        config: Arc::new(config),
+        batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
+        broadcast_tx,
+        health_registry: None,
+        cluster_instance_id: None,
+    };
+    let app = axum::Router::new()
+        .route(
+            "/api/dispatched-sessions/webhook",
+            axum::routing::post(crate::server::routes::dispatched_sessions::hook_session),
+        )
+        .with_state(state)
+        .fallback(|| async { axum::Json(serde_json::json!({})) });
+    let listener = tokio::net::TcpListener::bind((crate::config::loopback().as_str(), 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (port, server)
+}
+
+async fn native_herdr_cases(
+    rig: &crate::services::session_host::herdr_socket_rig_tests::NativeHerdrRig,
+    root: &tempfile::TempDir,
+    ids: [u64; 12],
+) {
+    use crate::db::dispatched_sessions::hosted_execution::{
+        self, HostedLocation, HostedOwner, HostedState,
+    };
+    use crate::services::platform::tmux::session_inventory::tests::ChannelNamespace;
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (api_port, api_server) = native_session_api(&pool).await;
+    discord::internal_api::init(api_port, Some(pool.clone()));
+    let hooks = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _hook_endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://{}",
+        hooks.local_addr().unwrap()
+    ));
+    let hook_server = tokio::spawn(async move {
+        axum::serve(
+            hooks,
+            crate::services::claude_tui::hook_server::hook_receiver_router(),
+        )
+        .await
+        .unwrap();
+    });
+    let mock = discord_mock::DiscordMockState::new();
+    for id in ids {
+        mock.allow_channel(id);
+    }
+    let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let _primed = prime_placeholder(&mock, &ctx, ids[0]).await;
+    let provider = ProviderKind::Claude;
+    let (mut shared, registry) =
+        runtime(pool.clone(), api_port, &ctx, &ids, root.path(), &provider).await;
+    drop(registry);
+    Arc::get_mut(&mut shared).unwrap().token_hash = "discord_0123456789abcdef".into();
+    for (index, id) in ids.into_iter().enumerate() {
+        let channel = ChannelId::new(id);
+        shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = None;
+        let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(id);
+        let namespace = ChannelNamespace::new(id, root.path().join(format!("tmux-{id}")));
+        let name = provider.build_tmux_session_name(&format!("s1-entry-{id}"));
+        let retired = index % 2 == 1;
+        if retired || (8..10).contains(&index) {
+            let owner = HostedOwner {
+                provider: "claude".into(),
+                discord_token_hash: shared.token_hash.clone(),
+                channel_id: id.to_string(),
+                logical_key: name.clone(),
+                owner_node: "test-node".into(),
+                runtime_root: crate::config::runtime_root().unwrap().display().to_string(),
+            };
+            let state = match index {
+                8 => HostedState::Pending,
+                9 => HostedState::Bound,
+                _ => HostedState::Retired,
+            };
+            let mut record = hosted_execution::tests::record(&owner, "recorded", state);
+            if state != HostedState::Pending {
+                record.location = Some(HostedLocation {
+                    host: "herdr".into(),
+                    execution_node: "test-node".into(),
+                    endpoint_config_key: "native".into(),
+                    socket_addr: rig.socket().display().to_string(),
+                    named_session: "agentdesk".into(),
+                    pane_id: "old-pane".into(),
+                });
+            }
+            let key = discord::adk_session::build_namespaced_session_key(
+                &shared.token_hash,
+                &provider,
+                &name,
+            );
+            discord::inflight::seed_session_row_hashed(
+                &pool,
+                &key,
+                id,
+                &shared.token_hash,
+                Some(serde_json::to_value(record).unwrap()),
+            )
+            .await;
+        }
+        let mut lifetime = None;
+        if (2..4).contains(&index) {
+            let fixture = SessionLifetime::new(root.path(), id);
+            let output = namespace
+                .start_command()
+                .args(["new-session", "-d", "-s", &name, &fixture.command])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            lifetime = Some(fixture);
+        } else if (4..6).contains(&index) {
+            let live_name = format!("s1-restored-{id}");
+            shared
+                .tmux_watchers
+                .restore_owner_channel_for_tmux_session(&live_name, channel);
+            let fixture = SessionLifetime::new(root.path(), id);
+            let output = namespace
+                .start_command()
+                .args(["new-session", "-d", "-s", &live_name, &fixture.command])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            lifetime = Some(fixture);
+        } else if (6..8).contains(&index) {
+            use crate::services::tui_prompt_dedupe::binding_events as binding;
+            let historical = format!("old-name-{id}");
+            let path = root.path().join(format!("old-{id}.jsonl"));
+            std::fs::write(&path, "{}\n").unwrap();
+            let source =
+                crate::services::tui_o::shadow::binding_reader::source_id_for("parent", &path)
+                    .unwrap();
+            let now = chrono::Utc::now();
+            let event = binding::BindingEvent {
+                seq: 1,
+                channel_id: id,
+                provider: "claude".into(),
+                tmux_session: historical.clone(),
+                execution_nonce: Some("historical".into()),
+                old: None,
+                new: binding::BindingTarget::Source(source),
+                cause: binding::BindingCause::Startup,
+                parent_hint: None,
+                evidence: binding::BindingEvidence {
+                    hook_event: Some("SessionStart".into()),
+                    received_at: now,
+                },
+                committed_at: now,
+            };
+            let dir = root.path().join(binding::BINDING_EVENTS_DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.log")),
+                format!("{}\n", serde_json::to_string(&event).unwrap()),
+            )
+            .unwrap();
+            let marker = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+                &historical,
+                "host_kind",
+            ));
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(marker, "process").unwrap();
+        } else if index >= 10 {
+            let marker = std::path::PathBuf::from(crate::services::tmux_common::session_temp_path(
+                &name,
+                "host_kind",
+            ));
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(
+                marker,
+                if index == 10 {
+                    "process"
+                } else {
+                    "unknown-host"
+                },
+            )
+            .unwrap();
+        }
+        let context = discord::queue_persistence_context(&shared, &provider, channel);
+        shared
+            .mailbox(channel)
+            .replace_queue(vec![row(id + 1_000_000)], context)
+            .await;
+        let requests_before = rig.requests().len();
+        let before = rig
+            .requests()
+            .iter()
+            .filter(|r| r["method"] == "pane.send_input")
+            .count();
+        let tmux = Arc::new(AtomicUsize::new(0));
+        let count = tmux.clone();
+        *provider_dispatch::CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((
+            id,
+            Box::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                Err("Herdr incorrectly selected tmux".into())
+            }),
+        ));
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        *discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+            .lock()
+            .unwrap() = Some((channel, complete));
+        let deps = IntakeDeps {
+            http: &ctx.http,
+            cache: Some(&ctx.cache),
+            ctx_for_chained_dispatch: Some(&ctx),
+            shared: &shared,
+            token: "test-token",
+        };
+        let observed =
+            discord::turn_presence::activity::activity_now(&shared, &provider, channel).await;
+        let key = discord::adk_session::build_namespaced_session_key(
+            &shared.token_hash,
+            &provider,
+            &name,
+        );
+        let host =
+            crate::services::turn_host::for_turn(Some(&pool), &provider, id, Some(&key)).await;
+        eprintln!(
+            "S1_HERDR_PREFLIGHT case={index} activity={observed:?} host={host:?} readiness_blocked={}",
+            hosted_tui_promote_readiness_blocked(&shared, &provider, channel).await
+        );
+        let result =
+            discord::queue_dispatch::kickoff::kickoff_idle_queue_channel(&deps, &provider, channel)
+                .await;
+        let positive = index < 2;
+        assert_eq!(result.started, positive, "case={index} result={result:?}");
+        let completed = if positive {
+            Some(tokio::time::timeout(Duration::from_secs(40), completion).await)
+        } else {
+            assert_eq!(
+                discord::mailbox_snapshot(&shared, channel)
+                    .await
+                    .intervention_queue[0]
+                    .message_id
+                    .get(),
+                id + 1_000_000
+            );
+            discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+                .lock()
+                .unwrap()
+                .take();
+            None
+        };
+        let sends = rig
+            .requests()
+            .iter()
+            .filter(|r| r["method"] == "pane.send_input")
+            .count()
+            - before;
+        assert_eq!(
+            sends,
+            usize::from(positive),
+            "Started must reach the selected Herdr execution I/O"
+        );
+        let requests = rig.requests();
+        let created: Vec<_> = requests
+            .iter()
+            .skip(requests_before)
+            .filter(|r| r["method"] == "workspace.create")
+            .collect();
+        assert_eq!(
+            created.len(),
+            usize::from(positive),
+            "unexpected Herdr workspace effect"
+        );
+        if positive {
+            assert_eq!(
+                created[0]["params"]["cwd"],
+                root.path().display().to_string()
+            );
+            let inputs: Vec<_> = requests
+                .iter()
+                .skip(requests_before)
+                .filter(|r| r["method"] == "pane.send_input")
+                .collect();
+            assert_eq!(inputs[0]["params"]["pane_id"], "w1:p1");
+            assert_eq!(inputs[0]["params"]["keys"], serde_json::json!(["enter"]));
+            assert!(!inputs[0]["params"]["text"].as_str().unwrap().is_empty());
+        }
+        assert_eq!(tmux.load(Ordering::SeqCst), 0, "Herdr fell back to tmux");
+        if let Some(completed) = completed {
+            completed
+                .expect("selected Herdr worker must finish its evidence read")
+                .unwrap();
+        }
+        eprintln!(
+            "S1_HERDR_IO case={index} retired={retired} started={} herdr={sends} tmux={} skip=0",
+            result.started,
+            tmux.load(Ordering::SeqCst)
+        );
+        provider_dispatch::CLAUDE_LEGACY_PROBE
+            .lock()
+            .unwrap()
+            .take();
+        if let Some(lifetime) = &mut lifetime {
+            lifetime.release();
+        }
+        shared.mailboxes.remove_fixture_for_test(channel);
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    hook_server.abort();
+    assert!(hook_server.await.unwrap_err().is_cancelled());
+    api_server.abort();
+    assert!(api_server.await.unwrap_err().is_cancelled());
+    pool.close().await;
+    db.drop().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn s1_codex_unproven_and_changed_observations_hold_real_human_start_pg() {
     if !discord::admin_host_guard::tests::api_child(concat!(

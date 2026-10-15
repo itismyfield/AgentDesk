@@ -2144,10 +2144,10 @@ fn u_observer_callers_confined() {
     }
     let code = code_tokens(include_str!("../discord/turn_presence/activity/unbound.rs"));
     for (item, count) in [
-        ("SessionTargetEvidence", 3),
+        ("SessionTargetEvidence", 6),
         ("SessionTargetInput", 2),
-        ("HostWitness", 8),
-        ("HostKindMarker", 1),
+        ("HostWitness", 11),
+        ("HostKindMarker", 3),
     ] {
         assert_eq!(item_uses(&code, item).0, count, "{item}");
     }

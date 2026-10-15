@@ -114,6 +114,22 @@ delivery has an existing configured-Herdr refusal, so it is not the Herdr
 positive path. Keep the existing injection and queued-head policies unchanged.
 Record the positive execution count beside every negative zero-effect case.
 
+```sh
+unset TMUX TMUX_PANE
+export CARGO_PROFILE_DEV_STRIP=none CARGO_PROFILE_TEST_STRIP=none
+bash "$PIPELINE_SKILL/scripts/pg_throwaway.sh" cargo test --lib \
+  s1_herdr_first_create_and_retired_use_herdr_pg -- --nocapture
+```
+
+The automated fixture uses the production Herdr executor and native Unix peer
+provenance over a private scripted socket. It installs the boot registry on the
+actual blocking worker, with consistent O ownership and writer-readiness
+fixtures. First-create and Retired each require one pane input and no tmux
+execution. Related live, restored-owner, historical, Pending/Bound, and marker
+conflicts preserve the queued head with no pane input. The socket fixture does
+not run a provider process; the two Mac checks still require the deployed Herdr
+server and provider runtime.
+
 For a large operational transcript, use read-only metadata and existing activity
 diagnostics to record SourceId, binding seq, length, window start, read-through,
 current EOF, and whether a new opener or partial EOF remains. Do not change the
