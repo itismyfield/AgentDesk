@@ -477,6 +477,25 @@ pub(crate) fn advance_codex_tui_checkpoint(
             return Advance::StartMismatch;
         }
         if offset == start {
+            // A launch binds past the marker; sync a lagging marker to this complete record end.
+            let lagging = read_codex_tui_rollout_marker(tmux_session_name)
+                .filter(|marker| codex_tui_rollout_paths_same(&marker.rollout_path, rollout_path))
+                .and_then(|marker| marker.rollout_start_offset)
+                .is_some_and(|marker| marker < offset);
+            if lagging
+                && checkpoint::at(rollout_path, offset).ok() == Some(offset)
+                && crate::services::tui_prompt_dedupe::migrate_codex_raw_marker(
+                    authority,
+                    binding.as_ref().expect("eligible binding"),
+                )
+                .is_ok()
+            {
+                let _ = advance_codex_tui_rollout_marker_start_offset_under_source_authority(
+                    authority,
+                    rollout_path,
+                    offset,
+                );
+            }
             return Advance::AlreadyAdvanced;
         }
         if checkpoint::at(rollout_path, offset).ok() != Some(offset) {
@@ -1235,6 +1254,58 @@ mod tests {
                 rollout_start_offset: Some(144),
             })
         );
+    }
+
+    #[test]
+    fn already_advanced_checkpoint_syncs_only_a_lagging_marker_at_a_record_end() {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::tui_prompt_dedupe::{
+            TuiRuntimeBinding, clear_tmux_runtime_binding, runtime_binding_for_tmux_session,
+        };
+        let _lock = lock_test_env();
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::set_agentdesk_root_and_host(dir.path(), "codex-marker-sync-host");
+        let tmux = "AgentDesk-codex-marker-sync";
+        let rollout = dir.path().join("rollout-sync.jsonl");
+        // (file bytes, marker start, marker after an equal-offset checkpoint)
+        let complete = [&[b'x'; 63][..], b"\n"].concat();
+        for (bytes, marker, expected) in [
+            (complete.clone(), 0, 64),
+            (complete, 96, 96),
+            (vec![b'x'; 64], 0, 0),
+        ] {
+            std::fs::write(&rollout, bytes).unwrap();
+            let binding = TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: rollout.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("sync-session".into()),
+                last_offset: 64,
+                relay_last_offset: None,
+            };
+            let marker_path = crate::services::tmux_common::session_temp_path(
+                tmux,
+                crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+            );
+            let _ = std::fs::remove_file(marker_path);
+            install_codex_tui_runtime_binding(tmux, Some(marker), binding);
+            assert_eq!(
+                advance_codex_tui_checkpoint(tmux, &rollout, None, 64),
+                checkpoint::Advance::AlreadyAdvanced
+            );
+            let marker = read_codex_tui_rollout_marker(tmux).unwrap();
+            assert_eq!(marker.rollout_start_offset, Some(expected));
+            assert_eq!(
+                runtime_binding_for_tmux_session(tmux).unwrap().last_offset,
+                64
+            );
+        }
+        clear_tmux_runtime_binding(tmux);
     }
 
     #[test]

@@ -3184,6 +3184,7 @@ services::codex_tui::session::source_observation::source_observation_tests::shad
 services::codex_tui::session::source_observation::source_observation_tests::shadow_ingress_is_readonly_before_equality_and_without_a_source_map
 services::codex_tui::session::source_observation::source_observation_tests::symlinked_payload_path_must_resolve_to_its_own_rollout_inside_the_root
 services::codex_tui::session::source_observation::source_observation_tests::trust_hash_path_is_reported_inactive_or_unverified_never_usable
+services::codex_tui::session::tests::already_advanced_checkpoint_syncs_only_a_lagging_marker_at_a_record_end
 services::codex_tui::session::tests::blank_requested_id_resolves_fresh
 services::codex_tui::session::tests::cleanup_best_effort_removes_codex_tui_home
 services::codex_tui::session::tests::codex_tui_launch_options_fingerprint_round_trips
