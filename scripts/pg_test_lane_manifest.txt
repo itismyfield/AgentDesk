@@ -2136,6 +2136,8 @@ services::discord::turn_presence::activity::unbound::live::review_tests::s1e_pub
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_rechecks_new_related_tmux_session_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_successful_unbound_reads_complete_in_reverse_order_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
 services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg
 services::discord::turn_presence::activity::unbound::tests::u_local_row_identity_pg
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg

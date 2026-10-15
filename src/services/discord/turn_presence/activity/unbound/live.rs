@@ -340,6 +340,49 @@ impl Snapshot {
             ports,
         })
     }
+    async fn collect_pair(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        ports: Arc<LivePorts>,
+    ) -> Result<(Self, Observation, Self), String> {
+        let mut before = Self::collect(shared, provider, channel, ports.clone()).await?;
+        let inventory = tokio::task::spawn_blocking(move || observe_inventory(channel.get()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut names: Vec<_> = before
+            .files
+            .candidates
+            .as_ref()
+            .map_err(Clone::clone)?
+            .names
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        if let Inventory::Sessions(live) = &inventory.inventory {
+            names.extend(live.iter().cloned());
+        }
+        before.owners = names
+            .into_iter()
+            .map(|name| {
+                let owner = shared
+                    .tmux_watchers
+                    .owner_channel_for_tmux_session(&name)
+                    .map(|id| id.get());
+                (name, owner)
+            })
+            .collect();
+        let after = Self::collect(shared, provider, channel, ports).await?;
+        Ok((before, inventory, after))
+    }
+    fn same_inputs(&self, other: &Self) -> bool {
+        self.runtime_root == other.runtime_root
+            && self.basis == other.basis
+            && Arc::ptr_eq(&self.config, &other.config)
+            && self.files.same(&other.files)
+            && self.exact == other.exact
+            && self.canonical == other.canonical
+    }
     fn memory_current(&self) -> bool {
         let Some(shared) = self.shared.upgrade() else {
             return false;
@@ -385,17 +428,14 @@ impl Snapshot {
         if !self.memory_current() {
             return false;
         }
-        let Ok(next) =
-            Self::collect(&shared, &self.provider, self.channel, self.ports.clone()).await
+        let Ok((before, fresh, next)) =
+            Self::collect_pair(&shared, &self.provider, self.channel, self.ports.clone()).await
         else {
             return false;
         };
-        let channel = self.channel.get();
-        let Ok(fresh) = tokio::task::spawn_blocking(move || observe_inventory(channel)).await
-        else {
-            return false;
-        };
-        if !namespace.same_namespace(&fresh)
+        if !before.same_inputs(&next)
+            || !self.same_inputs(&next)
+            || !namespace.same_namespace(&fresh)
             || namespace.inventory != fresh.inventory
             || !fresh.current()
         {
@@ -411,14 +451,7 @@ impl Snapshot {
         ) else {
             return false;
         };
-        self.runtime_root == next.runtime_root
-            && self.basis == next.basis
-            && Arc::ptr_eq(&self.config, &next.config)
-            && self.files.same(&next.files)
-            && self.files.same(&files)
-            && self.exact == next.exact
-            && self.canonical == next.canonical
-            && self.memory_current()
+        self.files.same(&files) && self.memory_current()
     }
     fn scope(&self, shared: &SharedData) -> HostScope {
         let candidates = self.files.candidates.as_ref().ok();
@@ -644,41 +677,12 @@ async fn collect(
     channel: ChannelId,
     ports: Arc<LivePorts>,
 ) -> Result<(Observed, Snapshot, Observation), String> {
-    let mut snapshot = Snapshot::collect(shared, provider, channel, ports.clone()).await?;
-    let namespace = tokio::task::spawn_blocking(move || observe_inventory(channel.get()))
-        .await
-        .map_err(|e| e.to_string())?;
+    let (snapshot, namespace, next) =
+        Snapshot::collect_pair(shared, provider, channel, ports).await?;
     let candidates = snapshot.files.candidates.clone();
-    let mut names: Vec<_> = candidates
-        .as_ref()
-        .map_err(Clone::clone)?
-        .names
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
-    if let Inventory::Sessions(live) = &namespace.inventory {
-        names.extend(live.iter().cloned());
-    }
-    snapshot.owners = names
-        .into_iter()
-        .map(|name| {
-            let owner = shared
-                .tmux_watchers
-                .owner_channel_for_tmux_session(&name)
-                .map(|id| id.get());
-            (name, owner)
-        })
-        .collect();
     let scope = snapshot.scope(shared);
     let verdict = decide_unbound(candidates, scope, &namespace.inventory, &snapshot.owners);
-    let next = Snapshot::collect(shared, provider, channel, ports).await?;
-    if snapshot.runtime_root != next.runtime_root
-        || snapshot.basis != next.basis
-        || !Arc::ptr_eq(&snapshot.config, &next.config)
-        || !snapshot.files.same(&next.files)
-        || snapshot.exact != next.exact
-        || snapshot.canonical != next.canonical
-    {
+    if !snapshot.same_inputs(&next) {
         return Ok((
             observed(Activity::Unknown, "superseded"),
             snapshot,

@@ -2102,7 +2102,7 @@ fn u_observer_callers_confined() {
         ("unbound_candidates", &[(U, 1)]),
         ("host_scope", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
         ("decide_unbound", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
-        ("observe_inventory", &[(I, 0), (UNBOUND_ADAPTER, 2)]),
+        ("observe_inventory", &[(I, 0), (UNBOUND_ADAPTER, 1)]),
     ];
     let violations = guarded_item_violations(&sources, items);
     assert!(
@@ -2114,7 +2114,7 @@ fn u_observer_callers_confined() {
         ("observe_candidates", 1),
         ("host_scope", 1),
         ("decide_unbound", 1),
-        ("observe_inventory", 2),
+        ("observe_inventory", 1),
     ] {
         assert_eq!(item_uses(&adapter, item).0, count, "adapter lost {item}");
         let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(count));
@@ -2132,6 +2132,7 @@ fn u_observer_callers_confined() {
             );
         }
     }
+    assert_eq!(item_uses(&adapter, "collect_pair").0, 2);
     for item in [
         "clear_legacy_session",
         "guard_first_state_change",

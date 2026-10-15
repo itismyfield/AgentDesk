@@ -800,3 +800,266 @@ async fn s1e_marker_change_during_publication_db_await_pg() {
         "stale publication callback ran"
     );
 }
+
+struct InventoryPause {
+    fifo: PathBuf,
+    armed: PathBuf,
+    entered: PathBuf,
+    finished: PathBuf,
+    _path: crate::config::TestEnvVarGuard,
+}
+impl InventoryPause {
+    fn new(root: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = root.join("inventory-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let fifo = root.join("inventory.fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let armed = root.join("inventory-armed");
+        let entered = root.join("inventory-entered");
+        let finished = root.join("inventory-finished");
+        let quote =
+            |path: &std::path::Path| crate::services::process::shell_escape(path.to_str().unwrap());
+        let script = format!(
+            "#!/bin/sh\nif [ -f {} ]; then\n  : > {}\n  read adk_release < {}\n  : > {}\nfi\nprintf '%s\\n' {} >&2\nexit 1\n",
+            quote(&armed),
+            quote(&entered),
+            quote(&fifo),
+            quote(&finished),
+            crate::services::process::shell_escape(&format!(
+                "error connecting to {} (No such file or directory)",
+                root.join("missing").display()
+            ))
+        );
+        let wrapper = bin.join("tmux");
+        std::fs::write(&wrapper, script).unwrap();
+        std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(&bin);
+        Self {
+            fifo,
+            armed,
+            entered,
+            finished,
+            _path: path,
+        }
+    }
+    fn release(&self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(&self.armed);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&self.fifo)
+        {
+            let _ = std::io::Write::write_all(&mut file, b"done\n");
+        }
+    }
+}
+impl Drop for InventoryPause {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
+    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    use crate::services::discord::{mailbox_snapshot, mailbox_take_next_automatic_intervention};
+    use crate::services::turn_orchestrator::{Intervention, InterventionMode};
+    use poise::serenity_prelude::{MessageId, UserId};
+    let rig = Rig::new(id, false, false).await;
+    let pause = InventoryPause::new(rig.root.path());
+    let _turn = crate::services::tui_o::turn_mode::TestConfirmation::new(id);
+    let trace = ChannelProbeTrace::new(id);
+    let reading = crate::services::discord::turn_presence::activity::reading_now(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+    )
+    .await;
+    assert_eq!(reading.observed, observed(Activity::Idle, "no_session"));
+    let normal_calls = AtomicUsize::new(0);
+    assert!(
+        reading
+            .publish_if_current(|| normal_calls.fetch_add(1, Ordering::SeqCst))
+            .await
+            .is_some()
+    );
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 1);
+    let original = reading.unbound.as_ref().unwrap().snapshot.as_ref().unwrap();
+    assert_eq!(original.exact, HostedLookup::Missing);
+    assert_eq!(original.canonical, HostedLookup::Missing);
+    let message_id = MessageId::new(id + 1_000_000);
+    let queued = Intervention {
+        author_id: UserId::new(7),
+        author_is_bot: false,
+        message_id,
+        queued_generation: 1,
+        source_message_ids: Vec::new(),
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: "eligible inventory race".into(),
+        mode: InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    };
+    let context = crate::services::discord::queue_persistence_context(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+    );
+    rig.shared
+        .mailbox(rig.channel)
+        .replace_queue(vec![queued], context)
+        .await;
+    let before = mailbox_snapshot(&rig.shared, rig.channel).await;
+    assert!(before.pending_user_dispatch.is_none());
+    let probe_before = trace.calls();
+    assert!(probe_before > 0);
+    std::fs::write(&pause.armed, "pause").unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let published = calls.clone();
+    let task = tokio::spawn(async move {
+        reading
+            .publish_if_current(|| published.fetch_add(1, Ordering::SeqCst))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !pause.entered.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        trace.calls(),
+        probe_before + 1,
+        "publication never reached its post-DB inventory command"
+    );
+    assert!(
+        !task.is_finished(),
+        "inventory command did not block in the FIFO"
+    );
+    let name = if matches!(kind, Changed::Exact) {
+        rig.name()
+    } else {
+        ProviderKind::Claude.build_tmux_session_name("other")
+    };
+    let key = adk_session::build_namespaced_session_key(
+        &rig.shared.token_hash,
+        &ProviderKind::Claude,
+        &name,
+    );
+    let owner = HostedOwner {
+        provider: "claude".into(),
+        discord_token_hash: rig.shared.token_hash.clone(),
+        channel_id: rig.channel.to_string(),
+        logical_key: name,
+        owner_node: "test-node".into(),
+        runtime_root: rig.root.path().display().to_string(),
+    };
+    let execution = record(&owner, "inventory-race", HostedState::Pending);
+    inflight::seed_session_row_hashed(
+        rig.shared.pg_pool.as_ref().unwrap(),
+        &key,
+        id,
+        &rig.shared.token_hash,
+        Some(serde_json::to_value(execution).unwrap()),
+    )
+    .await;
+    let changed = Snapshot::collect(&rig.shared, &ProviderKind::Claude, rig.channel, rig.ports())
+        .await
+        .unwrap();
+    let pending = |lookup: &HostedLookup| {
+        matches!(lookup,
+        HostedLookup::Found(row) if matches!(&row.record,
+            HostedRecord::Known(execution) if execution.state == HostedState::Pending))
+    };
+    if matches!(kind, Changed::Exact) {
+        assert!(
+            pending(&changed.exact),
+            "exact row did not reach the observed lookup"
+        );
+    } else {
+        assert_eq!(
+            changed.exact,
+            HostedLookup::Missing,
+            "canonical-only fixture changed exact lookup"
+        );
+    }
+    assert!(
+        pending(&changed.canonical),
+        "canonical row did not reach the observed lookup"
+    );
+    pause.release();
+    let result = task.await.unwrap();
+    assert!(
+        pause.finished.exists(),
+        "inventory timed out instead of observing the release"
+    );
+    assert!(
+        result.is_none(),
+        "{kind:?} row created during inventory published the old Idle"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "stale publication callback ran"
+    );
+    let next = crate::services::discord::turn_presence::activity::reading_now(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+    )
+    .await;
+    assert_eq!(next.observed.activity, Activity::Unknown);
+    let take =
+        mailbox_take_next_automatic_intervention(&rig.shared, &ProviderKind::Claude, rig.channel)
+            .await;
+    assert!(take.intervention.is_none() && take.dispatch_lease.is_none());
+    assert!(take.persistence_error.is_none());
+    let after = mailbox_snapshot(&rig.shared, rig.channel).await;
+    assert_eq!(
+        after
+            .intervention_queue
+            .iter()
+            .map(|i| i.message_id)
+            .collect::<Vec<_>>(),
+        vec![message_id]
+    );
+    assert_eq!(after.pending_user_dispatch, before.pending_user_dispatch);
+    assert_eq!(
+        after.pending_user_dispatch_lease_held_by_caller,
+        before.pending_user_dispatch_lease_held_by_caller
+    );
+    assert!(
+        crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
+            &ProviderKind::Claude,
+            &rig.shared.token_hash,
+            rig.channel
+        )
+        .is_none()
+    );
+    eprintln!(
+        "S1F_PUBLICATION_INVENTORY {kind:?} callback=0 queue_head={} pending=none probes={} skip=0",
+        message_id,
+        trace.calls()
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn s1f_publication_exact_change_during_inventory_pg() {
+    hosted_row_during_publication_inventory(Changed::Exact, 69_182_013).await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn s1f_publication_canonical_change_during_inventory_pg() {
+    hosted_row_during_publication_inventory(Changed::Canonical, 69_182_014).await;
+}
