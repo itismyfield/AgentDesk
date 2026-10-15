@@ -933,8 +933,7 @@ fn o_install_cold_claude_native_uses_current_durable_source_read_only() {
     });
 }
 
-#[test]
-fn o_install_verified_codex_proof_without_delivery_permission_is_withheld() {
+fn install_codex_source_read(current_proof: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     test_rt().block_on(async {
@@ -966,22 +965,53 @@ fn o_install_verified_codex_proof_without_delivery_permission_is_withheld() {
         let payload =
             serde_json::json!({"session_id":id, "transcript_path":native, "source":"startup"});
         let hook = binding_events::HookSignal::from_payload("session_start", &payload);
-        let observation =
-            dedupe::observe_verified_codex_hook(Some(&id), &payload, &hook, Some(&envelope));
-        // Ownership commits while the default delivery permission withholds its publication.
-        assert!(matches!(observation, Some(crate::services::claude_tui::hook_server::observation_ingress::IngressOutcome::Durable(crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Pending))), "{observation:?}");
+        if current_proof {
+            let observation =
+                dedupe::observe_verified_codex_hook(Some(&id), &payload, &hook, Some(&envelope));
+            assert!(matches!(observation, Some(crate::services::claude_tui::hook_server::observation_ingress::IngressOutcome::Durable(crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Adopted))), "{observation:?}");
+        }
         let fold = binding_events::codex::read_ownership(&context).unwrap();
         assert!(!fold.conflicted && fold.pending.is_empty());
-        let proof = fold.verified.unwrap();
-        assert_eq!(proof.ownership.context, context);
-        assert_eq!(proof.source.session_id, id);
-        assert_eq!(proof.source.path, native);
+        if current_proof {
+            let proof = fold.verified.unwrap();
+            assert_eq!(proof.ownership.context, context);
+            assert_eq!(proof.source.session_id, id);
+            assert_eq!(proof.source.path, native);
+        } else {
+            assert!(fold.verified.is_none());
+        }
+        let records = binding_events::records_strict(fixture.channel.get()).unwrap();
         dedupe::reset_state_for_tests();
         assert!(dedupe::peek_tmux_runtime_binding(&fixture.session).is_none());
-        assert_eq!(
-            fixture.install().await,
-            OOnlyInstallOutcome::Failed(OOnlyInstallReason::SourceMismatch)
-        );
-        assert!(fixture.shared.tmux_watchers.get(&fixture.channel).is_none());
+        let submitted =
+            crate::services::discord::task_supervisor::n4d_spawn_observation::Scope::new(
+                &fixture.shared,
+            );
+        if current_proof {
+            assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+            assert_eq!(submitted.submissions(), 1);
+            assert_eq!(fixture.handle().output_path, native.display().to_string());
+            fixture.cancel_and_join().await;
+        } else {
+            assert_eq!(
+                fixture.install().await,
+                OOnlyInstallOutcome::Deferred(OOnlyInstallReason::SourceUnavailable)
+            );
+            assert!(fixture.shared.tmux_watchers.get(&fixture.channel).is_none());
+            assert_eq!(submitted.submissions(), 0);
+            assert!(submitted.join_all().await.is_empty());
+        }
+        assert_eq!(binding_events::records_strict(fixture.channel.get()).unwrap(), records);
+        assert_eq!(std::fs::read_to_string(&native).unwrap(), format!("{header}\n"));
     });
+}
+
+#[test]
+fn o_install_verified_codex_source_with_unknown_delivery_permission_is_adopted() {
+    install_codex_source_read(true);
+}
+
+#[test]
+fn o_install_codex_without_current_proof_never_spawns() {
+    install_codex_source_read(false);
 }
