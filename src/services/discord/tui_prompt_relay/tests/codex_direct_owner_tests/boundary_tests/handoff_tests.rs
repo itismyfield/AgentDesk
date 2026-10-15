@@ -32,6 +32,7 @@ enum ParkedRace {
     ReceiptLimit,
     DirectPending,
     ReceiptFailure,
+    GenerationSwitch,
 }
 
 fn native_receipts(
@@ -72,6 +73,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         Some(ParkedRace::ReceiptLimit) => 101,
         Some(ParkedRace::DirectPending) => 102,
         Some(ParkedRace::ReceiptFailure) => 103,
+        Some(ParkedRace::GenerationSwitch) => 104,
     };
     let tmux_name = format!("{base_tmux}-{case}");
     let tmux = tmux_name.as_str();
@@ -114,7 +116,12 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
     let boundary = fx.append(&records);
     if !matches!(
         race,
-        Some(ParkedRace::ReceiptLimit | ParkedRace::DirectPending | ParkedRace::ReceiptFailure)
+        Some(
+            ParkedRace::ReceiptLimit
+                | ParkedRace::DirectPending
+                | ParkedRace::ReceiptFailure
+                | ParkedRace::GenerationSwitch
+        )
     ) {
         fx.append(user_record("next partial 6903", &turn(3)).trim_end_matches('\n'));
     }
@@ -175,6 +182,7 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
         "writer success is not a receipt"
     );
     let mut admitted_row = None;
+    let mut g1_generation = 0;
     assert!(inflight::clear_inflight_state(
         &ProviderKind::Codex,
         fx.codex.channel.get()
@@ -330,6 +338,26 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
                             std::fs::create_dir_all(&path).unwrap();
                         }));
                     }
+                    Some(ParkedRace::GenerationSwitch) => {
+                        assert_eq!(dedupe::codex_restore_settled_for_tests(tmux), Some(0));
+                        g1_generation = crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(tmux);
+                        let generation =
+                            crate::services::tmux_common::session_temp_path(tmux, "generation");
+                        let nonce =
+                            crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
+                        // The wrapper respawn lands after the Discord ACK and before commit.
+                        *prepare.after_send.lock().unwrap() = Some(Box::new(move || {
+                            let time = std::fs::metadata(&generation).unwrap().modified().unwrap();
+                            std::fs::File::open(&generation)
+                                .unwrap()
+                                .set_times(
+                                    std::fs::FileTimes::new()
+                                        .set_modified(time + Duration::from_secs(1)),
+                                )
+                                .unwrap();
+                            std::fs::write(&nonce, "g2-6903\n").unwrap();
+                        }));
+                    }
                     Some(ParkedRace::PendingRotation) => {
                         assert!(native_receipts(fx.codex.channel.get()).is_empty());
                         let previous = dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
@@ -394,6 +422,12 @@ async fn restored_historical_answer(root: PathBuf, writer_first: bool, race: Opt
                     *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
                         .lock()
                         .unwrap() = None;
+                    fx.finish();
+                    return;
+                }
+                if matches!(race, Some(ParkedRace::GenerationSwitch)) {
+                    let row = admitted_row.clone().unwrap();
+                    generation_switch_settles_parked(&root, &mut fx, &row, g1_generation).await;
                     fx.finish();
                     return;
                 }
@@ -2403,5 +2437,114 @@ fn codex_6903_custody_free_restore_protects_pending_direct_lease() {
             direct_pending_rotation(&root, &mut fx).await;
             fx.finish();
         })
+    });
+}
+
+/// A G1 exact delivery that commits as historical after the wrapper publishes G2 still
+/// ends the G1 parked custody, so the G2 source restores and keeps relaying.
+async fn generation_switch_settles_parked(
+    root: &Path,
+    fx: &mut Fixture,
+    row: &inflight::InflightTurnState,
+    g1: i64,
+) {
+    use crate::services::discord::outbound::delivery_record as dr;
+    let tmux = fx.codex.tmux.clone();
+    let channel = fx.codex.channel.get();
+    assert!(fx.delivered(STEER_ANSWER).await);
+    assert!(
+        wait_for(Duration::from_secs(5), || !native_receipts(channel)
+            .is_empty())
+        .await,
+        "the G1 exact delivery must still record its receipt"
+    );
+    let receipts = native_receipts(channel);
+    assert_eq!(receipts.len(), 1);
+    let parked = receipts[0].clone();
+    let g2 = dr::current_generation_mtime_ns(&tmux);
+    assert_ne!(g2, g1, "the wrapper must publish G2 before the commit");
+    assert_eq!(parked.source.generation_mtime_ns, g1);
+    assert_eq!(
+        parked.source.range,
+        (row.turn_start_offset.unwrap(), row.last_offset)
+    );
+    assert!(dr::historical_pinned_delivery_exists(
+        &parked.source,
+        parked.message_id
+    ));
+    let record = dr::read_record(&ProviderKind::Codex, row.delivery_record_owner_channel_id());
+    assert!(
+        record
+            .and_then(|record| record.delivered_frontier)
+            .is_none_or(|frontier| frontier.generation_mtime_ns != g1),
+        "a G1 delivery after the switch is historical, never the current frontier"
+    );
+    // No restore pass runs here; only the delivery's own completion can settle G1.
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            dedupe::codex_restore_settled_for_tests(&tmux) == Some(1)
+        })
+        .await,
+        "the historical receipt must settle the G1 parked owner on commit"
+    );
+    *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK
+        .lock()
+        .unwrap() = None;
+    assert!(
+        wait_for(Duration::from_secs(5), || fx.lease().is_none()).await,
+        "the parked relay lease must release"
+    );
+    let next = root.join("generation-switch.jsonl");
+    std::fs::write(
+        &next,
+        rollout_line(serde_json::json!({"type":"session_meta", "payload":{"id":"g2-6903"}})),
+    )
+    .unwrap();
+    crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+        &tmux,
+        &next,
+        Some("g2-6903"),
+    )
+    .unwrap();
+    let fresh = super::super::super::super::rehydration::rehydrate_codex_tui_binding_for_tests(
+        &tmux, channel,
+    )
+    .expect("settled G1 custody must release the G2 marker source");
+    assert_eq!(fresh.output_path, next.display().to_string());
+    assert_eq!(fresh.session_id.as_deref(), Some("g2-6903"));
+    fx.codex.rollout = next;
+    for n in 100..132 {
+        deliver_direct_terminal(fx, n).await;
+    }
+    let receipts = native_receipts(channel);
+    assert_eq!(receipts.len(), 32);
+    assert!(
+        !receipts
+            .iter()
+            .any(|receipt| receipt.source == parked.source),
+        "the G1 receipt must actually be drained"
+    );
+    deliver_direct_terminal(fx, 132).await;
+    fx.polls(3).await;
+    assert!(
+        native_receipts(channel)
+            .iter()
+            .all(|receipt| receipt.source.generation_mtime_ns == g2)
+    );
+    let frontier = dr::read_record(&ProviderKind::Codex, row.delivery_record_owner_channel_id())
+        .and_then(|record| record.delivered_frontier)
+        .unwrap();
+    assert_eq!(frontier.generation_mtime_ns, g2);
+    assert_eq!(fx.sent(STEER_ANSWER).len(), 1, "P is never republished");
+}
+
+#[test]
+fn codex_6903_generation_switch_historical_receipt_settles_parked_owner() {
+    run(|root| {
+        Box::pin(restored_historical_answer(
+            root,
+            true,
+            Some(ParkedRace::GenerationSwitch),
+        ))
     });
 }

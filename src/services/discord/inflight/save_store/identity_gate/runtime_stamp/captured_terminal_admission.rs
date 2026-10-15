@@ -210,6 +210,10 @@ pub(super) struct ParkedProof {
     identity: InflightTurnIdentity,
     exact: ExactJsonlSourceIdentity,
     actor: std::sync::Weak<crate::services::provider::CancelToken>,
+    /// Owner and opening record read while the source was live, to settle after its receipt.
+    turn: String,
+    owner: crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    opening: Option<serde_json::Value>,
 }
 
 impl ParkedProof {
@@ -248,10 +252,14 @@ impl ParkedProof {
         {
             return None;
         }
+        let opening = source.record(tmux, range.0).ok();
         Some(Self {
             source,
             identity: InflightTurnIdentity::from_state(row),
             actor: std::sync::Arc::downgrade(actor),
+            turn: turn.to_owned(),
+            opening,
+            owner: owner.clone(),
             exact: ExactJsonlSourceIdentity {
                 provider: row.provider.clone(),
                 tmux_session_name: tmux.to_owned(),
@@ -333,7 +341,24 @@ impl TuiTerminalRange {
     pub(in crate::services::discord) fn complete_parked_delivery(&self) {
         #[cfg(unix)]
         if self.source.provider == ProviderKind::Codex.as_str() {
-            crate::services::discord::tui_prompt_relay::rehydration::codex_marker::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
+            // The admission proof settles without current liveness; a range admitted without one
+            // still looks up its receipt on the live source.
+            let settled = self.parked.as_deref().is_some_and(|proof| {
+                proof.exact == self.source
+                    && proof.opening.as_ref().is_some_and(|opening| {
+                        crate::services::tui_prompt_dedupe::settle_codex_parked_delivery(
+                            &self.source.tmux_session_name,
+                            &proof.turn,
+                            &proof.owner,
+                            &proof.source,
+                            opening,
+                            self.source.range.1,
+                        )
+                    })
+            });
+            if !settled {
+                crate::services::discord::tui_prompt_relay::rehydration::codex_marker::finish_confirmed_parked_owners(&self.source.tmux_session_name, Some(self));
+            }
         }
     }
     /// Consume an existing ACK after process-local bindings disappear. This

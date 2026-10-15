@@ -674,9 +674,45 @@ pub(crate) fn complete_codex_parked_owner(
     let Ok(json) = source.record(tmux, owner.5) else {
         return;
     };
-    let Some((prompt, entry, evidence)) = extract_codex_rollout_user_prompt_with_evidence(&json)
+    settle_owner_inputs(scope, turn, owner, &json, terminal_end);
+}
+
+/// Settles a restored parked owner from the proof captured before its exact delivery.
+/// Its receipt already committed, so a later wrapper generation cannot reopen custody.
+#[cfg(unix)]
+pub(crate) fn settle_codex_parked_delivery(
+    tmux: &str,
+    turn: &str,
+    owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    source: &crate::services::codex_tui::session::checkpoint::Source,
+    opening: &Value,
+    terminal_end: u64,
+) -> bool {
+    let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(scope) = state.codex_restore_by_tmux.get_mut(tmux) else {
+        return false;
+    };
+    if &scope.source != source
+        || scope.owners.get(turn) != Some(owner)
+        || owner.5 >= terminal_end
+        || terminal_end > source.complete_end
+    {
+        return false;
+    }
+    settle_owner_inputs(scope, turn, owner, opening, terminal_end)
+}
+
+#[cfg(unix)]
+fn settle_owner_inputs(
+    scope: &mut super::super::handoff::CodexRestore,
+    turn: &str,
+    owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
+    opening: &Value,
+    terminal_end: u64,
+) -> bool {
+    let Some((prompt, entry, evidence)) = extract_codex_rollout_user_prompt_with_evidence(opening)
     else {
-        return;
+        return false;
     };
     let indices = restored_input_indices(scope, &prompt, entry.as_deref(), Some(turn), &evidence);
     scope.settled_inputs.extend(indices);
@@ -688,6 +724,7 @@ pub(crate) fn complete_codex_parked_owner(
                 (joined == turn && owner.5 <= *end && *end <= terminal_end).then_some(*index)
             }),
     );
+    true
 }
 
 #[cfg(unix)]
@@ -812,13 +849,16 @@ pub(crate) fn prepare_codex_restore(
     {
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(scope) = state.codex_restore_by_tmux.get(tmux) {
-            scope.source.check(tmux)?;
-            if scope.source.matches_path(&source.path)
+            // A settled scope from an earlier wrapper generation may still be replaced.
+            let live = scope.source.check(tmux);
+            if live.is_ok()
+                && scope.source.matches_path(&source.path)
                 && scope.source.session_id == source.session_id
             {
                 return Ok(scope.clone());
             }
             if !codex_restore_replacement_allowed(&state, tmux, scope, &source) {
+                live?;
                 return Err(std::io::Error::other(
                     "Codex restore custody source mismatch",
                 ));
@@ -863,13 +903,15 @@ pub(crate) fn finish_codex_restore(
     scope.source.check(tmux)?;
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(current) = state.codex_restore_by_tmux.get(tmux) {
-        current.source.check(tmux)?;
-        if current.source.matches_path(&scope.source.path)
+        let live = current.source.check(tmux);
+        if live.is_ok()
+            && current.source.matches_path(&scope.source.path)
             && current.source.session_id == scope.source.session_id
         {
             return Ok(current.input_start);
         }
         if !codex_restore_replacement_allowed(&state, tmux, current, &scope.source) {
+            live?;
             return Err(std::io::Error::other("Codex restore source changed"));
         }
     }
