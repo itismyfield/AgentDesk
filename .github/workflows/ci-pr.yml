@@ -348,6 +348,7 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
@@ -1704,7 +1705,7 @@ jobs:
 
       # Compare complete expected/executed ID sets rather than an execution-count floor.
       - name: Library sweep (selection-set gated)
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: bash
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
@@ -2138,7 +2139,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2390,7 +2391,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=1b6bd2cae4e17ed6f8374dcd9943c627e69e8bc62813ad7a91e4a551d0b52bb7
+          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

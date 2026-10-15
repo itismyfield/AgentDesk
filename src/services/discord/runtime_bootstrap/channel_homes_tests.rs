@@ -198,6 +198,71 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
     db.drop().await;
 }
 
+/// A REST worker booted as target of a released row adopts it through the runtime's own port only
+/// once its turns are restored: before, two renewal periods leave the row and the gate untouched.
+#[tokio::test]
+async fn a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg() {
+    const RELEASED: u64 = 9_300_000_000_000_014;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = RELEASED.to_string();
+    let applied = |write: Result<HomeWrite<o_channel_homes::ChannelHome>, _>| match write {
+        Ok(HomeWrite::Applied(row)) => row,
+        other => panic!("{other:?}"),
+    };
+    let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
+    let released = applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    shared.restart.reconcile_done.store(false, Ordering::SeqCst);
+    let settings_on = settings(Some(true));
+    let started = start_channel_homes(
+        &shared,
+        &ProviderKind::Claude,
+        HomeRole::RestWorker,
+        &settings_on,
+    );
+    let started = started.await;
+    assert_eq!(started.len(), 1, "the released row names this node");
+    tokio::time::sleep(channel_home::RENEW_EVERY * 2 + std::time::Duration::from_secs(1)).await;
+    let read = || o_channel_homes::read_home(&pool, &channel);
+    assert_eq!(
+        read().await.unwrap(),
+        Some(released.clone()),
+        "adopted unrestored"
+    );
+    assert_eq!(started[0].ownership(), HomeOwnership::Lost);
+
+    mark_reconcile_complete(&shared);
+    let mut owned = None;
+    for _ in 0..500 {
+        if let HomeOwnership::Owned { home_epoch, .. } = started[0].ownership() {
+            owned = Some(home_epoch);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        owned,
+        Some(released.epoch),
+        "the adopted row's lease opens the gate"
+    );
+    let adopted = read().await.unwrap().expect("the home row");
+    let held = (adopted.state, adopted.holder.as_deref(), adopted.target);
+    assert_eq!(
+        held,
+        (o_channel_homes::HomeState::Worker, Some("mini"), None)
+    );
+    assert_eq!(
+        channel_home_boot::running(&channel),
+        (true, Some(released.epoch))
+    );
+    channel_home_boot::stop(&channel).await;
+    channel_home::unregister(&channel);
+    pool.close().await;
+    db.drop().await;
+}
+
 /// The standby writer's port names its bot over the REST client and posts through it.
 #[cfg(unix)]
 #[tokio::test]

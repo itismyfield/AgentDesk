@@ -833,11 +833,13 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── following_source.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
 │   │   ├── session/
+│   │   │   ├── checkpoint.rs
 │   │   │   ├── source_observation.rs
 │   │   │   └── source_observation_tests.rs
 │   │   ├── verified_tail/
@@ -1020,8 +1022,11 @@ src/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── turn_deliver/
 │   │   │   │   ├── inject/
+│   │   │   │   │   ├── herdr.rs
+│   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
-│   │   │   │   │   └── queued_support.rs
+│   │   │   │   │   ├── queued_support.rs
+│   │   │   │   │   └── test_hook.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -2807,6 +2812,7 @@ src/
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
+│   │   │   │   ├── retained_capture.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── activation.rs
@@ -2873,6 +2879,7 @@ src/
 │   │   │   ├── round_trip.rs
 │   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── source_read_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
