@@ -678,6 +678,31 @@ fn a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes() {
     });
 }
 
+/// A V1 file that still carries the retired `queue_exit_debts` key reads like any other: its
+/// items keep their place and the next write is accepted.
+#[test]
+fn a_snapshot_with_the_retired_exit_debt_key_still_reads() {
+    let _root = root();
+    block_on(async {
+        let channel = ChannelId::new(6_813_173);
+        let item = r#"{"author_id":7,"message_id":71,"text":"a","channel_id":6813173}"#;
+        let gone = r#"{"author_id":7,"message_id":70,"text":"gone","channel_id":6813173}"#;
+        let debt = format!(
+            r#"{{"event_id":"exit-70","episode":"e","kind":"cancelled","intervention":{gone},"state":"unacked"}}"#
+        );
+        let path = queue_path(channel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = format!(r#"{{"version":1,"items":[{item}],"queue_exit_debts":[{debt}]}}"#);
+        std::fs::write(&path, old).unwrap();
+
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        let written = handle.enqueue(human(72, 8, "b"), ctx()).await;
+        assert!(written.enqueued && written.persistence_error.is_none());
+        let ids: Vec<u64> = queued(&handle).await.iter().map(|row| row.0).collect();
+        assert_eq!(ids, [71, 72]);
+    });
+}
+
 /// A full queue evicts the oldest unreserved tail, while the reserved head stays first.
 /// A restored item cannot land ahead of that head.
 #[test]

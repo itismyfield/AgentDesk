@@ -12,14 +12,7 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
-mod queue_exit_debt;
 mod queued_recovery;
-#[cfg(test)]
-pub(super) use queue_exit_debt::{
-    ExitWithDebt, PreparedQueueExitTransition, QueueExitCommitError, QueueExitPrepareError,
-    commit_queue_exit, read_back_fault,
-};
-pub(super) use queue_exit_debt::{QueueExitDebt, check_queue_exit_debts};
 pub(crate) use queued_recovery::load_pending_queues_checked;
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
@@ -433,6 +426,20 @@ pub(super) fn pending_queue_item_from_intervention(
     }
 }
 
+/// Lets a metadata-free test write replace only a missing file or a legacy array.
+#[cfg(test)]
+fn refuse_metadata_loss(path: &Path) -> Result<(), String> {
+    match fs::read_to_string(path) {
+        Ok(content) if !matches!(parse_snapshot(&content), Ok((_, None))) => {
+            Err(format!("refusing to overwrite {}", path.display()))
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("read {}: {error}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
 #[cfg(test)]
@@ -446,7 +453,7 @@ pub(crate) fn save_channel_queue(
     crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
         // This writer carries no metadata, so it must not replace or remove a V1 snapshot.
         if let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) {
-            queue_exit_debt::refuse_metadata_loss(&path)?;
+            refuse_metadata_loss(&path)?;
         }
         save_channel_queue_locked(
             provider,

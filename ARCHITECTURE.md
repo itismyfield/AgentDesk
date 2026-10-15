@@ -1386,10 +1386,7 @@ src/
 │   │   │   │   ├── output_paths.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_hold.rs
-│   │   │   │   ├── replay_hold_tests.rs
-│   │   │   │   ├── scoped_policy_receipt_tests.rs
-│   │   │   │   ├── scoped_restore.rs
-│   │   │   │   └── scoped_restore_claim_tests.rs
+│   │   │   │   └── replay_hold_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
@@ -1620,8 +1617,6 @@ src/
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
 │   │   │   ├── restored_state.rs
-│   │   │   ├── scoped_inflight_restore_tests.rs
-│   │   │   ├── scoped_restore_lane_tests.rs
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
@@ -2979,8 +2974,6 @@ src/
 │   │   │   └── tests/
 │   │   │       └── hydrate_corrupt_queue_tests.rs
 │   │   ├── pending_queue_persistence/
-│   │   │   ├── queue_exit_debt.rs
-│   │   │   ├── queue_exit_debt_tests.rs
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
@@ -3004,7 +2997,6 @@ src/
 │   │   ├── input_fence_tests.rs
 │   │   ├── input_handback.rs
 │   │   ├── input_handback_tests.rs
-│   │   ├── installed_actor_handoff.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs
@@ -3024,8 +3016,6 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
-│   │   ├── scoped_claim.rs
-│   │   ├── scoped_claim_tests.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
