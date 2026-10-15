@@ -8,6 +8,9 @@ use super::{FinalizeContext, TerminalEvent, TurnKey};
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::RelayOwnerKind;
 
+pub(in crate::services::discord) mod terminal_release;
+pub(in crate::services::discord) use terminal_release::rearm_queue_backstop_after_mailbox_release;
+
 #[derive(Clone, Copy)]
 struct ReactionCleanupRequest {
     channel_id: serenity::model::id::ChannelId,
@@ -415,24 +418,6 @@ pub(super) fn ensure_synthetic_claim_marker_before_clear(
 /// Late `AlreadyFinalized` losers still perform guarded active-state cleanup.
 /// This is intentionally narrower than `do_finalize`: only the same real turn id
 /// can lose mailbox/inflight state, so a newer active turn is preserved.
-pub(in crate::services::discord) async fn rearm_queue_backstop_after_mailbox_release(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: serenity::model::id::ChannelId,
-    has_pending: bool,
-    reason: &'static str,
-) -> bool {
-    if !has_pending {
-        return false;
-    }
-    // The channel-scoped scheduler coalesces duplicate release/late-cleanup arms,
-    // and its worker rechecks the mailbox before every dispatch attempt.
-    crate::services::discord::arm_slow_idle_queue_backstop_if_queue_nonempty(
-        shared, provider, channel_id, reason,
-    )
-    .await
-}
-
 pub(super) async fn already_finalized_active_state(
     key: TurnKey,
     provider: &ProviderKind,
