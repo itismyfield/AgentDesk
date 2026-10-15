@@ -6,6 +6,9 @@
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
+mod circuit_evidence;
+use crate::services::discord::relay_recovery::circuit_evidence::CircuitPendingEvidence;
+use circuit_evidence::mix_finalizer_hash;
 mod identity;
 mod legacy_replay_coordinate;
 mod serde_adapters;
@@ -62,15 +65,6 @@ mod discord_id_tests {
 
 const SYNTHETIC_FINALIZER_TURN_ID_MASK: u64 = i64::MAX as u64;
 const SYNTHETIC_FINALIZER_TURN_ID_FLOOR: u64 = 1_000_000_000_000_000_000;
-
-fn mix_finalizer_hash(mut hash: u64, bytes: &[u8]) -> u64 {
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
 
 #[allow(clippy::too_many_arguments)]
 fn synthetic_finalizer_turn_id(
@@ -235,6 +229,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// this row as an active provider turn after this point.
     #[serde(default)]
     pub terminal_delivery_committed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_circuit_evidence: Vec<CircuitPendingEvidence>,
     /// Original opened terminal FD (dev, ino); recovery must not synthesize this from a pathname.
     #[serde(default)]
     pub tui_terminal_source_file_identity: Option<(u64, u64)>,
@@ -1087,6 +1083,7 @@ impl InflightTurnState {
             full_response: String::new(),
             response_sent_offset: 0,
             terminal_delivery_committed: false,
+            pending_circuit_evidence: Vec::new(),
             tui_terminal_source_file_identity: None,
             tui_terminal_generation_mtime_ns: None,
             tui_terminal_kind: None,

@@ -801,3 +801,6 @@ fn the_downgrade_converts_only_a_resolved_snapshot() {
         );
     });
 }
+
+#[path = "queued_head_prefix_tests.rs"]
+mod prefix;

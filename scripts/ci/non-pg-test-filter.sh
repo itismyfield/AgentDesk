@@ -121,6 +121,8 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::receipt_boundary_tests
   --skip services::discord::inflight::removal::custody_notice_tests
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
+  --skip services::discord::ingress_shadow::compat_tests
+  --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
@@ -191,6 +193,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::relay_e2e::registered_bootstrap_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e
+  --skip services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests
   --skip services::discord::turn_bridge::headless_delivery::production_seam_tests
   --skip services::discord::turn_bridge::intake_settlement::tests
   --skip services::discord::turn_bridge::recovery_text::tests
@@ -230,6 +233,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::tui_o::writer::tests::actor::host_start::late_delegated
   --skip services::tui_o::writer::tests::actor::host_start::receipt_projection
   --skip services::tui_o::writer::tests::actor::repost_turn
+  --skip services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
   --skip services::turn_host::tests
   --skip services::turn_lifecycle::host_guard_tests
   --skip voice::announce_meta::tests
@@ -501,6 +505,16 @@ NON_PG_FILTER_REPLAY=(
   services::discord::inflight::removal::custody_notice_tests::a_dm_sessions_notice_is_delivered_by_the_provider_bot
   services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_garbled_marker_is_warned_and_skipped
   services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_attachment_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_components_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_live_messages_byte_identical
+  services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_poise_commands_byte_identical
+  services::discord::ingress_shadow::shadow_tests::a_full_or_closed_queue_drops_and_counts_without_waiting
+  services::discord::ingress_shadow::shadow_tests::an_event_is_described_by_its_own_channel_and_ids
+  services::discord::ingress_shadow::shadow_tests::an_unreadable_gate_holds_and_counts_as_unknown
+  services::discord::ingress_shadow::shadow_tests::freshness_counts_the_whole_lookup_on_the_database_clock
+  services::discord::ingress_shadow::shadow_tests::only_the_switch_with_listed_channels_starts_an_observer
+  services::discord::ingress_shadow::shadow_tests::the_worker_judges_the_real_gate_and_records_every_id
   services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_adopt_requires_all_provider_mapping_views_ports
   services::discord::input_runtime::supervisor::runtime::ports::tests::b_runtime_ports_freeze_failure_preserves_legacy_and_closing
@@ -726,6 +740,14 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::released_anchor_preserves_prior_tail_and_runs_q_exactly_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::restart_restores_q_and_inflight_then_runs_q_once
   services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::session_bound_row_keeps_its_anchor_despite_dead_pane
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_is_held_while_a_stop_hook_has_no_terminal
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_direct_answer_survives_a_stop_hook_ahead_of_task_complete
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_injected_new_turn_hook_first_delivers_its_answer
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_injected_new_turn_rollout_first_delivers_its_answer
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_model_turn_queued_eight_ms_after_completion_delivers_both_answers
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_steer_into_a_discord_turn_only_echoes
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_turn_queued_behind_a_shell_turn_answers_on_its_anchor
+  services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_typed_input_shaped_like_a_shell_record_answers_on_its_anchor
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_preserves_legacy_error_shape
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::dispatch_failure_result_uses_auth_token_expired_code
   services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::post_commit_failure_emits_result_and_quality_observability

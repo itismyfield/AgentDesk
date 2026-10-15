@@ -349,22 +349,6 @@ async fn persist_one_shot_candidate_bind<G: TurnGateway + ?Sized>(
     }
 }
 
-/// Binds a just-created candidate now, discarding it when the store stays unavailable past the
-/// bounded retry; true only when the candidate became the turn's current message.
-pub(super) async fn bind_pending_current_message_candidate<G: TurnGateway + ?Sized>(
-    context: &mut StreamTickCandidateSaveContext<'_, G>,
-    caller: &'static str,
-) -> bool {
-    let Some(candidate) = *context.pending_current_message_candidate else {
-        return false;
-    };
-    let outcome = persist_one_shot_candidate_bind(context, caller).await;
-    if outcome == GuardedSaveOutcome::IoError {
-        discard_pending_current_message_candidate(context).await;
-    }
-    outcome == GuardedSaveOutcome::Saved && context.inflight_state.current_msg_id == candidate.get()
-}
-
 /// A stream-loop break may happen before the next periodic tick. Give a pending
 /// response candidate one final guarded bind; if the store stays unavailable past
 /// the bounded retry, discard the unbound Discord message instead of returning an orphan.
