@@ -89,14 +89,29 @@ impl<B: BindingEvents> Sources<B> {
         let Some((_, events)) = self.read_log(writer, 0)? else {
             return Ok(());
         };
+        let committed_seq = events.last().map_or(0, |event| event.seq);
+        #[cfg(all(test, unix))]
+        boundary_pause("snapshot");
         for link in pending {
             let Some((from, evidence)) = self.boundary_proof(writer, &link, &events)? else {
                 continue;
             };
-            writer
-                .store()
-                .resolve_automatic_boundary(&link.source, from, evidence)
-                .map_err(halted("automatic boundary"))?;
+            let admitted = crate::services::tui_prompt_dedupe::binding_events::admit_committed_seq(
+                self.channel,
+                committed_seq,
+                || {
+                    #[cfg(all(test, unix))]
+                    boundary_pause("handoff");
+                    writer
+                        .store()
+                        .resolve_automatic_boundary(&link.source, from, evidence)
+                },
+            )
+            .map_err(|error| halt(format!("binding boundary admission: {error}")))?;
+            let Some(resolved) = admitted else {
+                continue;
+            };
+            resolved.map_err(halted("automatic boundary"))?;
             self.rotation = writer.store().rotation().map_err(halted("rotation"))?;
             let store = writer.store();
             self.sync_parent(&source_key(&link.source), |parent| {
@@ -421,5 +436,44 @@ fn verified_first(source: &SourceId) -> bool {
             first: FirstRecord::Session(session),
         }) => session == source.session_id && file_match(source, (dev, ino)) != FileMatch::Other,
         _ => false,
+    }
+}
+
+#[cfg(all(test, unix))]
+type BoundaryPause = (&'static str, Box<dyn FnOnce()>);
+#[cfg(all(test, unix))]
+thread_local! {
+    static BOUNDARY_PAUSE: std::cell::RefCell<Option<BoundaryPause>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, unix))]
+fn boundary_pause(point: &str) {
+    let pause = BOUNDARY_PAUSE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(at, _)| *at == point) {
+            slot.take().map(|(_, pause)| pause)
+        } else {
+            None
+        }
+    });
+    if let Some(pause) = pause {
+        pause();
+    }
+}
+#[cfg(all(test, unix))]
+impl<B: BindingEvents> Sources<B> {
+    pub(crate) fn with_boundary_pause<R>(
+        point: &'static str,
+        pause: impl FnOnce() + 'static,
+        run: impl FnOnce() -> R,
+    ) -> R {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                BOUNDARY_PAUSE.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        BOUNDARY_PAUSE.with(|slot| *slot.borrow_mut() = Some((point, Box::new(pause))));
+        let _reset = Reset;
+        run()
     }
 }

@@ -2,7 +2,7 @@
 use super::*;
 use crate::services::tui_o::store::rotation::SourceLink;
 
-fn hook(f: &Fixture, cause: &str) {
+fn hook_request(f: &Fixture, cause: &str) -> impl FnOnce() + Send + 'static {
     use crate::services::claude_tui::hook_server::observation_ingress::{
         IngressOutcome, observe_binding_hook,
     };
@@ -18,17 +18,25 @@ fn hook(f: &Fixture, cause: &str) {
     };
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
-    assert!(matches!(
-        observe_binding_hook(
-            "claude",
-            "SessionStart",
-            Some(&f.pane.a),
-            Some(&f.pane.b),
-            &serde_json::json!({"hook_event_name":"SessionStart","session_id":f.pane.b,"transcript_path":f.pane.b_path(),"source":cause}),
-            &headers
-        ),
-        IngressOutcome::Durable(_)
-    ));
+    let command = f.pane.a.clone();
+    let session = f.pane.b.clone();
+    let payload = serde_json::json!({"hook_event_name":"SessionStart","session_id":f.pane.b,"transcript_path":f.pane.b_path(),"source":cause});
+    move || {
+        assert!(matches!(
+            observe_binding_hook(
+                "claude",
+                "SessionStart",
+                Some(&command),
+                Some(&session),
+                &payload,
+                &headers
+            ),
+            IngressOutcome::Durable(_)
+        ));
+    }
+}
+fn hook(f: &Fixture, cause: &str) {
+    hook_request(f, cause)();
 }
 fn link(f: &Fixture) -> SourceLink {
     f.channel()
@@ -373,4 +381,87 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     });
+}
+
+#[test]
+fn explicit_resume_and_automatic_resolution_share_one_committed_order() {
+    use crate::services::tui_o::writer::binding::ChannelBindingLog;
+    use crate::services::tui_o::writer::rotation::Sources;
+    use crate::services::tui_prompt_dedupe::binding_events;
+    use std::sync::mpsc;
+    for point in ["snapshot", "handoff"] {
+        run(async |f| {
+            f.initialize(0);
+            let mut e = f.engine();
+            e.capture().unwrap();
+            provisional(&f, &mut e, true).await;
+            f.gate.acquired();
+            e.deliver(100).await;
+            assert_eq!(f.posts(), ["A_BODY"]);
+            let hook = hook_request(&f, "resume");
+            let root = f.root.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let (entered, begin) = mpsc::channel();
+            let (release, resume) = mpsc::channel();
+            let mutex_held = std::thread::scope(|scope| {
+                let producer = scope.spawn(move || {
+                    let _runtime = runtime.enter();
+                    binding_events::set_test_root(Some(&root));
+                    begin.recv_timeout(Duration::from_secs(10)).unwrap();
+                    let held = binding_events::admission_mutex_held_for_tests();
+                    if point == "snapshot" || !held {
+                        hook();
+                        release.send(()).unwrap();
+                    } else {
+                        release.send(()).unwrap();
+                        hook();
+                    }
+                    binding_events::set_test_root(None);
+                    held
+                });
+                Sources::<ChannelBindingLog>::with_boundary_pause(
+                    point,
+                    move || {
+                        entered.send(()).unwrap();
+                        resume.recv_timeout(Duration::from_secs(10)).unwrap();
+                    },
+                    || {
+                        e.sources
+                            .capture(&mut e.writer, &mut e.deriver, &mut e.owed)
+                    },
+                )
+                .unwrap();
+                producer.join().unwrap()
+            });
+            // Match the actor order: deliver retained work before following the new Hook.
+            e.deliver(100).await;
+            if point == "snapshot" || !mutex_held {
+                assert_eq!(f.posts(), ["A_BODY"], "Hook durable first at {point}");
+                assert!(f.channel().ledger().boundary_evidence(&f.b()).is_none());
+                e.capture().unwrap();
+                refined(&f, "resume");
+            } else {
+                opened(&f, prefix(&f).len() as u64);
+                assert_eq!(f.posts(), ["A_BODY", "N_BODY"]);
+                f.assert_posted("N", &novel(&f, "N_BODY"));
+                e.capture().unwrap();
+            }
+            if point == "handoff" {
+                assert!(mutex_held, "resolution must run under the append mutex");
+            }
+            let posts = f.posts();
+            f.assert_posted(
+                "A",
+                &record(&f.pane.a, "a1", "2026-10-01T01:00:00Z", "A_BODY", false),
+            );
+            drop(e);
+            let mut e = f.engine();
+            e.capture().unwrap();
+            e.deliver(100).await;
+            assert_eq!(f.posts(), posts);
+            if point == "snapshot" {
+                refined(&f, "resume");
+            }
+        });
+    }
 }

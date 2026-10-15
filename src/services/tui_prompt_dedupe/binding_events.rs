@@ -375,33 +375,30 @@ pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Rec
     Ok(log.notify.subscribe())
 }
 
-#[cfg(all(test, unix))]
-pub(crate) use presence_admission::admit_committed_seq;
+/// Runs the hand-off under the append/apply mutex only while the healthy committed seq matches.
+pub(crate) fn admit_committed_seq<R>(
+    channel_id: u64,
+    expected: u64,
+    hand_off: impl FnOnce() -> R,
+) -> io::Result<Option<R>> {
+    let Some(path) = log_path(channel_id)? else {
+        return Ok(None);
+    };
+    let logs = lock_logs();
+    let Some(log) = logs.get(&path) else {
+        return Ok(None);
+    };
+    // A restored or poisoned writer cannot admit using only its cached seq.
+    let healthy = log
+        .writer
+        .as_ref()
+        .is_some_and(|writer| !writer.poisoned && !writer.tainted);
+    Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
+}
 
 #[cfg(all(test, unix))]
-mod presence_admission {
-    use super::*;
-
-    /// Hands off synchronously under the append/apply/committed-seq mutex without writing the log.
-    pub(crate) fn admit_committed_seq<R>(
-        channel_id: u64,
-        expected: u64,
-        hand_off: impl FnOnce() -> R,
-    ) -> io::Result<Option<R>> {
-        let Some(path) = log_path(channel_id)? else {
-            return Ok(None);
-        };
-        let logs = lock_logs();
-        let Some(log) = logs.get(&path) else {
-            return Ok(None);
-        };
-        // A seq restored without its writer, or left after a poisoned one, proves no healthy log.
-        let healthy = log
-            .writer
-            .as_ref()
-            .is_some_and(|writer| !writer.poisoned && !writer.tainted);
-        Ok((healthy && *log.notify.borrow() == expected).then(hand_off))
-    }
+pub(crate) fn admission_mutex_held_for_tests() -> bool {
+    matches!(LOGS.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }
 
 /// What a commit left in the log for its proposal.

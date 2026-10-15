@@ -9061,6 +9061,7 @@ services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_tra
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::durable_resolution_recovers_append_before_apply_with_the_same_parent_and_start
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::explicit_hook_clear_keeps_zero_start_and_parentless_resume_keeps_pending
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::first_record_session_and_persisted_event_nonce_are_revalidated
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::explicit_resume_and_automatic_resolution_share_one_committed_order
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_clear_and_startup_replay_the_already_spooled_n_once
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_fork_and_compact_promote_a_and_use_explicit_prefix_policy
 services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::late_hook::late_parentless_resume_revokes_candidate_and_keeps_n_pending
