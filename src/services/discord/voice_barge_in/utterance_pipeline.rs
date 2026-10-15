@@ -290,6 +290,22 @@ impl VoiceBargeInRuntime {
         provider: &ProviderKind,
         channel_id: ChannelId,
     ) -> bool {
+        if !self.deferred_drainable(provider, channel_id) {
+            return false;
+        }
+        let Some(drain) = self.take_deferred_prompt(channel_id).await else {
+            return false;
+        };
+        self.enqueue_deferred(shared, provider, channel_id, drain)
+            .await
+    }
+
+    /// Whether a finished turn may drain its deferred prompt now.
+    pub(in crate::services::discord) fn deferred_drainable(
+        &self,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+    ) -> bool {
         if !self.barge_in_enabled {
             return false;
         }
@@ -302,11 +318,40 @@ impl VoiceBargeInRuntime {
             );
             return false;
         }
+        true
+    }
 
-        let Some(drain) = self.take_deferred_prompt(channel_id).await else {
+    /// Takes the channel's buffer out of the map, so a later utterance starts a fresh one.
+    pub(in crate::services::discord) fn detach_deferred(
+        &self,
+        channel_id: ChannelId,
+    ) -> Option<Arc<Mutex<DeferredBargeInBuffer>>> {
+        let detached = self.channels.deferred_buffers.remove(&channel_id.get());
+        detached.map(|(_, buffer)| buffer)
+    }
+
+    /// Drains a buffer already detached for this channel and enqueues its prompt once.
+    pub(in crate::services::discord) async fn drain_detached(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        buffer: Arc<Mutex<DeferredBargeInBuffer>>,
+    ) -> bool {
+        let Some(drain) = self.drain_buffer(&buffer).await else {
             return false;
         };
+        self.enqueue_deferred(shared, provider, channel_id, drain)
+            .await
+    }
 
+    async fn enqueue_deferred(
+        self: &Arc<Self>,
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        drain: DeferredBargeInDrain,
+    ) -> bool {
         if let Some(acknowledgement) = drain.acknowledgement {
             if let Some(path) = self
                 .synthesize_acknowledgement(&acknowledgement, channel_id)
@@ -337,6 +382,13 @@ impl VoiceBargeInRuntime {
             .deferred_buffers
             .get(&channel_id.get())
             .map(|entry| entry.value().clone())?;
+        self.drain_buffer(&buffer).await
+    }
+
+    async fn drain_buffer(
+        &self,
+        buffer: &Mutex<DeferredBargeInBuffer>,
+    ) -> Option<DeferredBargeInDrain> {
         let mut buffer = buffer.lock().await;
         let ack = &self.acknowledgement;
         let acknowledgement = buffer

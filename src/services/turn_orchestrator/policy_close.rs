@@ -12,6 +12,9 @@ use super::{ChannelMailboxState, FinishTurnResult, InterventionMode, QueuePersis
 use crate::services::discord::input_runtime::fence::{Failure, PopulationScope};
 use crate::services::provider::{CancelToken, ProviderKind};
 
+#[path = "policy_tail.rs"]
+pub(crate) mod tail;
+
 /// Test seam at a typed stage of the close, on the request's own probe; gone outside tests.
 macro_rules! at {
     ($request:expr, $stage:ident) => {
@@ -117,6 +120,8 @@ pub(crate) struct PolicyCloseRequest {
     pub(crate) persistence: QueuePersistenceContext,
     /// Set only by the finalizer, when its ledger already holds this exact episode as finalized.
     pub(crate) release_reconcile_allowed: bool,
+    /// The finalizer's ledger-owned ticket; a commit seals it before the step answers.
+    pub(crate) ticket: Option<Arc<tail::PolicyCommitTicket>>,
     pub(crate) trace: Trace,
 }
 
@@ -202,15 +207,38 @@ impl PolicyCloseRequest {
     }
 }
 
-/// The mailbox arm of one close: runs the step under the guard's own authority and answers.
+/// The mailbox arm of a close or its tail claim: a close runs the step under the guard's own
+/// authority and answers; a tail claim is decided against the commit's stamp.
 pub(super) fn answer(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
-    request: PolicyCloseRequest,
-    guard: &super::input_fence::StepGuard,
-    reply: tokio::sync::oneshot::Sender<PolicyMailboxOutcome>,
+    msg: super::ChannelMailboxMsg,
+    (guard, recovery_done): (&super::input_fence::StepGuard, &super::RecoveryDoneSignal),
 ) {
-    let _ = reply.send(step(state, channel_id, request, guard.policy_authority()));
+    let (request, reply) = match msg {
+        super::ChannelMailboxMsg::PolicyClose { request, reply } => (*request, reply),
+        super::ChannelMailboxMsg::ClaimPolicyTail(claim) => {
+            return tail::answer(state, claim, recovery_done);
+        }
+        _ => unreachable!("only policy messages reach this arm"),
+    };
+    #[cfg(test)]
+    let lost = request.trace.lost(test_hooks::Loss::MailboxReply);
+    let outcome = step(state, channel_id, request, guard.policy_authority());
+    // Test seam: the step ran and sealed; only its reply is lost.
+    #[cfg(test)]
+    if lost {
+        return;
+    }
+    let _ = reply.send(outcome);
+}
+
+/// A purged actor commits nothing; the close stays held for restart.
+pub(super) fn refuse_closed(
+    reply: tokio::sync::oneshot::Sender<PolicyMailboxOutcome>,
+) -> &'static str {
+    let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
+    "PolicyClose"
 }
 
 /// Runs one close inside the actor under the step's own authority. A panic stops here; one after
@@ -244,6 +272,13 @@ pub(super) fn step(
             })
         }
         (Err(_), None) => PolicyMailboxOutcome::Retained(PolicyRetain::Panicked),
+    };
+    // A commit, unwound or not, seals the ticket before the actor answers or reads on.
+    let outcome = match (outcome, request.ticket.as_ref()) {
+        (PolicyMailboxOutcome::Committed(finish), Some(ticket)) => {
+            PolicyMailboxOutcome::Committed(ticket.seal(state, finish))
+        }
+        (outcome, _) => outcome,
     };
     let committed = matches!(outcome, PolicyMailboxOutcome::Committed(_));
     request
@@ -318,6 +353,7 @@ fn close(
         "policy_close",
     );
     super::mark_turn_finished_signal_done(channel_id);
+    at!(request, BeforeSeal);
     PolicyMailboxOutcome::Committed(finish)
 }
 
@@ -417,6 +453,7 @@ pub(crate) mod test_hooks {
         AfterDebit,
         AfterFence,
         AfterCommit,
+        BeforeSeal,
         Unwound,
         BeforeFinalize,
     }
@@ -467,6 +504,8 @@ pub(crate) mod test_hooks {
         Dequeued,
         /// Processed, then only its ACK sender is dropped.
         Ack,
+        /// The mailbox step ran; only its reply is dropped.
+        MailboxReply,
     }
 
     /// One request's observations; it travels with the request to whatever thread runs it.

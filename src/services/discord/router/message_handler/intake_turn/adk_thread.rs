@@ -37,11 +37,68 @@ pub(super) struct RedirectDispatch<'a> {
     pub queued_drain: bool,
 }
 
+/// Where a turn runs and the routing it owns. Nothing is written until its mailbox claim
+/// succeeds, so a turn that has not claimed cannot be taken for the channel's owner.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Route {
+    pub(super) target: ChannelId,
+    parent: Option<ChannelId>,
+    role: Role,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Role {
+    /// No routing decision: the channel's override as read at resolve time, left in place.
+    Inherited(Option<ChannelId>),
+    Set(ChannelId),
+    Cleared,
+}
+
+impl Route {
+    fn inherited(shared: &SharedData, target: ChannelId) -> Self {
+        let current = shared.dispatch.role_overrides.get(&target).map(|v| *v);
+        let role = Role::Inherited(current);
+        Self {
+            target,
+            parent: None,
+            role,
+        }
+    }
+
+    /// The role channel this turn resolves its binding and provider from.
+    pub(super) fn role(&self) -> Option<ChannelId> {
+        match self.role {
+            Role::Inherited(role) => role,
+            Role::Set(role) => Some(role),
+            Role::Cleared => None,
+        }
+    }
+
+    pub(super) fn provider(&self, provider: &ProviderKind) -> ProviderKind {
+        (self.role())
+            .and_then(|role| resolve_role_binding(role, None))
+            .and_then(|binding| binding.provider)
+            .unwrap_or_else(|| provider.clone())
+    }
+
+    /// Runs right after the claim: this turn's routing replaces whatever the channel held.
+    pub(super) fn publish(&self, shared: &SharedData) {
+        if let Some(parent) = self.parent {
+            shared.dispatch.thread_parents.insert(parent, self.target);
+        }
+        match self.role {
+            Role::Inherited(_) => {}
+            Role::Set(role) => _ = shared.dispatch.role_overrides.insert(self.target, role),
+            Role::Cleared => _ = shared.dispatch.role_overrides.remove(&self.target),
+        }
+    }
+}
+
 pub(super) async fn redirect_dispatch(
     request: RedirectDispatch<'_>,
 ) -> Result<
     Option<(
-        ChannelId,
+        Route,
         bool,
         Option<crate::services::discord::input_runtime::fence::Permit>,
     )>,
@@ -66,12 +123,14 @@ pub(super) async fn redirect_dispatch(
     } = request;
     let mut bootstrapped_fresh_thread_session = false;
     let mut redirected_permit = None;
+    let (mut parent, mut role) = (None, Role::Cleared);
     let channel_id = if let Some(did) = dispatch_id_for_thread {
         if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str) {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 📢 Dispatch {did} uses primary-channel routing, skipping thread creation"
             );
+            role = Route::inherited(shared, channel_id).role;
             channel_id
         } else {
             // Use cached dispatch metadata for thread reuse and cross-channel role override
@@ -113,7 +172,7 @@ pub(super) async fn redirect_dispatch(
                             .unwrap_or_else(|| provider.clone());
                         redirected_permit =
                             final_admission(&final_provider, channel_id, redirected_permit.take())?;
-                        shared.dispatch.role_overrides.insert(channel_id, alt_ch);
+                        role = Role::Set(alt_ch);
                     }
                 }
                 channel_id
@@ -167,7 +226,7 @@ pub(super) async fn redirect_dispatch(
                             cache,
                         )
                         .await;
-                        shared.dispatch.thread_parents.insert(channel_id, tid);
+                        parent = Some(channel_id);
                         // For review dispatches reusing an implementation thread,
                         // override role/model to use the counter-model channel.
                         if is_counter_model_dispatch {
@@ -185,7 +244,7 @@ pub(super) async fn redirect_dispatch(
                                     tid,
                                     redirected_permit.take(),
                                 )?;
-                                shared.dispatch.role_overrides.insert(tid, alt_ch);
+                                role = Role::Set(alt_ch);
                             }
                         }
                         Some(tid)
@@ -249,7 +308,7 @@ pub(super) async fn redirect_dispatch(
                                 cache,
                             )
                             .await;
-                            shared.dispatch.thread_parents.insert(channel_id, thread.id);
+                            parent = Some(channel_id);
                             super::super::super::link_dispatch_thread(
                                 shared.api_port,
                                 did,
@@ -262,6 +321,7 @@ pub(super) async fn redirect_dispatch(
                         Err(e) => {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
+                            role = Route::inherited(shared, channel_id).role;
                             channel_id // fallback to main channel
                         }
                     }
@@ -269,13 +329,57 @@ pub(super) async fn redirect_dispatch(
             }
         }
     } else {
+        role = Route::inherited(shared, channel_id).role;
         channel_id
     };
+    let route = Route {
+        target: channel_id,
+        parent,
+        role,
+    };
+    #[cfg(test)]
+    route_seam::reached(route.target).await;
     Ok(Some((
-        channel_id,
+        route,
         bootstrapped_fresh_thread_session,
         redirected_permit,
     )))
+}
+
+/// Test seam: a resolved route that has not claimed yet, held until the test releases it.
+#[cfg(test)]
+pub(crate) mod route_seam {
+    use poise::serenity_prelude::ChannelId;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Hold = (ChannelId, oneshot::Sender<()>, oneshot::Receiver<()>);
+    static HOLD: Mutex<Option<Hold>> = Mutex::new(None);
+
+    /// Holds the next route to `target`: `reached` fires there, and it resumes on `release`.
+    pub(crate) fn hold(target: ChannelId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, at) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        *HOLD.lock().unwrap() = Some((target, reached, resume));
+        (at, release)
+    }
+
+    pub(super) async fn reached(target: ChannelId) {
+        let held = {
+            let mut hold = HOLD.lock().unwrap();
+            match hold.take() {
+                Some((at, reached, resume)) if at == target => Some((reached, resume)),
+                other => {
+                    *hold = other;
+                    None
+                }
+            }
+        };
+        if let Some((reached, resume)) = held {
+            let _ = reached.send(());
+            let _ = resume.await;
+        }
+    }
 }
 
 pub(super) fn final_admission(

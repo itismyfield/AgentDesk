@@ -39,7 +39,6 @@ use std::sync::Arc;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::closed_verdict::MailboxRefusal;
-use super::policy_close::{PolicyMailboxOutcome, PolicyRetain};
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
     ChannelMailboxState, ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason,
@@ -152,10 +151,8 @@ pub(super) fn gate_closed_arm(
             "RequeueFront"
         }
         M::PolicyClose { ref request, .. } if request.reconciles(state, channel_id) => return Some(msg),
-        M::PolicyClose { reply, .. } => {
-            let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
-            "PolicyClose"
-        }
+        M::PolicyClose { reply, .. } => super::policy_close::refuse_closed(reply),
+        M::ClaimPolicyTail(claim) => claim.closed(),
         // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
         // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.
         M::CancelActiveTurnWithReason { .. }

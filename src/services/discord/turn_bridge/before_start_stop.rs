@@ -201,6 +201,7 @@ fn policy_intent(
             channel,
         ),
         release_reconcile_allowed: false,
+        ticket: None,
         trace: Default::default(),
     };
     // Tests bind the request's own probe and settlement switch to it here.

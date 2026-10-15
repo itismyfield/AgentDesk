@@ -1427,12 +1427,12 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
-    /// A before-start policy close: one step claims the exact episode, clears its receipt and
-    /// releases it (see `policy_close.rs`).
+    /// A before-start policy close and its later tail claim on the same actor (`policy_close.rs`).
     PolicyClose {
         request: Box<policy_close::PolicyCloseRequest>,
         reply: oneshot::Sender<policy_close::PolicyMailboxOutcome>,
     },
+    ClaimPolicyTail(policy_close::tail::TailClaim),
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -2589,8 +2589,8 @@ fn input_mailbox_step(
                 });
             }
         }
-        ChannelMailboxMsg::PolicyClose { request, reply } => {
-            policy_close::answer(&mut state, channel_id, *request, &_step, reply);
+        msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
+            policy_close::answer(&mut state, channel_id, msg, (&_step, own_recovery_done));
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();

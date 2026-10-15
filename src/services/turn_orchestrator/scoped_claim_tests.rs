@@ -188,6 +188,7 @@ impl Fixture {
             active: Arc::new(AtomicUsize::new(1)),
             persistence: ctx(),
             release_reconcile_allowed: false,
+            ticket: None,
             trace: Default::default(),
         };
         // The request carries this thread's armed hook, if any, on its own probe.

@@ -895,7 +895,7 @@ async fn handle_text_message_admitted(
             );
         }
     }
-    let Some((channel_id, bootstrapped_fresh_thread_session, redirected_permit)) =
+    let Some((route, bootstrapped_fresh_thread_session, redirected_permit)) =
         adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
             http,
             cache,
@@ -917,14 +917,7 @@ async fn handle_text_message_admitted(
     else {
         return Ok(IntakeExecution::Executed);
     };
-    let final_provider =
-        if let Some(override_channel) = shared.dispatch.role_overrides.get(&channel_id) {
-            resolve_role_binding(*override_channel, None)
-                .and_then(|binding| binding.provider)
-                .unwrap_or_else(|| provider.clone())
-        } else {
-            provider.clone()
-        };
+    let (channel_id, final_provider) = (route.target, route.provider(&provider));
     let final_permit = adk_thread::final_admission(&final_provider, channel_id, redirected_permit)?;
     let (http_owned, cache_owned, ctx_owned, shared_owned, token_owned) = (
         http.clone(),
@@ -1061,8 +1054,7 @@ async fn handle_text_message_admitted(
     let mut resolved_role_binding = {
         // For cross-channel dispatch reuse (e.g. review in implementation thread),
         // resolve role from the override channel instead of the thread's parent.
-        if let Some(override_ch) = shared.dispatch.role_overrides.get(&channel_id) {
-            let alt_ch = *override_ch;
+        if let Some(alt_ch) = route.role() {
             ResolvedThreadRoleBinding::direct(resolve_role_binding(alt_ch, None))
         } else {
             let data = shared.core.lock().await;
@@ -1083,7 +1075,7 @@ async fn handle_text_message_admitted(
 
     // For cross-channel dispatch reuse, override the provider so the turn
     // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
-    let provider = if shared.dispatch.role_overrides.contains_key(&channel_id) {
+    let provider = if route.role().is_some() {
         role_binding
             .as_ref()
             .and_then(|rb| rb.provider.clone())
@@ -1363,6 +1355,10 @@ async fn handle_text_message_admitted(
             ),
         ))
         .await;
+    // The claim owns the route: publish it before this turn can be observed.
+    if started {
+        route.publish(shared);
+    }
 
     // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only
     // — see latency_spans.rs). Never `.log()`'d on the early returns below.
