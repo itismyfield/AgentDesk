@@ -14,8 +14,7 @@ acceptance_criteria:
   - Assert [E2E:E18:LATE] is absent from relay output after cancellation.
   - Assert health counters drain to global_active=0 and global_finalizing=0.
 notes: |
-  #2937 coverage. This remains destructive-gated and intentionally omits
-  claude-e because the stop/cancel path under test is the relay-backed
+  #2937 coverage. This remains destructive-gated and tests the relay-backed
   pipe/TUI turn lifecycle. The send_provider_hold_prompt fixture asks the
   provider to emit the early marker, block in a shell sleep, and emit the late
   marker only if cancellation fails to stop the turn. The driver waits on the

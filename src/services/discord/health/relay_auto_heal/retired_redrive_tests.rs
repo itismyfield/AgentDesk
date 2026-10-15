@@ -30,8 +30,33 @@ const BEFORE_REATTACH: Stage = "redrive_reattach";
 
 type Tree = BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>;
 
-/// Everything a pass can leave behind: full redrive accounting of some keys and every durable
-/// byte under the runtime root.
+// Tmux death hooks outlive their fixture. Keep our marker and all other durable files observed.
+fn redrive_tree(root: &Path, session: &str) -> Tree {
+    let own_marker = PathBuf::from(crate::services::tmux_common::session_dead_marker_path(
+        session,
+    ));
+    let sessions = root.join("runtime/sessions");
+    tree_fingerprint(root)
+        .into_iter()
+        .filter(|(path, _)| {
+            let foreign_marker = path.parent() == Some(sessions.as_path())
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "pane_dead")
+                && path != &own_marker;
+            !foreign_marker
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn write_foreign_dead_marker(session: &str) {
+    let marker =
+        crate::services::tmux_common::session_dead_marker_path(&format!("{session}-other"));
+    std::fs::write(marker, "dead").expect("unrelated session exits during the pass");
+}
+
+/// Full redrive accounting and durable bytes, excluding other sessions' asynchronous death markers.
 #[derive(Debug, PartialEq)]
 struct Observed {
     accounting: String,
@@ -43,6 +68,7 @@ fn observe(
     provider: &ProviderKind,
     keys: &[ChannelId],
     root: &Path,
+    session: &str,
 ) -> Observed {
     let accounting = keys
         .iter()
@@ -58,7 +84,7 @@ fn observe(
         .join("\n");
     Observed {
         accounting,
-        tree: tree_fingerprint(root),
+        tree: redrive_tree(root, session),
     }
 }
 
@@ -317,7 +343,7 @@ impl NudgeFixture {
         if self.owner != self.channel {
             keys.push(self.owner);
         }
-        observe(&self.shared, &self.provider, &keys, root)
+        observe(&self.shared, &self.provider, &keys, root, &self.session.0)
     }
 
     fn clear(&self) {
@@ -500,6 +526,7 @@ async fn retired_redrive_key_never_moves_the_watcher_resume_offset() {
         );
 
         let result = fixture.redrive(base).await.expect("redrive entrypoint");
+        write_foreign_dead_marker(&fixture.session.0);
 
         let probes = tmux_log.calls_naming(&fixture.session.0) - probes_before;
         match retire {
@@ -559,6 +586,7 @@ async fn retired_watcher_owner_key_stops_the_nudge_of_a_legacy_request() {
         let probe = Probe::arm(channel, None);
 
         let result = fixture.redrive(base).await.expect("redrive entrypoint");
+        write_foreign_dead_marker(&fixture.session.0);
 
         assert_eq!(
             probe.reached(),
@@ -606,12 +634,14 @@ async fn retirement_before_reattach_promotion_spawns_no_watcher() {
         let fixture = ReattachFixture::new(tmp.path(), channel).await;
         let base = chrono::Utc::now().timestamp();
         fixture.seed_grace(base).await;
-        let (shared, provider, root) = (
+        let (shared, provider, root, session) = (
             fixture.shared.clone(),
             fixture.provider.clone(),
             tmp.path().to_path_buf(),
+            fixture.session.0.clone(),
         );
-        let capture: Capture = Box::new(move || observe(&shared, &provider, &[channel], &root));
+        let capture: Capture =
+            Box::new(move || observe(&shared, &provider, &[channel], &root, &session));
         let probe = Probe::arm_capturing(
             channel,
             retire.then_some((BEFORE_REATTACH, &fixture.provider, channel)),
@@ -619,6 +649,7 @@ async fn retirement_before_reattach_promotion_spawns_no_watcher() {
         );
 
         let result = fixture.redrive(base).await.expect("redrive entrypoint");
+        write_foreign_dead_marker(&fixture.session.0);
 
         assert_eq!(
             probe.reached(),
@@ -636,7 +667,13 @@ async fn retirement_before_reattach_promotion_spawns_no_watcher() {
                 .captured()
                 .expect("state observed at the promotion gate");
             assert_eq!(
-                observe(&fixture.shared, &fixture.provider, &[channel], tmp.path()),
+                observe(
+                    &fixture.shared,
+                    &fixture.provider,
+                    &[channel],
+                    tmp.path(),
+                    &fixture.session.0,
+                ),
                 at_gate,
                 "nothing changes after the promotion gate refuses a retired key"
             );
@@ -666,12 +703,16 @@ async fn empty_retired_set_keeps_the_legacy_nudge_outcome() {
         .expect("seeded row");
     let base = chrono::Utc::now().timestamp();
     fixture.seed_grace(base).await;
-    let (tree_before, events_before) = (tree_fingerprint(tmp.path()), events_for(channel));
+    let (tree_before, events_before) = (
+        redrive_tree(tmp.path(), &fixture.session.0),
+        events_for(channel),
+    );
     let millis_before = chrono::Utc::now().timestamp_millis();
 
     let result = fixture.redrive(base).await.expect("redrive entrypoint");
 
     let millis_after = chrono::Utc::now().timestamp_millis();
+    write_foreign_dead_marker(&fixture.session.0);
     assert!(result, "the Legacy key is nudged");
     assert_eq!(fixture.resumed_at(), Some(BIRTH_OFFSET));
     let key = fixture.shared.redrive_key(&fixture.provider, channel);
@@ -719,7 +760,7 @@ async fn empty_retired_set_keeps_the_legacy_nudge_outcome() {
         channel.get()
     ));
     assert_eq!(
-        changed_paths(&tree_before, &tree_fingerprint(tmp.path())),
+        changed_paths(&tree_before, &redrive_tree(tmp.path(), &fixture.session.0)),
         vec![baseline],
         "only the grace baseline is rewritten"
     );
@@ -745,12 +786,16 @@ async fn empty_retired_set_keeps_the_legacy_reattach_outcome() {
     let fixture = ReattachFixture::new(tmp.path(), channel).await;
     let base = chrono::Utc::now().timestamp();
     fixture.seed_grace(base).await;
-    let (tree_before, events_before) = (tree_fingerprint(tmp.path()), events_for(channel));
+    let (tree_before, events_before) = (
+        redrive_tree(tmp.path(), &fixture.session.0),
+        events_for(channel),
+    );
     let millis_before = chrono::Utc::now().timestamp_millis();
 
     let result = fixture.redrive(base).await.expect("redrive entrypoint");
 
     let millis_after = chrono::Utc::now().timestamp_millis();
+    write_foreign_dead_marker(&fixture.session.0);
     let requests = fixture.discord.requests_for(channel.get());
     let spawned = fixture.take_spawned_watcher();
     assert!(result, "the Legacy key is reattached");
@@ -798,7 +843,7 @@ async fn empty_retired_set_keeps_the_legacy_reattach_outcome() {
     let runtime = tmp.path().join("runtime");
     let channel_file = format!("claude/{}.json", channel.get());
     assert_eq!(
-        changed_paths(&tree_before, &tree_fingerprint(tmp.path())),
+        changed_paths(&tree_before, &redrive_tree(tmp.path(), &fixture.session.0)),
         vec![
             runtime.join("discord_inflight").join(&channel_file),
             runtime
@@ -823,4 +868,58 @@ async fn empty_retired_set_keeps_the_legacy_reattach_outcome() {
         "the reattach itself sends nothing to Discord"
     );
     fixture.clear();
+}
+
+#[test]
+fn redrive_tree_ignores_only_foreign_death_markers() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let tmp = tempfile::tempdir().expect("temp runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    let session = "redrive-observation";
+    let own_marker = PathBuf::from(crate::services::tmux_common::session_dead_marker_path(
+        session,
+    ));
+    let foreign_marker = PathBuf::from(crate::services::tmux_common::session_dead_marker_path(
+        &format!("{session}-other"),
+    ));
+    let before = redrive_tree(tmp.path(), session);
+    for content in ["dead", "updated"] {
+        std::fs::write(&foreign_marker, content).unwrap();
+        assert_eq!(redrive_tree(tmp.path(), session), before);
+    }
+    std::fs::remove_file(&foreign_marker).unwrap();
+    assert_eq!(redrive_tree(tmp.path(), session), before);
+
+    for path in [
+        own_marker,
+        foreign_marker.with_extension("json"),
+        tmp.path().join("unexpected.pane_dead"),
+    ] {
+        let before = redrive_tree(tmp.path(), session);
+        std::fs::write(&path, "original").unwrap();
+        let added = redrive_tree(tmp.path(), session);
+        assert_eq!(changed_paths(&before, &added), vec![path.clone()]);
+        std::fs::write(&path, "changed").unwrap();
+        let rewritten = redrive_tree(tmp.path(), session);
+        assert_eq!(changed_paths(&added, &rewritten), vec![path.clone()]);
+        assert_ne!(added[&path].0, rewritten[&path].0);
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let retimed = redrive_tree(tmp.path(), session);
+        assert_eq!(rewritten[&path].0, retimed[&path].0);
+        assert_eq!(changed_paths(&rewritten, &retimed), vec![path.clone()]);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            changed_paths(&retimed, &redrive_tree(tmp.path(), session)),
+            vec![path]
+        );
+    }
 }
