@@ -72,8 +72,13 @@ pub trait DiscordPort: Send + Sync + 'static {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send;
-    /// Whether reading history is provably allowed; an empty page alone proves nothing.
-    fn history_readable(&self, channel: u64) -> bool;
+    /// One message by id: `Ok(None)` is a 404; a refusal, server or transport failure, or an
+    /// unreadable body is an error.
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send;
 }
 
 /// The channel's shared delivery lease, held from before admission until the result is recorded

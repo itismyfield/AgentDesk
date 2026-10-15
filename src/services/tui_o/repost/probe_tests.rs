@@ -594,7 +594,7 @@ async fn f4_timeout_budget_and_nonprogress_remain_incomplete() {
     assert!(matches!(progress, Progress::Incomplete(_)), "{progress:?}");
     let waited = started.elapsed();
     assert!(
-        waited >= READ_TIMEOUT && waited < READ_TIMEOUT * 2,
+        waited >= confirm::READ_TIMEOUT && waited < confirm::READ_TIMEOUT * 2,
         "{waited:?}"
     );
     assert_eq!(stalled.gets(), 1);
@@ -802,7 +802,7 @@ async fn f4_default_off_does_not_construct_a_probe() {
     assert!(reader.reads() > 0, "the on control really reads");
 }
 
-/// Answers like the legacy writer's gateway: empty history, permission as the adapter says.
+/// Answers like the legacy writer's gateway: empty history, a read by id through the adapter.
 struct Legacy(GatewayPort);
 
 impl DiscordPort for Legacy {
@@ -818,8 +818,12 @@ impl DiscordPort for Legacy {
         Ok(Vec::new())
     }
 
-    fn history_readable(&self, channel: u64) -> bool {
-        self.0.history_readable(channel)
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        self.0.message(channel, id)
     }
 }
 
@@ -1172,8 +1176,8 @@ async fn f4_has_no_operational_probe_edges_and_preserves_legacy_confirmation() {
 
     let gateway = GatewayPort::new(Arc::new(serenity::Http::new("test-token")), BOT);
     let legacy = Legacy(gateway);
-    assert!(!legacy.history_readable(CHANNEL));
-    let verdict = confirm::settle(&legacy, CHANNEL, ANCHOR, PAYLOAD, false).await;
+    // Without a known post to read back, an empty history proves nothing.
+    let verdict = confirm::settle(&legacy, CHANNEL, ANCHOR, PAYLOAD, false, &[]).await;
     assert!(
         matches!(verdict, confirm::Verdict::Unresolved(_)),
         "{verdict:?}"

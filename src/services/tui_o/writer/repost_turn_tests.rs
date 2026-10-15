@@ -589,7 +589,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
         .lock()
         .unwrap()
         .push_back(Reply::Unsent);
-    // An unreadable history settles the lost reply as unresolved at the first look.
+    // An unreadable history settles the lost reply as unresolved.
     harness.port.unreadable.store(true, Ordering::SeqCst);
     assert_eq!(writer.deliver(&piece("on", "on payload")).await, Step::Done);
     assert_eq!(*intent_first.lock().unwrap(), Some(true));

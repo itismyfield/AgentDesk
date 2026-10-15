@@ -292,6 +292,10 @@ async fn operator_resume_uncertain_retry_never_reblocks_or_reposts_after_reopeni
             harness.port.say(BOT, "original bytes");
             harness.port.say(BOT, "original bytes");
         }
+        if case == "not_found" {
+            // A listed message shows the history readable.
+            harness.port.say(BOT + 1, "chatter");
+        }
         if case == "unresolved" {
             harness.port.unreadable.store(true, Ordering::SeqCst);
         }

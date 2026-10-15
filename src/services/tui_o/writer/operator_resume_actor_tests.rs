@@ -214,7 +214,8 @@ async fn operator_resume_open_consumed_retry_without_raw_work_settles_before_fol
         .unwrap();
     harness.port.unreadable.store(true, Ordering::SeqCst);
     let (stop, task) = spawn(harness.writer());
-    polls(12).await;
+    // An unreadable history leaves the piece unresolved at the last look.
+    polls(32).await;
     let channel = harness.channel();
     assert!(matches!(
         channel.ledger().piece(1).unwrap().outcome,

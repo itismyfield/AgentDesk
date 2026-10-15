@@ -707,12 +707,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     );
                     unsettled && piece.payload == payload
                 });
+        // This bot's latest posts here, newest first; one read back by id proves history readable.
+        let posted = (0..serial)
+            .rev()
+            .filter_map(|earlier| match ledger.piece(earlier)?.outcome {
+                Some(PieceOutcome::Posted(msg_id)) => Some(msg_id),
+                _ => None,
+            });
+        let proof_ids: Vec<u64> = posted.take(confirm::PROOF_IDS).collect();
         let verdict = confirm::settle(
             &*self.port,
             self.channel,
             anchor,
             &payload,
             earlier_same_payload,
+            &proof_ids,
         )
         .await;
         let (entry, alarm) = match verdict {

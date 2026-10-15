@@ -138,18 +138,34 @@ impl DiscordPort for FakePort {
         _channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send {
+        // Without history permission Discord lists nothing rather than refusing.
+        let readable = !self.unreadable.load(Ordering::SeqCst);
         let history = self.history.lock().unwrap();
         let page: Vec<SeenMessage> = history
             .iter()
-            .filter(|m| m.id > after)
+            .filter(|m| readable && m.id > after)
             .take(confirm::HISTORY_PAGE)
             .cloned()
             .collect();
         async move { Ok(page) }
     }
 
-    fn history_readable(&self, _channel: u64) -> bool {
-        !self.unreadable.load(Ordering::SeqCst)
+    fn message(
+        &self,
+        _channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let found = match self.unreadable.load(Ordering::SeqCst) {
+            true => Err("HTTP 403 Forbidden".to_owned()),
+            false => Ok(self
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|m| m.id == id)
+                .cloned()),
+        };
+        async move { found }
     }
 }
 
@@ -414,45 +430,90 @@ async fn settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out
     let port = FakePort::default();
     port.say(BOT, "same");
     port.say(BOT, "same");
+    let proof = [1001];
     assert_eq!(
-        confirm::settle(&port, CHANNEL, 0, "same", false).await,
+        confirm::settle(&port, CHANNEL, 0, "same", false, &proof).await,
         Verdict::Ambiguous(vec![1000, 1001])
     );
     assert_eq!(
-        confirm::settle(&port, CHANNEL, 1000, "same", true).await,
+        confirm::settle(&port, CHANNEL, 1000, "same", true, &proof).await,
         Verdict::Ambiguous(vec![1001])
     );
     assert_eq!(
-        confirm::settle(&port, CHANNEL, 1000, "same", false).await,
+        confirm::settle(&port, CHANNEL, 1000, "same", false, &proof).await,
         Verdict::Posted(1001)
     );
     assert_eq!(
-        confirm::settle(&port, CHANNEL, 1001, "same", false).await,
+        confirm::settle(&port, CHANNEL, 1001, "same", false, &proof).await,
         Verdict::NotFound
+    );
+    assert!(
+        matches!(
+            confirm::settle(&port, CHANNEL, 1001, "same", false, &[]).await,
+            Verdict::Unresolved(_)
+        ),
+        "an empty page with no own post read back proves nothing"
     );
     port.unreadable.store(true, Ordering::SeqCst);
     assert!(matches!(
-        confirm::settle(&port, CHANNEL, 1001, "same", false).await,
+        confirm::settle(&port, CHANNEL, 1001, "same", false, &proof).await,
         Verdict::Unresolved(_)
     ));
-    port.say(BOT + 1, "someone else");
-    assert!(
-        matches!(
-            confirm::settle(&port, CHANNEL, 1001, "same", false).await,
-            Verdict::Unresolved(_)
-        ),
-        "another author's message is no proof that history is readable"
-    );
     port.unreadable.store(false, Ordering::SeqCst);
+    port.say(BOT + 1, "someone else");
+    assert_eq!(
+        confirm::settle(&port, CHANNEL, 1001, "same", false, &[]).await,
+        Verdict::NotFound,
+        "a listed message shows the history readable"
+    );
     let pages = confirm::HISTORY_PAGE * confirm::MAX_PAGES;
     for _ in 0..pages {
         port.say(7, "chatter");
     }
     assert!(matches!(
-        confirm::settle(&port, CHANNEL, 0, "same", false).await,
+        confirm::settle(&port, CHANNEL, 0, "same", false, &proof).await,
         Verdict::Unresolved(_)
     ));
     assert_eq!(confirm::judge(&[5], false), Some(Verdict::Posted(5)));
+}
+
+/// Answers every history read with a full page of chatter just inside the read timeout.
+struct SlowPages;
+
+impl DiscordPort for SlowPages {
+    fn bot_id(&self) -> u64 {
+        BOT
+    }
+
+    fn post(&self, _: u64, _: String) -> impl Future<Output = PostOutcome> + Send + 'static {
+        std::future::pending()
+    }
+
+    async fn history_after(&self, _: u64, after: u64) -> Result<Vec<SeenMessage>, String> {
+        let just_inside = confirm::READ_TIMEOUT - std::time::Duration::from_millis(100);
+        tokio::time::sleep(just_inside).await;
+        let chatter = |n| SeenMessage {
+            id: after + n,
+            author_id: 7,
+            content: "chatter".into(),
+        };
+        Ok((1..=confirm::HISTORY_PAGE as u64).map(chatter).collect())
+    }
+
+    async fn message(&self, _: u64, _: u64) -> Result<Option<SeenMessage>, String> {
+        Ok(None)
+    }
+}
+
+/// Reads that each finish in time still end the settlement at its deadline, inside the lease.
+#[tokio::test(start_paused = true)]
+async fn a_settlement_ends_at_its_deadline_however_slowly_full_pages_arrive() {
+    let started = tokio::time::Instant::now();
+    let verdict = confirm::settle(&SlowPages, CHANNEL, 0, "same", false, &[]).await;
+    let deadline = confirm::SETTLE_DEADLINE;
+    let late = format!("settlement exceeded {deadline:?}");
+    assert_eq!(verdict, Verdict::Unresolved(late));
+    assert_eq!(started.elapsed(), deadline);
 }
 
 #[tokio::test(start_paused = true)]
@@ -468,7 +529,11 @@ async fn an_unclear_post_sharing_an_earlier_unsettled_payload_stays_ambiguous() 
         .extend([Reply::Unsent, Reply::CreatedUnseen]);
     writer.deliver(&piece("m1", "ok")).await;
     writer.deliver(&piece("m2", "ok")).await;
-    assert_eq!(outcome(&mut writer, "m1"), Some(PieceOutcome::NotFound));
+    // No post of this bot yet proves the empty history readable.
+    assert!(matches!(
+        outcome(&mut writer, "m1"),
+        Some(PieceOutcome::Unresolved(_))
+    ));
     assert_eq!(
         outcome(&mut writer, "m2"),
         Some(PieceOutcome::Ambiguous(vec![1000]))

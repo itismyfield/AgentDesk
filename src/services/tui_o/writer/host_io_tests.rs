@@ -49,8 +49,14 @@ impl DiscordPort for Posts {
         std::future::ready(Ok(page.map(|(_, m)| m.clone()).collect()))
     }
 
-    fn history_readable(&self, _: u64) -> bool {
-        true
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let posts = locked(&self.0);
+        let found = posts.iter().find(|(c, m)| *c == channel && m.id == id);
+        std::future::ready(Ok(found.map(|(_, m)| m.clone())))
     }
 }
 

@@ -510,7 +510,8 @@ pub(super) async fn unsent_seed_node(_: &Env) {
 }
 
 /// T-H7 Prepared alone, NotFound: an unsent Prepared keeps the reclaim draining until the replayed
-/// row settles it NotFound from a readable history with no candidate; nothing is posted.
+/// row settles it NotFound from a history another author's message shows readable, with no
+/// candidate; nothing is posted.
 #[tokio::test(flavor = "current_thread")]
 async fn th7_prepared_alone_settles_not_found_pg() {
     unsent_settles("th7_settles_not_found")
@@ -560,7 +561,7 @@ async fn unsent_settles(scenario: &str) -> Scene {
 }
 
 pub(super) async fn settles_not_found_node(env: &Env) {
-    let discord = Discord::kept_in(&env.dir.join(HISTORY));
+    let discord = Discord::kept_in(&env.dir.join(HISTORY)).with_chatter();
     let (node, replayed) = settled_on_replay(env, discord).await;
     let reads = node.discord().history_reads();
     let after = reads.first().map(|r| r.after);
@@ -569,7 +570,7 @@ pub(super) async fn settles_not_found_node(env: &Env) {
         .collect();
     assert_eq!(
         answers,
-        [(C, after, Ok(0)), (C, after, Ok(0))],
+        [(C, after, Ok(1)), (C, after, Ok(1))],
         "both looks, one anchor"
     );
     let first = reads[0].at.duration_since(replayed);
@@ -593,7 +594,11 @@ pub(super) async fn settles_unresolved_node(env: &Env) {
         .map(|r| (r.channel, r.answer.clone()))
         .collect();
     let failed = (C, Err(HISTORY_UNAVAILABLE.to_string()));
-    assert_eq!(answers, [failed], "read again after an error");
+    assert_eq!(
+        answers,
+        [failed.clone(), failed],
+        "a failed first look is read again at the last"
+    );
     let first = reads[0].at.duration_since(replayed);
     assert!(first >= FIRST_LOOK, "first read {first:?} after the row");
     let outcomes = settled(&node);
