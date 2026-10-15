@@ -606,7 +606,7 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
             queue.iter().map(fields).collect()
         };
         let before = input(&harness.durable_queue());
-        assert!(!kick_off(&harness).await, "the refused kickoff started");
+        let started = kick_off(&harness).await;
         let held = harness.mailbox().await.intervention_queue;
         assert_eq!(input(&held), before, "refused input left the queue");
         assert_eq!(
@@ -614,6 +614,7 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
             before,
             "left the durable queue"
         );
+        assert!(!started, "the refused kickoff started");
         assert_eq!(sends(), Vec::new(), "the refused kickoff prompted");
         assert_eq!(tmux_calls(), Vec::<String>::new(), "no local tmux call");
         assert_eq!(
