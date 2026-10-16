@@ -32508,7 +32508,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:fb467855b2d1652bccc275b7e5a9c78a7c7a578b6caa13a6a9c4659328981177"
+      "fingerprint": "sha256:6ad24536f81c7bbbf240b935ce160a6038ed7fb36790d7264cb90afdf4d2b0cd"
     },
     {
       "root": "src",
@@ -32516,26 +32516,8 @@
       "path": "src/services/discord/runtime_bootstrap/orphan_recovery.rs",
       "api": "sqlx::query",
       "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:388f5bda4662d70e8c722513a0bfa8127bbf0261127d37d70ae01a9256ceda54"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/orphan_recovery.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "UNRESOLVED",
-      "fingerprint": "sha256:efae14c06e02fe81852e3609bb8b971375d45d23a6a09d3bb8b8f9c4655f62e8"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/runtime_bootstrap/orphan_recovery.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:7392ba3bd21db5305ad625280a3b84c729f965f76f13cbd5d963f162fb597948"
+      "fingerprint": "sha256:e47263d6ee1709833fc447840246998ec590f97e269dc61071503e358bfa5c45"
     },
     {
       "root": "src",

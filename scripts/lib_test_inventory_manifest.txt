@@ -7237,7 +7237,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::o_writer_host::repost_tests::f6_gateway_and_delegated_hosts_build_a_repost_turn_only_with_a_pool
-services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
