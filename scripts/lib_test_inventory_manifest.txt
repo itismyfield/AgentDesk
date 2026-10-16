@@ -12612,8 +12612,6 @@ services::tui_o::repost::runner_tests::f5_t06_first_transport_poll_and_wire_guar
 services::tui_o::repost::runner_tests::f5_t06_gate_closes_during_pg_wait_pg
 services::tui_o::repost::runner_tests::f5_t09_t23_t24_a_turn_waits_for_the_channel_and_allocates_nothing_pg
 services::tui_o::repost::runner_tests::f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg
-services::tui_o::shadow::binding_reader::tests::binding_reader_reports_source_changes_once_and_keeps_the_last_on_gaps
-services::tui_o::shadow::binding_reader::tests::binding_view_reads_the_native_transcript_of_tui_runtimes_only
 services::tui_o::shadow::capture::io_trace::s0o_read_range_probe_records_actual_seek_reads
 services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_alignment_preserves_complete_first_and_partial_last
 services::tui_o::shadow::capture::observation::observation_tests::tests::s0o_complete_large_records_keep_existing_partial_limit
@@ -12632,15 +12630,6 @@ services::tui_o::shadow::capture::tests::readers_s1a_access_error_is_unreadable_
 services::tui_o::shadow::capture::tests::readers_s1a_missing_is_exact_and_first_anomaly_is_sticky
 services::tui_o::shadow::capture::tests::readers_s1a_open_fd_verification_rejects_full_prefix_change_and_partial
 services::tui_o::shadow::capture::tests::readers_s1a_permission_denied_is_never_missing
-services::tui_o::shadow::derive::tests::claude_profile_units_follow_identity_rules
-services::tui_o::shadow::derive::tests::codex_profile_units_and_unsealed_announcements
-services::tui_o::shadow::derive::tests::empty_window_start_then_new_attach_counts_live
-services::tui_o::shadow::derive::tests::history_below_start_boundary_or_before_window_is_not_live
-services::tui_o::shadow::derive::tests::inherited_replayed_edge_and_unattached_turns_are_not_counted
-services::tui_o::shadow::derive::tests::live_requires_attach_and_a_window_boundary_for_the_source
-services::tui_o::shadow::derive::tests::sealed_units_repeat_silently_and_block_when_changed
-services::tui_o::shadow::derive::tests::split_pieces_follow_legacy_split_in_utf16_units
-services::tui_o::shadow::derive::tests::turns_open_on_native_input_and_close_on_idle_observation
 services::tui_o::shadow::identity::tests::claude_multi_block_row_keys_each_block_like_one_block_rows
 services::tui_o::shadow::identity::tests::claude_synthetic_resume_chrome_alone_is_excluded
 services::tui_o::shadow::identity::tests::codex_turn_aborted_closes_only_the_named_parent_turn
@@ -13584,7 +13573,6 @@ services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::unresolved_t
 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::verified_source_less_equal_command_initial_ups_uses_exact_utf8
 services::tui_prompt_dedupe::runtime_binding::s2a1_binding_tests::s2a1_common_and_lock_held_expiry_invalidate_actual_removal_only
 services::tui_prompt_dedupe::runtime_binding::s2a1_binding_tests::s2a1_runtime_publish_read_offset_noop_clear_and_rehydrate_fence_identity
-services::tui_prompt_dedupe::runtime_binding::shadow_session_tests::observer_discovery_lists_live_sessions_without_changing_relay_state
 services::tui_prompt_dedupe::session_rotation::tests::drain_progress_resets_the_stall_counter_and_stall_accumulates
 services::tui_prompt_dedupe::session_rotation::tests::second_hop_preserves_the_original_frozen_transcript
 services::tui_prompt_dedupe::session_rotation::tests::settling_a_rotation_does_not_retire_the_adopted_session_authority
