@@ -652,6 +652,111 @@ async fn s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_re
     fixture.assert_holder_kept().await;
 }
 
+/// Claude Code's paste block around `inner`, opened and closed with the given ids.
+fn paste_block(open: &str, inner: &str, close: &str) -> String {
+    format!("<pasted_content id=\"{open}\">\n{inner}\n</pasted_content id=\"{close}\">")
+}
+
+/// The pane's enqueue receipt with `content` as its prompt.
+fn enqueue_receipt(content: Value) -> String {
+    json!({"type": "queue-operation", "operation": "enqueue", "content": content}).to_string()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_block_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(6_813_430, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let block = paste_block("b0ac", "@BODY@", "b0ac");
+    fixture.pane.set("receipt", &enqueue_receipt(json!(block)));
+    let before = fixture.queue().await;
+    fixture.kick().await;
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\nstatus?"));
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let after = fixture.queue().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(format!("{:?}", after[0]), format!("{:?}", before[1]));
+
+    // The composer is empty again, so the next kick types B once in the same way.
+    std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+    fixture.kick().await;
+    assert_eq!(
+        fixture.pane.keys(),
+        ["paste-buffer", "send-keys", "paste-buffer", "send-keys"]
+    );
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\ndistinct tail B"));
+    assert!(fixture.queue().await.is_empty());
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let terminal = disk["terminal_identities"].as_array().unwrap();
+    assert_eq!(terminal.len(), 2);
+    for (identity, head) in terminal.iter().zip(&before) {
+        assert_eq!(identity["primary"], head.message_id.get());
+        assert_eq!(identity["queued_generation"], head.queued_generation);
+        assert_eq!(identity["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(identity["sources"][0]["message_id"], head.message_id.get());
+    }
+    fixture.assert_holder_kept().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let block = |inner: &str| paste_block("b0ac", inner, "b0ac");
+    let quoted = block("@BODY@");
+    let cases = [
+        ("suffix inside", enqueue_receipt(json!(block("@BODY@\nX")))),
+        ("changed body", enqueue_receipt(json!(block("@HEAD@\nstatus!")))),
+        ("text after", enqueue_receipt(json!(format!("{quoted}\nX")))),
+        ("trailing newline", enqueue_receipt(json!(format!("{quoted}\n")))),
+        ("leading space", enqueue_receipt(json!(format!(" {quoted}")))),
+        ("other close id", enqueue_receipt(json!(paste_block("b0ac", "@BODY@", "c1d2")))),
+        ("uppercase id", enqueue_receipt(json!(paste_block("B0AC", "@BODY@", "B0AC")))),
+        (
+            "extra attribute",
+            enqueue_receipt(json!(quoted.replacen("\">", "\" source=\"x\">", 1))),
+        ),
+        ("nested", enqueue_receipt(json!(paste_block("c1d2", &quoted, "c1d2")))),
+        (
+            "nontext",
+            enqueue_receipt(json!([{"type": "text", "text": quoted},
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}])),
+        ),
+        (
+            "assistant quote",
+            json!({"type": "assistant", "message": {"content": quoted}}).to_string(),
+        ),
+        (
+            "tool result",
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": quoted}]}})
+                .to_string(),
+        ),
+        (
+            "meta",
+            json!({"type": "user", "isMeta": true, "message": {"content": quoted}}).to_string(),
+        ),
+    ];
+    for (offset, (case, receipt)) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(6_813_431 + offset as u64, "all").await;
+        let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+        fixture.pane.set("receipt", &receipt);
+        let before = payloads(items(fixture.disk()));
+        fixture.kick().await;
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"], "{case}");
+        assert_eq!(
+            fixture.disk()["head_injection"]["phase"],
+            "unknown",
+            "{case}"
+        );
+        fixture.assert_unknown_barrier(before).await;
+        fixture.assert_holder_kept().await;
+    }
+}
+
 async fn reached(signal: &tokio::sync::Notify) {
     tokio::time::timeout(std::time::Duration::from_secs(10), signal.notified())
         .await

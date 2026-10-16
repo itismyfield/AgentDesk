@@ -27,7 +27,8 @@ const BUSY_TURN: &str = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"con
     {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
 
 /// Scripted `tmux` of `size` (80,24) pasting only at `live`: folded, or flat with `draw`/`draw.rows`;
-/// Enter records the complete submitted buffer. `gate`/`hold` park keys/capture until `go`.
+/// Enter records the complete submitted buffer, or the `receipt` JSON line with `@BODY@` as it and
+/// `@HEAD@` as its header line. `gate`/`hold` park keys/capture until `go`.
 const FAKE_TMUX: &str = r##"#!/bin/sh
 d='@D@'
 echo "$*" >> "$d/log"
@@ -60,7 +61,10 @@ if-shell)
       cat "$d/draw"; printf '\342\235\257\302\240%s\n' "$(head -n 1 "$d/buffer")"
       if [ -f "$d/draw.rows" ]; then cat "$d/draw.rows"; else awk 'NR > 1 { print ($0 == "" ? "" : "  " $0) }' "$d/buffer"; fi
       cat "$d/draw.tail"; } > "$d/cap.pasted" ;;
-  send-keys*) python3 -c 'import json,sys; print(json.dumps({"type":"queue-operation","operation":"enqueue","content":open(sys.argv[1]).read(),"sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"}))' "$d/buffer" >> "$d/transcript.jsonl" ;;
+  send-keys*) python3 -c 'import json,os,sys; b=open(sys.argv[1]).read(); t=sys.argv[2]
+r=open(t).read().strip() if os.path.exists(t) else json.dumps({"type":"queue-operation","operation":"enqueue","content":"@BODY@","sessionId":"6245","timestamp":"2026-10-06T00:00:00.000Z"})
+e=lambda v: json.dumps(v)[1:-1]
+print(r.replace("@BODY@", e(b)).replace("@HEAD@", e(b.split("\n")[0])))' "$d/buffer" "$d/receipt" >> "$d/transcript.jsonl" ;;
   esac ;;
 esac
 exit 0

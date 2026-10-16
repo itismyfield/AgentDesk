@@ -1,6 +1,7 @@
 //! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
+mod receipt;
 pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;
@@ -197,7 +198,9 @@ pub(super) fn transcript_submission(
             && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
             && text.contains(&marker)
         {
-            return Some(expected.is_none_or(|expected| !has_nontext && text == expected));
+            return Some(
+                expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
+            );
         }
         line.clear();
     }
@@ -890,7 +893,7 @@ impl Attempt<'_> {
 }
 
 /// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:
-/// only the exact `text` is a receipt, another body under the nonce is contaminated.
+/// only the exact `text`, bare or in one paste block, is a receipt; another body is contaminated.
 pub(crate) fn await_receipt(
     (transcript, offset, nonce, text): (&Path, u64, &str, &str),
     deadline: Instant,

@@ -625,6 +625,7 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
+│   │   │   ├── receipt.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
