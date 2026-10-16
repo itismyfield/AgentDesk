@@ -123,16 +123,6 @@ fn run_heartbeat_sweep_pass_inner(
     }
 
     for candidate in candidates {
-        // A retired channel keeps only the stale-watcher cancel, never the row load.
-        if super::health::legacy_supervision::legacy_retired(
-            candidate.provider.as_str(),
-            candidate.channel_id,
-            "heartbeat_gap_eviction",
-        ) {
-            cancel_watcher_by_session_name(shared, &candidate.tmux_session_name);
-            report.cancelled += 1;
-            continue;
-        }
         // Cleanup is best-effort and double-bookkept: even when the
         // inflight row is missing (legitimate turn just completed) we
         // still want to cancel the watcher so the registry slot does
@@ -309,7 +299,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod retired_channel_tests {
+mod legacy_channel_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -317,7 +307,6 @@ mod retired_channel_tests {
 
     use super::run_heartbeat_sweep_pass_inner;
     use crate::config::TestEnvVarGuard;
-    use crate::services::discord::health::legacy_supervision::RetiredForTest;
     use crate::services::discord::health::legacy_supervision::test_support::{
         fingerprint, seed_backfill_row,
     };
@@ -340,19 +329,18 @@ mod retired_channel_tests {
         }
     }
 
-    /// A retired channel's stale watcher is still cancelled, but its row is neither
-    /// loaded (backfilled) nor evicted into an abandon request.
+    /// Stale Legacy watchers are cancelled and their rows are evicted into abandon requests.
     #[test]
-    fn retired_channel_keeps_row_and_only_cancels_watcher() {
+    fn legacy_channels_evict_rows_and_cancel_watchers() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let (retired, legacy) = (6_325_404_001u64, 6_325_404_002u64);
+        let channels = [6_325_404_001u64, 6_325_404_002u64];
         let mut rows = Vec::new();
         let mut cancels = Vec::new();
-        for channel in [retired, legacy] {
+        for channel in channels {
             let session = format!("AgentDesk-codex-n4a-hb-{channel}");
             let state = InflightTurnState::new(
                 ProviderKind::Codex,
@@ -376,28 +364,27 @@ mod retired_channel_tests {
             );
             cancels.push(cancel);
         }
-        let _retired = RetiredForTest::new("codex", retired);
-        let before = fingerprint(&rows[0]);
 
         let report = run_heartbeat_sweep_pass_inner(&shared, &ProviderKind::Codex);
 
-        assert_eq!((report.evicted, report.cancelled), (1, 2));
+        assert_eq!((report.evicted, report.cancelled), (2, 2));
         assert!(cancels.iter().all(|cancel| cancel.load(Ordering::Relaxed)));
         assert!(
-            before.is_some() && fingerprint(&rows[0]) == before,
-            "retired row untouched"
+            rows.iter().all(|path| fingerprint(path).is_none()),
+            "Legacy rows evicted"
         );
-        assert!(fingerprint(&rows[1]).is_none(), "legacy row evicted");
         let abandon_root =
             crate::services::discord::runtime_store::discord_abandon_requests_root().unwrap();
         let abandon =
             crate::services::discord::health::legacy_supervision::test_support::tree_fingerprint(
                 &abandon_root,
             );
-        assert!(
-            abandon
-                .keys()
-                .all(|path| !path.to_string_lossy().contains(&retired.to_string()))
-        );
+        for channel in channels {
+            assert!(
+                abandon
+                    .keys()
+                    .any(|path| path.to_string_lossy().contains(&channel.to_string()))
+            );
+        }
     }
 }

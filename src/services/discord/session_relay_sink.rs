@@ -17,7 +17,7 @@ use serenity::model::id::{ChannelId, MessageId};
 pub(in crate::services::discord) use self::tests::sink_fixtures::*;
 use super::delivery_lease_cell::source_epoch_observer;
 use super::formatting::{self, ReplaceLongMessageOutcome};
-use super::health::{self, HealthRegistry};
+use super::health::HealthRegistry;
 use super::inflight::{self, InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
