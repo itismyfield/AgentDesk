@@ -17,18 +17,16 @@ class SkipPromotionTests(unittest.TestCase):
         (self.root / 'src').mkdir()
         (self.root / 'scripts').mkdir()
         (self.root / 'src/lib.rs').write_text(
-            'mod promoted;\n#[cfg(test)] mod still_test;\n')
-        for name in ('promoted.rs', 'still_test.rs', 'fixture_tests.rs'):
+            'mod promoted;\n#[cfg(test)] mod still_test;\n#[cfg(test)] mod deleted;\n')
+        for name in ('promoted.rs', 'still_test.rs', 'deleted.rs', 'fixture_tests.rs'):
             (self.root / 'src' / name).write_text('fn fixture() {}\n')
         self.path = self.root / 'scripts/test_only_module_skip_pin.py'
         self.original = (
-            'PINNED_BASENAME_TEST_FILES = frozenset(\n    {\n'
-            '        "src/fixture_tests.rs",\n    }\n)\n'
             'PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(\n    {\n'
-            '        "src/promoted.rs",\n        "src/still_test.rs",\n    }\n)\n')
+            '        "src/promoted.rs",\n        "src/still_test.rs",\n        "src/deleted.rs",\n    }\n)\n')
         self.path.write_text(self.original)
-        pinned = frozenset(('src/fixture_tests.rs', 'src/promoted.rs', 'src/still_test.rs'))
-        patched = patch.object(guard.classifier._SKIP_PIN, 'PINNED_TEST_ONLY_MODULE_FILES', pinned)
+        pinned = frozenset(('src/deleted.rs', 'src/promoted.rs', 'src/still_test.rs'))
+        patched = patch.object(guard.classifier._SKIP_PIN, 'PINNED_RESOLVER_TEST_ONLY_FILES', pinned)
         patched.start()
         self.addCleanup(patched.stop)
 
@@ -43,7 +41,8 @@ class SkipPromotionTests(unittest.TestCase):
         self.assertIsNone(self.outcome(('src/promoted.rs',)))
         self.assertNotIn('"src/promoted.rs"', self.path.read_text())
         self.assertIn('"src/still_test.rs"', self.path.read_text())
-        self.assertIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertIn('"src/deleted.rs"', self.path.read_text())
+        self.assertNotIn('fixture_tests.rs', self.path.read_text())
 
     def test_split_pin_edits_child_and_preserves_delegate(self):
         child = self.root / 'scripts/test_only_module_skip_pin_paths.py'
@@ -51,18 +50,23 @@ class SkipPromotionTests(unittest.TestCase):
         delegate = 'from test_only_module_skip_pin_paths import *\n'
         self.path.write_text(delegate)
         (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
+        (self.root / 'src/new_helper.rs').write_text('fn fixture() {}\n')
+        owner = self.root / 'src/lib.rs'
+        owner.write_text(owner.read_text() + '#[cfg(test)] mod new_helper;\n')
         self.assertIsNone(self.outcome(('src/promoted.rs',)))
         self.assertEqual(self.path.read_text(), delegate)
         source = child.read_text()
         self.assertNotIn('"src/promoted.rs"', source)
-        self.assertIn('"src/new_tests.rs"', source)
+        self.assertNotIn('"src/new_tests.rs"', source)
+        self.assertIn('"src/new_helper.rs"', source)
         self.assertIn('"src/still_test.rs"', source)
+
     def test_explicit_deletion_removes_only_missing_pin(self):
-        (self.root / 'src/fixture_tests.rs').unlink()
-        with patch.object(guard.classifier._SKIP_PIN, 'PINNED_TEST_ONLY_MODULE_FILES',
-                          frozenset(('src/fixture_tests.rs', 'src/still_test.rs'))):
-            guard.sync_skips(self.root, deleted_paths=('src/fixture_tests.rs',))
-        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        (self.root / 'src/deleted.rs').unlink()
+        with patch.object(guard.classifier._SKIP_PIN, 'PINNED_RESOLVER_TEST_ONLY_FILES',
+                          frozenset(('src/deleted.rs', 'src/still_test.rs'))):
+            guard.sync_skips(self.root, deleted_paths=('src/deleted.rs',))
+        self.assertNotIn('"src/deleted.rs"', self.path.read_text())
         self.assertIn('"src/still_test.rs"', self.path.read_text())
 
     def test_existing_deletion_path_refuses_without_writing(self):
@@ -84,8 +88,8 @@ class SkipPromotionTests(unittest.TestCase):
                                          '"src/promoted.rs",\n        "src/missing.rs",')
         self.path.write_text(original)
         pin = guard.classifier._SKIP_PIN
-        with patch.object(pin, 'PINNED_TEST_ONLY_MODULE_FILES',
-                          pin.PINNED_TEST_ONLY_MODULE_FILES | {'src/missing.rs'}):
+        with patch.object(pin, 'PINNED_RESOLVER_TEST_ONLY_FILES',
+                          pin.PINNED_RESOLVER_TEST_ONLY_FILES | {'src/missing.rs'}):
             self.assertEqual(self.outcome(('src/promoted.rs', 'src/missing.rs')),
                              'promotion path missing: src/missing.rs')
         self.assertEqual(self.path.read_text(), original)
@@ -95,30 +99,51 @@ class SkipPromotionTests(unittest.TestCase):
                          'promotion remains test-only: src/still_test.rs')
         self.assertEqual(self.path.read_text(), self.original)
 
-    def test_addition_stays_next_to_its_directory_without_removing_existing_pins(self):
+    def test_basename_addition_needs_no_pin_without_removing_existing_resolver_pins(self):
         (self.root / 'src/new_tests.rs').write_text('fn fixture() {}\n')
         self.assertIsNone(self.outcome(('src/promoted.rs',)))
         source = self.path.read_text()
-        self.assertLess(source.index('"src/new_tests.rs"'), source.index('"src/fixture_tests.rs"'))
+        self.assertNotIn('new_tests.rs', source)
+        self.assertNotIn('fixture_tests.rs', source)
         self.assertIn('"src/still_test.rs"', source)
 
+    def test_basename_addition_and_deletion_leave_pin_bytes_unchanged(self):
+        guard.sync_skips(self.root, ('src/promoted.rs',))
+        before = self.path.read_bytes()
+        added = self.root / 'src/new_tests.rs'
+        added.write_text('fn fixture() {}\n')
+        pin = guard.classifier._SKIP_PIN
+        with patch.object(pin, 'PINNED_RESOLVER_TEST_ONLY_FILES',
+                          pin.PINNED_RESOLVER_TEST_ONLY_FILES - {'src/promoted.rs'}):
+            guard.sync_skips(self.root)
+            self.assertEqual(self.path.read_bytes(), before)
+            added.unlink()
+            guard.sync_skips(self.root)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_sync_refuses_production_basename_mount_without_writing(self):
+        (self.root / 'src/lib.rs').write_text('mod fixture_tests;\n')
+        with self.assertRaisesRegex(RuntimeError, 'production module mounts basename test file'):
+            guard.sync_skips(self.root)
+        self.assertEqual(self.path.read_text(), self.original)
+
     def test_explicit_deleted_pin_removes_only_missing_path(self):
-        missing = 'src/fixture_tests.rs'
+        missing = 'src/deleted.rs'
         (self.root / missing).unlink()
         guard.sync_skips(self.root, ('src/promoted.rs',), (missing,))
-        self.assertNotIn('"src/fixture_tests.rs"', self.path.read_text())
+        self.assertNotIn('"src/deleted.rs"', self.path.read_text())
         self.assertIn('"src/still_test.rs"', self.path.read_text())
 
     def test_deleted_pin_refuses_existing_unpinned_or_implicit_removal(self):
         for path, expected in (
-            ('src/fixture_tests.rs', 'deletion path still exists: src/fixture_tests.rs'),
+            ('src/deleted.rs', 'deletion path still exists: src/deleted.rs'),
             ('src/missing.rs', 'deletion is not pinned: src/missing.rs'),
         ):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(RuntimeError, expected):
                     guard.sync_skips(self.root, ('src/promoted.rs',), (path,))
                 self.assertEqual(self.path.read_text(), self.original)
-        (self.root / 'src/fixture_tests.rs').unlink()
+        (self.root / 'src/deleted.rs').unlink()
         self.assertEqual(self.outcome(('src/promoted.rs',)), 'refusing pin removal')
         self.assertEqual(self.path.read_text(), self.original)
 

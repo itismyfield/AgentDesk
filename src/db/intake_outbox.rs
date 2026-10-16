@@ -248,6 +248,14 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
     },
 }
 
+/// A home-stamped source is retried only while its exact Worker home stands;
+/// otherwise it stays terminal instead of becoming an unclaimable child.
+const SOURCE_HOME_STAMP_SQL: &str = "(parent.home_epoch IS NULL OR EXISTS (
+    SELECT 1 FROM o_channel_homes home
+     WHERE home.channel_id = parent.channel_id AND home.provider = parent.provider
+       AND home.state = 'worker' AND home.epoch = parent.home_epoch
+       AND home.holder IS NOT NULL))";
+
 pub(crate) async fn sweep_failed_pre_accept_once(
     pool: &PgPool,
     local_leader: &str,
@@ -284,6 +292,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                    AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
            )
            AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
+           AND {SOURCE_HOME_STAMP_SQL}
            AND EXISTS (
                 SELECT 1 FROM worker_nodes worker
                  WHERE worker.status = 'online'
@@ -361,6 +370,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                        AND open_row.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
                )
                AND NOT replay_sources_blocked(parent.provider, parent.channel_id, COALESCE(parent.replay_source_message_ids, ARRAY[parent.user_msg_id]))
+               AND {SOURCE_HOME_STAMP_SQL}
              ORDER BY parent.updated_at ASC, parent.id ASC
              LIMIT 1
              FOR UPDATE OF parent SKIP LOCKED
@@ -413,8 +423,8 @@ pub(crate) async fn sweep_failed_pre_accept_once(
             .await?;
     }
 
-    // Re-check the capability snapshot after the source lock. A worker may
-    // have heartbeated a new snapshot between candidate selection and here.
+    // Re-check capability after the source lock (a worker may have re-heartbeated);
+    // a home-stamped source may target only the holder of its exact Worker home.
     let targets: Vec<Value> = sqlx::query_scalar(
         r#"
         SELECT to_jsonb(worker) || jsonb_build_object('api_base_url', worker.capabilities->'agentdesk_api'->>'base_url')
@@ -461,6 +471,11 @@ pub(crate) async fn sweep_failed_pre_accept_once(
                        AND owner.owner_instance_id = $5
                        AND owner.generation = $6
                 )))
+           AND ($9::BIGINT IS NULL OR EXISTS (
+                SELECT 1 FROM o_channel_homes home
+                 WHERE home.channel_id = $7 AND home.provider = $2
+                   AND home.state = 'worker' AND home.epoch = $9
+                   AND home.holder = worker.instance_id))
          ORDER BY worker.last_heartbeat_at DESC, worker.instance_id ASC
          FOR SHARE
         "#,
@@ -473,6 +488,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
     .bind(source.owner_generation)
     .bind(&source.channel_id)
     .bind(&source.required_labels)
+    .bind(source.home_epoch)
     .fetch_all(&mut *tx)
     .await?;
     let requirements =

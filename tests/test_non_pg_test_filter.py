@@ -172,7 +172,7 @@ run_non_pg_filter_replay
         self.assertEqual(tuple(replayed), replay)
 
     def test_pg_shards_partition_the_unsharded_selection(self) -> None:
-        """Main's two PG jobs together run each PG-selected test exactly once."""
+        """Main's PG jobs together run each PG-selected test exactly once."""
         membership = load_membership_module()
         coverage = membership._load_coverage_module(ROOT)
         inventory = membership.load_lib_test_inventory(ROOT)
@@ -195,11 +195,12 @@ run_non_pg_filter_replay
             command = shlex.join(["cargo", "test", "--lib", "--", *result.stdout.splitlines()])
             return coverage.cargo_test_filter(command).selected_tests(inventory)
 
-        whole, shard_0, shard_1 = selection(None), selection("0"), selection("1")
-        self.assertTrue(shard_0 and shard_1)
-        self.assertEqual(shard_0 & shard_1, set())
-        self.assertEqual(shard_0 | shard_1, whole)
-        for shard in ("2", "01", " "):
+        whole = selection(None)
+        shards = [selection(str(index)) for index in range(membership.PG_SHARD_COUNT)]
+        self.assertTrue(all(shards))
+        self.assertEqual(sum(len(shard) for shard in shards), len(whole))
+        self.assertEqual(set().union(*shards), whole)
+        for shard in (str(membership.PG_SHARD_COUNT), "01", " "):
             with self.subTest(shard=shard):
                 env = {**os.environ, "PG_INCLUDE_SHARD": shard}
                 result = subprocess.run(
@@ -220,7 +221,7 @@ run_non_pg_filter_replay
         spec.loader.exec_module(integrity)
         restored = integrity.PackageTestIds(ROOT).pg_include_selections()
         self.assertIsInstance(restored, dict)
-        for shard in ("", "0", "1"):
+        for shard in ("", *(str(index) for index in range(load_membership_module().PG_SHARD_COUNT))):
             env = {key: value for key, value in os.environ.items() if key != "PG_INCLUDE_SHARD"}
             if shard:
                 env["PG_INCLUDE_SHARD"] = shard
@@ -237,7 +238,7 @@ run_non_pg_filter_replay
                 self.assertEqual(restored[shard], tuple(result.stdout.splitlines()))
 
     def test_main_pg_shards_run_each_test_postgres_command_once(self) -> None:
-        """Main's two PG jobs together run what one test-postgres run does, once each."""
+        """Main's PG jobs together run what one test-postgres run does, once each."""
         job = yaml.safe_load((ROOT / ".github/workflows/ci-main.yml").read_text("utf-8"))["jobs"]["postgres"]
         [command] = [step["run"].strip() for step in job["steps"] if "just " in str(step.get("run", ""))]
         membership = load_membership_module()
@@ -274,8 +275,8 @@ bash -euo pipefail -c "$1"
 
             rc, whole = run("just test-postgres", None)
             self.assertEqual(rc, 0)
-            shards = [run(command, shard) for shard in ("0", "1")]
-            for shard in ("", "2"):
+            shards = [run(command, str(index)) for index in range(membership.PG_SHARD_COUNT)]
+            for shard in ("", str(membership.PG_SHARD_COUNT)):
                 with self.subTest(shard=shard):
                     rc, calls = run(command, shard)
                     self.assertNotEqual(rc, 0)

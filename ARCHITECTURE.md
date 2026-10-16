@@ -1179,7 +1179,6 @@ src/
 │   │   │   │   ├── classify.rs
 │   │   │   │   ├── client.rs
 │   │   │   │   ├── client_tests.rs
-│   │   │   │   ├── skills.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
@@ -1497,9 +1496,7 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── component_events.rs
 │   │   │   │   ├── gate.rs
-│   │   │   │   ├── ledger.rs
-│   │   │   │   ├── ledger_io_tests.rs
-│   │   │   │   ├── ledger_tests.rs
+│   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
 │   │   │   │   └── stale_turn_host_tests.rs
