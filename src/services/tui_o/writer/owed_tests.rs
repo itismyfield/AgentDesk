@@ -69,12 +69,18 @@ impl DiscordPort for Port {
         async move { PostOutcome::Created(message) }
     }
 
-    async fn history_after(&self, _channel: u64, _after: u64) -> Result<Vec<SeenMessage>, String> {
-        Ok(Vec::new())
+    /// A readable channel where only another author spoke after `after`.
+    async fn history_after(&self, _channel: u64, after: u64) -> Result<Vec<SeenMessage>, String> {
+        let (id, author_id, content) = (after + 1, 7, "chatter".to_owned());
+        Ok(vec![SeenMessage {
+            id,
+            author_id,
+            content,
+        }])
     }
 
-    fn history_readable(&self, _channel: u64) -> bool {
-        true
+    async fn message(&self, _channel: u64, _id: u64) -> Result<Option<SeenMessage>, String> {
+        Ok(None)
     }
 }
 

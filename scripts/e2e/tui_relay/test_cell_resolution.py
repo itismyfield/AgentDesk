@@ -63,6 +63,11 @@ class CellHelpers(unittest.TestCase):
             # legacy adk-dash workspaces must never match a new cell substring.
             self.assertNotIn("dash", sub)
 
+    def test_herdr_cells_keep_their_cell_named_workspace_tag(self):
+        # claude-tui's agent move must not retarget the Herdr harness's path tag.
+        self.assertEqual(driver.cell_workspace_substring("claude-herdr"), "adk-claude-herdr-e2e")
+        self.assertEqual(driver.cell_workspace_substring("codex-herdr"), "adk-codex-herdr-e2e")
+
 
 class ScenarioFilter(unittest.TestCase):
     def setUp(self):
@@ -111,11 +116,6 @@ class ScenarioFilter(unittest.TestCase):
         self.assertEqual(driver.scenario_coverage_class(e16), "live")
         self.assertTrue(e16.get("steps"))
         self.assertNotIn("E-7", ids)
-
-    def test_retired_claude_e_has_no_scenarios(self):
-        self.assertEqual(
-            driver.load_scenarios(self.scenarios_dir, cell="claude-e"), [],
-        )
 
     def test_all_scenario_cells_are_supported(self):
         paths = sorted(self.scenarios_dir.glob("*.yaml"))
@@ -440,7 +440,7 @@ class ScenarioFilter(unittest.TestCase):
     def test_no_legacy_adk_dash_residue_in_scenarios(self):
         """Scenarios must not embed the legacy `adk-dash` reverify substring.
 
-        New session names are AgentDesk-{provider}-adk-{cell}-e2e, so any
+        New session names are AgentDesk-{provider}-{worker agent}, so any
         kill_pane / destructive guard that reverifies against `adk-dash`
         would fail closed under the cell driver.
         """
@@ -507,10 +507,10 @@ class HerdrCells(unittest.TestCase):
         scenario = next(s for s in driver.load_scenarios(ROOT / 'tests/e2e/tui_relay/scenarios', cell='claude-herdr') if s['id'] == 'E-19')
         before = {'channel': '41', 'provider': 'claude', 'state': 'bound', 'nonce': 'same',
                   'pane': 'provider_running', 'launch_evidence': 'recorded', 'input_hold': None}
-        health = {'status': 'healthy', 'herdr': {'admission': 'open', 'restart_required': False,
+        health = {'status': 'healthy', 'fully_recovered': True, 'degraded_reasons': [], 'herdr': {'admission': 'open', 'restart_required': False,
                   'configured_channels': ['41'], 'endpoints': {'test': {'local': True}}, 'input_holds': 0,
                   'reconnect': dict(channels=1, published=1, withheld=0, unknown=0, pending=0)}}
-        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://unused.test', dry_run=False,
+        args = Namespace(cell='claude-herdr', channel_id='41', base_url='http://127.0.0.1:8797', dry_run=False,
                          hard_reset_session_each=False, reset_before_each=False, allow_destructive=True,
                          restart_script=None, restart_target_override='dev', herdr_isolated_server=True,
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk', final_refetches=1)
@@ -525,13 +525,16 @@ class HerdrCells(unittest.TestCase):
         client.wait_for_message.side_effect = wait
         client.fetch_messages.side_effect = lambda *a, **k: list(rows)
         with patch.object(driver, 'tmux', None), patch.object(driver, '_read_api_json', return_value=(200, health)) as get, \
-             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before]}))) as run, \
+             patch.object(driver.herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps({'executions': [before], 'other_input_holds': []}))) as run, \
              patch.object(driver.herdr.time, 'sleep'), patch.dict('os.environ', {'AGENTDESK_E2E_ALLOW_DESTRUCTIVE': '1'}):
             result = driver.run_scenario(scenario, args=args, client=client, run_id='restart')
         self.assertEqual(result['status'], 'not_applicable', result)
         self.assertEqual([c.args[0][:2] for c in run.call_args_list],
-                         [['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'], ['/test/agentdesk', 'herdr']])
-        self.assertTrue(all(c.args[1] == '/api/health' for c in get.call_args_list))
+                         [['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['launchctl', 'kickstart'],
+                          ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr'], ['/test/agentdesk', 'herdr']])
+        self.assertEqual([c.args[1] for c in get.call_args_list],
+                         ['/api/health/detail', '/api/health', '/api/health/detail',
+                          '/api/health/detail', '/api/health/detail'])
         self.assertEqual(result['herdr_observations'][1]['row']['nonce'], 'same')
 
     def test_e36_executes_twelve_normal_discord_prompts_without_legacy_evidence(self):

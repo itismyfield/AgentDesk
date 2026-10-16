@@ -47,14 +47,14 @@ pub(crate) fn admit_effect<T>(
 }
 
 // The caller must read the retirement population before confirming a selected channel.
-pub(crate) fn confirm(channel: u64) {
-    if channel != 0 {
-        CONFIRMED
+// Returns whether this call added the channel to the confirmed set.
+pub(crate) fn confirm(channel: u64) -> bool {
+    channel != 0
+        && CONFIRMED
             .get_or_init(|| RwLock::new(BTreeSet::new()))
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(channel);
-    }
+            .insert(channel)
 }
 
 /// Confirms each selected channel of `owned` only after `retire` reports it fully retired. An empty

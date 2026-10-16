@@ -5,7 +5,16 @@ use std::time::{Duration, Instant};
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
-use super::host_input;
+#[cfg(test)]
+pub use super::guarded_outcome::{send_followup_prompt_or_idle_transcript, send_fresh_prompt};
+use super::{
+    guarded_outcome::{self, SubmissionError},
+    host_input::{self, guarded_submission as guarded},
+};
+
+mod literal_chunks;
+mod submission;
+use literal_chunks::split_literal_chunks;
 
 mod draft_hold;
 use draft_hold::{admit_automatic_write, dismiss_startup_dialog, refuse_composer_draft};
@@ -361,19 +370,6 @@ pub fn plan_selector_navigation(nav: SelectorNavigation) -> Result<Vec<TuiInputA
     Ok(actions)
 }
 
-pub fn send_fresh_prompt(
-    session_name: &str,
-    prompt: &str,
-    cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    send_prompt_with_readiness(
-        session_name,
-        prompt,
-        PromptReadinessKind::FreshTurn,
-        cancel_token,
-    )
-}
-
 pub fn send_followup_prompt(
     session_name: &str,
     prompt: &str,
@@ -385,6 +381,7 @@ pub fn send_followup_prompt(
         PromptReadinessKind::Followup,
         cancel_token,
     )
+    .map_err(SubmissionError::into_legacy)
 }
 
 pub fn is_prompt_ready_timeout_error(error: &str) -> bool {
@@ -433,49 +430,13 @@ pub(super) fn prompt_readiness_snapshot_from_capture(
     }
 }
 
-fn send_prompt_with_readiness(
+pub(crate) fn send_prompt_with_readiness(
     session_name: &str,
     prompt: &str,
     readiness: PromptReadinessKind,
     cancel_token: Option<&CancelToken>,
-) -> Result<(), String> {
-    let actions = plan_prompt_submit(prompt)?;
-    // Readiness can wait for a busy prior turn, but it must not hold the narrow
-    // composer lock while doing so. Revalidate only after acquiring that lock so
-    // `/compact` and a normal follow-up cannot interleave their key mutations.
-    wait_for_prompt_ready(session_name, readiness, cancel_token)?;
-    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
-        admit_automatic_write(session_name, readiness)?;
-        let snapshot = prompt_readiness_snapshot(session_name);
-        if !prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
-            return Err("claude tui composer changed before follow-up mutation".to_string());
-        }
-        if readiness.is_followup() {
-            refuse_composer_draft(session_name, readiness)?;
-        }
-        super::submission_fence::before_first_payload()?;
-        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-            "claude",
-            session_name,
-            prompt,
-        );
-        match run_actions_with_submission_confirmation(
-            session_name,
-            &actions,
-            Some(prompt),
-            cancel_token,
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                    "claude",
-                    session_name,
-                    prompt,
-                );
-                Err(error)
-            }
-        }
-    })
+) -> Result<(), SubmissionError> {
+    submission::send(session_name, prompt, readiness, cancel_token, None)
 }
 
 /// Submit `/compact` into a busy Claude pane without the generic readiness wait.
@@ -629,6 +590,9 @@ pub(crate) fn steering_snapshot_decision(
 }
 
 pub(crate) fn inject_steering_prompt(session_name: &str, prompt: &str) -> Result<(), String> {
+    if let Some(run) = guarded::steering_selected(session_name, prompt) {
+        return SubmissionError::from_run(run).map_err(SubmissionError::into_legacy);
+    }
     let actions = plan_prompt_submit(prompt)?;
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
         admit_automatic_write(session_name, PromptReadinessKind::Followup)?;
@@ -1179,54 +1143,19 @@ pub fn wait_for_prompt_ready_or_idle_transcript(
     wait_for_prompt_ready_inner(session_name, readiness, cancel_token, Some(transcript_path))
 }
 
-pub fn send_followup_prompt_or_idle_transcript(
+pub(crate) fn send_followup_prompt_or_idle_transcript_owned(
     session_name: &str,
     prompt: &str,
     cancel_token: Option<&CancelToken>,
     transcript_path: &std::path::Path,
-) -> Result<(), String> {
-    let actions = plan_prompt_submit(prompt)?;
-    // The potentially long warm-follow-up readiness wait must not hold the
-    // narrow composer lock: a busy-pane `/compact` still needs to steer while
-    // this path waits for the prior turn. Once readiness returns, however,
-    // re-check the live composer and keep the dedupe record plus the entire
-    // submit/confirmation sequence serialized with every other mutation.
-    wait_for_prompt_ready_or_idle_transcript(
+) -> Result<(), SubmissionError> {
+    submission::send(
         session_name,
+        prompt,
         PromptReadinessKind::ProvenWarmFollowup,
         cancel_token,
-        transcript_path,
-    )?;
-    crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
-        admit_automatic_write(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
-        let snapshot = prompt_readiness_snapshot(session_name);
-        if !proven_warm_followup_revalidates_prompt_ready(&snapshot, transcript_path) {
-            return Err("claude tui composer changed before follow-up mutation".to_string());
-        }
-        refuse_composer_draft(session_name, PromptReadinessKind::ProvenWarmFollowup)?;
-        super::submission_fence::before_first_payload()?;
-        crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-            "claude",
-            session_name,
-            prompt,
-        );
-        match run_actions_with_submission_confirmation(
-            session_name,
-            &actions,
-            Some(prompt),
-            cancel_token,
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-                    "claude",
-                    session_name,
-                    prompt,
-                );
-                Err(error)
-            }
-        }
-    })
+        Some(transcript_path),
+    )
 }
 
 fn wait_for_prompt_ready_inner(
@@ -2298,28 +2227,6 @@ fn validate_prompt_not_empty(input: &str) -> Result<(), String> {
         return Err("prompt must contain non-whitespace text".to_string());
     }
     Ok(())
-}
-
-fn split_literal_chunks(input: &str, max_chars: usize) -> Vec<String> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-    let max_chars = max_chars.max(1);
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_chars = 0usize;
-    for ch in input.chars() {
-        if current_chars >= max_chars {
-            chunks.push(std::mem::take(&mut current));
-            current_chars = 0;
-        }
-        current.push(ch);
-        current_chars += 1;
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 #[cfg(test)]
@@ -4315,7 +4222,6 @@ line 37";
                 for entry in ENTRIES {
                     let session = format!("claude-r5-default-{}", uuid::Uuid::new_v4());
                     let spy = SpyGuard::install(SpyState {
-                        pane_size: Some((80, 24)),
                         captures: std::iter::repeat_n(Some(IDLE.to_string()), 16).collect(),
                         captures_after_send: Some(
                             std::iter::repeat_n(Some(BUSY.to_string()), 4).collect(),

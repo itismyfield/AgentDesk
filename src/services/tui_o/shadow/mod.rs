@@ -1,9 +1,7 @@
-//! Read-only shadow of TUI output: derives what O would post and diffs it against Legacy.
-//! Its only write target is `root::ShadowRoot`; `scripts/check_o_shadow_write_zero.py` enforces that.
+//! Shared transcript capture, identity and derivation support for the output track.
 
 pub mod binding_reader;
 pub mod capture;
-pub mod root;
 
 // Derive-side modules (identity, seal, derive, unit_plan) are declared below.
 pub mod derive;
@@ -11,10 +9,7 @@ pub mod identity;
 pub mod seal;
 pub mod unit_plan;
 
-// Observe-side modules (tap, diff, report, metrics) are declared below.
-pub mod diff;
-pub mod metrics;
-pub mod report;
+// Retains the shared output-track settings and retired shadow keys.
 pub mod tap;
 
 use std::path::PathBuf;
@@ -34,7 +29,7 @@ pub const TAP_CAPACITY: usize = 1024;
 pub const DISK_CAP_BYTES: u64 = 1024 * 1024 * 1024;
 pub const MATCH_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// Raised when unit identity, turn extraction or historical rules change; old samples do not mix.
-pub const IDENTITY_VERSION: u32 = 3;
+pub const IDENTITY_VERSION: u32 = 4;
 
 /// `tui_o.shadow` settings; disabled unless explicitly enabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +174,7 @@ pub struct DiffRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAnomalyKind {
+    Missing,
     Replaced,
     Shrunk,
     PrefixMismatch,

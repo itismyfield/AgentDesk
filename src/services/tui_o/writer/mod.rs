@@ -1,5 +1,5 @@
-//! The O writer: posts each transcript unit piece to its TUI channel once, only while the gateway
-//! is Owned and the channel's delivery lease is held, and settles unclear results from history.
+//! The O writer: posts transcript pieces under gateway ownership and a delivery lease, settles
+//! unclear results from history, and permits one durable retry after confirmed absence.
 
 pub mod activation;
 pub mod actor;
@@ -11,6 +11,8 @@ mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
+pub(crate) mod late_adopt;
+pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod resume;
@@ -32,6 +34,12 @@ pub struct WriterConfig {
     pub enabled: bool,
 }
 
+/// Reader policy selected explicitly by an engine caller; the default keeps FDs open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReaderConfig {
+    pub dormant: bool,
+}
+
 /// A message as Discord returned it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeenMessage {
@@ -49,7 +57,7 @@ pub enum PostOutcome {
     Uncertain(String),
 }
 
-/// Discord as the writer uses it: one POST per piece and forward history reads.
+/// Discord operations used for guarded sends and bounded history confirmation.
 pub trait DiscordPort: Send + Sync + 'static {
     fn bot_id(&self) -> u64;
     /// The first poll runs under the ownership gate and starts the request; the future owns
@@ -65,8 +73,13 @@ pub trait DiscordPort: Send + Sync + 'static {
         channel: u64,
         after: u64,
     ) -> impl Future<Output = Result<Vec<SeenMessage>, String>> + Send;
-    /// Whether reading history is provably allowed; an empty page alone proves nothing.
-    fn history_readable(&self, channel: u64) -> bool;
+    /// One message by id: `Ok(None)` is a 404; a refusal, server or transport failure, or an
+    /// unreadable body is an error.
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send;
 }
 
 /// The channel's shared delivery lease, held from before admission until the result is recorded
@@ -154,6 +167,15 @@ pub enum WriterAlarm {
     /// A retired source grew; it is read again.
     RetiredSourceGrew {
         source: SourceId,
+        /// The job of an operator's transition cleanup its cursor records: a past cleanup of the
+        /// source, which need not be what retired it this time.
+        cleanup_history: Option<String>,
+    },
+    CleanupRetired {
+        source: SourceId,
+        offset: u64,
+        modified: std::time::SystemTime,
+        age: std::time::Duration,
     },
     /// The full spool refuses an old source's tail, its successor waits behind that tail, and an
     /// announced unit keeps GC off; nothing can move, so the channel stops for an operator.
@@ -178,7 +200,13 @@ pub trait AlarmSink: Send + Sync {
 mod historical_hops;
 mod past_bind;
 mod renumbered;
+mod transition_cleanup;
+/// The operator route `POST /api/o/transition` is its only production sender.
+pub(crate) mod transition_port;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod source_read_tests;

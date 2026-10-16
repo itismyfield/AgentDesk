@@ -462,12 +462,7 @@ async fn live_evidence_requires_a_complete_observation_and_one_provider_terminal
         finished.no_effect_evidence().is_none(),
         "a finished turn is an effect"
     );
-    for activity in [
-        Activity::Output,
-        Activity::Tool,
-        Activity::Unclassified,
-        Activity::InjectedInput,
-    ] {
+    for activity in [Activity::Output, Activity::Tool, Activity::Unclassified] {
         let active = observed(
             &attempt,
             &[&COMPLETE[..], &[Seen::Activity(activity)]].concat(),

@@ -9,12 +9,16 @@ use serenity::{ChannelId, CreateMessage, GetMessages, MessageId};
 
 use super::super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, SharedData, lease_now_ms};
 use crate::services::tui_o::repost::io::{RepostHttp, Unsupported};
+use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 use crate::services::tui_o::writer::{
     DeliveryLease, DiscordPort, PostOutcome, SeenMessage, confirm,
 };
 
-/// Covers a POST (60 s) and its settlement (30 s) with room to spare.
+/// Covers a POST and its settlement, each under its own timeout.
 const O_LEASE_DEADLINE_MS: u64 = 180_000;
+const _: () = assert!(
+    POST_TIMEOUT.as_millis() + confirm::SETTLE_DEADLINE.as_millis() < O_LEASE_DEADLINE_MS as u128
+);
 
 /// Uses the gateway's cached client, so O shares Legacy's rate limiter and route buckets.
 pub(crate) struct GatewayPort {
@@ -119,9 +123,22 @@ impl DiscordPort for GatewayPort {
         }
     }
 
-    /// Unproven until a permission check exists, so a read without a candidate stays Unresolved.
-    fn history_readable(&self, _channel: u64) -> bool {
-        false
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let http = Arc::clone(&self.http);
+        async move {
+            let Some(id) = std::num::NonZeroU64::new(id) else {
+                return Ok(None);
+            };
+            match http.get_message(ChannelId::new(channel), id.into()).await {
+                Ok(message) => Ok(Some(seen(message))),
+                Err(error) if http_status(&error) == Some(404) => Ok(None),
+                Err(error) => Err(error.to_string()),
+            }
+        }
     }
 }
 

@@ -259,6 +259,7 @@ async fn not_found_work_stays_owed_and_holds_its_episode_while_posted_and_exclud
     };
     let ledger = verified.writer.store().ledger();
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial: ledger.next_serial(),
         unit_key: first.unit_key.clone(),
         piece_index: first.index,
@@ -284,6 +285,23 @@ async fn not_found_work_stays_owed_and_holds_its_episode_while_posted_and_exclud
         "the episode waits behind its debt"
     );
     assert!(!verified.writer.is_stopped());
+    for serial in 0..verified.writer.store().ledger().next_serial() {
+        assert!(
+            verified
+                .writer
+                .store()
+                .ledger()
+                .piece(serial)
+                .unwrap()
+                .local_retry
+                .is_none()
+        );
+    }
+    verified
+        .writer
+        .retry_local(Utc::now() + chrono::Duration::days(1))
+        .await;
+    assert!(!verified.writer.has_local_retry());
 }
 
 /// P2-3/P2-5: four sidecar states, one read per spooled record, and a failed second source
@@ -542,7 +560,16 @@ impl<W> crate::services::tui_o::repost::runner::RepostHook<W> for CountTurns {
         '_,
         crate::services::tui_o::repost::admission::OriginalGate,
     > {
-        Box::pin(async { crate::services::tui_o::repost::admission::OriginalGate::Send })
+        Box::pin(async { crate::services::tui_o::repost::admission::OriginalGate::SendLocal })
+    }
+
+    fn receipts(
+        &mut self,
+    ) -> crate::services::tui_o::repost::runner::Turned<
+        '_,
+        crate::services::tui_o::repost::projection::ReceiptOverlay,
+    > {
+        Box::pin(async { crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled })
     }
 }
 

@@ -454,14 +454,6 @@ async fn a_blocking_resume_cuts_only_the_ticket_inputs_and_keeps_the_guard_until
     );
 }
 
-// The input runtime names the production host and its boot constructor without control's help.
-#[test]
-fn the_production_resume_host_is_reachable_from_the_input_runtime() {
-    use crate::services::discord::commands::control::input_clear::LedgerClear;
-    let _constructor = LedgerClear::for_resume;
-    let _replay = resume_blocking::<LedgerClear>;
-}
-
 #[tokio::test]
 async fn postgres_outage_holds_without_reset_or_cut_and_reports_it() {
     let (root, channel) = (sandbox(), 6_325_408);
@@ -659,7 +651,7 @@ async fn superseded_foreign_or_mismatched_tickets_hold_without_effects() {
 }
 
 #[tokio::test]
-async fn a_reused_key_or_regressed_ledger_holds_without_cutting() {
+pub(crate) async fn a_reused_key_or_regressed_ledger_holds_without_cutting() {
     let (root, channel) = (sandbox(), 6_325_415);
     let mut ledger = open(root.path(), channel, &[11]);
     let mut host = Fake::new("claude", channel);

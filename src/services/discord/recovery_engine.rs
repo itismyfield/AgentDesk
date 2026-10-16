@@ -45,6 +45,13 @@ use self::status_panel_completion_producer::*;
 // #3479 r8: behavior-preserving extraction of pure clusters into leaf modules.
 #[path = "recovery_engine/jsonl_extract.rs"]
 mod jsonl_extract;
+// Dormant until the restore and idle paths dispatch to it.
+#[cfg(test)]
+#[path = "recovery_engine/legacy_restart_replay.rs"]
+mod legacy_restart_replay;
+#[cfg(test)]
+#[path = "recovery_engine/legacy_restart_replay_tests.rs"]
+mod legacy_restart_replay_tests;
 #[path = "recovery_engine/output_path_detect.rs"]
 mod output_path_detect;
 #[path = "recovery_engine/phase_policy.rs"]
@@ -223,7 +230,7 @@ pub(in crate::services::discord) use self::completion_delivery::{
 #[cfg(unix)]
 use self::restore_inflight::detect_live_tmux_output_path;
 pub(in crate::services::discord) use self::restore_inflight::{
-    finish_recovered_turn_mailbox, restore_inflight_turns,
+    finish_recovered_turn_mailbox, restore_inflight_states, restore_inflight_turns,
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 pub(super) use self::runtime::reregister_active_turn_from_inflight;
@@ -404,12 +411,6 @@ fn runtime_handoff_for_recovery(
             session_name: tmux_session_name,
             last_offset,
         },
-        RuntimeHandoffKind::ClaudeEAdapter => RuntimeHandoff::ClaudeEAdapter {
-            output_path,
-            session_name: tmux_session_name,
-            last_offset,
-            pid: 0,
-        },
     }
 }
 
@@ -568,12 +569,9 @@ impl std::fmt::Display for RebindError {
     }
 }
 
+#[cfg(all(test, unix))]
+pub(crate) use rebind_runtime::codex_rebind_complete_for_tests;
 #[cfg(test)]
 pub(crate) use rebind_runtime::codex_rebind_spawn_for_tests;
 #[cfg(test)]
 pub(crate) use restore_persist_outcome::codex_restart_output_for_tests;
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use self::restore_inflight::{
-    install_inflight_scoped, resume_inflight_scoped,
-};

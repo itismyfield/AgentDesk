@@ -16,6 +16,8 @@ use tokio::time::Instant;
 use crate::db::o_channel_homes::{self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
 
+pub(crate) mod ingress_snapshot;
+
 /// How often a holder renews its lease.
 pub(crate) const RENEW_EVERY: Duration = Duration::from_secs(5);
 /// A holder closes its own gate this long after sending its last successful renewal (H).
@@ -540,7 +542,6 @@ impl HomeGate {
     }
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
-    #[cfg(test)]
     pub(crate) fn admit_at_epoch(
         &self,
         provider: &str,
@@ -550,7 +551,6 @@ impl HomeGate {
         self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
     }
 
-    #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
         provider: &str,
@@ -643,18 +643,32 @@ type Registry = OnceLock<Mutex<HomeRegistry>>;
 static HOMES: Registry = OnceLock::new();
 #[cfg(test)]
 thread_local! {
-    static HOMES: Registry = const { OnceLock::new() };
+    static HOMES: std::cell::RefCell<Arc<Registry>> = std::cell::RefCell::new(Arc::new(OnceLock::new()));
 }
 
 fn with_homes<R>(use_homes: impl FnOnce(&Registry) -> R) -> R {
     #[cfg(not(test))]
     return use_homes(&HOMES);
     #[cfg(test)]
-    HOMES.with(use_homes)
+    HOMES.with(|homes| {
+        let homes = homes.borrow().clone();
+        use_homes(&homes)
+    })
 }
 
 fn lock_homes(homes: &Mutex<HomeRegistry>) -> MutexGuard<'_, HomeRegistry> {
     homes.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Taken only while no Home was ever registered, so the first mount and an unhomed admission
+/// still exclude each other without making this process take part in homes.
+static FIRST_MOUNT: Mutex<()> = Mutex::new(());
+
+fn first_mount(homes: &Registry) -> Option<MutexGuard<'static, ()>> {
+    homes
+        .get()
+        .is_none()
+        .then(|| FIRST_MOUNT.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Reads the registered gates; while none was ever registered nothing is locked.
@@ -670,6 +684,7 @@ fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
 /// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
     with_homes(|homes| {
+        let _first = first_mount(homes);
         let mut registry = lock_homes(homes.get_or_init(Mutex::default));
         if registry
             .gates
@@ -710,18 +725,19 @@ pub(crate) fn register(home: Arc<HomeGate>) {
 
 /// Removes the gate immediately; outstanding permits remain visible to a replacement.
 pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
-    with_homes(|homes| {
+    let removed = with_homes(|homes| {
         let mut registry = lock_homes(homes.get()?);
         let removed = registry.gates.remove(channel_id)?;
         removed.withdraw();
         registry.prune();
         Some(removed)
-    })
+    })?;
+    Some(removed)
 }
 
 /// A replaced watch may not remove the replacement's gate.
 pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
-    with_homes(|homes| {
+    let removed = with_homes(|homes| {
         let Some(homes) = homes.get() else {
             return false;
         };
@@ -742,7 +758,8 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
         home.withdraw();
         registry.prune();
         true
-    })
+    });
+    removed
 }
 
 /// The gate of a channel this process takes part in; none means the gateway rules apply.
@@ -937,7 +954,7 @@ pub(crate) async fn run_lease(pool: PgPool, home: Arc<HomeGate>, epoch: i64) {
 
 #[cfg(test)]
 #[path = "channel_home_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "channel_home_claim_tests.rs"]

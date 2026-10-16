@@ -51,7 +51,8 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, feature_accounting, fixtures, herdr, known_gap, lease, normal_intake_evidence, source_compare, tmux  # noqa: E402
+from tui_relay import herdr_restart, http_auth  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -115,9 +116,6 @@ E2E_TURN_START_TIMEOUT_MAX_S = 180.0
 # one second and the default two observations may be raised to at most three.
 E2E_FINAL_REFETCH_INTERVAL_MAX_S = 60.0
 E2E_FINAL_REFETCHES_MAX = 3
-# o_panel_below.rs re-posts a completed panel below O's last post for FOLLOW_WINDOW
-# (30s); the extra 5s covers that last POST and DELETE.
-COMPLETION_MOVE_WAIT_S = 35.0
 RUNTIME_QUEUE_DIRS: tuple[tuple[str, str], ...] = (
     ("pending_queue", "discord_pending_queue"),
     ("queued_placeholders", "discord_queued_placeholders"),
@@ -146,6 +144,7 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
     "sample_raw",
     "recent_raw",
     "marker_counts",
+    "clear_refusal",
     "tmux_key_sequences",
     "direct_input_prompts",
     "concurrent_prompt_batches",
@@ -245,9 +244,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run-id", default=uuid.uuid4().hex, help="Explicit run identity shared with source comparison")
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
+    herdr_restart.add_arguments(parser)
     parser.add_argument("--herdr-isolated-server", action="store_true", help="Operator attests restart target is a dedicated E2E server with no other channels.")
     parser.add_argument("--herdr-endpoint", help="Boot endpoint key for this channel; required for live Herdr observations.")
     parser.add_argument("--herdr-status-bin", default="agentdesk", help="AgentDesk CLI on the target node (read-only herdr status).")
+    parser.add_argument("--herdr-allowed-degraded-reason", action="append", metavar="PATTERN",
+                        help="Repeatable. Waive a detail degraded reason (exact or trailing-* prefix) for Herdr readiness; "
+                             "herdr or target-channel reasons are never waived and waivers are recorded in evidence.")
     parser.add_argument("--e36-intake-log", help="Explicit readable adk-tracing-text-v1 dcserver log for E36")
     parser.add_argument(
         "--cell",
@@ -310,7 +313,7 @@ def parse_args() -> argparse.Namespace:
         "--handoff-to-agent",
         default=None,
         help="Worker agent id whose channel binding receives send-to-agent prompts. "
-        "Defaults to adk-<cell>-e2e.",
+        "Defaults to the cell's worker agent (claude-tui: adk-claude-tui-2-e2e).",
     )
     parser.add_argument(
         "--handoff-from-agent",
@@ -358,6 +361,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    herdr_restart.validate_arguments(parser, args)
+    herdr.validate_arguments(parser, args)
     args.turn_start_timeout_s = _bounded_value(
         args.turn_start_timeout_s,
         source="--turn-start-timeout-s",
@@ -435,16 +440,25 @@ def cell_runtime(cell: str) -> str:
     return cell.split("-", 1)[1]
 
 
+# claude-tui has its own tmux-hosted agent; adk-claude-tui-e2e's channel stays with claude-herdr.
+CELL_AGENT_OVERRIDES: dict[str, str] = {"claude-tui": "adk-claude-tui-2-e2e"}
+
+
 def cell_session_name(cell: str, *, thread_channel_id: str | None = None) -> str:
-    """tmux session name owned by the cell's worker agent."""
+    """tmux session the runtime names after the worker's channel, which is named after its agent."""
     if cell_runtime(cell) == "herdr":
         raise ValueError("Herdr cells have no tmux session")
     suffix = f"-t{thread_channel_id}" if thread_channel_id else ""
-    return f"AgentDesk-{cell_provider(cell)}-adk-{cell}-e2e{suffix}"
+    return f"AgentDesk-{cell_provider(cell)}-{cell_default_agent(cell)}{suffix}"
 
 
 def cell_default_agent(cell: str) -> str:
-    return f"adk-{cell.replace('-herdr', '-tui')}-e2e"
+    return CELL_AGENT_OVERRIDES.get(cell) or f"adk-{cell.replace('-herdr', '-tui')}-e2e"
+
+
+def cell_replaced_agent(cell: str) -> str | None:
+    """The agent an overridden cell used before; a config holding only it predates the move."""
+    return f"adk-{cell}-e2e" if cell in CELL_AGENT_OVERRIDES else None
 
 
 def cell_channel_kind(cell: str) -> str:
@@ -453,7 +467,10 @@ def cell_channel_kind(cell: str) -> str:
 
 def cell_workspace_substring(cell: str) -> str:
     """Substring tagged onto runtime/jsonl paths to safely target this cell."""
-    return f"adk-{cell}-e2e"
+    # A tmux cell runs in its agent's workspace; Herdr cells keep their cell-named tag.
+    if cell_runtime(cell) == "herdr":
+        return f"adk-{cell}-e2e"
+    return cell_default_agent(cell)
 
 
 def normalize_agent_mode(value: Any, *, scenario_id: str | None = None) -> str:
@@ -2049,7 +2066,7 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
     request = urllib.request.Request(
         url,
         method="GET",
-        headers={"Connection": "close"},
+        headers=http_auth.request_headers(base_url, {"Connection": "close"}),
     )
     try:
         try:
@@ -3255,11 +3272,13 @@ def run_scenario(
             )
         return result
 
-    enabled_features = {
-        feature.strip()
-        for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
-        if feature.strip()
-    }
+    try:
+        enabled_features = feature_accounting.scenario_features(scenario)
+    except (OSError, ValueError) as error:
+        result.update(status="fail", reason=str(error))
+        result["failure_attribution"] = _failure_attribution("harness", str(error))
+        return result
+    scenario = {**scenario, "_enabled_features": enabled_features}
     required_features = {
         str(feature).strip()
         for feature in scenario.get("requires_features") or []
@@ -3268,11 +3287,18 @@ def run_scenario(
     missing_features = sorted(required_features - enabled_features)
     if missing_features:
         result["status"] = "skipped"
-        result["reason"] = "missing E2E features: " + ", ".join(missing_features)
+        result["reason"] = "explicitly disabled E2E features: " + ", ".join(missing_features)
+        result.update(execution_status="dormant", dormant_reason=result["reason"],
+                      required_features=sorted(required_features), disabled_features=missing_features)
         result["failure_attribution"] = _failure_attribution(
             "feature_gate",
             str(result["reason"]),
         )
+        if not args.dry_run:
+            _apply_observed_required_agent_mode_gate(result, required=getattr(args, "required_agent_mode", None),
+                                                     declared=declared_agent_mode, scenario_id=scenario_id)
+            _apply_observed_required_coverage_class_gate(result, required=getattr(args, "required_coverage_class", None),
+                                                        declared=declared_coverage_class, scenario_id=scenario_id)
         return result
 
     destructive = is_destructive(scenario)
@@ -3343,6 +3369,7 @@ def run_scenario(
         time.sleep(2.0)
 
     try:
+        result["executed"] = not args.dry_run
         window = run_one_cell(
             scenario=scenario,
             cell=cell,
@@ -3400,7 +3427,7 @@ def run_scenario(
                 record=window,
             )
         else:
-            result["status"] = "pass"
+            result["status"] = "dry_run" if args.dry_run else "pass"
     except HarnessEvidenceError as error:
         partial = partial_record_holder.get("record")
         if isinstance(partial, dict):
@@ -3521,7 +3548,7 @@ def run_scenario(
             result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
-    return result
+    return feature_accounting.annotate(result)
 
 
 def post_send_sleep(step):
@@ -3635,6 +3662,12 @@ def run_one_cell(
         print(f"[dry-run] {scenario_id} ({cell}): would send setup → steps → teardown")
         return record
 
+    try:
+        enabled_features = (scenario["_enabled_features"] if "_enabled_features" in scenario
+                            else feature_accounting.scenario_features(scenario))
+    except (OSError, ValueError) as error:
+        raise HarnessEvidenceError(str(error)) from error
+
     if scenario.get("e36_normal_intake"):
         try:
             e36 = normal_intake_evidence.Evidence(sys.modules[__name__], args, channel_id, record)
@@ -3747,6 +3780,7 @@ def run_one_cell(
 
     last_turn_identity: dict[str, str] | None = None
     last_sent_prompt: str | None = None
+    clear_after: str | None = None
 
     if e36 is not None:
         _prepare_first_prompt_window()
@@ -3788,6 +3822,8 @@ def run_one_cell(
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
             response = client.send(channel_id, last_sent_prompt)
+            if scenario_id == "E-50" and last_sent_prompt.startswith("!clear "):
+                clear_after = str(response.get("message_id") or response.get("id") or "")
             if scenario.get("durable_delivery_probe"):
                 record["durable_record_probe"]["inbound_prompt_id"] = str(
                     response.get("message_id") or response.get("id") or ""
@@ -3961,9 +3997,14 @@ def run_one_cell(
                     )
         elif "wait_for_raw_discord_text" in step:
             needle = step["wait_for_raw_discord_text"]
+            def current_clear_refusal(message):
+                return (scenario_id == "E-50" and bool(clear_after) and clear_after.isdigit()
+                        and not assertions.is_our_send(message)
+                        and herdr.clear_refusal([message], after=int(clear_after), channel=channel_id))
+
             predicate = lambda message: (  # noqa: E731
                 not assertions.is_our_send(message)
-                and needle in (message.get("content") or "")
+                and (current_clear_refusal(message) or needle in (message.get("content") or ""))
             )
             found, observed = client.wait_for_message(
                 channel_id,
@@ -3974,6 +4015,14 @@ def run_one_cell(
             )
             _ingest_observed(observed)
             _record_marker_counts(record, window, marker_targets)
+            refusal_reply = next((m for m in observed if current_clear_refusal(m)), None)
+            if refusal_reply is not None:
+                # Preserve the pending clear boundary so the smoke judge cannot accept an old reply.
+                record["clear_refusal"] = {"stage": "clear_ack", "after_id": clear_after,
+                                           "reply": refusal_reply}
+                _update_record_window_snapshot(record, window)
+                raise ScenarioStepAssertionError(
+                    f"text !clear refused by the server: {refusal_reply['content']}", record=record)
             if not found:
                 diagnostic = _collect_wait_timeout_diagnostics(
                     base_url=client.base_url,
@@ -4285,23 +4334,19 @@ def run_one_cell(
                 normal_intake_evidence.drained(e36.watcher())
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise HarnessEvidenceError(f"E36 final evidence unavailable: {error}") from error
-        enabled_features = frozenset(
-            feature.strip()
-            for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
-            if feature.strip()
-        )
         for assertion_spec in scenario.get("assertions") or []:
-            run_assertion(
-                assertion_spec,
-                window=window,
-                record=record,
-                enabled_features=enabled_features,
-                run_id=run_id,
-                pending_refetch=_pending_refetch,
-                observation_context=observation_context,
-                provider=cell_provider(cell),
-            )
-            record["assertions"].append({"spec": assertion_spec, "passed": True})
+            try:
+                outcome = run_assertion(
+                    assertion_spec, window=window, record=record, enabled_features=enabled_features,
+                    run_id=run_id, pending_refetch=_pending_refetch,
+                    observation_context=observation_context, provider=cell_provider(cell),
+                )
+            except assertions.AssertionError as error:
+                unevaluable = isinstance(error, HarnessEvidenceError)
+                record["assertions"].append({"spec": assertion_spec, "status": "unevaluable" if unevaluable else "fail",
+                                             "passed": None if unevaluable else False, "reason": str(error)})
+                raise
+            record["assertions"].append({"spec": assertion_spec, **outcome})
 
         idle_check = assert_cell_idle(
             base_url=client.base_url,
@@ -4696,17 +4741,51 @@ def _assert_provider_hold_marker_seen(
     )
 
 
+# Completed-panel chrome; the idle-recap card is a separate post, not the turn's panel.
+_PANEL_COMPLETION_PATTERNS = tuple(
+    pattern for pattern in assertions._COMPLETION_CHROME_PATTERNS
+    if pattern is not assertions._IDLE_RECAP_COMPLETION_PATTERN
+)
+
+
+def completed_panel_in_place(window: assertions.Window) -> None:
+    """Pass completion chrome above the body only as the turn's one panel, seen edited from a
+    running state to completed under its own id, with no panel posted again or deleted."""
+    def matches(content: Any, patterns: tuple[Any, ...]) -> bool:
+        return any(pattern.search(str(content or "")) for pattern in patterns)
+
+    rows = [row for row in window.raw_messages if not assertions.is_our_send(row)]
+    completed = [str(row.get("id") or "") for row in rows
+                 if matches(row.get("content"), _PANEL_COMPLETION_PATTERNS)]
+    deleted = [str(row.get("id") or "") for row in rows
+               if str(row.get("id") or "") in window.deleted_ids
+               and matches(row.get("content"), assertions._STATUS_PATTERNS)]
+    if len(completed) != 1 or deleted:
+        raise assertions.AssertionError(
+            f"completion panel posted again or deleted: completed={completed} deleted={deleted}"
+        )
+    if not any(
+        str(update.get("id") or "") == completed[0]
+        and matches(update.get("after"), _PANEL_COMPLETION_PATTERNS)
+        and not matches(update.get("before"), _PANEL_COMPLETION_PATTERNS)
+        for update in window.message_updates
+    ):
+        raise assertions.AssertionError(
+            f"completion panel {completed[0]} above the body was not seen edited in place"
+        )
+
+
 def run_assertion(
     spec: dict[str, Any],
     *,
     window: assertions.Window,
     record: dict[str, Any] | None = None,
-    enabled_features: frozenset[str] = frozenset(),
+    enabled_features: frozenset[str] | None = None,
     run_id: str | None = None,
     pending_refetch: Callable[[], None] | None = None,
     observation_context: ObservationContext | None = None,
     provider: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
 
@@ -4718,8 +4797,10 @@ def run_assertion(
     required_feature = spec.get("requires_feature")
     if required_feature is not None:
         required_feature = str(required_feature)
+        if enabled_features is None:
+            raise HarnessEvidenceError(f"feature evidence unavailable: {required_feature}")
         if required_feature not in enabled_features:
-            return
+            return feature_accounting.skipped_assertion(required_feature)
         spec = {key: value for key, value in spec.items() if key != "requires_feature"}
     if "message_count_between_markers" in spec:
         params = spec["message_count_between_markers"]
@@ -4955,8 +5036,8 @@ def run_assertion(
         body_marker = params.get("body_marker") if isinstance(params, dict) else params
         required = bool(params.get("required", False)) if isinstance(params, dict) else False
         body_marker = expand_marker(str(body_marker))
-        trace, move_wait = None, False
-        for attempt in range(int(COMPLETION_MOVE_WAIT_S // 2) + 2):
+        trace, bound, last_attempt = None, 10.0, 3
+        for attempt in range(last_attempt + 1):
             try:
                 assertions.completion_chrome_after_body(
                     window,
@@ -4964,25 +5045,19 @@ def run_assertion(
                     required=required,
                 )
                 break
+            except assertions.CompletionOrderError:
+                # A panel opened before the body stays above it; it passes only completed in place.
+                completed_panel_in_place(window)
+                break
             except assertions.AssertionError:
                 first = min((at for body, at in (record or {}).get("_body_observations", {}).items()
                              if body_marker in body), default=None)
                 if pending_refetch is None or first is None:
                     raise
-                try:
-                    assertions.completion_chrome_after_body(window, body_marker=body_marker)
-                except assertions.CompletionOrderError:
-                    # A completed panel above the body may still be moved below it.
-                    move_wait = True
-                bound, last_attempt = (
-                    (COMPLETION_MOVE_WAIT_S, int(COMPLETION_MOVE_WAIT_S // 2) + 1)
-                    if move_wait else (10.0, 3)
-                )
                 if trace is None:
                     trace = {"refetches": 0, "deadline_at": first + bound,
                              "elapsed_s": time.monotonic() - first, "outcome": "FAIL"}
                     record.setdefault("completion_rechecks", []).append(trace)
-                trace["deadline_at"] = first + bound
                 if attempt >= last_attempt:
                     trace["outcome"] = "EXHAUSTED"
                     raise
@@ -5031,6 +5106,7 @@ def run_assertion(
         )
     else:
         raise assertions.AssertionError(f"unknown assertion: {spec!r}")
+    return {"status": "pass", "passed": True}
 
 
 def agent_mode_totals(results: list[dict[str, Any]]) -> dict[str, int]:
@@ -5075,6 +5151,8 @@ def coverage_class_violations(results: list[dict[str, Any]]) -> list[dict[str, A
 
 def main() -> int:
     args = parse_args()
+    if getattr(args, "herdr_restart_observe_only", None):
+        return herdr_restart.run(sys.modules[__name__], args)
     cell = args.cell
     scenarios_dir = Path(args.scenarios)
     if not scenarios_dir.is_dir():
@@ -5159,6 +5237,7 @@ def main() -> int:
             "id": scenario_id, "cell": partial.get("cell", cell), "provider": partial.get("provider", cell_provider(cell)),
             "runtime": partial.get("runtime", cell_runtime(cell)), "status": "fail", "reason": reason,
             "durable_record_probe": {"status": "unevaluable", "reason": reason},
+            "failure_attribution": _failure_attribution("harness", reason, record=partial),
             "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
         })
     finally:
@@ -5169,6 +5248,7 @@ def main() -> int:
     # shared --output dir for all 4 cells never overwrites a sibling report.
     summary_path = output_dir / f"report.{cell}.json"
     summary = {
+        "schema_version": feature_accounting.SCHEMA_VERSION,
         "run_id": run_id,
         "cell": cell,
         "provider": cell_provider(cell),
@@ -5182,13 +5262,7 @@ def main() -> int:
             result.get("real_provider_contacted") is True for result in results
         ),
         "scenarios": results,
-        "totals": {
-            "pass": sum(1 for r in results if r["status"] == "pass"),
-            "fail": sum(1 for r in results if r["status"] == "fail"),
-            "skipped": sum(1 for r in results if r["status"] == "skipped"),
-            **{status: sum(r["status"] == status for r in results)
-               for status in ("not_applicable", "known_gap", "unexpected_pass", "dry_run")},
-        },
+        "totals": feature_accounting.totals(results),
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if deferred_failure is not None:

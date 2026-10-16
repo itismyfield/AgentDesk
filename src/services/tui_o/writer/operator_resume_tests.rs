@@ -10,6 +10,7 @@ async fn operator_resume_latest_legacy_posted_does_not_reblock_old_rejection() {
     let mut channel = harness.channel();
     for entry in [
         LedgerEntry::Prepared {
+            local_retry: None,
             serial: 0,
             unit_key: unit("old"),
             piece_index: 0,
@@ -22,6 +23,7 @@ async fn operator_resume_latest_legacy_posted_does_not_reblock_old_rejection() {
             status: 403,
         },
         LedgerEntry::Prepared {
+            local_retry: None,
             serial: 1,
             unit_key: unit("old"),
             piece_index: 0,

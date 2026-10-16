@@ -7,8 +7,8 @@ use serenity::{ChannelId, MessageId};
 
 use super::active_source_dedup::strip_source_message_id_from_intervention;
 use super::pending_queue_persistence::{
-    load_channel_pending_dispatch_marker, load_channel_pending_queue_checked,
-    remove_channel_pending_dispatch_marker,
+    load_channel_pending_dispatch_marker, load_channel_pending_dispatch_marker_checked,
+    load_channel_pending_queue_checked, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
@@ -138,6 +138,68 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
             error = %error,
             "failed to remove pending dispatch marker"
         );
+    }
+}
+
+/// A clear's first step: the marker's input goes back into the queue file in place of its
+/// reservation before the marker is removed, so a later failure still leaves one durable copy.
+pub(super) fn reclaim_pending_dispatch_marker(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<(), String> {
+    let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
+    let marker = load_channel_pending_dispatch_marker_checked(provider, token_hash, channel_id)?;
+    let Some((mut marker, _)) = marker else {
+        return Ok(());
+    };
+    let marker_id = marker.message_id;
+    let ids = intervention_dedup_ids(&marker);
+    let held: Vec<MessageId> = (ids.iter().copied())
+        .filter(|id| {
+            queued_intervention_contains_message_id(&state.intervention_queue, *id)
+                || state.active_user_message_id == Some(*id)
+        })
+        .collect();
+    if held.len() < ids.len() {
+        for id in held {
+            strip_source_message_id_from_intervention(&mut marker, id);
+        }
+        let previous_queue = state.intervention_queue.clone();
+        let at = super::queued_head::protected_len(state, channel_id, persistence);
+        state.intervention_queue.insert(at, marker);
+        let operation = "clear_reclaim_marker";
+        persist_queue_or_restore(state, channel_id, persistence, previous_queue, operation)?;
+    }
+    clear_pending_user_dispatch_if_matches(state, marker_id);
+    #[cfg(test)]
+    let fault = marker_remove_fault::take(channel_id);
+    #[cfg(test)]
+    if fault == Some(false) {
+        return Err("injected dispatch marker removal failure".to_string());
+    }
+    remove_channel_pending_dispatch_marker(provider, token_hash, channel_id)?;
+    #[cfg(test)]
+    if fault == Some(true) {
+        return Err("injected failure after dispatch marker removal".to_string());
+    }
+    Ok(())
+}
+
+/// Test-only: fail a channel's next clear marker removal once, before it (`false`) or after it.
+#[cfg(test)]
+pub(super) mod marker_remove_fault {
+    use super::ChannelId;
+    static ARMED: std::sync::Mutex<Vec<(ChannelId, bool)>> = std::sync::Mutex::new(Vec::new());
+
+    pub(crate) fn fail_next(channel: ChannelId, after_removal: bool) {
+        ARMED.lock().unwrap().push((channel, after_removal));
+    }
+
+    pub(super) fn take(channel: ChannelId) -> Option<bool> {
+        let mut armed = ARMED.lock().unwrap();
+        let index = armed.iter().position(|(armed, _)| *armed == channel)?;
+        Some(armed.remove(index).1)
     }
 }
 
@@ -486,6 +548,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
         .flatten();
     if state.pending_user_dispatch.is_some() || absorb_error.is_some() {
         return Some(TakeNextSoftResult {
+            selection_stale: false,
             intervention: None,
             dispatch_lease: None,
             has_more: state
@@ -560,6 +623,7 @@ pub(super) fn reconcile_pending_dispatch_marker_before_take_next(
     );
     if let Some(error) = marker_result.persistence_error {
         return Some(TakeNextSoftResult {
+            selection_stale: false,
             intervention: None,
             dispatch_lease: None,
             has_more: state
@@ -841,4 +905,6 @@ mod tests {
             assert_eq!(marker_after.text, "queued a");
         });
     }
+
+    mod hydrate_corrupt_queue_tests;
 }

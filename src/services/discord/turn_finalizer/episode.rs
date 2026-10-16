@@ -174,6 +174,18 @@ pub(super) struct TerminalEvidence {
     pub(super) claim_snapshot: Option<SyntheticClaimSnapshot>,
 }
 
+/// One policy close, built from the row the notice ACK returned: the finalizer owns it, and only
+/// the captured mailbox actor may commit its mailbox half.
+pub(in crate::services::discord) struct PolicyCloseIntent {
+    pub(in crate::services::discord) key: TurnKey,
+    pub(in crate::services::discord) provider: ProviderKind,
+    pub(in crate::services::discord) mailbox:
+        crate::services::turn_orchestrator::ChannelMailboxHandle,
+    pub(in crate::services::discord) request:
+        crate::services::turn_orchestrator::policy_close::PolicyCloseRequest,
+    pub(in crate::services::discord) snapshot: SyntheticClaimSnapshot,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,6 +749,37 @@ impl TurnFinalizer {
             .await;
         }
         out
+    }
+
+    /// The policy close's own submission: a lost send or ACK is `Unconfirmed`, never the
+    /// ordinary `AlreadyFinalized` and its compensation.
+    pub(in crate::services::discord) async fn submit_policy_close(
+        &self,
+        intent: PolicyCloseIntent,
+        shared: Arc<SharedData>,
+    ) -> PolicyCloseOutcome {
+        use crate::services::turn_orchestrator::policy_close::Point;
+        let trace = intent.request.trace.clone();
+        trace.note(Point::SubmitAttempt, 1);
+        let (ack, rx) = oneshot::channel();
+        let msg = FinalizeMsg::PolicyClose {
+            intent: Box::new(intent),
+            input_permit: super::super::input_runtime::fence::effect::current(),
+            shared,
+            ack,
+        };
+        let sent = self.tx.send(msg).is_ok();
+        trace.note(Point::SendAccepted, u64::from(sent));
+        if !sent {
+            #[cfg(test)]
+            trace.not_run(
+                crate::services::turn_orchestrator::policy_close::test_hooks::Branch::SendFailed,
+            );
+            return PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerSend);
+        }
+        let acked = rx.await;
+        trace.note(Point::AckObserved, u64::from(acked.is_ok()));
+        acked.unwrap_or(PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerAck))
     }
 }
 

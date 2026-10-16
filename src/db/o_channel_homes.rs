@@ -1,7 +1,6 @@
 //! Channel O home rows (`o_channel_homes`). Every transition is one conditional statement: a
 //! condition that no longer holds is [`HomeWrite::Stale`] and leaves the row unchanged. Each new
 //! epoch comes from one sequence, so no lifecycle of a channel repeats an earlier one's epoch.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::Duration;
 
@@ -84,6 +83,7 @@ pub(crate) struct ForceWindow(Duration);
 impl ForceWindow {
     pub(crate) const MIN: Self = Self(FORCE_AFTER);
 
+    #[cfg(test)]
     pub(crate) fn at_least(after: Duration) -> Option<Self> {
         (after >= FORCE_AFTER).then_some(Self(after))
     }
@@ -227,6 +227,25 @@ pub(crate) async fn read_home(
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(decode).transpose()
+}
+
+/// [`read_home`] with PG's clock taken by the same statement, for a reader that ages the lease.
+pub(crate) async fn read_home_at(
+    pool: &PgPool,
+    channel_id: &str,
+) -> Result<Option<(ChannelHome, DateTime<Utc>)>, HomeError> {
+    let row = sqlx::query(
+        "SELECT channel_id, provider, state, holder, target, epoch, renewed_at, updated_at, detail,
+                statement_timestamp() AS read_at
+         FROM o_channel_homes WHERE channel_id = $1",
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    Ok(Some((decode(&row)?, row.try_get("read_at")?)))
 }
 
 /// Operator `delegate`: a gateway-owned channel starts releasing to `target` at a fresh epoch.

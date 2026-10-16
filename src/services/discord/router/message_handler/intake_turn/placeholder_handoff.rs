@@ -19,9 +19,9 @@ fn apply_bound_notice_edit_result(
                 user_msg_id = user_msg_id.get(),
                 notice_message_id = existing.get(),
                 error = %error,
-                "busy follow-up notice is confirmed missing; clearing its binding before replacement"
+                "busy follow-up notice is confirmed missing; unbinding it and keeping its retry budget"
             );
-            let _ = crate::services::discord::busy_followup_retry_store::clear_if_current(
+            let _ = crate::services::discord::busy_followup_retry_store::unbind_notice_if_current(
                 provider,
                 channel_id.get(),
                 user_msg_id.get(),
@@ -43,7 +43,8 @@ fn apply_bound_notice_edit_result(
 }
 
 /// Reuse the retry input's bound busy notice rather than posting a card per attempt.
-/// A confirmed-missing notice clears its stale binding and falls through to replacement.
+/// A confirmed-missing or released notice falls through to a replacement card, which the next
+/// bind adopts with the same retry budget.
 pub(super) async fn reuse_bound_busy_notice(
     http: &Arc<serenity::http::Http>,
     shared: &Arc<SharedData>,
@@ -56,7 +57,8 @@ pub(super) async fn reuse_bound_busy_notice(
         provider,
         channel_id.get(),
         user_msg_id.get(),
-    )?;
+    )
+    .filter(|binding| binding.notice_bound)?;
     let existing = MessageId::new(binding.notice_message_id);
     match apply_bound_notice_edit_result(
         provider,
@@ -68,11 +70,6 @@ pub(super) async fn reuse_bound_busy_notice(
             shared.clone(),
             channel_id,
             existing,
-            crate::services::tui_o::n1_observation::Context {
-                provider: provider.as_str(),
-                origin: "discord_active",
-                input_message_id: Some(user_msg_id.get()),
-            },
         )
         .await,
     ) {
@@ -171,26 +168,43 @@ mod tests {
             assert_eq!(preserved.busy_retry_count, 1);
         }
 
-        assert_eq!(
-            apply_bound_notice_edit_result(
+        // Each lost card is replaced and the same budget continues until the sixth failure caps.
+        use crate::services::discord::busy_followup_retry_store as store;
+        for round in 1..store::MAX_BUSY_RETRY_COUNT {
+            let card = MessageId::new(notice.get() + u64::from(round));
+            let missing = ClassifiedOutboundEditError::ConfirmedMissing("404 (10008)".to_string());
+            let previous = MessageId::new(card.get() - 1);
+            let result = apply_bound_notice_edit_result(
                 &provider,
                 channel_id,
                 user_msg_id,
-                notice,
-                Err(ClassifiedOutboundEditError::ConfirmedMissing(
-                    "404 Unknown Message (10008)".to_string(),
-                )),
-            ),
-            Err(None)
-        );
-        assert!(
-            crate::services::discord::busy_followup_retry_store::load(
+                previous,
+                Err(missing),
+            );
+            assert_eq!(result, Err(None));
+            let rebound = store::bind_notice_if_absent(
                 &provider,
                 channel_id.get(),
                 user_msg_id.get(),
+                card.get(),
             )
-            .is_none(),
-            "only authoritative missing permits the replacement path"
-        );
+            .expect("replacement binds");
+            assert_eq!(rebound.notice_message_id, card.get(), "round {round}");
+            assert_eq!(rebound.busy_retry_count, round, "round {round}");
+            let charged = store::record_busy_retry(
+                &provider,
+                channel_id.get(),
+                user_msg_id.get(),
+                card.get(),
+            )
+            .expect("retry recorded");
+            assert_eq!(charged.state.busy_retry_count, round + 1, "round {round}");
+            assert_eq!(charged.capped, round + 1 == store::MAX_BUSY_RETRY_COUNT);
+        }
+        assert!(store::is_capped(
+            &provider,
+            channel_id.get(),
+            user_msg_id.get()
+        ));
     }
 }

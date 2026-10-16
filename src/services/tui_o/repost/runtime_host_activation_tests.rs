@@ -10,6 +10,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
 
+#[path = "rollback_rehearsal_tests.rs"]
+mod rollback_rehearsal_tests;
+use rollback_rehearsal_tests::scan_activated_ledgers;
+
+fn fixture_not_sent_tags(path: &std::path::Path) -> std::io::Result<usize> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| line["entry"]["type"] == "not_sent")
+        .count())
+}
+
 #[derive(Default)]
 struct Statements {
     armed: AtomicBool,
@@ -163,6 +175,12 @@ impl RepostHook<RealWriter> for Reached {
     fn original(&mut self, serial: u64, piece: PieceRecord) -> Turned<'_, OriginalGate> {
         self.inner.original(serial, piece)
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        self.inner.receipts()
+    }
 }
 
 struct RealHost {
@@ -293,7 +311,10 @@ async fn f6_off_host_has_zero_pg_statements_with_on_positive_control_pg() {
             .unwrap();
         let mut config = crate::config::Config::default();
         config.tui_o = Some(TuiOConfig {
-            repost: RepostConfig { enabled },
+            repost: RepostConfig {
+                enabled,
+                channels: [channel].into_iter().collect(),
+            },
             ..TuiOConfig::default()
         });
         crate::config_live_reload::install(config);
@@ -451,10 +472,13 @@ fn host_run() -> crate::services::tui_o::repost::io::probe::evidence::RunScope {
     }
 }
 
-fn on_switch() -> crate::services::tui_o::repost::config::RepostSwitch {
+fn on_switch(channel: u64) -> crate::services::tui_o::repost::config::RepostSwitch {
     use crate::services::tui_o::repost::config::{RepostConfig, RepostSwitch};
     let on = TuiOConfig {
-        repost: RepostConfig { enabled: true },
+        repost: RepostConfig {
+            enabled: true,
+            channels: [channel].into_iter().collect(),
+        },
         ..TuiOConfig::default()
     };
     RepostSwitch::new(Some(&on), watch::channel(None).1)
@@ -483,7 +507,12 @@ impl RepostHook<RealWriter> for SendOnce {
                 .unwrap();
             let scope = EvidenceScope::of(&row, &spent, &host_run()).unwrap();
             let intent = DispatchIntent::Auto(Box::new(absent_evidence(scope, host_run())));
-            let mut runner = Runner::new(on_switch(), self.pool.clone(), 42, host_run());
+            let mut runner = Runner::new(
+                on_switch(self.key.unit().channel_id),
+                self.pool.clone(),
+                42,
+                host_run(),
+            );
             let admission = runner
                 .try_next_dispatch(writer, OriginalGate::Admitted, intent)
                 .await
@@ -498,6 +527,14 @@ impl RepostHook<RealWriter> for SendOnce {
     }
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(std::future::ready(OriginalGate::Admitted))
+    }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
     }
 }
 
@@ -553,7 +590,7 @@ async fn d4act_host_stop_during_pending_finish_prevents_retry_pg() {
         )
         .unwrap();
         let mut provenance = ProvenanceLog::open(&root.join("seed.jsonl")).unwrap();
-        let mut on = on_switch();
+        let mut on = on_switch(channel);
         let admitter = Admitter::when_on(&mut on, &pool, "host-node", 42).unwrap();
         admitter
             .adopt_uncertain(
@@ -695,6 +732,12 @@ impl RepostHook<RealWriter> for WireTurn {
     fn original(&mut self, serial: u64, piece: PieceRecord) -> Turned<'_, OriginalGate> {
         self.inner.original(serial, piece)
     }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        self.inner.receipts()
+    }
 }
 
 struct WireServer {
@@ -702,6 +745,7 @@ struct WireServer {
     posts: Arc<AtomicUsize>,
     valid_posts: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
+    probe_reads: Arc<AtomicUsize>,
     first_429: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -729,6 +773,8 @@ impl WireServer {
             reads.clone(),
             first_429.clone(),
         );
+        let probe_reads = Arc::new(AtomicUsize::new(0));
+        let probed = Arc::clone(&probe_reads);
         let task = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut bytes = Vec::new();
@@ -769,6 +815,10 @@ impl WireServer {
                 });
                 let (status, headers, body, throttled) = if method == "GET" {
                     read.fetch_add(1, Ordering::SeqCst);
+                    // Message-route reads exclude unrelated root requests on the fixture listener.
+                    if path.starts_with(&route) {
+                        probed.fetch_add(1, Ordering::SeqCst);
+                    }
                     if path == format!("{route}/900") {
                         ("200 OK", "", proof.to_string(), false)
                     } else if path.starts_with(&format!("{route}?")) {
@@ -825,6 +875,7 @@ impl WireServer {
             posts,
             valid_posts,
             reads,
+            probe_reads,
             first_429,
             task,
         }
@@ -865,18 +916,10 @@ fn rollback_steps() -> Vec<RollbackStep> {
         .collect()
 }
 
-fn not_sent_tags(path: &std::path::Path) -> usize {
-    std::fs::read(path)
-        .unwrap()
-        .windows(b"\"type\":\"not_sent\"".len())
-        .filter(|part| *part == b"\"type\":\"not_sent\"")
-        .count()
-}
-
-fn validated_repost(path: &std::path::Path, enabled: bool) -> bool {
+fn validated_repost(path: &std::path::Path, enabled: bool, channel: u64) -> bool {
     std::fs::write(
         path,
-        format!("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n"),
+        format!("server:\n  port: 8791\ntui_o:\n  repost:\n    enabled: {enabled}\n    channels: [{channel}]\n"),
     )
     .unwrap();
     matches!(
@@ -970,6 +1013,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
         for entry in [
             LedgerEntry::Prepared {
+                local_retry: None,
                 serial: 0,
                 unit_key: key.unit().clone(),
                 piece_index: 0,
@@ -979,6 +1023,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             },
             LedgerEntry::NotFound { serial: 0 },
             LedgerEntry::Prepared {
+                local_retry: None,
                 serial: 1,
                 unit_key: unit("permission-proof"),
                 piece_index: 0,
@@ -995,10 +1040,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         }
         let original = ledger.ledger().piece(0).unwrap().clone();
         drop(ledger);
-        let ledger_path = root
-            .join("o_store")
-            .join(channel.to_string())
-            .join("ledger.jsonl");
+        let ledger_path = root.join(format!("o_store/{channel}/ledger.jsonl"));
         let old_bytes = std::fs::read(&ledger_path).unwrap();
         activated_ledgers.push(ledger_path.clone());
         let sidecar = runtime
@@ -1011,7 +1053,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         provenance
             .append(ProvenanceEntry::intent(0, &original, generation).unwrap())
             .unwrap();
-        let mut on = on_switch();
+        let mut on = on_switch(channel);
         Admitter::when_on(&mut on, &pool, "o-writer", 42)
             .unwrap()
             .adopt_uncertain(
@@ -1027,7 +1069,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             .unwrap();
         drop(provenance);
         let config_path = runtime.path().join(format!("{channel}.yaml"));
-        reloads_applied &= validated_repost(&config_path, enabled);
+        reloads_applied &= validated_repost(&config_path, enabled, channel);
         let server = WireServer::start(channel, &key).await;
         let http = Arc::new(serenity::Http::new(&format!("loopback-{channel}")));
         let turns = Arc::new(WireTurns::default());
@@ -1156,11 +1198,25 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
                 &canonical[..]
             };
             let mut scanned = None;
+            let mut off_confirmed = false;
+            let mut joined = false;
             for step in steps {
                 match step {
                     RollbackStep::Off => {
-                        reloads_applied &= validated_repost(&config_path, false);
-                        early_tags = not_sent_tags(&ledger_path);
+                        off_confirmed = validated_repost(&config_path, false, channel);
+                        reloads_applied &= off_confirmed;
+                        assert!(
+                            scan_activated_ledgers(
+                                &activated_ledgers,
+                                off_confirmed,
+                                joined,
+                                true,
+                                fixture_not_sent_tags,
+                            )
+                            .is_err()
+                        );
+                        // This early observation cannot authorize rollback before the writer joins.
+                        early_tags = fixture_not_sent_tags(&ledger_path).unwrap();
                     }
                     RollbackStep::Wait => {
                         if let Some(waiter) = queued.take() {
@@ -1175,10 +1231,18 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
                         if let Some(writer) = handle.take() {
                             writer.stop_and_join().await.unwrap();
                         }
+                        joined = !readiness.is_hosted(channel) && handle.is_none();
                     }
                     RollbackStep::Scan => {
-                        scanned =
-                            Some(activated_ledgers.iter().any(|path| not_sent_tags(path) > 0));
+                        scanned = scan_activated_ledgers(
+                            &activated_ledgers,
+                            off_confirmed,
+                            joined,
+                            true,
+                            fixture_not_sent_tags,
+                        )
+                        .ok()
+                        .map(|reads| reads.iter().any(|(_, tags)| !matches!(tags, Ok(0))));
                     }
                     RollbackStep::Decide => {
                         allow_old = Some(scanned == Some(false));
@@ -1205,7 +1269,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             valid_posts: server.valid_posts.load(Ordering::SeqCst),
             reads: server.reads.load(Ordering::SeqCst),
             early_tags,
-            late_tags: not_sent_tags(&ledger_path),
+            late_tags: fixture_not_sent_tags(&ledger_path).unwrap(),
             allow_old,
             queue_pending,
             rate_headers,
@@ -1303,3 +1367,6 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         "REFUSE an older reader after late NotSent; do not reuse an early scan"
     );
 }
+
+#[path = "allowlist_host_tests.rs"]
+mod allowlist;

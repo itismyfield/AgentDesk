@@ -7,7 +7,9 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
+use crate::services::session_host::legacy_collapse::ConfirmedDeadPane;
 use parser::{
     RolloutParseState, emit_done, process_rollout_line_bytes,
     task_complete_fallback_supersedes_final_text,
@@ -21,12 +23,9 @@ use super::rollout_index::rollout_files_under;
 
 mod legacy_selection;
 mod parser;
-#[cfg(test)]
 pub(crate) mod provenance;
-pub use legacy_selection::{
-    latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since,
-    rollout_candidates_for_cwd_since,
-};
+
+pub use legacy_selection::{latest_rollout_for_cwd_since, latest_unclaimed_rollout_for_cwd_since};
 use legacy_selection::{wait_for_latest_rollout_for_cwd, wait_for_resumed_rollout_for_session};
 
 #[cfg(test)]
@@ -36,31 +35,10 @@ use parser::{
 };
 
 const DEFAULT_ROLLOUT_WAIT_SECS: u64 = 30;
-/// Fallback EOF drain budget for rollouts that do NOT emit an explicit
-/// hook/composer-ready completion signal (legacy Codex CLI versions or
-/// unexpected codex variants). Modern Codex TUI completion is driven by
-/// `event_msg/composer_ready` (explicit or wrapper-synthetic) or by provider
-/// Stop hooks; this drain is only the safety net.
-///
-/// Issue #2423: previous value of 750ms produced premature `Done` whenever
-/// Codex paused for >750ms between rollout writes (e.g. tool-call burst
-/// boundary), truncating the assistant response. Issue #2419 / PR #2422 bumped
-/// this to 5000ms as a heuristic; #2423 replaced the heuristic with an
-/// explicit completion detection and keeps this shorter drain only for
-/// legacy/unknown rollout variants. Tool-call gating (see
-/// `RolloutParseState::pending_tool_calls`) is the structural complement that
-/// suppresses drain entirely while one or more tools are in flight.
+/// Legacy EOF drain fallback; modern turns complete from provider records or hooks.
+/// Tool-call gating suppresses this drain while tools remain in flight.
 const DEFAULT_TERMINAL_DRAIN_MS: u64 = 1000;
-/// Issue #2453: legacy Codex CLI builds (no `event_msg` records at all in the
-/// rollout) cannot benefit from the explicit completion path nor the
-/// token-count refresh signal. The short terminal drain stays structurally
-/// fragile against burst-pause-burst patterns with multi-second pauses.
-/// When the tail observes ZERO `event_msg` records on a turn — the
-/// canonical legacy-CLI fingerprint — the drain budget is bumped to this
-/// longer value so a single quiet window must persist that long before the
-/// tail flushes `Done`. Modern CLIs always emit at least one `event_msg`
-/// (token_count is emitted alongside every message) and therefore retain the
-/// shorter base drain. See issue #2453 / PR #2432 follow-up.
+/// Event-less rollouts need a longer quiet window to survive pauses between output bursts.
 const DEFAULT_LEGACY_TERMINAL_DRAIN_MS: u64 = 15000;
 /// Upper bound on how long the tailer will sit at EOF waiting for the assistant
 /// response to begin streaming. Without this guard, a stuck Codex TUI (tool
@@ -83,6 +61,7 @@ const DEFAULT_PANE_BUSY_VETO_CAP_SECS: u64 = 2 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
+    pub rollout_path: PathBuf,
     pub harvest: crate::services::session_backend::ReadHarvestStats,
     pub lines_read: usize,
     pub bytes_read: u64,
@@ -231,12 +210,12 @@ fn discord_handoff_tail_options(
     }
 }
 
-pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux<L: Into<PaneLiveness>>(
     cwd: &Path,
     modified_since: SystemTime,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
@@ -251,12 +230,12 @@ pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(
     )
 }
 
-fn tail_latest_rollout_for_cwd_with_handoff_options(
+fn tail_latest_rollout_for_cwd_with_handoff_options<L: Into<PaneLiveness>>(
     cwd: &Path,
     modified_since: SystemTime,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> bool,
+    mut is_alive: impl FnMut() -> L,
     options: RolloutTailOptions,
 ) -> Result<CodexTuiTailResult, String> {
     if super::verified_tail::is_verified(options.tmux_session_name.as_deref()) {
@@ -276,19 +255,20 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
         )
         .map(|(read_result, outcome)| CodexTuiTailResult {
             read_result,
-            rollout_path,
+            rollout_path: outcome.rollout_path,
             final_offset: outcome.final_offset,
             session_id: outcome.session_id,
         });
     }
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    let mut death = ConfirmedDeadPane::default();
     let rollout_path = wait_for_latest_rollout_for_cwd(
         cwd,
         modified_since,
         &sessions_dir,
         cancel_token.as_deref(),
-        &mut is_alive,
+        &mut || !death.observe(is_alive().into(), None),
         options.wait_for_rollout,
     )?;
     let rollout_session_id =
@@ -310,7 +290,7 @@ fn tail_latest_rollout_for_cwd_with_handoff_options(
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
-        rollout_path,
+        rollout_path: outcome.rollout_path,
         final_offset: outcome.final_offset,
         session_id: outcome.session_id,
     })
@@ -346,13 +326,13 @@ pub fn replay_rollout_file(
     }
 }
 
-pub fn tail_rollout_file_from_offset(
+pub fn tail_rollout_file_from_offset<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<&str>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
 ) -> Result<ReadOutputResult, String> {
     tail_rollout_file_from_offset_with_pane_busy_probe(
         rollout_path,
@@ -364,17 +344,40 @@ pub fn tail_rollout_file_from_offset(
         None,
         None,
     )
+    .map(|result| result.0)
 }
 
-pub fn tail_rollout_file_from_offset_for_tmux(
+#[cfg(test)]
+pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<&str>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
 ) -> Result<ReadOutputResult, String> {
+    tail_recovery_rollout_for_tmux(
+        rollout_path,
+        start_offset,
+        session_id,
+        sender,
+        cancel_token,
+        is_alive,
+        tmux_session_name,
+    )
+    .map(|result| result.0)
+}
+
+pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<&str>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    tmux_session_name: &str,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     tail_rollout_file_from_offset_with_pane_busy_probe(
         rollout_path,
         start_offset,
@@ -388,13 +391,13 @@ pub fn tail_rollout_file_from_offset_for_tmux(
 }
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
-pub(crate) fn tail_idle_rollout_for_tmux(
+pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<String>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
     own_turn: Option<String>,
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
@@ -416,16 +419,16 @@ pub(crate) fn tail_idle_rollout_for_tmux(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tail_rollout_file_from_offset_with_pane_busy_probe(
+fn tail_rollout_file_from_offset_with_pane_busy_probe<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<&str>,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     pane_busy_probe: Option<Box<dyn FnMut() -> super::input::CodexPaneBusySignal + Send>>,
     tmux_session_name: Option<&str>,
-) -> Result<ReadOutputResult, String> {
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     let mut defaults = RolloutTailOptions::default();
     defaults.pane_busy_probe = pane_busy_probe;
     defaults.tmux_session_name = tmux_session_name
@@ -440,7 +443,6 @@ fn tail_rollout_file_from_offset_with_pane_busy_probe(
         is_alive,
         defaults,
     )
-    .map(|result| result.0)
 }
 
 /// Tail exactly the rollout already bound to a live Codex TUI pane.
@@ -451,13 +453,13 @@ fn tail_rollout_file_from_offset_with_pane_busy_probe(
 /// Discord-origin prompt in the turn-local parser state preserves dedupe even
 /// if the global pending ledger expires during a long response.
 #[allow(clippy::too_many_arguments)]
-pub fn tail_warm_followup_rollout_for_tmux(
+pub fn tail_warm_followup_rollout_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: &str,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
     discord_origin_prompt: &str,
 ) -> Result<CodexTuiTailResult, String> {
@@ -479,14 +481,14 @@ pub fn tail_warm_followup_rollout_for_tmux(
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
-        rollout_path: rollout_path.to_path_buf(),
+        rollout_path: outcome.rollout_path,
         final_offset: outcome.final_offset,
         session_id: outcome.session_id,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
+pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux<L: Into<PaneLiveness>>(
     cwd: &Path,
     session_id: &str,
     previous_rollout_path: &Path,
@@ -494,12 +496,19 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
     modified_since: SystemTime,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     tmux_session_name: &str,
     discord_origin_prompt: Option<&str>,
 ) -> Result<CodexTuiTailResult, String> {
     if super::verified_tail::is_verified(Some(tmux_session_name)) {
-        super::verified_tail::hold(cancel_token.as_deref())?;
+        return tail_latest_rollout_for_cwd_with_handoff_options(
+            cwd,
+            modified_since,
+            sender,
+            cancel_token,
+            is_alive,
+            discord_handoff_tail_options(tmux_session_name, discord_origin_prompt),
+        );
     }
     let sessions_dir = default_codex_sessions_dir()
         .ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
@@ -526,7 +535,7 @@ pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(
 // resume regression tests; production uses the `_with_handoff_for_tmux` form.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-fn tail_resumed_rollout_for_session_with_options(
+fn tail_resumed_rollout_for_session_with_options<L: Into<PaneLiveness>>(
     cwd: &Path,
     session_id: &str,
     previous_rollout_path: &Path,
@@ -535,7 +544,7 @@ fn tail_resumed_rollout_for_session_with_options(
     sessions_dir: &Path,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     options: RolloutTailOptions,
 ) -> Result<ReadOutputResult, String> {
     tail_resumed_rollout_for_session_with_handoff_options(
@@ -554,7 +563,7 @@ fn tail_resumed_rollout_for_session_with_options(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tail_resumed_rollout_for_session_with_handoff_options(
+fn tail_resumed_rollout_for_session_with_handoff_options<L: Into<PaneLiveness>>(
     cwd: &Path,
     session_id: &str,
     previous_rollout_path: &Path,
@@ -563,12 +572,20 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
     sessions_dir: &Path,
     sender: Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> bool,
+    mut is_alive: impl FnMut() -> L,
     options: RolloutTailOptions,
 ) -> Result<CodexTuiTailResult, String> {
     if super::verified_tail::is_verified(options.tmux_session_name.as_deref()) {
-        super::verified_tail::hold(cancel_token.as_deref())?;
+        return tail_latest_rollout_for_cwd_with_handoff_options(
+            cwd,
+            modified_since,
+            sender,
+            cancel_token,
+            is_alive,
+            options,
+        );
     }
+    let mut death = ConfirmedDeadPane::default();
     let rollout_path = wait_for_resumed_rollout_for_session(
         cwd,
         session_id,
@@ -577,7 +594,7 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
         modified_since,
         sessions_dir,
         cancel_token.as_deref(),
-        &mut is_alive,
+        &mut || !death.observe(is_alive().into(), None),
         options.wait_for_rollout,
     )?;
     let start_offset = if same_path(&rollout_path, previous_rollout_path) {
@@ -603,7 +620,7 @@ fn tail_resumed_rollout_for_session_with_handoff_options(
     )
     .map(|(read_result, outcome)| CodexTuiTailResult {
         read_result,
-        rollout_path,
+        rollout_path: outcome.rollout_path,
         final_offset: outcome.final_offset,
         session_id: outcome.session_id,
     })
@@ -762,13 +779,13 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tail_rollout_file_until_assistant_response(
+fn tail_rollout_file_until_assistant_response<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     initial_session_id: Option<String>,
     sender: &Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> bool,
+    is_alive: impl FnMut() -> L,
     terminal_drain: Duration,
     assistant_response_deadline: Option<Duration>,
     pending_tool_call_deadline: Option<Duration>,
@@ -799,397 +816,8 @@ fn tail_rollout_file_until_assistant_response(
     )
 }
 
-fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
-    rollout_path: &Path,
-    start_offset: u64,
-    initial_session_id: Option<String>,
-    sender: &Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    mut is_alive: impl FnMut() -> bool,
-    options: RolloutTailOptions,
-) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
-    let RolloutTailOptions {
-        terminal_drain,
-        assistant_response_deadline,
-        pending_tool_call_deadline,
-        enable_task_complete_fast_path,
-        legacy_terminal_drain,
-        apply_pending_tool_deadline_without_assistant_text,
-        tmux_session_name,
-        discord_origin_prompt,
-        mut pane_busy_probe,
-        pane_busy_veto_cap,
-        terminal_range_eligible,
-        own_turn,
-        ..
-    } = options;
-    let source_pin = super::verified_tail::SourcePin::new(
-        tmux_session_name.as_deref(),
-        rollout_path,
-        initial_session_id.as_deref(),
-    );
-    let mut file = if let Some(pin) = &source_pin {
-        let Some(file) = pin.open(cancel_token.as_deref(), start_offset) else {
-            return Ok((
-                ReadOutputResult::Cancelled {
-                    offset: start_offset,
-                },
-                RolloutTailOutcome {
-                    harvest: Default::default(),
-                    lines_read: 0,
-                    bytes_read: 0,
-                    final_offset: start_offset,
-                    session_id: initial_session_id,
-                },
-            ));
-        };
-        file
-    } else {
-        std::fs::File::open(rollout_path)
-            .map_err(|error| format!("open Codex rollout {}: {error}", rollout_path.display()))?
-    };
-    let file_len = file
-        .metadata()
-        .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
-        .len();
-    let seek_offset = start_offset.min(file_len);
-    file.seek(SeekFrom::Start(seek_offset))
-        .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
-
-    let mut state = RolloutParseState {
-        harvest: crate::services::session_backend::ReadHarvestStats {
-            source_file: Some(
-                crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
-            ),
-            ..Default::default()
-        },
-        session_id: initial_session_id,
-        tmux_session_name,
-        discord_origin_prompt,
-        ..RolloutParseState::default()
-    };
-    let mut current_offset = seek_offset;
-    let mut partial_line = Vec::new();
-    let mut buf = [0u8; 8192];
-    let mut last_output_at: Option<Instant> = None;
-    let mut pane_busy_veto_started_at: Option<Instant> = None;
-    let started_at = Instant::now();
-    let mut hook_events = crate::services::claude_tui::hook_server::subscribe_hook_events();
-    let terminal_range = (
-        seek_offset,
-        cancel_token.as_deref().and_then(CancelToken::turn_nonce),
-        terminal_range_eligible,
-    );
-    // #2172 cancel boundary: wrap the raw sender so any send after the
-    // shared `cancel_token` flips becomes a no-op. The producer (this
-    // tail) is the relay-suppression enforcement point — once the user
-    // cancels a turn, no further rollout-derived StreamMessage may reach
-    // the bridge / Discord for that turn. See
-    // docs/codex-tui-cancel-boundary.md for the full contract.
-    let source_identity =
-        crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file);
-    let mut sender = RelaySuppressionSender::new(sender, cancel_token.as_deref());
-    sender.source_pin = source_pin.as_ref();
-    sender.source_identity = source_identity;
-    let accept = parser::RecordAcceptance::new(cancel_token.as_ref());
-    let accept = accept.with_own_turn(own_turn.as_deref(), &mut state);
-
-    loop {
-        if sender.cancel_observed() {
-            return Ok((
-                ReadOutputResult::Cancelled {
-                    offset: current_offset,
-                },
-                outcome(&state, seek_offset),
-            ));
-        }
-
-        if let Some(pin) = &source_pin {
-            if !pin.wait(cancel_token.as_deref(), source_identity) {
-                continue;
-            }
-            if !file
-                .metadata()
-                .is_ok_and(|metadata| metadata.len() >= current_offset)
-            {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-        }
-        match file.read(&mut buf) {
-            Ok(0) => {
-                let turn = (seek_offset, terminal_range.1);
-                let tail = (&mut state, &mut partial_line);
-                match parser::herdr_eof(&sender, tail, rollout_path, turn, &accept, &mut is_alive) {
-                    Some(Some(ended)) => return Ok((ended, outcome(&state, seek_offset))),
-                    Some(None) => continue,
-                    None => {}
-                }
-                if let Some(ended) = parser::native_turn_eof(
-                    &sender,
-                    &mut state,
-                    rollout_path,
-                    terminal_range,
-                    &accept,
-                ) {
-                    return Ok((ended, outcome(&state, seek_offset)));
-                }
-                if try_process_complete_partial_line(
-                    &mut partial_line,
-                    &sender,
-                    &mut state,
-                    &accept,
-                ) {
-                    last_output_at = Some(Instant::now());
-                    continue;
-                }
-                observe_codex_completion_hooks(&mut hook_events, &mut state);
-                if let Some(finalize_path) =
-                    explicit_finalize_path(&mut state, enable_task_complete_fast_path)
-                {
-                    emit_done(
-                        &sender,
-                        &mut state,
-                        finalize_path,
-                        rollout_path,
-                        current_offset,
-                        terminal_range,
-                    );
-                    return Ok((
-                        ReadOutputResult::Completed {
-                            offset: current_offset,
-                        },
-                        outcome(&state, seek_offset),
-                    ));
-                }
-                if source_pin.is_some() {
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                // #2419: only consider the turn drainable when no tool call
-                // is currently in flight. Otherwise the natural silence while
-                // codex waits for the tool result would trip the timer.
-                //
-                // #2453: with NO `event_msg` observed yet (legacy CLI
-                // fingerprint), bump to `legacy_terminal_drain`. Modern CLIs
-                // emit ≥1 `event_msg` per message, so this widens the drain
-                // only for legacy writers lacking the structural signals
-                // (token_count refresh, hook/envelope completion) the short
-                // default leans on. Applied only when legacy drain is strictly
-                // longer — `terminal_drain.is_zero()` (replay) / shorter
-                // overrides stay verbatim.
-                let effective_drain = if state.seen_any_event_msg || terminal_drain.is_zero() {
-                    terminal_drain
-                } else {
-                    match legacy_terminal_drain {
-                        Some(legacy) if legacy > terminal_drain => legacy,
-                        _ => terminal_drain,
-                    }
-                };
-                if state.saw_assistant_text && !state.has_pending_tool_call() {
-                    if effective_drain.is_zero()
-                        || last_output_at.is_some_and(|at| at.elapsed() >= effective_drain)
-                    {
-                        if heuristic_finalize_allowed(&mut state, rollout_path, current_offset) {
-                            emit_done(
-                                &sender,
-                                &mut state,
-                                RolloutFinalizePath::Heuristic,
-                                rollout_path,
-                                current_offset,
-                                terminal_range,
-                            );
-                            return Ok((
-                                ReadOutputResult::Completed {
-                                    offset: current_offset,
-                                },
-                                outcome(&state, seek_offset),
-                            ));
-                        }
-                        last_output_at = Some(Instant::now());
-                    }
-                }
-                // #2419 (Codex HIGH): bounded recovery for a pending tool call
-                // whose `*_output` never arrives (hung tool / malformed line /
-                // call_id skew) — else the drain gate stays shut forever while
-                // the pane lives and the Discord turn hangs. After
-                // `pending_tool_call_deadline` of inactivity past the last
-                // lifecycle event we surface a terminal Done. #2429 HIGH 2:
-                // with `apply_pending_tool_deadline_without_assistant_text`
-                // (default) it ALSO fires for a tool that hangs BEFORE any
-                // assistant text (previously fell to the 30 min global); the
-                // warning copy flags the no-text case for operators.
-                let tool_deadline_gate = state.has_pending_tool_call()
-                    && (state.saw_assistant_text
-                        || apply_pending_tool_deadline_without_assistant_text);
-                if tool_deadline_gate
-                    && let Some(deadline) = pending_tool_call_deadline
-                    && last_output_at.is_some_and(|at| at.elapsed() >= deadline)
-                {
-                    let busy_signal = pane_busy_probe
-                        .as_mut()
-                        .map_or(super::input::CodexPaneBusySignal::Unavailable, |probe| {
-                            probe()
-                        });
-                    if busy_signal == super::input::CodexPaneBusySignal::Fresh {
-                        let veto_started_at =
-                            *pane_busy_veto_started_at.get_or_insert_with(Instant::now);
-                        if veto_started_at.elapsed() < pane_busy_veto_cap {
-                            tracing::debug!(
-                                rollout_path = %rollout_path.display(),
-                                pending_keyed = state.pending_tool_calls.len(),
-                                pending_unkeyed = state.pending_tool_calls_unkeyed,
-                                veto_elapsed_ms = veto_started_at.elapsed().as_millis(),
-                                veto_cap_ms = pane_busy_veto_cap.as_millis(),
-                                "Codex rollout tail kept pending tool call open because the pane busy signal is fresh"
-                            );
-                            std::thread::sleep(Duration::from_millis(100));
-                            continue;
-                        }
-                        tracing::warn!(
-                            rollout_path = %rollout_path.display(),
-                            veto_elapsed_ms = veto_started_at.elapsed().as_millis(),
-                            veto_cap_ms = pane_busy_veto_cap.as_millis(),
-                            "Codex pane-busy veto reached its hard cap; failing open to pending-tool recovery"
-                        );
-                    }
-
-                    let elapsed_secs = last_output_at
-                        .map(|at| at.elapsed().as_secs())
-                        .unwrap_or_default();
-                    let tool_first = !state.saw_assistant_text;
-                    tracing::warn!(
-                        rollout_path = %rollout_path.display(),
-                        elapsed_secs,
-                        pending_keyed = state.pending_tool_calls.len(),
-                        pending_unkeyed = state.pending_tool_calls_unkeyed,
-                        tool_first,
-                        "Codex rollout tail tool-call deadline expired; emitting Done to unblock turn"
-                    );
-                    let mut result_text = state.final_text.clone();
-                    let warning = if tool_first {
-                        format!(
-                            "⚠ Codex tool call did not resolve within {}s before any assistant text — emitting empty response to unblock turn.",
-                            elapsed_secs
-                        )
-                    } else {
-                        format!(
-                            "\n\n⚠ Codex tool call did not resolve within {}s — emitting partial response.",
-                            elapsed_secs
-                        )
-                    };
-                    if tool_first {
-                        result_text = warning;
-                    } else {
-                        result_text.push_str(&warning);
-                    }
-                    sender.send(StreamMessage::Done {
-                        result: result_text,
-                        session_id: state.session_id.clone(),
-                    });
-                    return Ok((
-                        ReadOutputResult::Completed {
-                            offset: current_offset,
-                        },
-                        outcome(&state, seek_offset),
-                    ));
-                }
-                if !is_alive() {
-                    let result = if state.saw_assistant_text {
-                        emit_done(
-                            &sender,
-                            &mut state,
-                            RolloutFinalizePath::Heuristic,
-                            rollout_path,
-                            current_offset,
-                            (terminal_range.0, terminal_range.1, false),
-                        );
-                        ReadOutputResult::Completed {
-                            offset: current_offset,
-                        }
-                    } else {
-                        ReadOutputResult::SessionDied {
-                            offset: current_offset,
-                        }
-                    };
-                    return Ok((result, outcome(&state, seek_offset)));
-                }
-                // #2182: hung-TUI guard (else the tailer lives forever, no
-                // `Done`). #3419 B: fire on IDLE, not absolute age — silence
-                // since the last rollout activity (`last_output_at`: assistant
-                // text AND tool/event lifecycle, NOT empty 100ms polls), or
-                // `started_at` while no output ever arrived. A live codex turn
-                // (write_stdin/tool/event) resets idle and survives; only a
-                // genuinely silent turn trips `deadline`. `!saw_assistant_text`
-                // keeps this the no-text branch (post-text drain owns the rest).
-                let idle_elapsed =
-                    last_output_at.map_or_else(|| started_at.elapsed(), |at| at.elapsed());
-                if !state.saw_assistant_text
-                    && let Some(deadline) = assistant_response_deadline
-                    && idle_elapsed >= deadline
-                {
-                    let elapsed_secs = idle_elapsed.as_secs();
-                    tracing::warn!(
-                        rollout_path = %rollout_path.display(),
-                        elapsed_secs,
-                        "Codex rollout tail idle past deadline with no assistant response; emitting Done"
-                    );
-                    sender.send(StreamMessage::Done {
-                        result: format!(
-                            "⚠ Codex TUI produced no assistant response within {}s — turn timed out.",
-                            elapsed_secs
-                        ),
-                        session_id: state.session_id.clone(),
-                    });
-                    return Ok((
-                        ReadOutputResult::Completed {
-                            offset: current_offset,
-                        },
-                        outcome(&state, seek_offset),
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Ok(n) => {
-                current_offset += n as u64;
-                partial_line.extend_from_slice(&buf[..n]);
-                // #2172 cancel boundary: a single `read` may return many
-                // newline-delimited rollout records. Without this check,
-                // every line drained from the just-read buffer would be
-                // pushed to the sender BEFORE the next loop iteration
-                // observes cancel — even if the user has already pressed
-                // /stop. The `RelaySuppressionSender` is the canonical
-                // enforcement point: once the shared cancel flag flips,
-                // every `send` call drops on the floor.
-                while let Some(pos) = partial_line.iter().position(|byte| *byte == b'\n') {
-                    // A stop leaves this and later bytes unaccepted in `partial_line`.
-                    if accept.accept_next_record(&state) == parser::NextRecord::StopBefore {
-                        break;
-                    }
-                    if let Some(pin) = &source_pin
-                        && !pin.wait(cancel_token.as_deref(), source_identity)
-                    {
-                        break;
-                    }
-                    let line: Vec<u8> = partial_line.drain(..=pos).collect();
-                    state.record(line.len());
-                    if process_rollout_line_bytes(&line, &sender, &mut state) {
-                        last_output_at = Some(Instant::now());
-                    }
-                }
-            }
-            Err(_) if source_pin.is_some() => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "read Codex rollout {}: {error}",
-                    rollout_path.display()
-                ));
-            }
-        }
-    }
-}
+mod following_source;
+use following_source::tail_rollout_file_until_assistant_response_with_pane_busy_probe;
 
 /// Relay suppression wrapper for `Sender<StreamMessage>` used by the Codex
 /// TUI rollout tail.
@@ -1209,7 +837,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
 struct RelaySuppressionSender<'a> {
     inner: &'a Sender<StreamMessage>,
     cancel_token: Option<&'a CancelToken>,
-    source_pin: Option<&'a super::verified_tail::SourcePin>,
+    source_pin: Option<super::verified_tail::SourcePin>,
     source_identity: crate::services::cluster::stream_relay::SourceFileIdentity,
 }
 
@@ -1231,6 +859,7 @@ impl<'a> RelaySuppressionSender<'a> {
     fn send(&self, message: StreamMessage) {
         if self
             .source_pin
+            .as_ref()
             .is_some_and(|pin| !pin.wait(self.cancel_token, self.source_identity))
         {
             return;
@@ -1247,47 +876,25 @@ impl<'a> RelaySuppressionSender<'a> {
 }
 
 fn try_process_complete_partial_line(
-    partial_line: &mut Vec<u8>,
+    partial: &mut Vec<u8>,
     sender: &RelaySuppressionSender<'_>,
     state: &mut RolloutParseState,
     accept: &parser::RecordAcceptance<'_>,
 ) -> bool {
-    // A flushed partial line is a record too, so it passes the same acceptance judgement.
-    if accept.accept_next_record(state) == parser::NextRecord::StopBefore {
+    if !partial.ends_with(b"\n")
+        || accept.accept_next_record(state) == parser::NextRecord::StopBefore
+    {
         return false;
     }
-    let Ok(line) = std::str::from_utf8(partial_line) else {
-        return false;
-    };
-    let trimmed = line.trim();
-    if trimmed.is_empty() || serde_json::from_str::<Value>(trimmed).is_err() {
-        return false;
-    }
-    let line = std::mem::take(partial_line);
+    let line = std::mem::take(partial);
     state.record(line.len());
     process_rollout_line_bytes(&line, sender, state)
 }
 
-/// `final_offset` is the end of the last COMPLETE record — `source_start`
-/// (where this tail seeked) plus the bytes `state.record()` accepted — NOT the
-/// raw `current_offset` the read loop consumed. The two are equal on every
-/// sealed input and diverge only when a torn write leaves the tail parked
-/// mid-record; see
-/// `codex_tui_final_offset_stops_at_the_last_complete_record_5264`.
-///
-/// #5264 PR-B — known asymmetry, unresolved: this value flows into
-/// `CodexTuiTailResult.final_offset` and from there into the durable
-/// `TuiRuntimeBinding.last_offset` / marker cursor (codex.rs:602, 2134, 2166).
-/// The rebind path in
-/// `services/discord/recovery_engine/rebind_runtime.rs:510-523` advances that
-/// SAME durable binding and marker from `ReadOutputResult`'s offset, i.e. the
-/// raw `current_offset`. Before this branch both expressions produced the same
-/// number, so the two paths now advance one cursor with two different meanings.
-/// That asymmetry was introduced here and is deliberately left alone: which of
-/// the two the rebind path should use is a separate judgement, out of scope for
-/// this change.
-fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
+/// The durable cursor ends after the last accepted newline, including on recovery joins.
+fn outcome(state: &RolloutParseState, source_start: u64, path: &Path) -> RolloutTailOutcome {
     RolloutTailOutcome {
+        rollout_path: path.to_path_buf(),
         harvest: state.harvest,
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
@@ -1501,6 +1108,297 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::mpsc;
+
+    fn idle_deadline_probe(
+        path: &Path,
+        deadline: Duration,
+        probe: impl FnMut() -> PaneLiveness,
+    ) -> (ReadOutputResult, Vec<StreamMessage>) {
+        let (tx, rx) = mpsc::channel();
+        let (result, _) = tail_rollout_file_until_assistant_response(
+            path,
+            0,
+            None,
+            &tx,
+            None,
+            probe,
+            Duration::ZERO,
+            Some(deadline),
+            None,
+            true,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        drop(tx);
+        (result, rx.into_iter().collect())
+    }
+
+    #[test]
+    fn codex_idle_deadline_waits_for_each_death_confirmation() {
+        for deadline in [
+            Duration::ZERO,
+            Duration::from_millis(50),
+            Duration::from_millis(150),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let mut observed = Vec::new();
+            let started = Instant::now();
+            let (result, messages) = idle_deadline_probe(file.path(), deadline, || {
+                calls += 1;
+                assert!(calls <= 3, "death confirmation must be bounded");
+                observed.push(started.elapsed());
+                PaneLiveness::DeadOrAbsent
+            });
+            println!("deadline={deadline:?} probe_elapsed={observed:?}");
+            assert!(
+                matches!(result, ReadOutputResult::SessionDied { offset: 0 }),
+                "{deadline:?}: {result:?}"
+            );
+            assert_eq!(
+                calls, 3,
+                "{deadline:?}: idle timeout preempted confirmation"
+            );
+            assert!(
+                !messages
+                    .iter()
+                    .any(|m| matches!(m, StreamMessage::Done { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_resumes_after_alive_or_probe_error() {
+        for (recovery_at, recovery) in [
+            (2, PaneLiveness::Live),
+            (3, PaneLiveness::Live),
+            (2, PaneLiveness::ProbeError),
+            (3, PaneLiveness::ProbeError),
+            (1, PaneLiveness::ProbeError),
+        ] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= recovery_at,
+                    "recovery must release the expired deadline"
+                );
+                if calls == recovery_at {
+                    recovery
+                } else {
+                    PaneLiveness::DeadOrAbsent
+                }
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset: 0 }),
+                "{recovery:?} at {recovery_at}: {result:?}"
+            );
+            assert_eq!(calls, recovery_at);
+            assert_eq!(messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result.contains("timed out"))).count(), 1);
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_reads_growth_during_confirmation() {
+        let reasoning = "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n";
+        for growth_at in [2, 3] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= growth_at + 1,
+                    "growth must reset confirmation and be read"
+                );
+                if calls == growth_at {
+                    std::fs::write(file.path(), reasoning).unwrap();
+                }
+                if calls > growth_at {
+                    PaneLiveness::Live
+                } else {
+                    PaneLiveness::DeadOrAbsent
+                }
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset } if offset == reasoning.len() as u64),
+                "growth at {growth_at}: {result:?}"
+            );
+            assert_eq!(calls, growth_at + 1);
+            assert_eq!(messages.iter().filter(|m| matches!(m, StreamMessage::Done { result, .. } if result.contains("timed out"))).count(), 1);
+        }
+    }
+
+    #[test]
+    fn codex_idle_deadline_native_terminal_preempts_confirmation() {
+        let final_record = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"late answer\"}}\n";
+        for final_at in [2, 3] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut calls = 0;
+            let (result, messages) = idle_deadline_probe(file.path(), Duration::ZERO, || {
+                calls += 1;
+                assert!(
+                    calls <= final_at,
+                    "native terminal must complete before another probe"
+                );
+                if calls == final_at {
+                    std::fs::write(file.path(), final_record).unwrap();
+                }
+                PaneLiveness::DeadOrAbsent
+            });
+            assert!(
+                matches!(result, ReadOutputResult::Completed { offset } if offset == final_record.len() as u64),
+                "final at {final_at}: {result:?}"
+            );
+            assert_eq!(calls, final_at);
+            let done: Vec<_> = messages
+                .iter()
+                .filter_map(|m| match m {
+                    StreamMessage::Done { result, .. } => Some(result.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(done, ["late answer"]);
+        }
+    }
+
+    #[test]
+    fn codex_liveness_probe_timeout_and_spawn_failure_preserve_tail() {
+        use crate::services::platform::tmux::liveness_tests::{output, probe};
+        let mut outcomes = Vec::new();
+        for error in ["tmux has-session timed out", "failed to spawn tmux"] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::new(CancelToken::new());
+            let mut calls = 0;
+            let result = tail_rollout_file_from_offset(
+                file.path(),
+                0,
+                None,
+                tx,
+                Some(cancel.clone()),
+                || {
+                    calls += 1;
+                    if calls == 1 {
+                        probe("fake-pane", Duration::from_secs(1), vec![Err(error.into())])
+                    } else {
+                        if calls == 3 {
+                            cancel
+                                .cancelled
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        probe(
+                            "fake-pane",
+                            Duration::from_secs(1),
+                            vec![output(0, "", ""), output(0, "0\n", "")],
+                        )
+                    }
+                },
+            )
+            .unwrap();
+            let sent_done = rx
+                .try_iter()
+                .any(|m| matches!(m, StreamMessage::Done { .. }));
+            outcomes.push((error, result, calls, sent_done));
+        }
+        assert!(
+            outcomes.iter().all(|(_, result, calls, sent_done)| {
+                matches!(result, ReadOutputResult::Cancelled { .. }) && *calls == 3 && !sent_done
+            }),
+            "probe failures ended the live tail: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn codex_liveness_confirmed_death_requires_three_probes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut calls = 0;
+        let result = tail_rollout_file_from_offset(file.path(), 0, None, tx, None, || {
+            calls += 1;
+            PaneLiveness::DeadOrAbsent
+        })
+        .unwrap();
+        assert!(matches!(
+            result,
+            ReadOutputResult::SessionDied { offset: 0 }
+        ));
+        assert_eq!(calls, 3, "a single negative must not end the tail");
+    }
+
+    #[test]
+    fn codex_liveness_alive_or_unknown_before_threshold_resets_death() {
+        for recovery in [PaneLiveness::Live, PaneLiveness::ProbeError] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let (tx, _rx) = mpsc::channel();
+            let mut calls = 0;
+            let result = tail_rollout_file_from_offset(file.path(), 0, None, tx, None, || {
+                calls += 1;
+                if calls == 3 {
+                    recovery
+                } else {
+                    PaneLiveness::DeadOrAbsent
+                }
+            })
+            .unwrap();
+            assert!(matches!(result, ReadOutputResult::SessionDied { .. }));
+            assert_eq!(calls, 6, "{recovery:?} must break consecutive negatives");
+        }
+    }
+
+    #[test]
+    fn codex_liveness_growth_during_final_probe_is_read_before_death() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut calls = 0;
+        let result = tail_rollout_file_from_offset(file.path(), 0, None, tx, None, || {
+            calls += 1;
+            if calls == 3 {
+                std::fs::write(file.path(), concat!(
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"late answer\"}]}}\n",
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"late answer\"}}\n"
+                )).unwrap();
+            }
+            PaneLiveness::DeadOrAbsent
+        }).unwrap();
+        assert!(
+            matches!(result, ReadOutputResult::Completed { .. }),
+            "growth during the death probe was lost: {result:?}"
+        );
+        let done: Vec<_> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                StreamMessage::Done { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done, ["late answer"]);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn codex_liveness_explicit_final_completes_before_failed_probe() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"answer\"}}\n").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut calls = 0;
+        let result = tail_rollout_file_from_offset(file.path(), 0, None, tx, None, || {
+            calls += 1;
+            PaneLiveness::ProbeError
+        })
+        .unwrap();
+        assert!(matches!(result, ReadOutputResult::Completed { .. }));
+        assert_eq!(calls, 0);
+        assert_eq!(
+            rx.try_iter()
+                .filter(|m| matches!(m, StreamMessage::Done { result, .. } if result == "answer"))
+                .count(),
+            1
+        );
+    }
 
     fn collect_rollout(lines: &str, start_offset: u64) -> Vec<StreamMessage> {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -2284,19 +2182,20 @@ mod tests {
     }
 
     #[test]
-    fn terminal_drain_processes_final_line_without_newline() {
+    fn terminal_drain_holds_final_line_without_newline() {
         let messages = collect_rollout(
             r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"final no newline"}]}}"#,
             0,
         );
 
-        assert!(messages.iter().any(
+        assert!(!messages.iter().any(
             |message| matches!(message, StreamMessage::Text { content } if content == "final no newline")
         ));
-        assert!(matches!(
-            messages.last(),
-            Some(StreamMessage::Done { result, .. }) if result == "final no newline"
-        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Done { .. }))
+        );
     }
 
     #[test]
@@ -5003,9 +4902,9 @@ mod tests {
     fn every_handoff_tail_entry_point_uses_the_shared_options_constructor() {
         let source = include_str!("rollout_tail.rs");
         for entry in [
-            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux(",
-            "pub fn tail_warm_followup_rollout_for_tmux(",
-            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux(",
+            "pub fn tail_latest_rollout_for_cwd_with_handoff_for_tmux",
+            "pub fn tail_warm_followup_rollout_for_tmux",
+            "pub fn tail_resumed_rollout_for_session_with_handoff_for_tmux",
         ] {
             let body = source
                 .split_once(entry)

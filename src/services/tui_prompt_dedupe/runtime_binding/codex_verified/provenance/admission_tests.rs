@@ -113,8 +113,10 @@ fn cancellation_before_or_after_attach_withholds_every_later_admission() {
     let before = origin(584_603, "before");
     let cancelled = token("before");
     cancelled.publish_cancel("user stop");
-    let record = issue(&before, &cancelled).unwrap();
-    assert_eq!(record.admit(&before, || ()), Err("cancelled_before_attach"));
+    assert!(matches!(
+        issue(&before, &cancelled),
+        Err("cancelled_before_attach")
+    ));
     let after = origin(584_603, "after");
     let live = token("after");
     let record = issue(&after, &live).unwrap();
@@ -163,4 +165,79 @@ fn not_ready_or_revoked_records_admit_nothing() {
     assert_eq!(record.admit(&origin, || ()), Ok(()));
     revoke_channel(584_605, "o_unavailable");
     assert_eq!(record.admit(&origin, || ()), Err("o_unavailable"));
+}
+
+/// C17-A3: even a valid exact permit cannot start Prepared or POST at the production fallback.
+/// No READY override is installed: the real writer must reach the default-off admission check.
+#[cfg(unix)]
+#[tokio::test]
+async fn production_readiness_fallback_withholds_real_writer_effects() {
+    use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
+    use crate::services::tui_o::store::{
+        Initialized, LEDGER_FILE, OStore, STORE_DIR_NAME, StoreConfig,
+    };
+    use crate::services::tui_o::writer::deliver::Step;
+    use crate::services::tui_o::writer::owed::tests::owed_writer;
+    use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
+
+    struct RegistryCleanup(u64);
+    impl Drop for RegistryCleanup {
+        fn drop(&mut self) {
+            forget_channel_for_tests(self.0);
+        }
+    }
+
+    let channel = 584_606;
+    let _cleanup = RegistryCleanup(channel);
+    let origin = origin(channel, "fallback-turn");
+    let owner = token("fallback-turn");
+    let record = issue(&origin, &owner).unwrap();
+    let lookup_result = lookup(&origin);
+
+    let runtime = tempfile::tempdir().unwrap();
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
+        .unwrap()
+        .unwrap();
+    let era = store
+        .begin_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: vec![],
+                initial_anchor: 100,
+                build_digest: "c17-a3".into(),
+                at: chrono::Utc::now(),
+            })
+        })
+        .unwrap();
+    let channel_store = store.open_channel(&era, channel).unwrap().unwrap();
+    let (mut writer, port) = owed_writer(channel_store);
+    let ledger_path = runtime
+        .path()
+        .join(STORE_DIR_NAME)
+        .join(channel.to_string())
+        .join(LEDGER_FILE);
+    let before_bytes = std::fs::read(&ledger_path).unwrap();
+    let before_serial = writer.store().ledger().next_serial();
+    let piece = Derived::Piece(PieceWork {
+        unit_key: UnitKey {
+            channel_id: channel,
+            provider: ShadowProvider::Codex,
+            native_key: "c17-a3-body".into(),
+            kind: UnitKind::Body,
+        },
+        index: 0,
+        payload: "출처 활성화 전에는 보내지 않는다".into(),
+    });
+    let step = writer
+        .deliver_admitted(&piece, Some((&record, &origin)))
+        .await;
+
+    // Check actual effects before helper results so an opened fallback fails on a real POST.
+    assert!(port.posts().is_empty(), "fallback permitted a real POST");
+    assert_eq!(std::fs::read(ledger_path).unwrap(), before_bytes);
+    assert_eq!(writer.store().ledger().next_serial(), before_serial);
+    assert_eq!(step, Step::Withheld);
+    assert!(!writer.is_stopped());
+    assert_eq!(lookup_result.err(), Some("verified_owed_not_ready"));
+    assert_eq!(record.admit(&origin, || ()), Err("verified_owed_not_ready"));
 }

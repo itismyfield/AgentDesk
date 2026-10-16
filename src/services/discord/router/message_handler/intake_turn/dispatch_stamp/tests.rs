@@ -55,6 +55,7 @@ fn assert_path_returns_before_handoff(
     source: &str,
     start_anchor: &str,
     end_anchor: &str,
+    expected_return: &str,
     expected_returns: usize,
 ) {
     let path = source
@@ -65,7 +66,12 @@ fn assert_path_returns_before_handoff(
         .unwrap_or_else(|| panic!("path end anchor exists after start: {end_anchor}"))
         .0;
     assert_eq!(
-        path.matches("return Ok(());").count(),
+        path.matches("return Ok(").count(),
+        expected_returns,
+        "the anchored path must not gain other successful returns: {start_anchor}"
+    );
+    assert_eq!(
+        path.matches(expected_return).count(),
         expected_returns,
         "the anchored path must retain its own inline return(s): {start_anchor}"
     );
@@ -118,19 +124,22 @@ async fn inline_completed_paths_never_reach_dispatched_pg() {
     assert_path_returns_before_handoff(
         source,
         "let (session_id, memento_context_loaded, current_path, auto_start_provider_isolated) =",
-        "let turn_start_attempt =",
+        "let add_turn_pending =",
+        "return Ok(IntakeExecution::Executed);",
         2,
     );
     assert_path_returns_before_handoff(
         source,
         "let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =",
         "let force_fresh_provider_session =",
+        "return Ok(IntakeExecution::Executed);",
         1,
     );
     assert_path_returns_before_handoff(
         source,
         "if stale_dispatch_guard::abort_terminal_dispatch_at_turn_start(",
         "claim_bootstrap::bootstrap_claimed_turn(",
+        "return Ok(IntakeExecution::Executed);",
         1,
     );
     // The Discord/session fixtures needed to drive these handler branches do
@@ -156,6 +165,7 @@ async fn race_loss_requeue_leaves_row_in_spawned_and_worker_closes_it_pg() {
         include_str!("../../intake_turn.rs"),
         "let Some(intake_runtime_transition) = runtime_transition::acquire_after_redirect_or_requeue(",
         "let (mut session_id, mut memento_context_loaded, current_path) =",
+        "return Ok(IntakeExecution::deferred(channel_id));",
         1,
     );
     assert_worker_closes_spawned(&pool, "race-loss-requeue").await;
@@ -174,6 +184,7 @@ async fn hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg() {
         include_str!("../../intake_turn.rs"),
         "if let Some(diagnostic) = tui_busy_diagnostic {",
         "if recapture_offset_after_busy_wait {",
+        "return Ok(IntakeExecution::deferred(channel_id));",
         1,
     );
     assert_worker_closes_spawned(&pool, "hosted-tui-busy").await;

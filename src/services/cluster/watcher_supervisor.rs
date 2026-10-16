@@ -113,11 +113,13 @@ impl ActiveRelays {
     }
 
     fn remove(&mut self, session: &str) -> Option<StreamRelayHandle> {
-        self.by_session.remove(session)
+        let handle = self.by_session.remove(session)?;
+        Some(handle)
     }
 
     fn drain(&mut self) -> Vec<(String, StreamRelayHandle)> {
-        self.by_session.drain().collect()
+        let drained: Vec<_> = self.by_session.drain().collect();
+        drained
     }
 }
 

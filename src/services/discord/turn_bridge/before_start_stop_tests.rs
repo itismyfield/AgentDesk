@@ -827,6 +827,15 @@ impl Close {
     }
 }
 
+#[path = "before_start_stop_disk_gate_tests.rs"]
+mod disk_gate;
+
+#[path = "before_start_stop_clear_order_tests.rs"]
+mod clear_order;
+
+#[path = "before_start_stop_policy_tests.rs"]
+mod policy;
+
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,
@@ -908,7 +917,7 @@ async fn coldstop_notice_ack_only_after_delivery() {
     let finalized_on = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = finalized_on.clone();
     test_hooks::observe(Some(Box::new(move |step, _| {
-        if step == "before_finalize" {
+        if step == "before_submit" {
             let durable =
                 discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, 922);
             let receipt = durable.and_then(|row| row.herdr_before_start_stop).unwrap();
@@ -923,7 +932,7 @@ async fn coldstop_notice_ack_only_after_delivery() {
     let settled = close.consume(async { Ok(fallback) }).await;
     test_hooks::observe(None);
     assert!(settled);
-    assert_eq!(*finalized_on.borrow(), [true], "acked before finalize");
+    assert_eq!(*finalized_on.borrow(), [true], "acked before the clear");
     assert_eq!(test_hooks::submitted(), submitted + 1);
     assert!(close.durable().is_none());
 }
@@ -1004,7 +1013,12 @@ const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midwa
 
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
+    use crate::services::turn_orchestrator::policy_close::{PolicyClear, test_hooks};
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
+    let clear = |row: &InflightTurnState, generation| {
+        let receipt = row.clone().into_policy_receipt(generation);
+        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
+    };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;
     let admitted = close
@@ -1027,20 +1041,11 @@ async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
     for change in changes {
         let mut wrong = acked.clone();
         change(&mut wrong);
-        assert_eq!(
-            wrong.clear_before_start_policy_receipt(generation),
-            GuardedClearOutcome::UserMsgMismatch
-        );
+        assert_eq!(clear(&wrong, generation), PolicyClear::Mismatch);
         assert_eq!(close.bytes(), before);
     }
-    assert_eq!(
-        admitted.clear_before_start_policy_receipt(generation),
-        GuardedClearOutcome::UserMsgMismatch
-    );
-    assert_eq!(
-        acked.clear_before_start_policy_receipt(generation + 1),
-        GuardedClearOutcome::UserMsgMismatch
-    );
+    assert_eq!(clear(&admitted, generation), PolicyClear::Mismatch);
+    assert_eq!(clear(&acked, generation + 1), PolicyClear::Mismatch);
     assert_eq!(
         discord::inflight::clear_inflight_state_for_captured_episode(
             &close.shared.provider,
@@ -1055,14 +1060,12 @@ async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
         925
     ));
     assert_eq!(close.bytes(), before);
-    assert_eq!(
-        acked.clear_before_start_policy_receipt(generation),
-        GuardedClearOutcome::Cleared
-    );
+    assert_eq!(clear(&acked, generation), PolicyClear::Cleared);
     assert!(close.bytes().is_none());
 }
 
 const CRASH_PHASE: &str = "ADK_COLDSTOP_B_PHASE";
+const CRASH_STEP: &str = "ADK_COLDSTOP_B_STEP";
 const CRASH_ROOT: &str = "ADK_COLDSTOP_B_ROOT";
 const CRASH_CHANNEL: u64 = 1_479_671_301_387_210_000;
 
@@ -1090,20 +1093,29 @@ fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) 
     pid
 }
 
-/// A close dying after its receipt, notice ack or just before finalize is finished by the next
-/// restart, led by the receipt alone (no Herdr marker): the row goes, the stop shows once in total.
+/// A close dying before its clear is finished by the next restart from the receipt alone (no Herdr
+/// marker): after its receipt, its ACK, or just before its policy submission. One dying inside the
+/// mailbox step right after the clear leaves nothing. Either way the stop shows once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
     if let Ok(phase) = std::env::var(CRASH_PHASE) {
         return crash_phase(&phase).await;
     }
-    for step in ["after_receipt", "after_notice_ack", "before_finalize"] {
+    for step in [
+        "after_receipt",
+        "after_notice_ack",
+        "before_submit",
+        "after_policy_clear",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let close = [
             (CRASH_ROOT, root.path().as_os_str()),
             (test_hooks::STOP_AT, std::ffi::OsStr::new(step)),
         ];
-        let restore = [(CRASH_ROOT, root.path().as_os_str())];
+        let restore = [
+            (CRASH_ROOT, root.path().as_os_str()),
+            (CRASH_STEP, std::ffi::OsStr::new(step)),
+        ];
         let closed = run_crash_phase("CLOSE", "COLDSTOP_B_STOP", &close);
         let restored = run_crash_phase("RESTORE", "COLDSTOP_B_PHASE RESTORE", &restore);
         assert_ne!(closed, restored);
@@ -1134,6 +1146,18 @@ async fn crash_phase(phase: &str) {
     let generation = crate::services::discord::runtime_store::allocate_process_generation();
     if phase == "CLOSE" {
         let close = Close::open_in(generation, CRASH_CHANNEL, |_| {}).await;
+        // The clear runs inside the close's mailbox step; this process dies right after it.
+        if std::env::var(test_hooks::STOP_AT).as_deref() == Ok("after_policy_clear") {
+            crate::services::turn_orchestrator::policy_close::test_hooks::arm(Box::new(|stage| {
+                if stage == crate::services::turn_orchestrator::policy_close::test_hooks::Stage::AfterClear {
+                    println!(
+                        "COLDSTOP_B_STOP after_policy_clear pid={}",
+                        std::process::id()
+                    );
+                    std::process::exit(0);
+                }
+            }));
+        }
         assert_eq!(
             close.shared.restart.current_generation,
             crate::services::discord::runtime_store::process_generation()
@@ -1156,10 +1180,15 @@ async fn crash_phase(phase: &str) {
     writable.provider = ProviderKind::Claude;
     writable.restart.current_generation = generation;
     let row =
-        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL)
-            .expect("the crashed close left its row");
-    let receipt = row.herdr_before_start_stop.expect("with its receipt");
-    assert!(receipt.supported() && receipt.admitted_generation() < generation);
+        discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL);
+    // A close that cleared its receipt before dying leaves restart nothing to finish.
+    if std::env::var(CRASH_STEP).as_deref() == Ok("after_policy_clear") {
+        assert!(row.is_none(), "the receipt cleared before the crash");
+    } else {
+        let row = row.expect("the crashed close left its row");
+        let receipt = row.herdr_before_start_stop.expect("with its receipt");
+        assert!(receipt.supported() && receipt.admitted_generation() < generation);
+    }
     let recorder =
         crate::services::discord::recovery_engine::o_cut_recorder::start(CRASH_CHANNEL).await;
     crate::services::discord::recovery_engine::restore_inflight_turns(

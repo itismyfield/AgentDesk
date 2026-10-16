@@ -95,8 +95,10 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
             while let Ok(tmux_session_name) = done_rx.try_recv() {
                 active_tails.remove(&tmux_session_name);
             }
+            // A reservation that never settled still relays what it held.
+            crate::services::tui_prompt_dedupe::drain_expired_handoffs();
 
-            for (tmux_session_name, binding) in
+            for (tmux_session_name, _) in
                 crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
                     RuntimeHandoffKind::CodexTui,
                 )
@@ -165,6 +167,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     prompt: inflight.user_text.clone(),
                                     line_end_offset,
                                     entry_id: None,
+                                    evidence: Default::default(),
                                 }))
                             }
                             Ok(CodexTurnPrompt::NotYet) => Ok(None),
@@ -328,8 +331,16 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                     );
                 }
 
+                crate::services::tui_prompt_dedupe::codex_replay_restored_handoff_inputs(
+                    &tmux_session_name, &rollout_path,
+                );
                 let scan =
-                    match scan_codex_idle_rollout_for_prompt(&rollout_path, binding.last_offset) {
+                    match super::idle_transcript_scan::scan_codex_records(
+                        match std::fs::File::open(&rollout_path) { Ok(file) => file, Err(_) => continue },
+                        binding.last_offset, None, true,
+                        crate::services::tui_prompt_dedupe::codex_restore_observed_end(&tmux_session_name)
+                            .unwrap_or(binding.last_offset),
+                    ) {
                         Ok(scan) => scan,
                         Err(error) => {
                             tracing::debug!(
@@ -342,32 +353,51 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         }
                     };
 
+                let (scan, stats) = scan;
                 match scan {
                     CodexIdleRolloutScan::NoPrompt { offset } => {
                         if offset != binding.last_offset {
-                            advance_codex_tui_runtime_binding_and_marker_offset(
+                            let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
                                 &tmux_session_name,
                                 &rollout_path,
-                                offset,
+                                Some(binding.last_offset), offset,
                             );
+                            if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
+                                let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
+                                crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
+                            }
                         }
                     }
                     CodexIdleRolloutScan::Prompt {
                         prompt,
                         line_end_offset,
                         entry_id,
+                        evidence,
                     } => {
+                        let prompt_start = crate::services::codex_tui::session::checkpoint::at(
+                            &rollout_path, line_end_offset.saturating_sub(1),
+                        ).unwrap_or(line_end_offset);
+                        if prompt_start > binding.last_offset {
+                            let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
+                                &tmux_session_name, &rollout_path, Some(binding.last_offset), prompt_start,
+                            );
+                            if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
+                                let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
+                                crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
+                            }
+                        }
                         let observed_at = chrono::Utc::now();
-                        let own_turn = super::idle_transcript_scan::codex_native_turn_at(
+                        let own_turn = evidence.turn_id.clone().or_else(|| super::idle_transcript_scan::codex_native_turn_at(
                             &rollout_path,
                             line_end_offset,
-                        );
+                        ));
                         let observation =
-                            crate::services::tui_prompt_dedupe::observe_codex_prompt_in_turn_at(
+                            crate::services::tui_prompt_dedupe::observe_restored_codex_record_prompt_at(
                                 &tmux_session_name,
-                                &prompt,
-                                entry_id.as_deref(),
-                                own_turn.as_deref(),
+                                (&rollout_path,
+                                    prompt_start,
+                                    &evidence),
+                                (&prompt, entry_id.as_deref(), own_turn.as_deref()),
                                 observed_at,
                             );
                         tracing::info!(
@@ -394,6 +424,8 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             &rollout_path,
                             observed_at,
                         );
+                        #[cfg(test)]
+                        super::synthetic_start::bridge_handoff::pause_for_test(&SCAN_LEASE_PAUSE, channel_id).await;
                         tracing::info!(
                             tmux_session_name = %tmux_session_name,
                             channel_id = channel_id.get(),
@@ -527,6 +559,8 @@ pub(super) static TAIL_STARTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 type TestPause = Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>;
 #[cfg(test)]
 pub(super) static CAPTURE_PAUSE: Mutex<TestPause> = Mutex::new(None);
+#[cfg(all(test, unix))]
+pub(super) static SCAN_LEASE_PAUSE: Mutex<TestPause> = Mutex::new(None);
 /// Test hook: per tmux session, how often a poll reached each checkpoint.
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

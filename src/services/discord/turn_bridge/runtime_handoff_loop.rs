@@ -7,7 +7,6 @@ use crate::services::agent_protocol::{RuntimeHandoff, RuntimeHandoffKind};
 
 use super::*;
 
-mod claude_e;
 mod watcher_handoff;
 use watcher_handoff::{
     WatcherRuntimeHandoffContext, WatcherRuntimeHandoffState,
@@ -844,42 +843,6 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     state_dirty =
                         tmux_ready_state_dirty_after_guarded_save(state_dirty, Some(outcome));
                     guarded_save_outcome = Some(outcome);
-                    if done {
-                        terminal_control_drain_until = None;
-                    }
-                }
-                RuntimeHandoff::ClaudeEAdapter {
-                    output_path,
-                    session_name,
-                    last_offset,
-                    pid,
-                } => {
-                    // Phase 1 of the claude-e rollout (see
-                    // `docs/claude-e-rollout/`). The adapter
-                    // is a per-turn PTY spawn — no tmux pane
-                    // backs it, so `tmux_session_name` must
-                    // stay `None` to satisfy the
-                    // `inflight_tmux_one_to_one` invariant
-                    // when a channel switches between TUI
-                    // and claude-e. `session_name` is the
-                    // logical adapter id (Claude session uuid
-                    // or `claude-e-{pid}`); it does not map
-                    // to a tmux pane and is intentionally
-                    // not stamped here.
-                    let _ = session_name;
-                    tmux_last_offset = Some(last_offset);
-                    let (next_state_dirty, outcome) = claude_e::stamp_process_evidence(
-                        inflight_state,
-                        output_path,
-                        last_offset,
-                        pid,
-                        state_dirty,
-                    );
-                    state_dirty = next_state_dirty;
-                    guarded_save_outcome = Some(outcome);
-                    if outcome == crate::services::discord::inflight::GuardedSaveOutcome::Saved {
-                        tmux_last_offset = Some(inflight_state.last_offset);
-                    }
                     if done {
                         terminal_control_drain_until = None;
                     }

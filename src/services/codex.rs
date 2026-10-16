@@ -1,3 +1,5 @@
+#[cfg(all(test, unix))]
+pub(crate) mod actual_submit_tests;
 #[cfg(unix)]
 use crate::services::codex_tui::verified_hold;
 mod process_session_launch;
@@ -17,9 +19,11 @@ mod herdr_guard_tests;
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::emit_codex_tui_post_tail_handoff;
+pub(crate) use tui_session_launch::{
+    CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, tui_preflight, verified_warm_preflight,
+};
 #[cfg(unix)]
-use tui_session_launch::prepare_codex_tui_launch_script;
+use tui_session_launch::{prepare_codex_tui_incarnation, publish_codex_tui_launch_script};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
@@ -76,7 +80,7 @@ static CODEX_TUI_SESSION_TURN_LOCKS: LazyLock<dashmap::DashMap<String, CodexTuiS
     LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(unix)]
-fn codex_tui_session_turn_lock(tmux_session_name: &str) -> CodexTuiSessionTurnLock {
+pub(crate) fn codex_tui_session_turn_lock(tmux_session_name: &str) -> CodexTuiSessionTurnLock {
     CODEX_TUI_SESSION_TURN_LOCKS
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -1579,6 +1583,8 @@ struct CodexTuiLaunchScript {
     script_path: String,
     owner_path: String,
     rollout_modified_since: std::time::SystemTime,
+    /// The Discord handoff reserved before launch, held until the tail returns.
+    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the
@@ -1593,52 +1599,6 @@ pub(crate) fn wire_cancel_token_to_tmux_session(
         if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
             token.store_child_pid(pid);
         }
-    }
-}
-
-/// Dispatch the rollout tail for the Direct TUI launch: a resume tails the
-/// selected session's rollout from its committed offset, otherwise we tail the
-/// latest rollout for the cwd. Mirrors the inline resume-vs-fresh branch.
-///
-/// `resume` carries the validated `(rollout_path, start_offset,
-/// selected_session_id)` for the resume branch; `None` selects the fresh tail.
-/// The resume-metadata validation lives in the orchestrator so a missing
-/// rollout-path / session-id short-circuits the launch *before* any tail
-/// dispatch (no tmux leak-kill), matching the pre-refactor inline ordering.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn dispatch_codex_tui_rollout_tail(
-    resume: Option<(&std::path::Path, u64, &str)>,
-    working_dir: &str,
-    rollout_modified_since: std::time::SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    tmux_session_name: &str,
-    prompt: &str,
-) -> Result<crate::services::codex_tui::rollout_tail::CodexTuiTailResult, String> {
-    if let Some((rollout_path, start_offset, selected_session_id)) = resume {
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            selected_session_id,
-            rollout_path,
-            start_offset,
-            rollout_modified_since,
-            sender,
-            cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
-    } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            rollout_modified_since,
-            sender,
-            cancel_token,
-            || tmux_live_pane_bool(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
     }
 }
 
@@ -1665,6 +1625,34 @@ fn execute_streaming_local_tui_tmux(
     // A Herdr channel is refused before the turn lock, warm follow-up or any session cleanup.
     if crate::services::herdr_launch::herdr_configured_for_tui_launch(report_channel_id) {
         return Err(crate::services::herdr_launch::HERDR_NOT_ADMITTED.to_string());
+    }
+    if verified_hold::existing_incarnation(tmux_session_name)
+        && !force_fresh_provider_session
+        && crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled()
+        && let (Some(session_id), Some(channel), Some(token)) =
+            (session_id, report_channel_id, cancel_token.as_ref())
+    {
+        return crate::services::codex_tui::warm_followup::verified_warm(
+            crate::services::codex_tui::warm_followup::VerifiedWarmRequest {
+                tmux: tmux_session_name,
+                channel,
+                session_id,
+                cwd: std::path::Path::new(working_dir),
+                prompt,
+                options: &CodexLaunchOptions::new(prompt)
+                    .with_resume_session_id(Some(session_id))
+                    .with_developer_instructions(developer_instructions)
+                    .with_model(model)
+                    .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
+                    .with_compact_token_limit(compact_token_limit)
+                    .with_readonly_mode(readonly_mode)
+                    .with_fast_mode_enabled(fast_mode_enabled)
+                    .with_goals_enabled(goals_enabled)
+                    .with_cwd(Some(working_dir)),
+                token: std::sync::Arc::clone(token),
+                sender,
+            },
+        );
     }
     let warm_followup_enabled =
         match verified_hold::preflight(tmux_session_name, cancel_token.as_ref()) {
@@ -1702,12 +1690,16 @@ fn execute_streaming_local_tui_tmux(
         .with_fast_mode_enabled(fast_mode_enabled)
         .with_goals_enabled(goals_enabled)
         .with_cwd(Some(working_dir));
+    let (prepared, resume_root) = tui_session_launch::preflight_codex_tui_turn(
+        tmux_session_name,
+        report_channel_id,
+        &launch_options,
+        &session_selection,
+        (session_exists, force_fresh_provider_session),
+        &auth_overlay,
+    )
+    .map_err(|error| error.to_string())?;
     if let Some(fallback_reason) = direct_tui_material_fallback_reason(&launch_options) {
-        if crate::services::codex_tui::canary::enabled_for(tmux_session_name)
-            || crate::services::tui_prompt_dedupe::codex_verified_requires_proof(tmux_session_name)
-        {
-            return verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref());
-        }
         tracing::warn!(
             provider = "codex",
             unsupported_options = fallback_reason,
@@ -1737,9 +1729,8 @@ fn execute_streaming_local_tui_tmux(
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
 
-    // Emergency kill switch: when disabled, bypass the warm module entirely
-    // and retain the pre-#4411 cleanup/relaunch path below.
-    if warm_followup_enabled {
+    // Disabled warm reuse keeps the existing cleanup and relaunch path.
+    if warm_followup_enabled && prepared.is_none() {
         match crate::services::codex_tui::warm_followup::try_codex_tui_warm_followup(
             &session_selection,
             &launch_options,
@@ -1768,6 +1759,13 @@ fn execute_streaming_local_tui_tmux(
         }
     }
 
+    tui_preflight(
+        tmux_session_name,
+        report_channel_id,
+        &launch_options,
+        resume_root.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     if session_exists {
         cleanup_existing_codex_tui_session(
             tmux_session_name,
@@ -1782,25 +1780,44 @@ fn execute_streaming_local_tui_tmux(
     crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(tmux_session_name)
         .cleanup_best_effort();
 
+    let prepared = match prepared {
+        Some(prepared) => prepared,
+        None => prepare_codex_tui_incarnation(
+            tmux_session_name,
+            report_channel_id,
+            &launch_options,
+            &auth_overlay,
+            resume_root.as_deref(),
+        )
+        .map_err(|error| error.to_string())?,
+    };
+
     let CodexTuiLaunchScript {
         prepared,
         script_path,
         owner_path,
         rollout_modified_since,
-    } = prepare_codex_tui_launch_script(
+        handoff: _handoff,
+    } = publish_codex_tui_launch_script(
         tmux_session_name,
         session_id,
         prompt,
         &launch_options,
-        report_channel_id,
-        report_provider,
+        (report_channel_id, report_provider),
         warm_followup_enabled,
-        &auth_overlay,
+        (&auth_overlay, prepared),
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
+    tui_preflight(
+        tmux_session_name,
+        report_channel_id,
+        &launch_options,
+        resume_root.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     let tmux_result = crate::services::platform::tmux::create_session(
         tmux_session_name,
         Some(working_dir),
@@ -1826,6 +1843,11 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
+    // Before the spawn marker: the marker is restart evidence that these checks passed.
+    let validated_tail = crate::services::codex_tui::tail_launch::validate_selection(
+        &prepared.context,
+        &session_selection,
+    )?;
     prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
         tmux_session_name,
         Some(&prepared),
@@ -1839,27 +1861,12 @@ fn execute_streaming_local_tui_tmux(
     // without re-acquiring it. The tail call itself moves its clone into
     // the rollout-tail thread; this clone stays in the launch frame.
     let cancel_token_for_post_tail = cancel_token.clone();
-    // Resume-metadata validation runs HERE — after the cancel-token clone and
-    // immediately before the tail dispatch, matching the pre-refactor inline
-    // ordering. A missing rollout-path / session-id short-circuits the whole
-    // launch with Err *without* the tail-error tmux leak-kill, exactly as the
-    // original did (the validations were `?` above the tail_result assignment).
-    let resume_params = if session_selection.resume {
-        let rollout_path = session_selection
-            .rollout_path
-            .as_deref()
-            .ok_or_else(|| "Codex TUI resume selected without rollout path".to_string())?;
-        let start_offset = session_selection.rollout_start_offset.unwrap_or(0);
-        let selected_session_id = session_selection
-            .selected_session_id
-            .as_deref()
-            .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        Some((rollout_path, start_offset, selected_session_id))
-    } else {
-        None
-    };
-    let tail_result = dispatch_codex_tui_rollout_tail(
-        resume_params,
+    crate::services::codex_tui::tail_launch::record_resume_proof(
+        &prepared.context,
+        &validated_tail,
+    )?;
+    let tail_result = crate::services::codex_tui::tail_launch::dispatch(
+        validated_tail,
         working_dir,
         rollout_modified_since,
         sender.clone(),
@@ -3245,6 +3252,159 @@ mod verified_admission_tests {
     use crate::services::tui_prompt_dedupe::{
         self as dedupe, binding_context::PreparedIncarnation,
     };
+
+    #[test]
+    fn verified_preflight_and_archive_fail_before_any_pane_effect() {
+        use crate::config::TestEnvVarGuard as Guard;
+        use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
+        use std::os::unix::fs::PermissionsExt;
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+        let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let fake =
+            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        let binary = root.path().join("codex");
+        let _binary = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
+        let marker = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "spawn_nonce");
+        std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+        let legacy = PreparedIncarnation::prepare_pinned(
+            "codex",
+            CANARY_TMUX,
+            Some(CANARY_CHANNEL),
+            None,
+            false,
+            Some(root.path().join("sessions")),
+            (None, Some("legacy".into())),
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for (mode, hooks, help, endpoint, fault) in [
+            (CodexSourceMode::Invalid, "1", true, true, None),
+            (CodexSourceMode::Verified, "0", true, true, None),
+            (CodexSourceMode::Verified, "1", false, true, None),
+            (CodexSourceMode::Verified, "1", true, false, None),
+            (
+                CodexSourceMode::Verified,
+                "1",
+                true,
+                true,
+                Some("directory"),
+            ),
+            (CodexSourceMode::Verified, "1", true, true, Some("link")),
+            (CodexSourceMode::Verified, "1", true, true, Some("parent")),
+            (
+                CodexSourceMode::Verified,
+                "1",
+                true,
+                true,
+                Some("archive_directory"),
+            ),
+            (
+                CodexSourceMode::Verified,
+                "1",
+                true,
+                true,
+                Some("archive_link"),
+            ),
+            (
+                CodexSourceMode::Verified,
+                "1",
+                true,
+                true,
+                Some("archive_parent"),
+            ),
+            (
+                CodexSourceMode::Verified,
+                "1",
+                true,
+                true,
+                Some("policy_changed"),
+            ),
+        ] {
+            SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
+            let _hooks = Guard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+                std::ffi::OsStr::new(hooks),
+            );
+            let published = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+                "http://127.0.0.1:9".into(),
+            );
+            let published = endpoint.then_some(published);
+            std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.1'; else echo '{}'; fi\n", if help { "--dangerously-bypass-hook-trust" } else { "unsupported" })).unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(&marker, &legacy.context.execution_nonce).unwrap();
+            let _ = fake.take_calls();
+            dedupe::binding_context::CREATE_FAULT.with(|f| f.set(fault));
+            if fault == Some("policy_changed") {
+                tui_session_launch::BEFORE_PANE_EFFECT.with_borrow_mut(|slot| {
+                    *slot = Some(Box::new(|| unsafe {
+                        std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", "0")
+                    }));
+                });
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let result = execute_streaming_local_tui_tmux(
+                "private request",
+                None,
+                None,
+                None,
+                None,
+                root.path().to_str().unwrap(),
+                tx,
+                None,
+                CANARY_TMUX,
+                None,
+                Some(CANARY_CHANNEL),
+                Some(ProviderKind::Codex),
+                None,
+                false,
+                None,
+                true,
+            );
+            dedupe::binding_context::CREATE_FAULT.with(|f| f.set(None));
+            drop(published);
+            SOURCE_MODE_TEST.with(|m| m.set(None));
+            let calls = fake.take_calls();
+            let effects = calls.iter().any(|c| {
+                ["kill-session", "new-session", "send-keys", "paste-buffer"]
+                    .iter()
+                    .any(|effect| c.starts_with(effect))
+            });
+            let marker_preserved = std::fs::read_to_string(&marker).unwrap_or_default()
+                == legacy.context.execution_nonce;
+            let error = result
+                .as_ref()
+                .err()
+                .map(String::as_str)
+                .unwrap_or_default();
+            let expected = fault.map_or_else(
+                || {
+                    if mode == CodexSourceMode::Invalid {
+                        "SourceModeInvalid".into()
+                    } else {
+                        "HooksUnavailable".into()
+                    }
+                },
+                |step| {
+                    if step == "policy_changed" {
+                        "HooksUnavailable".into()
+                    } else {
+                        format!("injected {step}")
+                    }
+                },
+            );
+            let refusal = error.starts_with("CodexTuiNotAttempted:") && error.contains(&expected);
+            if !refusal || effects || !marker_preserved || rx.try_recv().is_ok() {
+                failures.push(format!("{mode:?}/{hooks}/{help}/{endpoint}/{fault:?}: error={} effects={effects} marker_preserved={marker_preserved} calls={calls:?}", result.is_err()));
+            }
+        }
+        dedupe::reset_state_for_tests();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     fn verified(f: impl FnOnce(&str, &std::path::Path)) {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

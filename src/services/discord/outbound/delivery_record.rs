@@ -39,13 +39,7 @@
 //! `inflight::save_inflight_state`; the sweeper / recovery read via the inflight
 //! loaders) knows these paths exist.
 //!
-//! ## B0 is a pure add (no production caller)
-//!
-//! Like the A1 controller skeleton, B0 ships the types + the store API fully
-//! implemented and tested but wired by NOBODY — B1 adds the shadow-write, B2
-//! flips read-authority, B3 hydrates on restart. So every public item is
-//! `#[allow(dead_code)]` until B1, and the store is behaviorally a no-op in this
-//! PR.
+//! Relay consumers use this sidecar for durable delivery state.
 //!
 //! ## Conservatism (invariants I2 / I3)
 //!
@@ -1822,23 +1816,8 @@ pub(in crate::services::discord) fn range_committed_after_edit_failure(
     )
 }
 
-/// #3593 JSONL-space monotonic dedup predicate (pure, testable). `range_end` is the
-/// END of the consumed JSONL byte range a watcher pass is about to relay;
-/// `committed` is the already-delivered committed JSONL offset (the relay coord's
-/// `confirmed_end_offset`, via [`effective_committed_offset`] — which also fuses the
-/// current-generation durable frontier when read-authority is enabled). Returns `true` iff this range was ALREADY
-/// delivered (`range_end <= committed`), i.e. a re-send would re-post text already
-/// relayed (the #3593 synthetic-resume duplicate, where range_end=422855 sits at or
-/// below committed=443154). MUST be the SAME JSONL byte-offset space on both sides
-/// (never `response_sent_offset`, which is assistant-text-byte space — mixing them
-/// is the category error warned about at the watcher resend site).
-///
-/// `range_end == 0` (empty/zero range) and `committed == 0` (e.g. just reset by a
-/// generation change / pane reset, so nothing is known-delivered) both return
-/// `false` — suppress NOTHING in those cases, so a genuinely-new answer is never
-/// dropped (message-loss prevention dominates duplicate-suppression). Mirror of the
-/// `already_relayed` decision both relay consumers make, with an explicit non-zero
-/// `range_end` guard so an empty range can never be treated as "already committed".
+/// A nonzero JSONL range is already delivered when its end is at or below the committed offset.
+/// Both offsets must use JSONL bytes, never assistant-text bytes; either zero suppresses nothing.
 pub(in crate::services::discord) fn range_already_committed(
     range_end: u64,
     committed: u64,
@@ -1947,12 +1926,7 @@ fn recent_delivered_content_matches_at(
         .is_some_and(|record| recent_content_fingerprint_matches(record, &fingerprint, now_ms))
 }
 
-// #4046 S1r-1 P3-2: module-local only — every caller is in this file. Reverted
-// from the transient `pub(in ...::outbound)` widening (no caller outside this
-// module; behavior unchanged). #5264 PR-B: there are now three call sites —
-// `record_delivered_content_fingerprint` and `shadow_mirror_delivered_frontier_inner`
-// (the two fresh-send record sites) plus `record_pinned_delivery_metadata`, which
-// keys the pinned bridge's fingerprint by the offset-authority channel.
+// Record a content fingerprint under the supplied channel and generation.
 fn record_delivered_content_fingerprint_for_generation(
     provider: &ProviderKind,
     channel_id: u64,
@@ -2042,6 +2016,29 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
     tmux_session_name: &str,
     body: &str,
 ) -> bool {
+    let generation = current_generation_mtime_ns(tmux_session_name);
+    if generation != 0 {
+        return recent_delivered_content_matches_for_generation(
+            provider, channel, generation, body,
+        );
+    }
+    // Preserve the live path's existing lookup when its generation is unknown.
+    let Some(path) = delivery_record_path(provider, channel.get()) else {
+        return false;
+    };
+    recent_delivered_content_matches_at(&path, channel.get(), body, generation, now_epoch_ms())
+}
+
+/// Match a retained content witness only for a known source generation.
+pub(in crate::services::discord) fn recent_delivered_content_matches_for_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    generation_mtime_ns: i64,
+    body: &str,
+) -> bool {
+    if generation_mtime_ns == 0 {
+        return false;
+    }
     let Some(path) = delivery_record_path(provider, channel.get()) else {
         return false;
     };
@@ -2049,19 +2046,12 @@ pub(in crate::services::discord) fn recent_delivered_content_matches(
         &path,
         channel.get(),
         body,
-        current_generation_mtime_ns(tmux_session_name),
+        generation_mtime_ns,
         now_epoch_ms(),
     )
 }
 
-/// I2 outcome map (pure, testable): the confirmed-delivery funnel fires ONLY for
-/// `Delivered`. The historical function name is retained for hotfile callers.
-/// Every other outcome means the controller did NOT advance the
-/// offset — `NotDelivered` (identity gate refused), `Transient`/`Unknown`
-/// (ambiguous), `Skipped` (no-op) — so the durable frontier must NOT advance
-/// (I2, the #3143/#3416 class). This pins the owner call-site's outcome decision
-/// (a frozen-file `matches!` was previously untested — broadening it to include
-/// `NotDelivered` slipped through; the variant test now catches it).
+/// Only `Delivered` permits the confirmed-delivery funnel to advance durable offsets.
 pub(in crate::services::discord) fn outcome_is_shadow_delivered(outcome: &DeliveryOutcome) -> bool {
     matches!(outcome, DeliveryOutcome::Delivered { .. })
 }

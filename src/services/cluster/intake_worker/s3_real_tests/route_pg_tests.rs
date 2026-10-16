@@ -16,6 +16,7 @@ use crate::services::cluster::intake_worker::test_executor::{self, Checkpoint};
 use crate::services::cluster::intake_worker::{TickOutcome, run_intake_worker_tick};
 use crate::services::discord::SharedData;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::tui_o::writer::host;
 
 const WITHIN: Duration = Duration::from_secs(60);
 
@@ -46,22 +47,31 @@ async fn rows(pool: &PgPool) -> String {
 
 /// The holder's executor stand-in: each turn it runs writes one assistant row to the channel's
 /// transcript, which only the real actor turns into a POST.
-fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
-    let transcript = node.transcript.clone();
+pub(super) fn replies(node: &Booted) -> (test_executor::Hook, test_executor::Recorder) {
+    replies_tagged(node, "")
+}
+
+/// As [`replies`], with `tag` before each row id and reply, so a later generation's turns are new.
+pub(super) fn replies_tagged(
+    node: &Booted,
+    tag: &str,
+) -> (test_executor::Hook, test_executor::Recorder) {
+    let (transcript, tag) = (node.transcript.clone(), tag.to_string());
     let turns = Arc::new(AtomicUsize::new(0));
     let hook = test_executor::hook(Box::new(move |seen| {
-        let (transcript, turns) = (transcript.clone(), Arc::clone(&turns));
+        let (transcript, turns, tag) = (transcript.clone(), Arc::clone(&turns), tag.clone());
         Box::pin(async move {
             if seen == Checkpoint::FinalDb {
                 let n = turns.fetch_add(1, Ordering::SeqCst) + 1;
-                append(&transcript, &row(&format!("r{n}"), &format!("reply-{n}")));
+                let line = row(&format!("{tag}r{n}"), &format!("{tag}reply-{n}"));
+                append(&transcript, &line);
             }
         })
     }));
     (hook, test_executor::record())
 }
 
-async fn owner() -> Arc<SharedData> {
+pub(super) async fn owner() -> Arc<SharedData> {
     eprintln!("[s3] registering the owner runtime");
     let owner = crate::services::discord::health::owner_runtime_for_tests::registered("claude");
     let (registry, shared) = owner.await;
@@ -69,7 +79,7 @@ async fn owner() -> Arc<SharedData> {
     shared
 }
 
-async fn tick(node: &Booted, shared: &Arc<SharedData>, target: &str) -> TickOutcome {
+pub(super) async fn tick(node: &Booted, shared: &Arc<SharedData>, target: &str) -> TickOutcome {
     let owner = format!("o-{target}");
     eprintln!("[s3] tick on {target}");
     run_intake_worker_tick(&node.pool, shared, target, "claude", &owner, &|| false)
@@ -100,16 +110,21 @@ async fn th8_two_routers_one_holder_pg() {
     let gw = Node::spawn(&scene, "th8_gateway", GW);
     mini.finish(Duration::from_secs(180)).await;
     gw.finish(Duration::from_secs(60)).await;
-    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+    let done = ("done".to_string(), MINI.to_string(), Some(epoch));
+    assert_eq!(routed(&scene.pool).await, [done]);
+    scene.drop_db().await;
+}
+
+/// Status, target and routed epoch of each of the channel's outbox rows.
+pub(super) async fn routed(pool: &PgPool) -> Vec<(String, String, Option<i64>)> {
+    sqlx::query_as(
         "SELECT status::TEXT, target_instance_id, home_epoch FROM intake_outbox
          WHERE channel_id = $1",
     )
     .bind(C.to_string())
-    .fetch_all(&scene.pool)
+    .fetch_all(pool)
     .await
-    .unwrap();
-    assert_eq!(rows, [("done".to_string(), MINI.to_string(), Some(epoch))]);
-    scene.drop_db().await;
+    .unwrap()
 }
 
 pub(super) async fn holder_node(env: &Env) {
@@ -317,21 +332,27 @@ async fn th8_candidate_is_not_home_authority_pg() {
         .finish(Duration::from_secs(120))
         .await;
     // The row lock keeps the restarted holder's renewal waiting, so its gate stays Lost.
-    let mut lock = scene.pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
-        .bind(C.to_string())
-        .execute(&mut *lock)
-        .await
-        .unwrap();
+    let lock = lock_home_row(&scene.pool).await;
     let id = seed(&scene.pool, "4001", Some(epoch)).await;
     put(scene.dir(), "phase", 2);
-    let mini = Node::spawn(&scene, "th8_candidate", MINI);
-    wait_signal(scene.dir(), "lost_checked", WITHIN).await;
+    let mut mini = Node::spawn(&scene, "th8_candidate", MINI);
+    mini.wait_signal("lost_checked", WITHIN).await;
     lock.rollback().await.unwrap();
     mini.finish(Duration::from_secs(120)).await;
     let done = ("done".to_string(), Some("o-mini-s3".to_string()), true);
     assert_eq!(stored(&scene.pool, id).await, done);
     scene.drop_db().await;
+}
+
+/// Locks the home row until the returned transaction ends; renewals wait, reads do not.
+pub(super) async fn lock_home_row(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
+        .bind(C.to_string())
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    lock
 }
 
 pub(super) async fn candidate_node(env: &Env) {
@@ -377,6 +398,39 @@ pub(super) async fn candidate_node(env: &Env) {
     assert_eq!(tick(&node, &shared, MINI).await, TickOutcome::Processed);
     assert_eq!(recorder.channels(), [C]);
     node.until_posts(&["while-lost", "reply-1"]).await;
+    node.stop().await;
+}
+
+/// T-H8: a ready, resumed writer takes work only while its home is Owned now; closing the home
+/// refuses at once, before the readiness publisher has seen the close.
+#[tokio::test(flavor = "current_thread")]
+async fn th8_accepts_rechecks_home_after_ready_pg() {
+    let scene = Scene::new().await;
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    Node::spawn(&scene, "th8_home_recheck", MINI)
+        .finish(Duration::from_secs(120))
+        .await;
+    scene.drop_db().await;
+}
+
+pub(super) async fn home_recheck_node(env: &Env) {
+    let (node, _) = open_holder(env).await;
+    let readiness = host::process_readiness();
+    assert!(readiness.is_ready(C), "the writer is published ready");
+    assert!(readiness.accepts(C), "ready and Owned: it takes work");
+    let gate = node.gate().expect("the holder's row registers its gate");
+    // No await until the refusal, so this current-thread runtime cannot run the publisher.
+    gate.close();
+    assert!(
+        readiness.is_ready(C),
+        "the publisher has not seen the close"
+    );
+    assert!(!readiness.accepts(C), "accepts re-reads the closed home");
+    until("the publisher withdraws readiness", WITHIN, || {
+        !readiness.is_ready(C)
+    })
+    .await;
     node.stop().await;
 }
 

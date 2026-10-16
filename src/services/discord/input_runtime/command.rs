@@ -1,16 +1,23 @@
 //! Serialized supervisor commands; dropping a reply receiver never cancels a WAL loan.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use super::super::fence::Closing;
 use super::external::ExternalReceipt;
 use super::fence::Failure;
 use super::ordering::{
     FetchTicket, PendingOverflow, PendingSource, ScanCapability, ValidatedOrderCapability,
 };
-use super::receipt::{Deferred, Receipt};
+use super::receipt::{Deferred, Receipt, ResponsibilityLookup};
 use super::source::Source;
-use crate::services::tui_input::rows::receipt_identity::{ReceiptIdentity, Responsibility};
+use crate::services::provider::ProviderKind;
+use crate::services::tui_input::ledger::LedgerSlot;
+use crate::services::tui_input::rows::receipt_identity::ReceiptIdentity;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ClosedAndFlushed(());
 
 pub(crate) struct ScanCommit {
     pub(crate) receipt: Receipt,
@@ -41,7 +48,7 @@ pub(crate) enum SupervisorCmd {
     },
     Clear,
     Close {
-        ack: oneshot::Sender<Result<(), Deferred>>,
+        ack: oneshot::Sender<Result<ClosedAndFlushed, Deferred>>,
     },
     FetchTicket {
         reply: oneshot::Sender<Result<FetchTicket, Failure>>,
@@ -57,7 +64,7 @@ pub(crate) enum SupervisorCmd {
     },
     LookupResponsibility {
         identity: ReceiptIdentity,
-        reply: oneshot::Sender<Responsibility>,
+        reply: oneshot::Sender<ResponsibilityLookup>,
     },
     BeginScan {
         ticket: FetchTicket,
@@ -161,6 +168,18 @@ async fn request_within<T>(
     make: impl FnOnce(oneshot::Sender<T>) -> SupervisorCmd,
     limit: Duration,
 ) -> Result<T, Deferred> {
+    #[cfg(test)]
+    if super::mutant("separate_send_and_reply_timeouts") {
+        let (reply, response) = oneshot::channel();
+        tokio::time::timeout(limit, sender.send(make(reply)))
+            .await
+            .map_err(|_| Deferred::SupervisorLost)?
+            .map_err(|_| Deferred::SupervisorLost)?;
+        return tokio::time::timeout(limit, response)
+            .await
+            .map_err(|_| Deferred::SupervisorLost)?
+            .map_err(|_| Deferred::SupervisorLost);
+    }
     tokio::time::timeout(limit, async {
         let (reply, response) = oneshot::channel();
         sender
@@ -173,9 +192,97 @@ async fn request_within<T>(
     .unwrap_or(Err(Deferred::SupervisorLost))
 }
 
+/// Certifies only a current Held gate and the fold of this supervisor's existing slot.
+pub(super) async fn close_slot(
+    slot: &mut LedgerSlot,
+    closing: Option<Arc<Closing>>,
+    provider: &ProviderKind,
+    channel: u64,
+    ack: oneshot::Sender<Result<ClosedAndFlushed, Deferred>>,
+    #[cfg(test)] observer: Option<Box<dyn FnOnce() + Send>>,
+) -> (Result<(), Deferred>, bool) {
+    let mut ack = Some(ack);
+    let mut flushed = false;
+    let result = async {
+        let closing = closing.ok_or(Deferred::Gate(Failure::StalePermit))?;
+        let check = closing.ensure_held_current(provider, channel);
+        #[cfg(test)]
+        let check = if super::mutant("ignore_close_hold_failure")
+            || super::mutant("close_ack_from_ready_cache")
+        {
+            Ok(())
+        } else {
+            check
+        };
+        check.map_err(Deferred::Gate)?;
+        #[cfg(test)]
+        if super::mutant("close_ack_before_loan") {
+            let _ = ack.take().unwrap().send(Ok(ClosedAndFlushed(())));
+        }
+        #[cfg(test)]
+        if super::mutant("reply_drop_cancels_loan")
+            && ack.as_ref().is_some_and(|sender| sender.is_closed())
+        {
+            return Err(Deferred::SupervisorLost);
+        }
+        super::loan(slot, move |lease| {
+            let result = lease.get().and_then(|ledger| ledger.rows()).map(|_| ());
+            lease.needs_reopen |= result.is_err();
+            #[cfg(test)]
+            if let Some(observe) = observer {
+                observe();
+            }
+            result
+        })
+        .await
+        .ok_or(Deferred::SupervisorLost)?
+        .map_err(|_| Deferred::Persistence)?;
+        flushed = true;
+        closing
+            .with_held_current(provider, channel, || {
+                if let Some(sender) = ack.take() {
+                    let _ = sender.send(Ok(ClosedAndFlushed(())));
+                }
+            })
+            .map_err(Deferred::Gate)
+    }
+    .await;
+    if let (Some(sender), Err(cause)) = (ack, result) {
+        let _ = sender.send(Err(cause));
+    }
+    (result, flushed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn g1b_close_bound_includes_send_and_reply_waits() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender.send(SupervisorCmd::Clear).await.unwrap();
+        let beginning = tokio::time::Instant::now();
+        let calling = async {
+            let result = request_within(
+                &sender,
+                |ack| SupervisorCmd::Close { ack },
+                Duration::from_secs(3),
+            )
+            .await;
+            assert!(matches!(result, Err(Deferred::SupervisorLost)));
+            assert_eq!(beginning.elapsed(), Duration::from_secs(3));
+        };
+        let serving = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert!(matches!(receiver.recv().await, Some(SupervisorCmd::Clear)));
+            let command = receiver.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let SupervisorCmd::Close { ack } = command {
+                let _ = ack.send(Err(Deferred::Persistence));
+            }
+        };
+        tokio::join!(calling, serving);
+    }
 
     #[tokio::test]
     async fn g1a_request_bound_covers_unstarted_receiver_and_full_mailbox() {
@@ -202,7 +309,8 @@ mod tests {
             6_325_760,
             7,
             0,
-        );
+        )
+        .unwrap();
         let overflow = order.pending_overflow();
         let ticket = order.fetch_ticket(7).unwrap();
         let (sender, receiver) = mpsc::channel(1);
@@ -231,7 +339,8 @@ mod tests {
             6_325_761,
             7,
             0,
-        );
+        )
+        .unwrap();
         let overflow = order.pending_overflow();
         let (sender, _receiver) = mpsc::channel(1);
         let at = tokio::time::Instant::now();
@@ -250,7 +359,8 @@ mod tests {
             6_325_762,
             7,
             0,
-        );
+        )
+        .unwrap();
         let overflow = order.pending_overflow();
         let (sender, mut receiver) = mpsc::channel(1);
         let service = tokio::spawn(async move {
@@ -276,7 +386,8 @@ mod tests {
             6_325_763,
             7,
             0,
-        );
+        )
+        .unwrap();
         let overflow = order.pending_overflow();
         let (sender, mut receiver) = mpsc::channel(1);
         let service = tokio::spawn(async move {
@@ -304,7 +415,8 @@ mod tests {
                 6_325_770 + index as u64,
                 7,
                 0,
-            );
+            )
+            .unwrap();
             let overflow = order.pending_overflow();
             let ticket = order.fetch_ticket(7).unwrap();
             let (sender, mut receiver) = mpsc::channel(1);

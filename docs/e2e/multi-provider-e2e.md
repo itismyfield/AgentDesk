@@ -9,12 +9,13 @@ dedicated Discord channel. The legacy single-pair smoke against
 | Cell           | Provider | Runtime    | Worker agent            | Channel                  |
 | -------------- | -------- | ---------- | ----------------------- | ------------------------ |
 | `claude-pipe`  | claude   | `pipe`     | `adk-claude-pipe-e2e`   | `adk-claude-pipe-e2e`    |
-| `claude-tui`   | claude   | `tui`      | `adk-claude-tui-e2e`    | `adk-claude-tui-e2e`     |
+| `claude-tui`   | claude   | `tui`      | `adk-claude-tui-2-e2e`  | `adk-claude-tui-2-e2e`   |
 | `codex-pipe`   | codex    | `pipe`     | `adk-codex-pipe-e2e`    | `adk-codex-pipe-e2e`     |
 | `codex-tui`    | codex    | `tui`      | `adk-codex-tui-e2e`     | `adk-codex-tui-e2e`      |
 
-The four worker channels above plus the orchestrator channel
-`adk-e2e-orchestrator` (five channels total) all live under the dedicated
+The four worker channels above, the `claude-herdr` worker channel
+`adk-claude-tui-e2e` (Herdr-mapped) and the orchestrator channel
+`adk-e2e-orchestrator` (six channels total) all live under the dedicated
 `ADK E2E` Discord category. Channel IDs are looked up from `agentdesk.yaml`
 — no hard-coded ids in scripts or docs.
 
@@ -268,6 +269,34 @@ separate operator sessions. The top-level report includes `agent_mode_totals`
 runtime, worker agent, channel id, run id, raw failure attribution,
 `coverage_class_actual`, and whether a real provider was contacted.
 
+Cell report schema version 2 adds feature accounting while retaining the existing
+`pass`/`fail`/`skipped` scenario totals. Consumers must ignore unknown fields and
+must not sum every value in `totals`: the additional counts describe coverage.
+For the pipe/TUI driver, `AGENTDESK_E2E_FEATURES` is an explicit operator attestation
+of the target's enabled features. Set it to an empty string to attest that all
+gated features are disabled, or to a comma-separated list such as
+`two_message_panel,e2e_discord_control`. An unset, unreadable or malformed list
+is unevaluable when a selected scenario needs feature evidence; it fails before
+scenario actions and stops the phase. This declaration is not a runtime flag probe.
+
+Disabled E32–34 remain `status: skipped` for older consumers and also report
+`execution_status: dormant`, `dormant_reason`, `required_features` and
+`disabled_features`. Required observed coverage still fails for dormant scenarios.
+Each skipped E9/E15 assertion reports `status: skipped`, `passed: null`, its
+`required_feature` and reason. Executed assertions alone contribute to the
+per-scenario `assertion_totals.pass`/`fail` counts; `skipped`, `unevaluable` and
+`not_applicable` are separate. Legacy assertion rows containing only `passed`
+remain readable. A scenario can pass with `assertion_coverage: partial`; this
+means its executed checks passed, not that the gated capability was covered.
+
+`totals.executed`, `dormant` and `unevaluable` count disjoint execution outcomes;
+an execution interrupted by unavailable evidence counts as unevaluable. Legacy
+`fail` includes unevaluable and required-gate failures; legacy `skipped` includes
+dormant. `totals.skipped_assertions` counts only recorded skipped checks, not
+checks inside scenarios that never ran. Dry runs contribute no executed passes.
+The matrix forwards these totals and reports partial coverage when either dormant
+scenarios or skipped assertions remain, even if all executed scenarios passed.
+
 Post-deploy relay continuity uses a narrower operational wrapper around the
 same driver:
 
@@ -396,7 +425,7 @@ release.
    invocations by parent/name. Forum and media parents require `--message`;
    pass repeatable `--tag-id <ID>` values when the parent requires or accepts
    forum tags. News parents create announcement (`NewsThread`) threads.
-2. Confirm the operator's Obsidian vault has the 6 prompt files
+2. Confirm the operator's Obsidian vault has the 7 prompt files
    (`adk-claude-pipe-e2e.prompt.md` ... `adk-e2e-orchestrator.prompt.md`)
    under `~/ObsidianVault/RemoteVault/adk-config/agents/`. Re-run
    `scripts/deploy-release.sh` if the release `config/agents/` mirror is
@@ -439,7 +468,8 @@ yq '.agents[] | select(.id == "adk-claude-pipe-e2e") | .channels.claude.id' \
     ~/.adk/release/config/agentdesk.yaml
 ```
 
-Substitute the cell id for the agent id (`adk-<cell>-e2e`). The
+Substitute the cell's worker agent id (`adk-<cell>-e2e`, except
+`claude-tui`, which uses `adk-claude-tui-2-e2e`). The
 orchestrator entry follows the same shape with id `adk-e2e-orchestrator`.
 
 ## Skill

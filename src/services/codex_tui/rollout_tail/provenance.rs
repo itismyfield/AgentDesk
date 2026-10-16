@@ -1,5 +1,10 @@
-//! Dormant native span evidence; fixed source and byte boundaries never select a live binding.
+//! Native span evidence; fixed source and byte boundaries never select a live binding.
 
+#[cfg(all(unix, test))]
+use super::{
+    Arc, CancelToken, CodexTuiTailResult, Sender, StreamMessage, discord_handoff_tail_options,
+    tail_rollout_file_until_assistant_response_with_pane_busy_probe,
+};
 use serde_json::Value;
 
 use crate::services::agent_protocol::codex_payload_turn_id;
@@ -205,6 +210,78 @@ fn records(
     Ok(records)
 }
 
+/// Native evidence is observed before the delivery permission wait, without emitting a body.
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) fn submitted_native_span(
+    submitted: &crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::construction::SubmittedEpisode,
+    floor: &crate::services::tui_o::store::codex_provenance::submit_floor::NativeFloor,
+) -> Result<
+    Option<crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan>,
+    &'static str,
+> {
+    let (source, through, hash) = floor.checkpoint();
+    let mut capture = SourceCapture::reopen(source.clone(), through, hash)
+        .map_err(|_| "native_floor_source_changed")?;
+    if !capture
+        .verify_prefix()
+        .map_err(|_| "native_floor_source_changed")?
+        || matches!(capture.poll(0), CaptureOutcome::Anomaly(_))
+    {
+        return Err("native_floor_source_changed");
+    }
+    let end = capture
+        .file_len()
+        .map_err(|_| "native_source_unavailable")?;
+    let anchor = match scan_anchor(source, through, end) {
+        Err("incomplete_native_record") => return Ok(None),
+        other => other?,
+    };
+    let Some(anchor) = anchor else {
+        return Ok(None);
+    };
+    let terminal = terminal_end(source, &anchor, end)?;
+    let Some(terminal) = terminal else {
+        return Ok(None);
+    };
+    let mut span = crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::construction::bind_episode_span(
+        submitted, floor.execution(), anchor, floor.generation())?;
+    span.end = Some(terminal);
+    Ok(Some(span))
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) fn tail_closed_episode(
+    span: &crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan,
+    prompt: &str,
+    sender: Sender<StreamMessage>,
+    token: Arc<CancelToken>,
+) -> Result<(), String> {
+    let tmux = &span.execution.tmux_session;
+    let mut options = discord_handoff_tail_options(tmux, Some(prompt));
+    options.own_turn = Some(span.episode.native_turn_id.clone());
+    let (read_result, outcome) = tail_rollout_file_until_assistant_response_with_pane_busy_probe(
+        &span.execution.source.path,
+        span.start,
+        Some(span.execution.source.session_id.clone()),
+        &sender,
+        Some(Arc::clone(&token)),
+        || crate::services::session_host::legacy_collapse::tmux_live_pane_bool(tmux),
+        options,
+    )?;
+    crate::services::codex::emit_codex_tui_post_tail_handoff(
+        CodexTuiTailResult {
+            read_result,
+            rollout_path: span.execution.source.path.clone(),
+            final_offset: outcome.final_offset,
+            session_id: outcome.session_id,
+        },
+        sender,
+        Some(token),
+        tmux,
+    )
+}
 #[cfg(test)]
 #[path = "provenance_tests.rs"]
 mod tests;

@@ -56,8 +56,12 @@ pub(in crate::services::discord) mod typing_indicator;
 mod voice_announcement_route;
 mod voice_announcement_scope;
 mod watchdog;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use watchdog::incident_attach;
 
 use self::goal_lifecycle::*;
+#[cfg(test)]
+pub(in crate::services::discord) use self::provider_dispatch::producer_error_test_support::producer_error_frame;
 use self::provider_isolation::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
@@ -65,6 +69,11 @@ use self::turn_lifecycle::{
     cleanup_terminal_delivery_marker_after_turn_start, should_add_turn_pending_reaction,
 };
 use self::watchdog::*;
+
+type IntakeClaimContext<'a, 'b, 'c, 'd> = (
+    (Option<&'a str>, &'b ProviderKind, Option<&'c str>),
+    Option<LaunchState<'d>>,
+);
 
 /// Claim an intake turn, healing a stale busy mailbox and retrying once when
 /// its managed tmux session is proven absent. On non-Unix platforms the tmux
@@ -75,10 +84,7 @@ async fn try_start_turn_with_stale_busy_heal(
     cancel_token: Arc<CancelToken>,
     request_owner: serenity::UserId,
     user_msg_id: serenity::MessageId,
-    context: (
-        (Option<&str>, &ProviderKind, Option<&str>),
-        Option<LaunchState<'_>>,
-    ),
+    context: IntakeClaimContext<'_, '_, '_, '_>,
 ) -> bool {
     let ((session_key, provider, tmux_session_name), mut launch) = context;
     let started = mailbox_try_start_turn_with_terminal_marker_cleanup(
@@ -139,10 +145,7 @@ fn intake_claim_context<'a>(
     session_id: &'a mut Option<String>,
     loaded: &'a mut bool,
     reason: &'a mut &'static str,
-) -> (
-    (Option<&'a str>, &'a ProviderKind, Option<&'a str>),
-    Option<LaunchState<'a>>,
-) {
+) -> IntakeClaimContext<'a, 'a, 'a, 'a> {
     (
         (session_key, provider, tmux_session_name),
         Some(LaunchState::new(path, session_id, loaded, reason)),
@@ -278,7 +281,7 @@ pub(super) async fn finish_admitted_local(
     queued_drain: bool,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
-) -> Result<(), Error> {
+) -> Result<IntakeExecution, Error> {
     intake_turn::handle_text_message(
         deps,
         preserve_on_cancel,

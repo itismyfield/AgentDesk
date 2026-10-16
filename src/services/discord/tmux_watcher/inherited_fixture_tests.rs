@@ -5,7 +5,7 @@ use crate::services::discord::health::legacy_supervision::{
 };
 use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::watcher_completion::Outcome;
-use crate::services::discord::tmux::{OOnlyInstallOutcome, watch_host_of};
+use crate::services::discord::tmux::watch_host_of;
 
 fn child(test: &str, env: &[(&str, &str)]) -> bool {
     isolated_in(
@@ -89,10 +89,10 @@ async fn inherited_host_snapshot_unknown_installed_normally_keeps_both_eofs() {
     let fingerprint = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(
         &observed,
-        "unknown snapshot captured by actual installer",
+        "unknown snapshot captured by actual watcher entry",
         |s| s.event_count("outer_eof") >= 2 && s.event_count("host_probe") >= 2,
     )
     .await;
@@ -136,7 +136,7 @@ async fn inherited_death_legacy_preserves_actual_pg_cancel_tombstone() {
     let fingerprint = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "initial live EOF before death", |s| {
         s.event_count("rowless_host_probe") > 0
     })
@@ -227,7 +227,7 @@ async fn inherited_tick_existing_panel_preserves_actual_lifecycle_snapshot() {
     let fingerprint = tree_fingerprint(&root);
     let observed = observe(&fixture);
     let submitted = Scope::new(&fixture.shared);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     until(&observed, "actual initial EOF before panel fixture", |s| {
         s.event_count("outer_eof") > 0
     })

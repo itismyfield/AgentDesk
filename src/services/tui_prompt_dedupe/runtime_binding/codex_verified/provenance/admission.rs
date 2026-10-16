@@ -40,12 +40,15 @@ thread_local! {
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
 pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
     #[cfg(test)]
-    return READY.with(|ready| ready.borrow().contains(&channel));
-    #[cfg(not(test))]
-    {
-        let _ = channel;
-        false
+    if READY.with(|ready| ready.borrow().contains(&channel)) {
+        return true;
     }
+    production_default_owed_readiness(channel)
+}
+
+fn production_default_owed_readiness(channel: u64) -> bool {
+    let _ = channel;
+    false
 }
 
 /// The record for `origin`'s exact episode; a missing, foreign or not-ready one is Unknown.
@@ -126,6 +129,28 @@ pub(crate) fn issue_for_tests(
     episode: TurnEpisodeRef,
     token: &Arc<CancelToken>,
 ) -> Result<Arc<EpisodePermissionRecord>, &'static str> {
+    issue(execution, episode, token)
+}
+
+/// Only the actor's durable close witness reaches production issuance.
+pub(crate) fn issue_closed(
+    closed: &crate::services::tui_o::writer::actor::codex_submission::Closed,
+    token: &Arc<CancelToken>,
+) -> Result<Arc<EpisodePermissionRecord>, &'static str> {
+    let span = closed.span();
+    if token.turn_nonce() != Some(span.episode.turn_nonce.as_str())
+        || token.cancelled.load(Ordering::Acquire)
+    {
+        return Err("episode_cancelled");
+    }
+    issue(span.execution.clone(), span.episode.clone(), token)
+}
+
+fn issue(
+    execution: ExecutionProofRef,
+    episode: TurnEpisodeRef,
+    token: &Arc<CancelToken>,
+) -> Result<Arc<EpisodePermissionRecord>, &'static str> {
     let mut registry = registry();
     if let Some(existing) = registry.get(&key(&episode)) {
         let same = Arc::ptr_eq(&existing.token, token)
@@ -141,7 +166,10 @@ pub(crate) fn issue_for_tests(
         token: Arc::clone(token),
         revoked: Mutex::new(None),
     });
-    token.attach_codex_owed(Arc::clone(&record));
+    token.attach_codex_owed(Arc::clone(&record))?;
+    if record.lock().is_some() || token.cancelled.load(Ordering::Acquire) {
+        return Err("episode_cancelled");
+    }
     registry.insert(key(&episode), Arc::clone(&record));
     Ok(record)
 }
@@ -154,3 +182,8 @@ pub(crate) fn forget_channel_for_tests(channel: u64) {
 #[cfg(test)]
 #[path = "admission_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn issued_for_tests(channel: u64, message: u64, nonce: &str) -> bool {
+    registry().contains_key(&(channel, message, nonce.to_owned()))
+}

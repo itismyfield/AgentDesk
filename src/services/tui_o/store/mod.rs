@@ -1,6 +1,7 @@
 //! Persistent state of the O writer under `<runtime_root>/o_store`: once-written `init` and
 //! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
+pub mod cleanup_witness;
 pub(crate) mod codex_provenance;
 mod durable;
 pub mod ledger;
@@ -453,6 +454,7 @@ mod tests {
     fn prepared(serial: u64, anchor_id: u64) -> LedgerEntry {
         let (unit_key, payload) = (unit(&format!("m{serial}")), format!("piece {serial}"));
         LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key,
             piece_index: 0,

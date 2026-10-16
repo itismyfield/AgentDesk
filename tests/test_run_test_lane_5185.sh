@@ -996,7 +996,7 @@ fi
 # here accepted a lane narrowed by an extra skip -- the exact evasion the
 # assertion claimed to block. Compare the whole command line instead, as a
 # fixed string, with the YAML block indentation normalised away.
-LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"'
+LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"'
 # `grep -q` exits the moment it matches, which closes the pipe while `sed`
 # still has the rest of the file to write. GNU sed reports that as
 # "couldn't flush stdout: Broken pipe" and exits non-zero; under the
@@ -1005,7 +1005,9 @@ LANE_COMMAND='python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summari
 # development machines finished writing first, so the suite was green
 # locally and red on ubuntu-latest. Dropping `-q` makes grep read to EOF,
 # so sed always completes and the status reflects the match alone.
-if ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF "$LANE_COMMAND" >/dev/null; then
+# The PR runs the selector, whose full mode is this exact line (main keeps its own copy).
+if ! grep -xF "$LANE_COMMAND" "$REPO_ROOT/scripts/ci/test-selection.py" >/dev/null \
+    || ! sed 's/^[[:space:]]*//' "$WORKFLOW" | grep -xF "run: python3 scripts/ci/test-selection.py run --lane sweep" >/dev/null; then
     fail_test "ci-pr.yml must run the non-pg-sweep lane through the gate with exactly the pinned command"
 else pass_test
 fi
@@ -1053,7 +1055,7 @@ if not declared:
 # not a mutation this suite can be expected to kill -- but it is the one line
 # a reviewer must read before trusting the check.
 external = {"--lib", "--skip", "--test-threads", "--exact", "--all-targets",
-            "--all-features", "--manifest-path", "--list", "--show-stats"}
+            "--all-features", "--manifest-path", "--list", "--show-stats", "--version"}
 used = set(re.findall(r"--[a-z][a-z0-9-]*", region))
 unknown = sorted(used - declared - external)
 if unknown:

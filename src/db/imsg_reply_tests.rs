@@ -939,3 +939,143 @@ async fn pg_migration_rerun_preserves_checksum_and_check_contract() {
     );
     f.close().await;
 }
+
+/// An admitting obligation on channel `7`, as the S1a route reserves it.
+async fn admitting(pool: &PgPool, origin: &str) {
+    let identity = AdmissionIdentity {
+        origin_id: origin,
+        agent_id: "agent",
+        channel_id: "7",
+        person_id: 1,
+        request_hash: "hash",
+    };
+    assert!(reserve_admission(pool, &identity).await.unwrap());
+}
+
+async fn admitted(pool: &PgPool, origin: &str, kind: &str) {
+    let settlement = AdmissionSettlement {
+        admission: "admitted",
+        kind: Some(kind),
+        result: &json!({}),
+        delivery_confirmed: Some(true),
+        turn_id: None,
+    };
+    assert!(settle_admission(pool, origin, &settlement).await.unwrap());
+}
+
+async fn ended(pool: &PgPool, episode: &str) {
+    sqlx::query(
+        "UPDATE imsg_reply_obligations SET terminal_seen_at = NOW() WHERE episode_key = $1",
+    )
+    .bind(episode)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn fallback(pool: &PgPool, origin: &str, episode: &str) -> Option<Uuid> {
+    let claim = ClaimAction {
+        reply_episode_key: Some(episode),
+        ..action(origin, Purpose::Fallback, "terminal-v1")
+    };
+    claim_action(pool, &claim).await.unwrap()
+}
+
+#[tokio::test]
+async fn s1b_multiple_origins_share_one_episode() {
+    let f = Fixture::create().await;
+    for origin in ["share-a", "share-b"] {
+        admitting(&f.pool, origin).await;
+        assert!(
+            bind_episode(&f.pool, origin, "E", Some(origin))
+                .await
+                .unwrap()
+        );
+    }
+    assert!(
+        !bind_episode(&f.pool, "share-a", "E-other", None)
+            .await
+            .unwrap()
+    );
+    ended(&f.pool, "E").await;
+    for origin in ["share-a", "share-b"] {
+        let row = read_obligation(&f.peer, origin).await.unwrap().unwrap();
+        assert_eq!(row.episode_key.as_deref(), Some("E"));
+        assert_eq!(row.inject_nonce.as_deref(), Some(origin));
+        assert!(row.terminal_seen_at.is_some());
+        admitted(&f.pool, origin, "injected").await;
+        assert!(fallback(&f.pool, origin, "E").await.is_some());
+    }
+    f.close().await;
+}
+
+#[tokio::test]
+async fn pg_s1b_handback_requires_the_bound_episode_and_nonce() {
+    let f = Fixture::create().await;
+    admitting(&f.pool, "handed").await;
+    assert!(
+        bind_episode(&f.pool, "handed", "E0", Some("n0"))
+            .await
+            .unwrap()
+    );
+    ended(&f.pool, "E0").await;
+    assert!(!release_episode(&f.pool, "handed", "E0").await.unwrap());
+    for (episode, nonce) in [("E0", "other"), ("E-other", "n0")] {
+        let handed = hand_back_busy(&f.pool, "handed", (episode, nonce), "9").await;
+        assert!(!handed.unwrap(), "{episode} {nonce}");
+    }
+    assert!(
+        hand_back_busy(&f.pool, "handed", ("E0", "n0"), "9")
+            .await
+            .unwrap()
+    );
+    let row = read_obligation(&f.peer, "handed").await.unwrap().unwrap();
+    assert_eq!(
+        (
+            row.episode_key,
+            row.queued_message_id.as_deref(),
+            row.terminal_seen_at
+        ),
+        (None, Some("9"), None)
+    );
+    assert_eq!(row.inject_nonce.as_deref(), Some("n0"));
+    assert_eq!(bind_consumed(&f.pool, "8", "9", "E1").await.unwrap(), 0);
+    assert_eq!(bind_consumed(&f.pool, "7", "9", "E1").await.unwrap(), 1);
+    assert_eq!(bind_consumed(&f.pool, "7", "9", "E2").await.unwrap(), 0);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn progress_episode_binding_evidence() {
+    let f = Fixture::create().await;
+    for origin in ["moved", "stayed"] {
+        admitting(&f.pool, origin).await;
+    }
+    assert!(
+        bind_episode(&f.pool, "moved", "E0", Some("n0"))
+            .await
+            .unwrap()
+    );
+    assert!(
+        hand_back_busy(&f.pool, "moved", ("E0", "n0"), "9")
+            .await
+            .unwrap()
+    );
+    assert!(bind_episode(&f.pool, "stayed", "E1", None).await.unwrap());
+    admitted(&f.pool, "moved", "queued").await;
+    admitted(&f.pool, "stayed", "started").await;
+    // A progress sent for E0 is no reply for the later E1; one sent for E1 is.
+    for (origin, episode) in [("moved", "E0"), ("stayed", "E1")] {
+        let claim = ClaimAction {
+            reply_episode_key: Some(episode),
+            ..action(origin, Purpose::Progress, "progress-1")
+        };
+        let id = claim_action(&f.pool, &claim).await.unwrap().unwrap();
+        assert!(ack(&f.pool, origin, id, AckOutcome::Sent).await);
+    }
+    assert_eq!(bind_consumed(&f.pool, "7", "9", "E1").await.unwrap(), 1);
+    ended(&f.pool, "E1").await;
+    assert!(fallback(&f.pool, "moved", "E1").await.is_some());
+    assert!(fallback(&f.pool, "stayed", "E1").await.is_none());
+    f.close().await;
+}

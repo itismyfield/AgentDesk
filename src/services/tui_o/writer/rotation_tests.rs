@@ -61,7 +61,10 @@ async fn an_old_tail_is_posted_before_the_new_source_and_a_proven_old_source_ret
         !retired(&harness, &a),
         "a grown retired source is read again"
     );
-    let grew = WriterAlarm::RetiredSourceGrew { source: a.clone() };
+    let grew = WriterAlarm::RetiredSourceGrew {
+        source: a.clone(),
+        cleanup_history: None,
+    };
     assert_eq!(harness.alarms.taken(), [grew]);
     halt(stop, task).await;
     let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
@@ -466,6 +469,8 @@ async fn an_old_tail_the_full_spool_refuses_behind_an_announced_unit_stops_the_c
     halt(stop, task).await;
 }
 
+#[path = "fork_mask_tests.rs"]
+mod fork_mask_tests;
 #[path = "fork_tests.rs"]
 mod fork_tests;
 #[path = "recovery_tests.rs"]

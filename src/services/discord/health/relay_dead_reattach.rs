@@ -236,6 +236,7 @@ mod tests {
 
     fn snapshot(started_at: &str) -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: "codex".to_string(),
             attached: true,
             tmux_session: Some("AgentDesk-codex-test".to_string()),

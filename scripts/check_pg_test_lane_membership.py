@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fnmatch
+import hashlib
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -34,11 +36,35 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-# Main's PG lane runs as two shards: shard 0 selects these include values and
-# shard 1 the rest with them skipped, so the shards partition the selection.
-PG_SHARD_0_SELECTORS = ("pg_", "postgres")
-PG_SHARD_JOB = ".github/workflows/ci-main.yml:postgres"
+PG_SHARD_COUNT = 2
+PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
+PG_INCLUDE_DERIVATION = tuple('''\
+readonly -a NON_PG_SKIP_ARGS
+readonly -a NON_PG_FILTER_REPLAY
+run_prepared_lib_test() {
+if [ -n "${ADK_LIB_TEST_ARTIFACT:-}" ]; then
+python3 scripts/ci/lib-test-artifact.py run -- "$@"
+else
+"$@"
+fi
+}
+PG_INCLUDE_ARGS=()
+for ((index = 1; index < ${#NON_PG_SKIP_ARGS[@]}; index += 2)); do
+PG_INCLUDE_ARGS+=("${NON_PG_SKIP_ARGS[$index]}")
+done
+unset index
+case "${PG_INCLUDE_SHARD-}" in
+"") ;;
+*)
+python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "$PG_INCLUDE_SHARD" || return 1
+PG_SELECTED_TESTS="$(set -o pipefail; run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --list | python3 scripts/check_pg_test_lane_membership.py --partition-pg-list "$PG_INCLUDE_SHARD")" || return 1
+mapfile -t PG_INCLUDE_ARGS <<< "$PG_SELECTED_TESTS"
+PG_INCLUDE_ARGS=(--exact "${PG_INCLUDE_ARGS[@]}")
+unset PG_SELECTED_TESTS
+;;
+esac
+readonly -a PG_INCLUDE_ARGS'''.splitlines())
 ALLOWLIST_REL = Path("scripts/pg_test_lane_allowlist.txt")
 NON_PG_FILTER_REL = Path("scripts/ci/non-pg-test-filter.sh")
 LIB_TEST_INVENTORY_REL = Path("scripts/lib_test_inventory_manifest.txt")
@@ -48,7 +74,6 @@ NON_PG_FILTER_WORKFLOWS = (
     Path(".github/workflows/ci-nightly.yml"),
 )
 NON_PG_FILTER_REQUIRED_JOBS = frozenset({
-    ".github/workflows/ci-pr.yml:library_sweep",
     ".github/workflows/ci-main.yml:full_non_pg",
     ".github/workflows/ci-nightly.yml:full_macos",
     ".github/workflows/ci-nightly.yml:full_windows",
@@ -63,7 +88,6 @@ SEEDS = (
 )
 CONNECT_SEEDS = tuple(seed for seed in SEEDS if seed != "PgPool")
 
-
 def _seed_pattern(seed: str) -> re.Pattern[str]:
     """Match exact type seeds and supported function-name suffix variants."""
     suffix = r"[A-Za-z0-9_]*" if seed in {
@@ -72,7 +96,6 @@ def _seed_pattern(seed: str) -> re.Pattern[str]:
         "lock_test_lifecycle",
     } else ""
     return re.compile(rf"\b{re.escape(seed)}{suffix}\b")
-
 
 SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in SEEDS)
 CONNECT_SEED_PATTERNS = tuple(_seed_pattern(seed) for seed in CONNECT_SEEDS)
@@ -128,6 +151,21 @@ PG_DB_BLOCK_HEADER = (
 )
 _PG_DB_ENTRY = re.compile(r"^-\s+['\"]([^'\"]+)['\"]\s*$")
 
+@lru_cache(maxsize=None)
+def shell_lexer():
+    """The shared shell lexer beside this file, which both CI gates read shell with;
+    a missing or broken lexer raises instead of lexing nothing."""
+    path = Path(__file__).with_name("ci_shell_lex.py")
+    loaded = sys.modules.get("ci_shell_lex")
+    if loaded is not None and Path(getattr(loaded, "__file__", "")).resolve() == path.resolve():
+        return loaded
+    spec = importlib.util.spec_from_file_location("ci_shell_lex", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot import the shell lexer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 def _load_coverage_module(repo_root: Path):
     path = repo_root / "scripts/check_test_lane_coverage.py"
@@ -138,7 +176,6 @@ def _load_coverage_module(repo_root: Path):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
-
 
 @dataclass(frozen=True)
 class PgInventory:
@@ -152,7 +189,6 @@ class PgInventory:
     def modules(self) -> set[str]:
         return {name.rpartition("::")[0] for name in self.tests}
 
-
 @dataclass(frozen=True)
 class Analysis:
     inventory: PgInventory
@@ -160,13 +196,11 @@ class Analysis:
     allowlist_count: int
     findings: tuple["Finding", ...] = ()
 
-
 @dataclass(frozen=True)
 class Finding:
     kind: str
     source: str
     detail: str
-
 
 @dataclass(frozen=True)
 class ModuleRange:
@@ -287,7 +321,8 @@ def _strip_line_comment(line: str) -> str:
     """Cut one line at its first real comment, honouring quoted ``#``.
 
     A ``#`` opens a comment only at the start of a line or after whitespace
-    (in shell also after ``;``, ``&`` or ``|``), and never inside a quoted
+    (in shell also after ``;``, ``&`` or ``|``) that no odd run of backslashes
+    escapes, and never inside a quoted
     scalar. That rule holds in YAML and in the POSIX
     shell that runs a ``run:`` body alike, which is why one scanner serves
     both: ``run: echo "a # b"`` keeps its ``#``, and a ``#`` line inside a
@@ -305,7 +340,8 @@ def _strip_line_comment(line: str) -> str:
         if quote is None:
             if char in "'\"":
                 quote = char
-            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"):
+            elif char == "#" and (index == 0 or line[index - 1] in " \t;&|"
+                                  and not (index - 1 - len(line[:index - 1].rstrip("\\"))) % 2):
                 return line[:index].rstrip()
         elif char == quote:
             if quote == "'" and line[index + 1:index + 2] == "'":
@@ -957,13 +993,12 @@ def _cargo_commands(
     breaks, per the YAML folding rules, so it is emitted as its own command
     rather than folded into its neighbours.
 
-    Two forms are deliberately not modelled, both of which make the extracted
-    command WIDER than the real one -- a wider filter selects more tests, so
-    rule5 over-reports rather than under-reports on them. An explicit
-    indentation indicator that declares a content indent smaller than the
-    first content line's own indent is read at the first line's indent. And a
-    shell line continuation (a trailing ``\\``) inside a literal body is left
-    split, so ``cargo test --lib -- \\`` reads as a command with no skips.
+    An explicit indentation indicator that declares a content indent smaller
+    than the first content line's own indent is read at the first line's
+    indent, which makes the extracted command WIDER than the real one -- a
+    wider filter selects more tests, so rule5 over-reports rather than
+    under-reports on it. A shell line continuation (a trailing ``\\``) inside a
+    literal body is not joined, so a cargo test line ending in one is refused.
     """
     commands: list[str] = []
     header_indent: int | None = None
@@ -981,9 +1016,9 @@ def _cargo_commands(
             value = re.sub(
                 r"[\"']?\$\{PG_INCLUDE_ARGS\[@\]\}[\"']?", included, value
             )
-        start = value.find("cargo test")
-        if start >= 0:
-            commands.append(value[start:])
+        argv = _proven_cargo_argv(value)
+        if argv is not None:
+            commands.append(shlex.join(argv))
 
     def flush() -> None:
         if pending:
@@ -1017,7 +1052,8 @@ def _cargo_commands(
             continue
         if content_indent is None:
             content_indent = indent
-        value = stripped.strip('"\'')
+        # A block line is shell text as written: its quotes belong to the shell.
+        value = stripped
         if folded and indent <= content_indent:
             pending.append(value)
             continue
@@ -1025,6 +1061,68 @@ def _cargo_commands(
         collect(value)
     flush()
     return commands
+
+
+# The closed set of prefixes CI runs `cargo test` behind; any other prefix is unproven.
+_ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
+_ARTIFACT_RUN = ["python3", "scripts/ci/lib-test-artifact.py", "run", "--"]
+# The run_test_lane.py options CI passes, each with the argparse value it accepts.
+_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
+
+
+def _prefix_template(words: list[str]) -> bool:
+    """Whether the raw words before `cargo` are one of the CI prefix templates."""
+    if words[:2] == ["python3", "scripts/ci-timeout.py"]:
+        return re.fullmatch(r"[1-9][0-9]*", "".join(words[2:3])) is not None \
+            and words[3:] == _ROOT_UNSET
+    if words[:2] == ["python3", "scripts/run_test_lane.py"] and "--" in words:
+        end = words.index("--")
+        names, values = words[2:end:2], words[3:end:2]
+        # argparse requires --lane; the command runs only after `--`.
+        return len(names) == len(values) and names.count("--lane") == 1 \
+            and all(re.fullmatch(_RUN_TEST_LANE_OPTIONS.get(name, r"(?!)"), value)
+                    for name, value in zip(names, values)) \
+            and words[end + 1:] in (_ROOT_UNSET, _ROOT_UNSET + _ARTIFACT_RUN)
+    return words in ([], _ROOT_UNSET, ["run_prepared_lib_test"], _ARTIFACT_RUN, _ROOT_UNSET + _ARTIFACT_RUN)
+
+
+def _proven_cargo_argv(command: str) -> list[str] | None:
+    """The `cargo test` argv ``command`` runs. None when no lexed word holds a cargo
+    program and `test`; a cargo-command-unparsed ValueError unless a template proves it."""
+    lex = shell_lexer()
+    scan = lex.scan_shell(command)
+    parts = {part for token in scan.tokens if token.kind == "WORD"
+             for part in re.split(r"[^\w.]+", token.value or "")}
+    if not ("test" in parts and any(part.startswith("cargo") for part in parts)) \
+            and not lex.may_execute_cargo(scan):
+        return None
+    tokens = list(scan.tokens)
+    sourced = [token.raw for token in tokens[:3]] == ["source", NON_PG_FILTER_REL.as_posix(), "&&"]
+    tokens = tokens[3:] if sourced else tokens
+    at = next((index for index, token in enumerate(tokens) if token.value == "cargo"), -1)
+    # A prefix word is plain text, so its raw form is the word the shell runs.
+    prefix = [token.raw for token in tokens[:max(at, 0)]
+              if token.raw == token.value] if at >= 0 else None
+    arrays = {f"${{{name}[@]}}" for name in KNOWN_ARRAYS}
+    try:
+        argv = shlex.split(command[tokens[at].start:], comments=True) if at >= 0 else None
+    except ValueError:
+        argv = None
+    if scan.issues or argv is None or argv[:2] != ["cargo", "test"] \
+            or argv != [token.value for token in tokens[at:]] \
+            or len(prefix) != at or not _prefix_template(prefix) or (sourced and prefix not in ([], ["run_prepared_lib_test"])) \
+            or any(token.kind != "WORD" or token.depth for token in tokens) \
+            or any(token.dynamic and token.value not in arrays for token in tokens):
+        raise ValueError(
+            f"cargo-command-unparsed: {command!r} crosses a shell boundary or "
+            "run-time value this gate cannot prove, so the lane filter it selects is unknown")
+    return argv
+
+
+def _lane_filter(coverage, command: str):
+    """``coverage.cargo_test_filter`` on the proven argv of the cargo test ``command`` runs."""
+    argv = _proven_cargo_argv(command)
+    return None if argv is None else coverage.cargo_test_filter(shlex.join(argv))
 
 
 def pg_lane_filters(
@@ -1044,7 +1142,7 @@ def pg_lane_filters(
                 commands.extend(coverage.just_recipe_commands(just_text, recipe))
             except ValueError:
                 pass
-    lanes = [coverage.cargo_test_filter(command) for command in commands]
+    lanes = [_lane_filter(coverage, command) for command in commands]
     return tuple(dict.fromkeys(lane for lane in lanes if lane is not None))
 
 
@@ -1058,7 +1156,7 @@ def pgless_lane_filters(
         for command in _cargo_commands(job.code, non_pg_skip_args):
             if "--all-targets" not in command or "--skip" not in command:
                 continue
-            lane = coverage.cargo_test_filter(command)
+            lane = _lane_filter(coverage, command)
             if lane is not None:
                 lanes.append(lane)
     return tuple(dict.fromkeys(lanes))
@@ -1088,7 +1186,7 @@ def pr_pgless_lane_filters(
         if "postgres-service.sh start" in job.code:
             continue
         for command in _cargo_commands(job.code, non_pg_skip_args):
-            lane = coverage.cargo_test_filter(command)
+            lane = _lane_filter(coverage, command)
             if lane is not None:
                 lanes.append(lane)
     return tuple(dict.fromkeys(lanes))
@@ -1446,42 +1544,34 @@ _ARRAY_READ = re.compile(
     rf"\$\{{[!#]?(?:{'|'.join(KNOWN_ARRAYS)})\b[^}}\n]*\}}|{_ARRAY_USE.pattern}"
 )
 _ARRAY_NAME = re.compile(rf"\b({'|'.join(KNOWN_ARRAYS)})\b")
-# Quoted spans (an unterminated one runs to the end) and escapes hold no shell syntax.
-_QUOTED = re.compile(r"'[^']*(?:'|\Z)|\"(?:\\.|[^\"\\])*(?:\"|\Z)|\\.", re.S)
 _SHELL_WORD = re.compile(r"[;&|()]+|[^\s;&|()]+")
 # Words opening a compound command, group or loop; a closer counts only in command position.
 _OPENERS = frozenset({"if", "case", "for", "select", "while", "until", "{"})
 _CLOSERS = frozenset({"fi", "esac", "done", "}"})
 
 
-def _quoted_blank(shell: str) -> str:
-    """``shell`` with quoted and escaped text blanked at its own width, newlines kept."""
-    return _QUOTED.sub(lambda span: re.sub(r"[^\n]", " ", span.group()), shell)
-
-
 def _at_top_level(shell: str, offset: int) -> bool:
     """Whether the word at ``offset`` runs as the shell's own command, not quoted, heredoc
-    data, a continued line or inside a compound, function or subshell: a fail-closed count."""
-    syntax = _quoted_blank(shell)
-    newline = shell.rfind("\n", 0, offset)
-    # An odd run of backslashes ending the previous line makes this word an argument there.
-    continued = newline > 0 and (newline - len(shell[:newline].rstrip("\\"))) % 2
-    # Code left ending in `&&`, `||` or a pipe makes this word its conditional or piped
-    # part; an odd backtick count leaves it inside a command substitution.
-    pending = syntax[:max(newline, 0)].rstrip().endswith(("&&", "|", "|&"))
-    if continued or pending or syntax[:offset].count("`") % 2 \
-            or syntax[offset:offset + 1].isspace() \
-            or re.search(r"(?<!<)<<(?!<)", syntax[:offset]):
+    data, a continued line or inside a compound, function, subshell or substitution: a
+    fail-closed count."""
+    scan = shell_lexer().scan_shell(shell)
+    before = [token for token in scan.tokens if token.start < offset and not token.depth]
+    word = next((token for token in scan.tokens if token.start == offset), None)
+    # A continued line or an enclosing substitution's word leaves no newline right before
+    # it, and code left ending in `&&`, `||` or a pipe makes it their conditional part.
+    pending = next((token.raw for token in reversed(before) if token.kind != "NEWLINE"), "")
+    if word is None or word.kind != "WORD" \
+            or (before and before[-1].kind != "NEWLINE") or pending in ("&&", "||", "|", "|&"):
         return False
     depth = 0
-    for line in syntax[:offset].split("\n"):
+    for line in scan.syntax_masked[:offset].split("\n"):
         words = _SHELL_WORD.findall(line)
         for index, word in enumerate(words):
             if word in _OPENERS:
                 depth += 1
             elif word in _CLOSERS and (index == 0 or words[index - 1][-1] in ";&|("):
                 depth -= 1
-        # An open `(`/`$(` nests; only a line led by `)` closes one, unlike a case pattern.
+        # An open `(` nests; only a line led by `)` closes one, unlike a case pattern.
         opened = line.count("(") - line.count(")")
         if opened > 0 or line.lstrip().startswith(")"):
             depth += opened
@@ -1492,7 +1582,7 @@ def _at_top_level(shell: str, offset: int) -> bool:
 
 def known_array_use(line: str) -> tuple[int, tuple[str, ...]] | None:
     """Where one shell line first expands a generated array, and every one it expands."""
-    uses = list(_ARRAY_USE.finditer(_strip_line_comment(line)))
+    uses = list(_ARRAY_USE.finditer(shell_lexer().scan_shell(line).comment_masked))
     if not uses:
         return None
     return uses[0].start(), tuple(dict.fromkeys(use.group(1) for use in uses))
@@ -1504,12 +1594,19 @@ def known_array_source_problem(shell: str) -> tuple[str, int] | None:
     ``("unsourced", -1)`` without a covering canonical source, ``(array, line)`` when a
     later word but a ``$`` read rebinds one (0-based line of ``shell``), else None.
     """
-    shell = _strip_comments(shell)
+    lex = shell_lexer()
+    scan = lex.scan_shell(shell)
+    # Past a boundary the lexer cannot prove, no later line's place in the shell is known;
+    # the use's own line ends mid-word here, so only earlier lines count.
+    if any(issue.kind in lex.OPEN_ISSUES and issue.start <= shell.rfind("\n")
+           for issue in scan.issues):
+        return ("unsourced", -1)
+    shell = scan.comment_masked
     # A source indented past the shell's outermost lines sits inside a compound command.
     outer = min((len(line) - len(line.lstrip()) for line in shell.split("\n") if line.strip()),
                 default=0)
-    # A quoted `;` or `|` is data, not a break in the source's `&&` chain.
-    syntax = _quoted_blank(shell)
+    # A quoted or nested `;` or `|` is data, not a break in the source's `&&` chain.
+    syntax = scan.syntax_masked
     covering = [
         source for source in _CANONICAL_SOURCE.finditer(shell)
         if len(source.group(1)) == outer and _at_top_level(shell, source.end(1))
@@ -1624,21 +1721,19 @@ def non_pg_filter_contract_errors(
 
 
 def load_pg_include_shards(repo_root: Path) -> tuple[tuple[str, ...], ...]:
-    text = (repo_root / NON_PG_FILTER_REL).read_text("utf-8")
-    shards = []
-    for index in range(2):
-        match = re.search(
-            rf"^PG_INCLUDE_ARGS_SHARD_{index}=\((.*?)^\)$", text, re.MULTILINE | re.DOTALL
-        )
-        if match is None:
-            raise ValueError(f"{NON_PG_FILTER_REL}: missing PG_INCLUDE_ARGS_SHARD_{index}")
-        shards.append(tuple(shlex.split(match.group(1))))
-    return tuple(shards)
+    lines = (repo_root / NON_PG_FILTER_REL).read_text("utf-8").splitlines()
+    stop = lines.index(NON_PG_SELECTION_END)
+    code = [" ".join(line.split()) for line in lines[stop + 1:]
+            if line.strip() and not line.lstrip().startswith("#")]
+    size = len(PG_INCLUDE_DERIVATION)
+    if tuple(code[:size]) != PG_INCLUDE_DERIVATION or any("PG_INCLUDE" in line or "PG_SELECTED" in line for line in code[size:]):
+        raise ValueError(f"{NON_PG_FILTER_REL}: PG shard derivation is not canonical")
+    return pg_include_shards(load_non_pg_skip_args(repo_root)[1::2], load_lib_test_inventory(repo_root))
 
 
 def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     """Each test the unsharded PG selection runs must run in exactly one shard,
-    and only the sharded main job may narrow the selection, from its matrix."""
+    and only the declared PG jobs may narrow the selection, from their matrix."""
     try:
         shards = load_pg_include_shards(repo_root)
     except ValueError as error:
@@ -1667,25 +1762,24 @@ def pg_shard_contract_errors(repo_root: Path, jobs: Iterable[Job]) -> list[str]:
     if len(wrong) > 20:
         errors.append(f"{NON_PG_FILTER_REL}: {len(wrong) - 20} more PG shard partition error(s)")
 
-    shard_job = next((job for job in jobs if job.key == PG_SHARD_JOB), None)
-    owned = shard_job.code.count("PG_INCLUDE_SHARD") if shard_job else 0
-    if owned and (
-        owned != 1
-        or not re.search(
+    owned_by_workflow: dict[str, int] = {}
+    for shard_job in (job for job in jobs if job.key in PG_SHARD_JOBS):
+        owned = shard_job.code.count("PG_INCLUDE_SHARD")
+        if owned != 1 or not re.search(
             r"(?m)^\s+PG_INCLUDE_SHARD:\s*\$\{\{\s*matrix\.shard\s*\}\}\s*$",
             shard_job.code,
-        )
-    ):
-        errors.append(f"{PG_SHARD_JOB}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
+        ):
+            errors.append(f"{shard_job.key}: PG_INCLUDE_SHARD must be set once, from matrix.shard")
+        owned_by_workflow[shard_job.workflow] = owned
     workflows = (repo_root / ".github/workflows")
     for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")]):
         rel = path.relative_to(repo_root).as_posix()
         count = _strip_comments(path.read_text("utf-8")).count("PG_INCLUDE_SHARD")
-        if count != (owned if shard_job and shard_job.workflow == rel else 0):
-            errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside {PG_SHARD_JOB}")
+        if count != owned_by_workflow.get(rel, 0):
+            errors.append(f"{rel}: PG_INCLUDE_SHARD is used outside the declared PG shard jobs")
     justfile = repo_root / "justfile"
     if justfile.is_file():
-        # Only the shard recipe main's job runs may read the shard; no recipe may set it.
+        # Only the shard recipe may read the shard; no recipe may set it.
         text = _strip_comments(justfile.read_text("utf-8"))
         try:
             reads = " ".join(coverage.just_recipe_commands(text, PG_SHARD_RECIPE)).count("PG_INCLUDE_SHARD")
@@ -1728,31 +1822,46 @@ def non_pg_selection(repo_root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]
     return skips, tuple(sorted(replay))
 
 
-def pg_include_shards(skips: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """libtest arguments for the two PG shards; a test matching a shard 0
-    selector is skipped by shard 1, so each selected test runs exactly once."""
-    missing = [value for value in PG_SHARD_0_SELECTORS if value not in skips]
-    if missing:
-        raise ValueError(f"PG shard 0 selectors are not include values: {missing}")
-    shard_1 = tuple(value for value in skips if value not in PG_SHARD_0_SELECTORS)
-    skipped = tuple(arg for value in PG_SHARD_0_SELECTORS for arg in ("--skip", value))
-    return PG_SHARD_0_SELECTORS, shard_1 + skipped
+def pg_test_shard(test_id: str) -> int:
+    return int.from_bytes(hashlib.sha256(test_id.encode("utf-8")).digest(), "big") % PG_SHARD_COUNT
+
+
+def validate_pg_shard(value: str) -> int:
+    if value not in tuple(str(index) for index in range(PG_SHARD_COUNT)):
+        raise ValueError(f"PG_INCLUDE_SHARD must be one of {list(range(PG_SHARD_COUNT))}, got: {value!r}")
+    return int(value)
+
+
+def partition_pg_test_list(text: str, shard: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    index = validate_pg_shard(shard)
+    lines = text.splitlines()
+    if not lines or not re.fullmatch(r"\d+ tests?, 0 benchmarks?", lines[-1]):
+        raise ValueError("PG --list summary is missing or malformed")
+    ids = [line.removesuffix(": test") for line in lines[:-1] if line]
+    if any(not line.endswith(": test") for line in lines[:-1] if line) \
+            or any(not test_id or test_id.startswith("-") or re.search(r"\s", test_id) for test_id in ids) \
+            or len(ids) != len(set(ids)) or len(ids) != int(lines[-1].split()[0]):
+        raise ValueError("PG --list IDs are malformed, duplicated or incomplete")
+    selected = tuple(test_id for test_id in sorted(ids) if pg_test_shard(test_id) == index)
+    if not selected and not allow_empty:
+        raise ValueError(f"PG shard {index} selects 0 tests")
+    return selected
+
+
+def pg_include_shards(skips: tuple[str, ...], inventory: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+    selected = sorted(test_id for test_id in inventory if any(value in test_id for value in skips))
+    listed = "".join(test_id + ": test\n" for test_id in selected) + f"\n{len(selected)} tests, 0 benchmarks\n"
+    return tuple(("--exact", *partition_pg_test_list(listed, str(index), allow_empty=True))
+                 for index in range(PG_SHARD_COUNT))
 
 
 def render_non_pg_selection(skips: tuple[str, ...], replay: tuple[str, ...]) -> list[str]:
-    shard_0, shard_1 = pg_include_shards(skips)
     lines = [NON_PG_SELECTION_BEGIN, "NON_PG_SKIP_ARGS=("]
     lines.extend(f"  --skip {value}" for value in skips)
     lines.append(")")
     lines.append("NON_PG_FILTER_REPLAY=(")
     lines.extend(f"  {test}" for test in replay)
     lines.append(")")
-    for name, args in (("PG_INCLUDE_ARGS_SHARD_0", shard_0), ("PG_INCLUDE_ARGS_SHARD_1", shard_1)):
-        lines.append(f"{name}=(")
-        lines.extend(f"  {shlex.join(args[index:index + 2])}" if arg == "--skip" else f"  {arg}"
-                     for index, arg in enumerate(args)
-                     if index == 0 or args[index - 1] != "--skip")
-        lines.append(")")
     lines.append(NON_PG_SELECTION_END)
     return lines
 
@@ -2120,6 +2229,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--pg-shard-matrix", action="store_true")
+    mode.add_argument("--pg-job-names", action="store_true")
+    mode.add_argument("--validate-pg-shard")
+    mode.add_argument("--partition-pg-list")
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--allowlist", type=Path)
@@ -2141,6 +2255,22 @@ def main(argv: list[str] | None = None) -> int:
         help="rewrite the generated pg_db region in ci-pr.yml from the manifest [files] section",
     )
     args = parser.parse_args(argv)
+    try:
+        if args.pg_shard_matrix:
+            print(json.dumps({"shard": list(range(PG_SHARD_COUNT))}, separators=(",", ":")))
+            return 0
+        if args.pg_job_names:
+            print("\n".join(f"PostgreSQL tests (shard {index})" for index in range(PG_SHARD_COUNT)))
+            return 0
+        if args.validate_pg_shard is not None:
+            validate_pg_shard(args.validate_pg_shard)
+            return 0
+        if args.partition_pg_list is not None:
+            print("\n".join(partition_pg_test_list(sys.stdin.read(), args.partition_pg_list)))
+            return 0
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     if args.manifest_only and not args.write_snapshots:
         parser.error("--manifest-only requires --write-snapshots")
     if args.write_snapshots and args.write_pg_db_paths:

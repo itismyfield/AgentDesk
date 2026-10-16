@@ -115,7 +115,6 @@ test-non-pg:
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::destructive_commit::tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::bridge_entry_guard_tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::identity_gate::bridge_entry::tests -- --test-threads=1
-    env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::current_message_anchor::tests -- --test-threads=1
     env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::guards::tests -- --test-threads=1
@@ -195,15 +194,42 @@ test-postgres:
     cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
     cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
-# Main's PG matrix job: shard 0 runs the whole recipe on its part of the
-# selection and shard 1 only its part, so the targeted commands run once.
+# Both PG matrices run the targeted commands only on shard 0.
 test-postgres-shard:
-    @case "${PG_INCLUDE_SHARD:-}" in 0|1) ;; *) echo "PG_INCLUDE_SHARD must be 0 or 1" >&2; exit 1 ;; esac
-    if [ "$PG_INCLUDE_SHARD" = 0 ]; then just test-postgres; else just test-postgres-selection; fi
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/check_pg_test_lane_membership.py --validate-pg-shard "${PG_INCLUDE_SHARD:-}"
+    test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    source scripts/ci/non-pg-test-filter.sh && run_prepared_lib_test cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+    pg_selection_status=$?
+    if [ "$pg_selection_status" != 0 ]; then exit "$pg_selection_status"; fi
+    if [ "$PG_INCLUDE_SHARD" != 0 ]; then exit 0; fi
+    unset PG_INCLUDE_SHARD && just test-postgres-continuity
+
+# Shard 0 of both PG matrices and the PR selector's shard 0 run these. The routing test
+# keeps them identical to the unsharded recipe's.
+test-postgres-continuity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/ci/non-pg-test-filter.sh
+    run_prepared_lib_test cargo test --lib services::memory::memento::anchor::tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib services::discord::prompt_builder::session_anchors::tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib tmux_turn_liveness::idle_cleanup_tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib frozen_busy_jsonl -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib idle_tmux_snapshot_missing_output_path -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib dispatched_sessions::kill_tmux_resume_tests -- --nocapture --test-threads=1
+    run_prepared_lib_test cargo test --lib services::routines::session_control::tests -- --nocapture --test-threads=1
 
 # The first command of test-postgres alone.
 test-postgres-selection:
     @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
     source scripts/ci/non-pg-test-filter.sh && cargo test --lib -- "${PG_INCLUDE_ARGS[@]}" --nocapture --test-threads=1
+
+# H9-W waits out the real H, POST timeout and F (over 200 s), so CI selection skips it; it runs
+# only by this exact name, forcing through the `agentdesk` binary built from the same tree.
+test-s3-h9w:
+    @test -n "${POSTGRES_TEST_DATABASE_URL_BASE:-}" || (echo "POSTGRES_TEST_DATABASE_URL_BASE must name the dedicated PostgreSQL test server with an explicit host and port" >&2; exit 1)
+    cargo build --bin agentdesk
+    ADK_S3_AGENTDESK_BIN="${CARGO_TARGET_DIR:-target}/debug/agentdesk" cargo test --lib services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg -- --exact --ignored --nocapture --test-threads=1
 
 check: fmt-check lint cargo-check test

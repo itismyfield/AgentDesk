@@ -10,9 +10,6 @@ pub(crate) enum Activity {
     Output,
     Tool,
     Unclassified,
-    /// Recorded by the TUI injection path, which is not connected yet.
-    #[cfg(test)]
-    InjectedInput,
 }
 
 /// A terminal the provider itself reported, not one a wrapper synthesised.
@@ -149,7 +146,7 @@ impl RawObservation {
     }
 }
 
-/// The provider's own terminal for one exact attempt, drawn from a complete observation.
+/// A provider terminal from its complete reader.
 #[derive(Debug)]
 pub(crate) struct TerminalEvidence {
     receipt_id: i64,

@@ -386,25 +386,7 @@ pub(super) fn advance_tmux_relay_confirmed_end(
         .map(tmux_generation_file_mtime_ns)
         .filter(|m| *m != 0);
 
-    let mut current = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
-    let mut won_advance = false;
-
-    while current < target_end {
-        match relay_coord.confirmed_end_offset.compare_exchange(
-            current,
-            target_end,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                break;
-            }
-            Err(observed) => current = observed,
-        }
-    }
+    let confirmed_end = relay_coord.advance_untyped_frontier(target_end, mtime_at_attempt);
 
     // #964: observability timestamp — updated through the same relay-progress
     // heartbeat used by confirmed chunk sends. Regression recovery may benignly
@@ -412,19 +394,6 @@ pub(super) fn advance_tmux_relay_confirmed_end(
     // relay progress still flows through this heartbeat path.
     relay_coord.note_relay_progress_heartbeat(chrono::Utc::now().timestamp_millis());
 
-    // Pair the pre-CAS mtime with the offset only when we actually won
-    // the advance. Losers and no-ops leave the mtime baseline alone so
-    // the legitimate winner's snapshot remains the one that labels the
-    // watermark (PR #1271 round 3).
-    if won_advance && let Some(mtime) = mtime_at_attempt {
-        relay_coord
-            .confirmed_end_generation_mtime_ns
-            .store(mtime, std::sync::atomic::Ordering::Release);
-    }
-
-    let confirmed_end = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
     let confirmed_reached_target = confirmed_end >= target_end;
     crate::services::observability::record_invariant_check(
         confirmed_reached_target,
@@ -2293,7 +2262,7 @@ mod tests {
                 };
                 let g1 = stamp(1_700_526_400);
                 let rollout = root.path().join("rollout-a.jsonl");
-                std::fs::write(&rollout, [b'x'; 64]).unwrap();
+                std::fs::write(&rollout, [&[b'x'; 63][..], b"\n"].concat()).unwrap();
                 let binding = |path: &std::path::Path, session: &str| {
                     crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
                         runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
@@ -2439,5 +2408,94 @@ mod relay_state_contract_refs {
         // I5 resume_offset producers: completion postlude + runtime-handoff loop.
         use super::super::completion_postlude::run_completion_postlude as _;
         use super::super::runtime_handoff_loop::handle_runtime_handoff_loop_message as _;
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod s2a1_bridge_tests {
+    use super::*;
+    use crate::services::cluster::stream_relay::source_read_proof::tests::seal;
+    use crate::services::discord::turn_finalizer::TurnKey;
+    use crate::services::discord::{DeliveryLeaseKey, LeaseOutcome};
+
+    #[test]
+    fn s2a1_bridge_optional_session_noop_movement_and_heartbeat_are_preserved() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(59_960_201);
+        let coord = shared.tmux_relay_coord(channel);
+        let (_dir, proof) = seal("s2a1-bridge-optional", 200);
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(200, 7, 0, Some(&proof))
+            ),
+            "Published"
+        );
+        for end in [None, Some(0)] {
+            advance_tmux_relay_confirmed_end(&shared, channel, end, None);
+            assert_eq!(coord.frontier_tuple_for_tests(), (200, 7, 0, true));
+            assert_eq!(
+                coord
+                    .last_relay_ts_ms
+                    .load(std::sync::atomic::Ordering::Acquire),
+                0
+            );
+        }
+        advance_tmux_relay_confirmed_end(&shared, channel, Some(100), None);
+        assert_eq!(coord.frontier_tuple_for_tests(), (200, 7, 0, true));
+        assert!(
+            coord
+                .last_relay_ts_ms
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+        );
+        advance_tmux_relay_confirmed_end(&shared, channel, Some(300), None);
+        assert_eq!(coord.frontier_tuple_for_tests(), (300, 7, 0, false));
+    }
+
+    #[test]
+    fn s2a1_bridge_real_lease_outcomes_preserve_delivery_policy_without_certificate() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            for (index, outcome) in [
+                LeaseOutcome::Delivered,
+                LeaseOutcome::Unknown,
+                LeaseOutcome::NotDelivered,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                let channel = ChannelId::new(59_960_210 + index as u64);
+                let coord = shared.tmux_relay_coord(channel);
+                let session = format!("s2a1-bridge-lease-{index}");
+            let (_dir, proof) = seal(&session, 100);
+                assert_eq!(format!("{:?}", coord.publish_confirmed_for_tests(100, 7, 0, Some(&proof))), "Published");
+            if outcome == LeaseOutcome::Delivered {
+                crate::services::cluster::stream_relay::source_read_proof::tests::exhaust_revision(&session);
+            }
+                let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 11, 0));
+                let BridgeLeaseAcquire::Held(lease) =
+                    BridgeDeliveryLease::acquire(&shared, channel, key, 100, Some(300))
+                else {
+                    panic!("lease");
+                };
+                assert!(lease.commit_and_advance(&shared, channel, None, outcome));
+                assert_eq!(
+                    coord.frontier_tuple_for_tests(),
+                    if outcome == LeaseOutcome::Delivered {
+                        (300, 7, 0, false)
+                    } else {
+                        (100, 7, 0, true)
+                    }
+                );
+            }
+        });
     }
 }

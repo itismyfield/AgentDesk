@@ -526,3 +526,72 @@ fn ordered_events_keep_abort_start_and_input_in_record_order() {
         ["opened u-1", "input u-1", "closed u-1 aborted=true"]
     );
 }
+
+fn codex_parent(
+    root: &std::path::Path,
+    name: &str,
+    channel: u64,
+    records: &[Value],
+) -> SourceBinding {
+    let path = root.join(name);
+    let meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root}});
+    std::fs::write(&path, format!("{meta}\n")).unwrap();
+    append(&path, records);
+    binding(&path, ShadowProvider::Codex, channel)
+}
+
+// A closer of a turn opened without a native id ends the turn without proving it completed.
+#[test]
+fn anonymous_turn_close_preserves_idle_and_ordered_close() {
+    let root = tempfile::tempdir().unwrap();
+    let claude = root.path().join("claude.jsonl");
+    std::fs::write(&claude, "").unwrap();
+    let anonymous = json!({"type":"user","message":{"content":"anonymous"}});
+    append(&claude, &[idle(), anonymous, idle()]);
+    let unnamed = |kind: &str| json!({"type":"event_msg", "payload":{"type":kind}});
+    let codex = codex_parent(
+        root.path(),
+        "codex.jsonl",
+        34,
+        &[unnamed("task_started"), unnamed("task_complete")],
+    );
+    for binding in [binding(&claude, ShadowProvider::Claude, 33), codex] {
+        let mut facts = InputFacts::open(binding).unwrap();
+        assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
+        assert_eq!(shapes(&facts).last().unwrap(), "closed - aborted=false");
+    }
+}
+
+// A halted reader keeps its resume point, and a resumed reader can process its closer.
+#[test]
+fn halted_reader_preserves_resume_and_repeated_error() {
+    let root = tempfile::tempdir().unwrap();
+    let blocked = json!({"type":"response_item","payload":{"type":"unknown_item","id":"x"}});
+    let parent = codex_parent(
+        root.path(),
+        "codex.jsonl",
+        35,
+        &[
+            codex("task_started", "t1"),
+            blocked,
+            codex("task_complete", "t1"),
+        ],
+    );
+    let claude = root.path().join("claude.jsonl");
+    std::fs::write(&claude, "").unwrap();
+    append(&claude, &[user("a", "busy")]);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&claude)
+        .unwrap()
+        .write_all(b"broken\n")
+        .unwrap();
+    let mut facts = InputFacts::open(parent.clone()).unwrap();
+    assert!(facts.poll(u64::MAX).is_err());
+    let resume = facts.resume_point().cloned().unwrap();
+    let mut resumed = InputFacts::resume(parent, &resume).unwrap();
+    assert_eq!(resumed.poll(u64::MAX).unwrap().state, TurnState::Idle);
+    let mut torn = InputFacts::open(binding(&claude, ShadowProvider::Claude, 36)).unwrap();
+    assert!(torn.poll(u64::MAX).is_err());
+    assert!(torn.poll(u64::MAX).is_err(), "a halted reader stays halted");
+}

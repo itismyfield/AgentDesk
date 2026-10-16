@@ -144,10 +144,11 @@ use crate::services::discord::router::{TurnKind, admit_queued_intake};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
+mod final_guards;
 mod replay_hold;
 
 struct ScopedIntakeTestEnv {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
     _root: tempfile::TempDir,
     previous_mode: Option<OsString>,
     previous_root: Option<OsString>,
@@ -159,9 +160,7 @@ impl ScopedIntakeTestEnv {
     }
 
     fn with_mode(mode: &str) -> Self {
-        let lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let root = tempfile::tempdir().expect("temporary AgentDesk root");
         let previous_mode = std::env::var_os("ADK_INTAKE_ROUTING_MODE");
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
@@ -518,6 +517,10 @@ async fn an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_post
     let config = crate::runtime_layout::config_file_path(env._root.path());
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "server: {}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
     let shared = crate::services::discord::make_shared_data_for_tests();
     let http = Arc::new(serenity::Http::new("Bot intake-dispatch-test"));
     let deps = deps(&http, &shared);
@@ -740,7 +743,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
             panic!("live foreign owner should forward")
         }
     };
-    super::finish_admitted_queued_intake(&deps, admitted, &intervention)
+    super::finish_admitted_queued_intake(&deps, admitted)
         .await
         .expect("forwarded queued finish is a no-op");
 
@@ -971,6 +974,7 @@ async fn dispatched_open_route_never_uses_stale_local_recovery_pg() {
         channel_id: &channel,
         policy_channel_id: &channel,
         user_msg_id: "4350452",
+        replay_source_message_ids: None,
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&submission.request.request_owner_name),
         user_text: &submission.request.user_text,

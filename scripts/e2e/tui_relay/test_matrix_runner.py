@@ -18,6 +18,15 @@ from tui_relay import assertions  # noqa: E402
 
 
 class MatrixConfig(unittest.TestCase):
+    def test_feature_accounting_keeps_partial_coverage_out_of_pass(self):
+        for totals, expected in (({"pass": 1, "skipped_assertions": 2}, "partial"),
+                                 ({"dormant": 3}, "partial"),
+                                 ({"pass": 1, "unevaluable": 1}, "fail"),
+                                 ({"pass": 1, "skipped_assertions": 0}, "pass"),
+                                 ({"pass": 1}, "pass")):
+            with self.subTest(totals=totals):
+                self.assertEqual(matrix.evidence_status(totals), expected)
+
     def test_load_channel_ids_from_agentdesk_yaml_shape(self):
         yaml = """
 agents:
@@ -25,6 +34,9 @@ agents:
     channels:
       claude: {id: "111"}
   - id: adk-claude-tui-e2e
+    channels:
+      claude: {id: "221"}
+  - id: adk-claude-tui-2-e2e
     channels:
       claude: {id: "222"}
   - id: adk-codex-pipe-e2e
@@ -34,9 +46,9 @@ agents:
     channels:
       codex: {id: "555"}
 """
-        # A pre-ops config may still contain the retired worker; ignore it.
+        # Ignore obsolete workers that have no supported cell mapping.
         legacy_extra = """
-  - id: adk-claude-e-e2e
+  - id: adk-obsolete-worker-e2e
     channels:
       claude: {id: "333"}
 """
@@ -55,12 +67,8 @@ agents:
         )
 
     def test_parse_cells_rejects_unknown_cell(self):
-        with self.assertRaises(ValueError):
-            matrix.parse_cells("claude-pipe,unknown")
-
-    def test_parse_cells_rejects_retired_cell(self):
-        for raw in ("claude-e", "claude-tui,claude-e"):
-            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "claude-e"):
+        for raw in ("unknown", "claude-pipe,unknown"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "unknown"):
                 matrix.parse_cells(raw)
 
     def test_reset_before_each_boolean_flags(self):
@@ -261,7 +269,7 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(
             [(p["cell"], p["channel_id"], p["handoff_to_agent"]) for p in participants],
             [
-                ("claude-tui", "111", "adk-claude-tui-e2e"),
+                ("claude-tui", "111", "adk-claude-tui-2-e2e"),
                 ("codex-tui", "222", "adk-codex-tui-e2e"),
             ],
         )
@@ -464,7 +472,7 @@ class CrossChannelMatrix(unittest.TestCase):
         self.assertEqual(FakeClient.max_active, 2)
         self.assertIn(
             (
-                "adk-claude-tui-e2e",
+                "adk-claude-tui-2-e2e",
                 "111",
                 "cc",
                 "응답에 정확히 한 줄로 [E2E:E11:CC-MARKER] 만 출력해줘.",

@@ -1,3 +1,4 @@
+use super::auto_queue_eligibility::{QueuedReach, queued_reach};
 use super::*;
 
 /// One task owns this slot until all arm requests have been evaluated.
@@ -43,7 +44,7 @@ struct IdleQueueBackstopRearm {
 
 pub(super) const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
-pub(super) const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration =
+pub(in crate::services::discord) const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration =
     std::time::Duration::from_secs(60);
 const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_backstop";
 
@@ -279,6 +280,22 @@ fn matching_residue_owns_anchor(
         .is_some_and(|residue| residue.matches_observed_owner(snapshot))
 }
 
+/// Backlog the queued-only lane still watches: nonzero while a first ready input stands, or its
+/// state could not be read, on a channel whose gate is open.
+async fn queued_lane_backlog_units(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    snapshot: &ChannelMailboxSnapshot,
+) -> usize {
+    let reach = queued_reach(None, shared, provider, channel_id, snapshot).await;
+    if reach.rearms() {
+        snapshot.intervention_queue.len().max(1)
+    } else {
+        0
+    }
+}
+
 pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_queue_nonempty(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -290,8 +307,15 @@ pub(in crate::services::discord) async fn arm_event_backstop_after_no_start_if_q
         return false;
     }
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    let backlog_units =
+    let mut backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
+    if backlog_units == 0 {
+        // Box the queued eligibility check so intake and restore futures stay small.
+        backlog_units = Box::pin(queued_lane_backlog_units(
+            shared, provider, channel_id, &snapshot,
+        ))
+        .await;
+    }
     if backlog_units == 0 {
         return false;
     }
@@ -395,40 +419,64 @@ async fn run_single_slow_idle_queue_backstop(
     let backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
     if backlog_units == 0 || idle_queue_snapshot_blocked_by_live_turn(&snapshot) {
-        return None;
-    }
-
-    if timed_out {
-        emit_idle_queue_backstop_warn(
-            provider,
-            Some(channel_id),
-            reason,
-            backlog_units,
-            "channel_backstop",
-        );
-    }
-    let may_kick = !idle_queue_snapshot_blocked_by_cancelled_anchor(&snapshot)
-        || release_cancelled_backstop_anchor(shared, provider, channel_id, &snapshot).await;
-    if may_kick {
-        let kickoff =
-            kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason);
-        #[cfg(test)]
-        let _ = queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
-            "idle_queue_backstop",
-            kickoff,
-        )
-        .await;
-        #[cfg(not(test))]
-        let _ = kickoff.await;
+        // No idle start is due. The queued-only lane may still paste; it never reclaims an anchor.
+        match queued_reach(None, shared.as_ref(), provider, channel_id, &snapshot).await {
+            QueuedReach::Ready => {
+                if timed_out {
+                    let queue_len = snapshot.intervention_queue.len();
+                    tracing::info!(
+                        target: IDLE_QUEUE_BACKSTOP_WARN_TARGET,
+                        provider = provider.as_str(),
+                        channel_id = channel_id.get(),
+                        reason,
+                        queue_len,
+                        cause = "queued_busy_backstop",
+                        "Idle queue slow backstop offers the first ready input to the busy TUI"
+                    );
+                }
+                kick_queued_only_channel_if_context_available(shared, provider, channel_id, reason)
+                    .await;
+            }
+            QueuedReach::Wait => {}
+            QueuedReach::Closed | QueuedReach::NoCandidate => return None,
+        }
+    } else {
+        if timed_out {
+            emit_idle_queue_backstop_warn(
+                provider,
+                Some(channel_id),
+                reason,
+                backlog_units,
+                "channel_backstop",
+            );
+        }
+        let may_kick = !idle_queue_snapshot_blocked_by_cancelled_anchor(&snapshot)
+            || release_cancelled_backstop_anchor(shared, provider, channel_id, &snapshot).await;
+        if may_kick {
+            let kickoff =
+                kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason);
+            #[cfg(test)]
+            let _ = queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
+                "idle_queue_backstop",
+                kickoff,
+            )
+            .await;
+            #[cfg(not(test))]
+            let _ = kickoff.await;
+        }
     }
 
     // A reported start can still have re-preserved the message at the hosted-TUI gate.
     slot.consume_requests();
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-    let backlog_units =
+    let mut backlog_units =
         idle_queue_backstop_backlog_units(shared.as_ref(), provider, channel_id, &snapshot);
     if backlog_units == 0 || idle_queue_snapshot_blocked_by_live_turn(&snapshot) {
-        return None;
+        // Whatever the paste left behind is judged afresh, not by what it reported.
+        backlog_units = queued_lane_backlog_units(shared, provider, channel_id, &snapshot).await;
+        if backlog_units == 0 {
+            return None;
+        }
     }
     Some(IdleQueueBackstopRearm { backlog_units })
 }

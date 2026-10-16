@@ -4,7 +4,7 @@ use crate::services::discord::health::legacy_supervision::{RetiredForTest, test_
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot, TerminalBarrier};
 use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::watcher_completion::{self, Outcome};
-use crate::services::discord::tmux::{InstallFixture, OOnlyInstallOutcome};
+use crate::services::discord::tmux::InstallFixture;
 use crate::services::tui_o::store::ledger::PieceOutcome;
 use poise::serenity_prelude::Http;
 use std::io::Write;
@@ -248,7 +248,7 @@ async fn terminal_case(case: Case) {
     let pending_post = matches!(case, Case::PendingReceipt).then(|| writer.hold_next_post());
     writer.acquired();
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     let ticket = watcher_completion::observe(&handle.cancel).unwrap();
     until(&observed, "actual initial EOF", |s| {
@@ -428,7 +428,7 @@ async fn retained_case_with_cancel(changed: Invalidated, cancel_from_test: bool)
     let submitted = Scope::new(&fixture.shared);
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let handle = fixture.handle();
     let ticket = watcher_completion::observe(&handle.cancel).unwrap();
     until(&observed, "initial EOF before authority change", |s| {
@@ -616,7 +616,7 @@ async fn t6_b_terminal_prefix_keeps_next_turn_and_utf8_carry_for_real_successor_
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
     writer.acquired();
     let (stop, actor) = writer.start();
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let first = fixture.handle();
     let first_join = watcher_completion::observe(&first.cancel).unwrap();
     until(&observed, "first install initial EOF", |s| {
@@ -675,7 +675,7 @@ async fn t6_b_terminal_prefix_keeps_next_turn_and_utf8_carry_for_real_successor_
     let recorded_after_prefix = crate::services::discord::tmux::tmux_watcher::cancel_handoff::capsule_observation::recorded_original(&fixture.shared, fixture.channel);
     drop(barrier);
     let barrier = TerminalBarrier::arm(&fixture.provider, CHANNEL);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
+    fixture.spawn_watcher().await;
     let successor = fixture.handle();
     assert!(!Arc::ptr_eq(&first.cancel, &successor.cancel));
     let successor_join = watcher_completion::observe(&successor.cancel).unwrap();

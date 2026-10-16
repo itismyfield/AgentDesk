@@ -27,6 +27,9 @@ pub(crate) struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
     selected: BTreeSet<u64>,
+    dormant_channels: BTreeSet<u64>,
+    /// Initial reservations can only be installed before this snapshot is published.
+    late_adopt_capable: bool,
     kinds: BTreeMap<u64, RuntimeHandoffKind>,
     site: Site,
     configured_id: Option<String>,
@@ -42,7 +45,13 @@ impl PartialEq for BootChannels {
         fn selected(boot: &BootChannels) -> impl PartialEq + '_ {
             let kinds = boot.kinds.iter().filter(|(c, _)| boot.selected.contains(c));
             let kinds: Vec<_> = kinds.collect();
-            (&boot.selected, kinds, &boot.site, &boot.configured_id)
+            (
+                &boot.selected,
+                &boot.dormant_channels,
+                kinds,
+                &boot.site,
+                &boot.configured_id,
+            )
         }
         selected(self) == selected(other)
     }
@@ -60,6 +69,15 @@ pub(crate) fn configured_channels(config: &Config) -> BTreeSet<u64> {
     }
     all_tui_kinds(config)
         .map(|kinds| kinds.into_keys().collect())
+        .unwrap_or_default()
+}
+
+/// Dormant membership as configured; only validation decides whether these writers are selected.
+pub(crate) fn configured_dormant_channels(config: &Config) -> BTreeSet<u64> {
+    config
+        .tui_o
+        .as_ref()
+        .map(|config| config.writer.dormant_channels.clone())
         .unwrap_or_default()
 }
 
@@ -195,9 +213,20 @@ impl BootChannels {
             listed_kinds(config, "tui_o.writer.channels", &channels)?
         };
         let channels: BTreeSet<u64> = kinds.keys().copied().collect();
+        let dormant_channels = configured_dormant_channels(config);
+        ensure!(
+            !dormant_channels.contains(&0),
+            "tui_o.writer.dormant_channels rejects channel 0"
+        );
+        ensure!(
+            dormant_channels.is_subset(&channels),
+            "tui_o.writer.dormant_channels must be a subset of the selected O writer channels"
+        );
         let (site, configured_id) = site(config, !channels.is_empty())?;
         Ok(Self {
             selected: channels.clone(),
+            dormant_channels,
+            late_adopt_capable: config.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt),
             channels,
             kinds,
             site,
@@ -239,7 +268,7 @@ impl BootChannels {
                 }
                 self.kinds.extend(kinds);
                 self.channels.extend(kept);
-                let candidate = |(channel, state)| (channel, Candidate::new(state));
+                let candidate = |(channel, state)| (channel, self.seed_candidate(channel, state));
                 self.candidates = states.into_iter().map(candidate).collect();
             }
             Site::Foreign { home } => {
@@ -249,11 +278,23 @@ impl BootChannels {
                 for (&channel, _) in states.iter().filter(|(_, s)| **s != Adoption::Pending) {
                     alarms.raise_at(channel, &alarm, Instant::now());
                 }
-                let standby = |(channel, state)| (channel, Candidate::new(state));
+                let standby = |(channel, state)| (channel, self.seed_candidate(channel, state));
                 self.standby = states.into_iter().map(standby).collect();
             }
         }
         Ok(self)
+    }
+
+    fn seed_candidate(&self, channel: u64, state: Adoption) -> Candidate {
+        let reserve = self.late_adopt_capable
+            && self.selected.contains(&channel)
+            && self.kind(channel) == Some(RuntimeHandoffKind::ClaudeTui)
+            && state == Adoption::Pending;
+        if reserve {
+            Candidate::reserved_late()
+        } else {
+            Candidate::new(state)
+        }
     }
 
     /// Every channel O may own here: the selection plus, on the home, its kept committed channels.
@@ -264,6 +305,15 @@ impl BootChannels {
     /// The channels the boot config selected, for restart-required comparison.
     pub(crate) fn selected(&self) -> &BTreeSet<u64> {
         &self.selected
+    }
+
+    /// Installed dormant policy, kept fixed across live config reloads.
+    pub(crate) fn dormant_channels(&self) -> &BTreeSet<u64> {
+        &self.dormant_channels
+    }
+
+    pub(crate) fn late_adopt_capable(&self) -> bool {
+        self.late_adopt_capable
     }
 
     pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
@@ -367,7 +417,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     };
     ensure!(
         installed == &candidate,
-        "tui_o.writer.channels requires a process restart"
+        "tui_o.writer.channels or tui_o.writer.dormant_channels requires a process restart"
     );
     Ok(())
 }
@@ -392,3 +442,6 @@ pub(crate) fn owns_output(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod late_reservation_tests;

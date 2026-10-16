@@ -39,6 +39,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::closed_verdict::MailboxRefusal;
+use super::policy_close::{PolicyMailboxOutcome, PolicyRetain};
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
     ChannelMailboxState, ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason,
@@ -113,11 +114,6 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(());
             "RestoreActiveTurn"
         }
-        #[cfg(test)]
-        M::InstalledActorHandoff(request) => {
-            request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected("handoff actor closed".into()));
-            "InstalledActorHandoff"
-        }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(RecoveryKickoffResult::RefusedClosed);
             "RecoveryKickoff"
@@ -137,6 +133,11 @@ pub(super) fn gate_closed_arm(
                 persistence_error: None,
             });
             "RequeueFront"
+        }
+        // A policy close commits only on its captured actor; the successor is never retried.
+        M::PolicyClose { reply, .. } => {
+            let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
+            "PolicyClose"
         }
         // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
         // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.

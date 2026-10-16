@@ -52,6 +52,38 @@ fn durable_phase(channel: u64) -> Option<SubmissionPhase> {
         .map(|record| record.phase)
 }
 
+#[test]
+fn cg_b2c_guarded_owner_rearms_pending_after_an_applied_input() {
+    use crate::services::claude_tui::{guarded_outcome, host_input::InputRun};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (_, submission) = managed_row(6_808_013);
+    guarded_outcome::with_owner(Some(submission.observer()), || {
+        guarded_outcome::begin();
+        submission.fence().before_first_payload().unwrap();
+        guarded_outcome::finish(&InputRun::Applied);
+        assert!(!submission.guarded_hold());
+        guarded_outcome::begin();
+        assert!(
+            submission.guarded_hold(),
+            "the next selected input must preserve pending cancellation"
+        );
+        assert!(matches!(
+            submission.classify_failure(),
+            SubmissionFailure::GuardedRunning
+        ));
+        let stopped = InputRun::Indeterminate {
+            confirmed: 0,
+            cause: crate::services::claude_tui::host_input::StopCause::Send("unknown".into()),
+        };
+        guarded_outcome::finish(&stopped);
+        guarded_outcome::begin();
+        assert!(matches!(
+            submission.classify_failure(),
+            SubmissionFailure::GuardedStopped(run) if run == stopped
+        ));
+    });
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Entry {
     Fresh,
@@ -397,4 +429,49 @@ fn a_composer_change_after_readiness_fails_before_the_fence() {
             SubmissionFailure::ProviderExecutionFailed
         ));
     }
+}
+
+#[test]
+fn cg_d1_off_restart_keeps_durable_may_have_submitted_and_refuses_resend() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _boot = crate::config::session_hosts::force_with_claude_guard_for_test(None, &[], &[]);
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let channel = 6_809_100;
+    let (_, previous) = managed_row(channel);
+    previous.fence().before_first_payload().unwrap();
+    drop(previous);
+    let row = super::super::load_inflight_state(&ProviderKind::Claude, channel).unwrap();
+    let birth = InflightEpisodePin::from_state(&row);
+    let restarted = ManagedSubmission(Arc::new(Attempt {
+        provider: ProviderKind::Claude,
+        channel_id: channel,
+        birth,
+        target: row.tmux_session_name.clone().unwrap(),
+        gate: Mutex::new(Gate::Open),
+        guarded: Mutex::new(GuardedState::Dormant),
+    }));
+    let session = row.tmux_session_name.as_deref().unwrap();
+    assert!(crate::services::claude_tui::guarded_outcome::held(session).is_none());
+    let result = run(Entry::Fresh, channel, "managed prompt", &restarted, None);
+    assert!(result.result.unwrap_err().contains("held before submit"));
+    assert!(
+        result.sends.is_empty(),
+        "the durable fence prevents OFF from resending"
+    );
+    assert_eq!(
+        durable_phase(channel),
+        Some(SubmissionPhase::MayHaveSubmitted)
+    );
+    assert!(matches!(
+        restarted.classify_failure(),
+        SubmissionFailure::PreSubmitPersistenceRefused(_)
+    ));
+    assert_eq!(
+        InflightEpisodePin::from_state(
+            &super::super::load_inflight_state(&ProviderKind::Claude, channel).unwrap()
+        ),
+        InflightEpisodePin::from_state(&row)
+    );
 }

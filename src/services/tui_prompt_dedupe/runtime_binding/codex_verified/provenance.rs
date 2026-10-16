@@ -42,5 +42,7 @@ pub struct CodexEpisodeDeny {
 pub(crate) mod admission;
 pub(crate) mod dormant;
 
-#[cfg(test)]
 pub(crate) mod permission;
+
+pub(crate) mod decisions;
+pub(crate) mod live_grant;

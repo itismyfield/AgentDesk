@@ -415,3 +415,73 @@ fn n1c_boot_confirms_only_selected_committed_channels_after_full_retirement() {
         markers::delete(&marker);
     }
 }
+
+// Pauses `channel`'s retirement on a worker running `boot`, checks it is not yet confirmed, then resumes.
+fn paused_boot<T: Send + 'static>(
+    channel: u64,
+    boot: impl FnOnce() -> T + Send + 'static,
+    while_paused: impl FnOnce(),
+) -> T {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    *PAUSE.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, reached_tx, resume_rx));
+    let worker = std::thread::spawn(boot);
+    reached_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert!(!crate::services::tui_o::turn_mode::transcript_turns(
+        channel
+    ));
+    while_paused();
+    resume_tx.send(()).unwrap();
+    worker.join().unwrap()
+}
+
+// A successful retirement confirms its channel before later channels, and repeats return it again.
+#[test]
+fn boot_confirmation_preserves_retirement_order_and_repeated_results() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::tui_o::cutover::test_override;
+    use crate::services::tui_o::turn_mode::TestConfirmation;
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let root_dir = tempfile::tempdir().unwrap();
+    let _root = Root::new(root_dir.path());
+    let [first, delayed, refused] = [63250231, 63250232, 63250233];
+    let _boot = test_override::force_channels(&[
+        (first, ClaudeTui),
+        (delayed, ClaudeTui),
+        (refused, ClaudeTui),
+    ]);
+    let bad = root().unwrap().join(format!("claude_{refused}_8.json"));
+    std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
+    std::fs::write(&bad, "invalid").unwrap();
+    let mut config = TuiOConfig::default();
+    config.turn.channels = [first, delayed, refused].into();
+    let shared = test_override::shared_channels();
+    let boot_config = config.clone();
+    let confirmed = paused_boot(
+        delayed,
+        move || {
+            let _boot = shared();
+            confirm_at_boot(&ProviderKind::Claude, Some(&boot_config))
+        },
+        || {
+            assert!(crate::services::tui_o::turn_mode::transcript_turns(first));
+            assert!(!crate::services::tui_o::turn_mode::transcript_turns(
+                refused
+            ));
+        },
+    );
+    assert_eq!(confirmed, [first, delayed]);
+    let _confirmed = [first, delayed].map(TestConfirmation::confirmed);
+    assert_eq!(
+        confirm_at_boot(&ProviderKind::Claude, Some(&config)),
+        [first, delayed]
+    );
+    assert!(!crate::services::tui_o::turn_mode::transcript_turns(
+        refused
+    ));
+    assert!(bad.exists());
+}

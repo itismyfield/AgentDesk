@@ -18,6 +18,8 @@ pub(super) async fn settle_receipt(
     {
         return false;
     }
+    #[cfg(test)]
+    test_hooks::note_early_hold();
     if let Some(receipt) = decode(shared, provider, state) {
         receipt.settle(http, shared, state).await;
     }
@@ -83,9 +85,11 @@ pub(super) fn decode(
         "the receipt names another turn"
     } else if admitted == 0 {
         "a receipt without its generation"
-    } else if admitted >= current {
+    } else if admitted >= current && !inflight::receipt_mutant("same-generation") {
         "this process's own close owns the receipt"
-    } else if inflight::row_is_current_generation(state, current) {
+    } else if inflight::row_is_current_generation(state, current)
+        && !inflight::receipt_mutant("same-generation")
+    {
         "the row was born in this process"
     } else {
         return Some(match inflight::opt_channel_id(state.channel_id) {
@@ -108,7 +112,7 @@ impl BeforeStartRestart {
             Self::Held(why) => return kept(state, why),
             Self::Settle(provider, channel) => (provider, channel),
         };
-        if state.restart_mode.is_some() {
+        if state.restart_mode.is_some() && !inflight::receipt_mutant("mode-bypass") {
             return kept(state, "planned restart owns the row");
         }
         if o_owns(state) {
@@ -119,18 +123,21 @@ impl BeforeStartRestart {
             .await
             .cancel_token
             .is_some()
+            && !inflight::receipt_mutant("actor-present")
         {
             return kept(state, "a live actor owns the channel");
         }
         let mut row = state.clone();
+        // A pending or delivered receipt without its message is never settled.
+        if row.current_msg_id == 0 {
+            return kept(state, "no message to show the stop on");
+        }
         if row
             .herdr_before_start_stop
             .as_ref()
             .is_some_and(|receipt| receipt.notice_pending())
+            || inflight::receipt_mutant("delivered-resend")
         {
-            if row.current_msg_id == 0 {
-                return kept(state, "no message to show the stop on");
-            }
             let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
             let anchor = MessageId::new(row.current_msg_id);
             let sent = gateway
@@ -147,6 +154,7 @@ impl BeforeStartRestart {
             .await
             .cancel_token
             .is_some()
+            && !inflight::receipt_mutant("actor-present")
         {
             return kept(state, "an actor arrived before cleanup");
         }
@@ -180,8 +188,8 @@ fn o_owns(state: &inflight::InflightTurnState) -> bool {
 }
 
 #[cfg(test)]
-mod test_hooks {
-    use std::cell::RefCell;
+pub(super) mod test_hooks {
+    use std::cell::{Cell, RefCell};
     use std::future::Future;
     use std::pin::Pin;
 
@@ -189,10 +197,20 @@ mod test_hooks {
 
     thread_local! {
         static BEFORE_CLEANUP: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static EARLY_HOLDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts receipt rows the scan's first check kept off every later path.
+    pub(super) fn note_early_hold() {
+        EARLY_HOLDS.set(EARLY_HOLDS.get() + 1);
+    }
+
+    pub(in crate::services::discord::recovery_engine) fn early_holds() -> usize {
+        EARLY_HOLDS.replace(0)
     }
 
     /// Runs once, after any notice ack and before the mailbox check and cleanup.
-    pub(super) fn set_before_cleanup(hook: Hook) {
+    pub(in crate::services::discord::recovery_engine) fn set_before_cleanup(hook: Hook) {
         BEFORE_CLEANUP.with(|slot| *slot.borrow_mut() = Some(hook));
     }
 

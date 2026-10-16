@@ -1,22 +1,7 @@
 use super::active_source_dedup::settle_completed_sources;
 use super::*;
 
-pub(super) fn enqueue_with_settlement(
-    queue: &mut Vec<Intervention>,
-    intervention: Intervention,
-    active_user_message_id: Option<MessageId>,
-    settlement: Option<(&ProviderKind, ChannelId)>,
-) -> EnqueueInterventionResult {
-    enqueue_behind(
-        queue,
-        intervention,
-        active_user_message_id,
-        settlement,
-        false,
-    )
-}
-
-/// `enqueue_with_settlement`, except a `reserved_front` head is never the merge target.
+/// A `reserved_front` head is never the merge target.
 pub(super) fn enqueue_behind(
     queue: &mut Vec<Intervention>,
     mut intervention: Intervention,
@@ -24,7 +9,7 @@ pub(super) fn enqueue_behind(
     settlement: Option<(&ProviderKind, ChannelId)>,
     reserved_front: bool,
 ) -> EnqueueInterventionResult {
-    let mut queue_exit_events = prune_interventions(queue);
+    let mut queue_exit_events = overflow::drain_head_overflow_behind(queue, reserved_front);
     ensure_source_message_ids(&mut intervention);
 
     if intervention_sources_all_match_active(&intervention, active_user_message_id) {
@@ -47,7 +32,15 @@ pub(super) fn enqueue_behind(
         );
     }
 
-    if let Some(last) = queue.last() {
+    // An input carrying a retry budget never absorbs a later one, by merge or by equal text.
+    let last_budgeted = settlement
+        .zip(queue.last())
+        .is_some_and(|((provider, channel), last)| {
+            crate::services::discord::busy_followup_retry_store::carries_retry_budget(
+                provider, channel, last,
+            )
+        });
+    if let Some(last) = queue.last().filter(|_| !last_budgeted) {
         if last.author_id == intervention.author_id
             && last.text == intervention.text
             && last.reply_context == intervention.reply_context
@@ -63,7 +56,8 @@ pub(super) fn enqueue_behind(
     }
 
     // A reserved queued head keeps its payload, so later input queues behind it instead.
-    let merge_index = (queue.len().checked_sub(1)).filter(|index| !(reserved_front && *index == 0));
+    let merge_index = (queue.len().checked_sub(1))
+        .filter(|index| !(reserved_front && *index == 0) && !last_budgeted);
     if let Some(index) = merge_index
         && should_merge_intervention(&queue[index], &intervention)
         && let Some((provider, channel_id)) = settlement
@@ -114,7 +108,7 @@ pub(super) fn enqueue_behind(
     }
 
     queue.push(intervention);
-    queue_exit_events.extend(drain_head_overflow(queue));
+    queue_exit_events.extend(overflow::drain_head_overflow_behind(queue, reserved_front));
     EnqueueInterventionResult {
         enqueued: true,
         merged: false,
@@ -130,5 +124,5 @@ pub(crate) fn enqueue_intervention(
     intervention: Intervention,
     active_user_message_id: Option<MessageId>,
 ) -> EnqueueInterventionResult {
-    enqueue_with_settlement(queue, intervention, active_user_message_id, None)
+    enqueue_behind(queue, intervention, active_user_message_id, None, false)
 }

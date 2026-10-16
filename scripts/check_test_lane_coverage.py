@@ -13,7 +13,8 @@ snapshot, and any newly uncovered module or stale entry also fails. Baseline
 debt can therefore only shrink without a redundant scalar lock.
 
 Required-PR jobs alone form a second ratchet axis with its own baseline, and
-lane_source_parity.py judges each explicit justfile filter's PR parity.
+lane_source_parity.py judges each explicit justfile filter's PR parity. Against the
+reference commit, lane_new_id_registration.py requires each added test ID in a required job.
 """
 
 from __future__ import annotations
@@ -49,6 +50,9 @@ MOD_RE = re.compile(
 )
 CFG_TEST_RE = re.compile(r"#\s*\[\s*cfg\s*\([^\]]*\btest\b[^\]]*\)\s*\]")
 PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"(?P<path>[^"]+)"\s*\]')
+# Every inner `#![cfg...` to the line end (matched on stripped source, read from the raw
+# text), so trailing tokens or a cfg_attr stay visible.
+INNER_CFG_RE = re.compile(r"#\s*!\s*\[\s*cfg[^\n]*")
 ATTRIBUTED_FN_RE = re.compile(
     r"(?P<attrs>(?:#\s*\[[^\]]*\]\s*)+)"
     r"(?:(?:pub(?:\s*\([^)]*\))?)\s+)?"
@@ -224,7 +228,7 @@ def file_module_path(src_root: Path, path: Path) -> tuple[str, ...]:
 
 
 def _module_records(
-    source: str, base: tuple[str, ...]
+    source: str, base: tuple[str, ...], decls: dict | None = None
 ) -> tuple[
     set[str],
     dict[str, set[str]],
@@ -237,6 +241,11 @@ def _module_records(
     ``outer/`` directory even though the source file itself is the parent file.
     """
     clean = strip_rust(source)
+    if decls is not None:
+        decls.setdefault(("#!", *base), []).extend(
+            source[m.start():m.start() + len(m.group().rstrip())]
+            for m in INNER_CFG_RE.finditer(clean)
+        )
     attributes: dict[int, str] = {}
     for match in ATTRIBUTED_MOD_RE.finditer(clean):
         attributes[match.start("name")] = source[
@@ -301,6 +310,8 @@ def _module_records(
         parent_names = tuple(item[1] for item in inline_stack)
         logical = (*base, *parent_names, name)
         is_test_module = bool(CFG_TEST_RE.search(attrs))
+        if decls is not None:
+            decls.setdefault(logical, []).append(attrs)
         if is_test_module:
             modules.add("::".join(logical))
             tests_by_module.setdefault("::".join(logical), set())
@@ -350,11 +361,18 @@ def _normalize_alias_path(
     return current
 
 
-def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
-    """Inventory logical test modules and test paths without building."""
+def discover_test_inventory(
+    repo_root: Path,
+    aliases_out: dict[tuple[str, ...], tuple[str, ...]] | None = None,
+    decls_out: dict[str, list[str]] | None = None,
+) -> dict[str, set[str]]:
+    """Inventory logical test modules and test paths without building; `aliases_out`
+    receives the `#[path]` module map and `decls_out` every module's declaration attributes
+    (a file's inner `#![cfg]` under `#!<module>`)."""
     src_root = (repo_root / "src").resolve()
     physical_inventory: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
     raw_aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    decls: dict[tuple[str, ...], list[str]] = {}
 
     for path in sorted(src_root.rglob("*.rs")):
         rel = path.relative_to(src_root)
@@ -362,7 +380,7 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
             continue
         base = file_module_path(src_root, path)
         source = path.read_text(encoding="utf-8")
-        modules, tests_by_module, aliases = _module_records(source, base)
+        modules, tests_by_module, aliases = _module_records(source, base, decls)
         for module in modules:
             physical = tuple(module.split("::"))
             physical_inventory.setdefault(physical, set()).update(
@@ -398,6 +416,12 @@ def discover_test_inventory(repo_root: Path) -> dict[str, set[str]]:
         if updated == aliases:
             break
         aliases = updated
+    if aliases_out is not None:
+        aliases_out.update(aliases)
+    for path, attrs in decls.items() if decls_out is not None else ():
+        marker = path[:1] == ("#!",)
+        key = "::".join(_normalize_alias_path(path[marker:], aliases))
+        decls_out.setdefault("#!" * marker + key, []).extend(attrs)
 
     inventory: dict[str, set[str]] = {}
     for physical_module, physical_tests in physical_inventory.items():
@@ -876,8 +900,11 @@ def check(
     reference_label: str = "reference snapshot",
     emit_success: bool = True,
     reference_required_pr: set[str] = frozenset(),
+    reference_sha: str | None = None,
 ) -> int:
-    inventory = discover_test_inventory(repo_root)
+    aliases: dict[tuple[str, ...], tuple[str, ...]] = {}
+    decls: dict[str, list[str]] = {}
+    inventory = discover_test_inventory(repo_root, aliases, decls)
     lanes = discover_lane_filters(repo_root)
     skip_args = (
         load_non_pg_skip_args(repo_root)
@@ -888,7 +915,7 @@ def check(
     parity = _parity_module()
     sources = parity.collect_sources(repo_root, sys.modules[__name__])
     required_lanes = tuple(
-        dict.fromkeys(s.lane for s in sources.of("pr-required") if s.lane is not None)
+        dict.fromkeys(s.lane for s in sources.required if s.lane is not None)
     )
     exceptions, exception_findings = parity.load_exceptions(
         repo_root / parity.EXCEPTIONS_REL
@@ -918,8 +945,8 @@ def check(
     required_failed = report_axis(
         "required_pr_coverage", "required-pr", required_current, required_baseline,
         set(reference_required_pr), reference_label,
-        f"Select '+' modules in a required PR job ({jobs}); main, nightly and "
-        "justfile lanes do not count. Remove '-' entries to lock in debt reduction.",
+        f"Select '+' modules in a required PR job or a main lane ({jobs}); nightly "
+        "and justfile lanes do not count. Remove '-' entries to lock in debt reduction.",
     )
     parity_findings = [*exception_findings, *verdict.findings]
     for axis, found in (
@@ -942,15 +969,26 @@ def check(
         print(
             f"OK: required_pr_coverage: {len(required_current)} uncovered module(s) "
             f"match the required-PR baseline; {len(required_lanes)} invocation(s) in "
-            f"required PR jobs: {jobs}."
+            f"required PR jobs and main lanes: {jobs}."
         )
     if emit_success and not parity_findings:
         print(
             f"OK: pr_filter_parity: {verdict.explicit} explicit justfile filter(s); "
-            f"{verdict.matched} selected by required PR named filters, "
+            f"{verdict.matched} selected by required PR or main named filters, "
             f"{verdict.excepted} by proven exceptions."
         )
-    return int(all_failed or required_failed or bool(parity_findings))
+    new_failed = False
+    if reference_sha is not None:
+        verdict = parity._sibling("lane_new_id_registration.py").judge(
+            repo_root, reference_sha, sys.modules[__name__], parity, sources, pg_tests,
+            skip_args, aliases, set(inventory), decls,
+        )
+        for finding in verdict.findings:
+            print(f"FAIL: new_required_test_ids: {finding.render()}", file=sys.stderr)
+        new_failed = bool(verdict.findings)
+        if emit_success and not new_failed:
+            print("\n".join([verdict.summary(), *(row.render() for row in verdict.mapped)]))
+    return int(all_failed or required_failed or bool(parity_findings) or new_failed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -974,6 +1012,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_baseline,
             reference_label=f"commit {reference_sha}",
             reference_required_pr=reference_required_pr,
+            reference_sha=reference_sha,
         )
     except (OSError, ValueError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

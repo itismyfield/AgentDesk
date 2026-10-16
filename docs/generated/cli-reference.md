@@ -11,7 +11,7 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 58
+- Top-level commands: 57
 - Commands including nested subcommands: 110
 
 ## Global options
@@ -122,11 +122,11 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk health`](#agentdesk-health) | Show consolidated health snapshot of the current node (server status, dcserver pid, last deploy time, queue lag, Discord/disk/outbox). |  |
 | [`agentdesk machine-compare`](#agentdesk-machine-compare) | Compare release/main/dev state across every registered worker node (`mac-mini`, `mac-book`, …). Renders a side-by-side table with dcserver pid, last deploy, queue lag, and a `diff` column. |  |
 | [`agentdesk activity`](#agentdesk-activity) | Time-windowed activity report: commits / closed issues / merged PRs / deploys / incidents in a single table. Uses gh + git + AgentDesk API. |  |
-| [`agentdesk o-shadow`](#agentdesk-o-shadow) | Read-only TUI output shadow: window start, report, synthetic manifest |  |
 | [`agentdesk o`](#agentdesk-o) |  |  |
 | [`agentdesk o boundary`](#agentdesk-o-boundary) | Source boundaries the writer could not decide |  |
 | [`agentdesk o status`](#agentdesk-o-status) | Rejected pieces of a channel and their operator approvals; writes nothing |  |
 | [`agentdesk o resume`](#agentdesk-o-resume) | Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start |  |
+| [`agentdesk o transition`](#agentdesk-o-transition) | Ask the local server about a transcript transition's cleanup; opens no store here |  |
 | [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
@@ -1252,12 +1252,6 @@ Usage: `agentdesk activity [OPTIONS]`
 | `--repo <REPO>` | `String` |  | Repository in owner/repo form. Defaults to the current repo's `origin` remote when omitted. |
 | `--no-agentdesk` | flag |  | Skip the AgentDesk-side deploy / incident lookup (useful when the local API is offline). Pure git + gh report. |
 
-## `agentdesk o-shadow`
-
-Read-only TUI output shadow: window start, report, synthetic manifest
-
-Usage: `agentdesk o-shadow`
-
 ## `agentdesk o`
 
 Usage: `agentdesk o <COMMAND>`
@@ -1267,6 +1261,7 @@ Subcommands:
 - `boundary` — Source boundaries the writer could not decide
 - `status` — Rejected pieces of a channel and their operator approvals; writes nothing
 - `resume` — Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start
+- `transition` — Ask the local server about a transcript transition's cleanup; opens no store here
 
 ### `agentdesk o boundary`
 
@@ -1298,6 +1293,12 @@ Usage: `agentdesk o resume [OPTIONS]`
 | `--operator <OPERATOR>` | `String` | `operator` |  |
 
 > Exit: 0 recorded, 1 no store, 3 already recorded, 4 refused, 5 busy, 6 not written, 7 unknown
+
+### `agentdesk o transition`
+
+Ask the local server about a transcript transition's cleanup; opens no store here
+
+Usage: `agentdesk o transition`
 
 ## `agentdesk herdr`
 

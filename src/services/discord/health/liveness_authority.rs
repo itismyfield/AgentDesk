@@ -582,6 +582,7 @@ mod tests {
         };
 
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: key.provider.clone(),
             attached: true,
             tmux_session: key.tmux_session_name.clone(),
@@ -821,7 +822,6 @@ mod tests {
                 reason: VouchDenial::Stale
             }
         );
-
         let mut mismatch = inflight.clone();
         mismatch.user_msg_id += 1;
         assert_eq!(

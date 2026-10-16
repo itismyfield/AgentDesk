@@ -349,26 +349,7 @@ pub(in crate::services::discord) fn claim_or_reuse_watcher_for_host(
     host: WatchHost,
 ) -> Result<WatcherClaimOutcome, WatchWithheld> {
     let claim = (source, false, thread_parent, host);
-    claim_watcher_for_host(watchers, channel_id, handle, provider, claim, None)
-}
-
-pub(super) fn claim_retired_o_watcher_for_host(
-    watchers: &TmuxWatcherRegistry,
-    channel_id: ChannelId,
-    handle: TmuxWatcherHandle,
-    provider: &ProviderKind,
-    host: WatchHost,
-) -> Result<Option<WatcherClaimOutcome>, WatchWithheld> {
-    let guard = lock_tmux_watcher_registry();
-    // Reject a foreign owner while holding the same lock as claim mutation.
-    if watchers
-        .owner_channel_for_tmux_session(&handle.tmux_session_name)
-        .is_some_and(|owner| owner != channel_id)
-    {
-        return Ok(None);
-    }
-    let claim = ("n4d_o_only_respawn", false, None, host);
-    claim_watcher_for_host(watchers, channel_id, handle, provider, claim, Some(guard)).map(Some)
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
 }
 
 /// Force a fresh watcher/converter generation even when a live same-session
@@ -396,7 +377,7 @@ pub(in crate::services::discord) fn claim_or_replace_watcher_for_host(
     host: WatchHost,
 ) -> Result<WatcherClaimOutcome, WatchWithheld> {
     let claim = (source, true, thread_parent, host);
-    claim_watcher_for_host(watchers, channel_id, handle, provider, claim, None)
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
 }
 
 #[cfg(test)]
@@ -415,7 +396,7 @@ pub(crate) fn claim_watcher(
         thread_parent,
         WatchHost::Legacy,
     );
-    claim_watcher_for_host(watchers, channel_id, handle, provider, claim, None)
+    claim_watcher_for_host(watchers, channel_id, handle, provider, claim)
         .expect("a legacy claim on an unlisted pane is never withheld")
 }
 
@@ -430,9 +411,8 @@ fn claim_watcher_for_host(
         Option<ThreadFollowUpParent>,
         WatchHost,
     ),
-    guard: Option<crate::services::discord::tmux_watcher_registry::TmuxWatcherRegistryGuard>,
 ) -> Result<WatcherClaimOutcome, WatchWithheld> {
-    let guard = guard.unwrap_or_else(lock_tmux_watcher_registry);
+    let guard = lock_tmux_watcher_registry();
     let _admission = admit_claim(&handle.tmux_session_name, host)?;
     let requested_tmux = handle.tmux_session_name.clone();
     let requested_output_path = handle.output_path.clone();
@@ -667,7 +647,8 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_test(
         }
     }
 
-    let watchers = TmuxWatcherRegistry::new();
+    let watchers =
+        TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux_session_name = "AgentDesk-claude-4984-cross-channel-claim";
     assert!(try_claim_watcher(
         &watchers,

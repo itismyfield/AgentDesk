@@ -1,3 +1,4 @@
+use super::intake_gate::ledger::legacy_allowed;
 use super::message_handler::{self, IntakeDeps, IntakeRequest};
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use crate::services::cluster::intake_router_hook::{
@@ -9,12 +10,26 @@ use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
 use poise::serenity_prelude as serenity;
 
+#[derive(Debug)]
+pub(in crate::services::discord::router) struct QueuedTransitionBusyHandoff {
+    pub(in crate::services::discord::router) owned_uploads:
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+}
+impl std::fmt::Display for QueuedTransitionBusyHandoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("queued intake transition busy")
+    }
+}
+impl std::error::Error for QueuedTransitionBusyHandoff {}
+
 mod attachment;
 #[cfg(test)]
 mod home_order_tests;
 mod notice;
 mod policy_channel;
 mod queued;
+#[cfg(test)]
+pub(super) use queued::transition_busy_tests::after_upload_take;
 pub(crate) mod replay_admission;
 #[cfg(test)]
 mod replay_admission_tests;
@@ -314,6 +329,16 @@ pub(crate) async fn admit_text_intake(
         super::TurnKind::Foreground => "foreground",
         super::TurnKind::BackgroundTrigger => "background_trigger",
     };
+    let replay_sources = checkpoint_waits_for_admission(request.channel_id).then(|| {
+        replay_admission::discord_input(
+            submission.provider.as_str(),
+            request.channel_id.get(),
+            request.user_msg_id.get(),
+            request.source_message_ids.iter().map(|source| source.get()),
+            &request.user_text,
+        )
+        .sources
+    });
     let ctx = IntakeRouterContext {
         mode,
         leader_instance_id: &self_instance_id,
@@ -321,6 +346,7 @@ pub(crate) async fn admit_text_intake(
         channel_id: &channel_id,
         policy_channel_id: &policy_channel_id,
         user_msg_id: &user_msg_id,
+        replay_source_message_ids: replay_sources.as_deref(),
         request_owner_id: &request_owner_id,
         request_owner_name: Some(&request.request_owner_name),
         user_text: &request.user_text,
@@ -479,6 +505,13 @@ pub(crate) async fn dispatch_text_intake(
     deps: &IntakeDeps<'_>,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    legacy_allowed(
+        deps.shared,
+        deps.http,
+        &submission.provider,
+        submission.request.channel_id,
+    )
+    .await?;
     let admission = admit_text_intake(deps, &submission).await;
     finish_text_intake_admission(deps, admission, submission).await
 }
@@ -496,7 +529,21 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     checkpoint: impl FnOnce() + Send + 'a,
 ) -> BoxedIntake<'a> {
     Box::pin(async move {
+        legacy_allowed(
+            deps.shared,
+            deps.http,
+            &submission.provider,
+            submission.request.channel_id,
+        )
+        .await?;
         let admission = admit_text_intake(deps, &submission).await;
+        legacy_allowed(
+            deps.shared,
+            deps.http,
+            &submission.provider,
+            submission.request.channel_id,
+        )
+        .await?;
         if !matches!(admission, IntakeAdmission::ReplayDeferred(_)) {
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
@@ -512,6 +559,13 @@ pub(crate) async fn finish_text_intake_admission(
     admission: IntakeAdmission,
     mut submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    legacy_allowed(
+        deps.shared,
+        deps.http,
+        &submission.provider,
+        submission.request.channel_id,
+    )
+    .await?;
     match admission {
         IntakeAdmission::Local(permit) => {
             finish_admitted_local(deps, permit, submission).await?;
@@ -551,14 +605,23 @@ pub(crate) async fn finish_admitted_text_intake(
     permit: LocalAdmissionPermit,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
-    finish_admitted_local(deps, permit, submission).await
+    finish_admitted_local(deps, permit, submission)
+        .await
+        .map(|_| ())
 }
 
 pub(crate) async fn finish_admitted_local(
     deps: &IntakeDeps<'_>,
     permit: LocalAdmissionPermit,
     submission: IntakeSubmission,
-) -> Result<(), super::super::Error> {
+) -> Result<super::IntakeExecution, super::super::Error> {
+    legacy_allowed(
+        deps.shared,
+        deps.http,
+        &submission.provider,
+        submission.request.channel_id,
+    )
+    .await?;
     if !permit.permits_submission(&submission) {
         tracing::error!(
             admitted_channel_id = permit.channel_id.get(),
@@ -567,15 +630,15 @@ pub(crate) async fn finish_admitted_local(
             submitted_request_owner = submission.request.request_owner.get(),
             "local admission permit does not match intake submission"
         );
-        return Ok(());
+        return Ok(super::IntakeExecution::ConsumedProtected);
     }
     let preserve_on_cancel = submission.preserve_on_cancel;
     let queued_drain = matches!(submission.origin, IntakeOrigin::QueuedDrain);
     local_turn(deps, submission, preserve_on_cancel, queued_drain).await
 }
 
-type BoxedIntake<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<(), super::super::Error>> + Send + 'a>,
+type BoxedIntake<'a, T = ()> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, super::super::Error>> + Send + 'a>,
 >;
 
 /// Boxed inside a plain function so the turn's large future never sits in the intake frames above it.
@@ -584,7 +647,7 @@ fn local_turn<'a, 'b: 'a>(
     submission: IntakeSubmission,
     preserve_on_cancel: bool,
     queued_drain: bool,
-) -> BoxedIntake<'a> {
+) -> BoxedIntake<'a, super::IntakeExecution> {
     Box::pin(message_handler::finish_admitted_local(
         deps,
         submission.request,

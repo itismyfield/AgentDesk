@@ -1,3 +1,4 @@
+use crate::services::discord::input_runtime::intake::skills::hold_text_skill;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -7,6 +8,10 @@ use super::super::turn_bridge::CommandStop;
 use super::super::*;
 use super::build_provider_skill_prompt;
 use super::command_policy::{TextCommandId, TextCommandSelection, select_text_command};
+
+#[cfg(test)]
+#[path = "text_commands/clear_refusal_reply_tests.rs"]
+mod clear_refusal_reply_tests;
 
 /// A text stop judges the turn, by its inflight row when the token has no name, before any write.
 async fn cancel_text_stop_token_mailbox(
@@ -447,16 +452,33 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
         }
 
         TextCommandId::Clear => {
-            super::clear_channel_session_state(
-                &ctx.http,
-                &data.shared,
-                &data.provider,
-                channel_id,
-                "!clear",
-                super::SoftClearNotifyMode::Suppress,
-            )
-            .await?;
-            let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
+            let cleared = async {
+                super::clear_channel_session_state(
+                    &ctx.http,
+                    &data.shared,
+                    &data.provider,
+                    channel_id,
+                    "!clear",
+                    super::SoftClearNotifyMode::Suppress,
+                )
+                .await?;
+                let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
+                anyhow::Ok(())
+            };
+            // A failed clear answers with its reason, as `/clear` does: an error returned from
+            // this handler reaches only the event-handler log, never the channel.
+            if let Err(error) = cleared.await {
+                tracing::warn!(
+                    event = "discord_command_failed",
+                    channel_id = channel_id.get(),
+                    user_id = msg.author.id.get(),
+                    user_name = %msg.author.name,
+                    command = cmd,
+                    reason = %error,
+                    "discord_command_failed"
+                );
+                let _ = msg.reply(&ctx.http, error.to_string()).await;
+            }
             return Ok(true);
         }
 
@@ -1380,6 +1402,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 _ => {}
             }
 
+            if Box::pin(hold_text_skill(ctx, msg, data, &skill, args_str)).await? {
+                return Ok(true);
+            }
+
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
             let skill_exists = {
@@ -1668,6 +1694,7 @@ mod home_command_tests {
             provider: crate::services::provider::ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let mut msg = serenity::Message::default();
         msg.id = serenity::MessageId::new(channel.get() + 2);

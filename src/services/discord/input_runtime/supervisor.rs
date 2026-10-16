@@ -5,14 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::{OwnedMutexGuard, watch};
 
 use self::command::{ScanCommit, SupervisorCmd};
 use self::ordering::AdmissionOrder;
-use self::receipt::{Deferred, Receipt};
+use self::receipt::{Deferred, Receipt, ResponsibilityLookup};
 use self::reserve::Reserved;
 use super::clear::{self, ClearHost, Step, Unresolved};
 use super::fence::{self, Closing, Failure, Gate, Mode};
@@ -30,6 +30,8 @@ pub(crate) mod admission;
 pub(crate) mod command;
 #[path = "external.rs"]
 pub(crate) mod external;
+#[path = "intake.rs"]
+pub(in crate::services::discord) mod intake;
 #[path = "mapping.rs"]
 pub(crate) mod mapping;
 #[path = "ordering.rs"]
@@ -70,6 +72,8 @@ struct Entry {
     health: BTreeMap<&'static str, String>,
     // The first mapping violation; no report, release or poison in this process removes it.
     latch: Option<HoldCause>,
+    overflow: Option<ordering::PendingOverflow>,
+    client: Option<Weak<intake::client::Client>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +84,7 @@ pub(crate) enum Refused {
     Sealed,
     /// The supervisor's config names another channel, provider or root than its reservation.
     Mismatch,
+    GenerationExhausted,
 }
 
 impl Registry {
@@ -92,6 +97,14 @@ impl Registry {
             #[cfg(test)]
             on_release: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn population_for_test(&self) -> (usize, usize) {
+        (
+            self.entries.lock().unwrap().len(),
+            self.closings.lock().unwrap().len(),
+        )
     }
 
     /// False until the first registration, so an unused registry costs health nothing.
@@ -127,12 +140,15 @@ impl Registry {
                 (false, false) => Refused::Duplicate,
             });
         }
-        entries.insert(key.clone(), Entry::default());
+        let order = AdmissionOrder::new(provider.clone(), channel, 1, 0)
+            .map_err(|_| Refused::GenerationExhausted)?;
+        entries.insert(key.clone(), Entry::with_overflow(order.pending_overflow()));
         self.used.store(true, Ordering::Release);
         Ok(Registration {
             registry: self,
             key,
             slot: Some(LedgerSlot::new(root, channel)),
+            order: Some(order),
             released: false,
         })
     }
@@ -169,6 +185,7 @@ pub(crate) struct Registration {
     registry: &'static Registry,
     key: (String, u64),
     slot: Option<LedgerSlot>,
+    order: Option<AdmissionOrder>,
     released: bool,
 }
 
@@ -209,6 +226,7 @@ impl Registration {
                     "ledger_receipt_identity_missing"
                         | "ledger_receipt_unconfirmed"
                         | "ledger_close_flush_unconfirmed"
+                        | "ledger_close_gate_unconfirmed"
                 ) =>
             {
                 *reason
@@ -405,6 +423,10 @@ pub(crate) trait Ports: Send + 'static {
     fn take_notices(host: &mut Self::Move) -> Vec<(Option<u64>, &'static str)>;
     /// False when delivery failed, so the same Notice may be sent again later.
     fn notice(&mut self, text: String) -> Step<'_, bool>;
+    /// Rechecks this source outside ledger loans; an unavailable policy never grants admission.
+    fn source_policy<'a>(&'a mut self, _source: &'a source::Source) -> Step<'a, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub(crate) struct Config {
@@ -438,6 +460,8 @@ pub(crate) struct Supervisor<P: Ports> {
     #[cfg(test)]
     pub(crate) after_receipt_io: Option<ordering::PendingOverflow>,
     #[cfg(test)]
+    pub(crate) after_close_loan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     pub(crate) handbacks: usize,
 }
 
@@ -460,7 +484,7 @@ impl<P: Ports> Supervisor<P> {
             return Err(Refused::Mismatch);
         }
         let slot = registration.slot().ok_or(Refused::Duplicate)?;
-        let order = AdmissionOrder::new(config.provider.clone(), config.channel, 1, 0);
+        let order = registration.order.take().ok_or(Refused::Duplicate)?;
         Ok(Self {
             config,
             ports,
@@ -482,6 +506,8 @@ impl<P: Ports> Supervisor<P> {
             #[cfg(test)]
             after_receipt_io: None,
             #[cfg(test)]
+            after_close_loan: Mutex::new(None),
+            #[cfg(test)]
             handbacks: 0,
         })
     }
@@ -491,15 +517,14 @@ impl<P: Ports> Supervisor<P> {
         let closed = self.closed;
         #[cfg(test)]
         let closed = closed && !mutant("close_allows_commit");
-        self.admitted && !closed && !self.slot.loaned() && self.registration.latched().is_none()
-    }
-
-    pub(crate) fn pending_overflow(&self) -> ordering::PendingOverflow {
-        self.order.pending_overflow()
-    }
-
-    pub(crate) fn pending_snapshot(&self) -> ordering::PendingSource {
-        self.order.pending_snapshot()
+        let exhausted = self.order.exhausted();
+        #[cfg(test)]
+        let exhausted = exhausted && !mutant("admission_ignores_order_exhaustion");
+        self.admitted
+            && !closed
+            && !exhausted
+            && !self.slot.loaned()
+            && self.registration.latched().is_none()
     }
 
     pub(crate) fn cursor(&mut self) -> Option<&mut Cursor> {
@@ -514,30 +539,6 @@ impl<P: Ports> Supervisor<P> {
         self.registration.release(self.slot)
     }
 
-    /// S1 to S7. A holding stage reports health and leaves every later stage unrun.
-    pub(crate) async fn boot(&mut self) -> Landing {
-        // Each boot must pass every stage again, so an earlier admission never outlives it.
-        self.admitted = false;
-        self.invalidate_order();
-        match self.stages().await {
-            Ok(landing) => landing,
-            Err(cause) => {
-                self.registration.report(&cause, true);
-                Landing::Held(cause)
-            }
-        }
-    }
-
-    fn invalidate_order(&mut self) {
-        match self.admission_gen.checked_add(1) {
-            Some(epoch) => {
-                self.admission_gen = epoch;
-                self.order.invalidate(epoch);
-            }
-            None => self.admitted = false,
-        }
-    }
-
     /// All receipt work borrows the existing slot; readiness for Enter is a separate decision.
     async fn input_command(&mut self, command: SupervisorCmd, receipt_open: bool) {
         use crate::services::tui_input::rows::receipt_identity::Responsibility;
@@ -546,21 +547,7 @@ impl<P: Ports> Supervisor<P> {
             SupervisorCmd::Adopt { channel, ack } => {
                 let _ = ack.send(self.adopt_task(channel));
             }
-            SupervisorCmd::Close { ack } => {
-                self.closed = true;
-                self.invalidate_order();
-                let result = loan(&mut self.slot, |lease| {
-                    let result = lease.get().and_then(|ledger| ledger.rows()).map(|_| ());
-                    lease.needs_reopen |= result.is_err();
-                    result
-                })
-                .await
-                .ok_or(Deferred::SupervisorLost)
-                .and_then(|result| result.map_err(|_| Deferred::Persistence));
-                self.registration
-                    .report(&held("ledger_close_flush_unconfirmed"), result.is_err());
-                let _ = ack.send(result);
-            }
+            SupervisorCmd::Close { ack } => self.close_command(ack).await,
             SupervisorCmd::FetchTicket { reply } => {
                 let _ = reply.send(self.order.fetch_ticket(self.admission_gen));
             }
@@ -572,8 +559,11 @@ impl<P: Ports> Supervisor<P> {
                 let admit_new = receipt_open
                     && self.admission_open()
                     && !ordering::order_barrier(&self.config.provider, self.config.channel);
+                let policy = self.permits_source(&source).await;
                 let result = if source.identity().execution_channel_id != self.config.channel {
                     external::ExternalReceipt::Deferred(Deferred::Conflict)
+                } else if !policy {
+                    external::ExternalReceipt::Deferred(Deferred::Unknown)
                 } else {
                     loan(&mut self.slot, move |lease| {
                         external::submit(lease, *source, admit_new)
@@ -590,17 +580,17 @@ impl<P: Ports> Supervisor<P> {
             }
             SupervisorCmd::LookupResponsibility { identity, reply } => {
                 let result = if identity.execution_channel_id != self.config.channel {
-                    Responsibility::Conflict
+                    ResponsibilityLookup::unproven(Responsibility::Conflict)
                 } else {
                     loan(&mut self.slot, move |lease| {
                         lease
                             .get()
                             .and_then(|ledger| ledger.rows())
-                            .map(|rows| rows.responsibility(&identity))
-                            .unwrap_or(Responsibility::Unknown)
+                            .map(|rows| receipt::lookup(&rows, &identity))
+                            .unwrap_or_else(|_| ResponsibilityLookup::unknown())
                     })
                     .await
-                    .unwrap_or(Responsibility::Unknown)
+                    .unwrap_or_else(ResponsibilityLookup::unknown)
                 };
                 let _ = reply.send(result);
             }
@@ -632,8 +622,11 @@ impl<P: Ports> Supervisor<P> {
                     .permits_sources(&capability, self.admission_gen, &sources)
                     .is_ok();
                 let mut attempted = false;
+                let policy = self.permits_source(&source).await;
                 let result = if !receipt_open || !self.admission_open() {
                     Receipt::Deferred(Deferred::Closed)
+                } else if !policy {
+                    Receipt::Deferred(Deferred::Unknown)
                 } else if source.identity().execution_channel_id != self.config.channel
                     || (!permits_new
                         && self
@@ -960,6 +953,7 @@ impl<P: Ports> Supervisor<P> {
         #[cfg(test)]
         {
             self.handbacks += 1;
+            ordering::note_handback_callback_for_test();
         }
         closing
             .begin_handback()
@@ -976,6 +970,10 @@ impl<P: Ports> Supervisor<P> {
             self.notify(key, reason).await;
         }
         self.host = Some(host);
+        #[cfg(test)]
+        if mutant("handback_failure_as_handed_back") {
+            return Ok(self.returned(Landing::HandedBack));
+        }
         match outcome {
             Ok(Outcome::Legacy) => Ok(self.returned(Landing::HandedBack)),
             _ => Err(held("handback_held")),

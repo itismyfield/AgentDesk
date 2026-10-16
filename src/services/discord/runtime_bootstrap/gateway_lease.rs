@@ -477,9 +477,6 @@ async fn self_fence_gateway(
     provider: &ProviderKind,
     shard_manager: &Arc<serenity::gateway::ShardManager>,
 ) {
-    // Yield and loss both land here after their gate transition; Home-owned approvals stay.
-    let gate = crate::services::tui_o::ownership::gate(provider.as_str());
-    crate::services::discord::turn_presence::entrypoints::withdraw_gateway(&gate, "gateway_lost");
     // A memory-only restart flag is insufficient in cluster mode: after the
     // gateway task returns, dcserver intentionally remains alive as a standby,
     // so launchd never gets an exit to restart. Publish the same durable marker
@@ -611,12 +608,8 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                             if let Some(lease) = current_lease.take() {
                                 let _ = release_gateway(&gate, lease.unlock()).await;
                             }
-                            self_fence_gateway(
-                                &shared_for_lease,
-                                &provider_for_lease,
-                                &shard_manager,
-                            )
-                            .await;
+                            let (shared, provider) = (&shared_for_lease, &provider_for_lease);
+                            self_fence_gateway(shared, provider, &shard_manager).await;
                             return;
                         }
                     }
@@ -638,9 +631,6 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         );
                         gate.uncertain();
                         current_lease = None;
-                        let withdraw =
-                            crate::services::discord::turn_presence::entrypoints::withdraw_gateway;
-                        withdraw(&gate, "gateway_uncertain");
                     }
                 }
             }
@@ -685,9 +675,9 @@ pub(super) fn run_bot_spawn_gateway_lease_keepalive(
                         "  [{ts}] ⛔ GATEWAY-LEASE: {} singleton lease taken by another instance — self-fencing",
                         provider_for_lease.display_name()
                     );
+                    let (shared, provider) = (&shared_for_lease, &provider_for_lease);
                     gate.lost();
-                    self_fence_gateway(&shared_for_lease, &provider_for_lease, &shard_manager)
-                        .await;
+                    self_fence_gateway(shared, provider, &shard_manager).await;
                     return;
                 }
             }

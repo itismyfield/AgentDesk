@@ -14,6 +14,7 @@ async fn acquire(
     message: u64,
     uploads: &[crate::services::cluster::attachment_transfer::uploads::Upload],
 ) -> Option<IntakeRuntimeTransition> {
+    let mut owned = uploads.to_vec();
     acquire_after_redirect_or_requeue(
         (
             http,
@@ -29,8 +30,8 @@ async fn acquire(
             "held prompt",
         ),
         (&None, false, false),
-        (uploads, &None),
-        (false, &None, None, false),
+        (&mut owned, &None),
+        (false, &None, None, false, false),
         (Some("old".into()), false, String::new()),
     )
     .await
@@ -221,6 +222,7 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
 
         let handled = crate::services::discord::router::message_handler::handle_text_command(

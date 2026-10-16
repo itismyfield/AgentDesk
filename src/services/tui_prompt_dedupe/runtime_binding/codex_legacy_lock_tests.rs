@@ -9,7 +9,13 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess, PreparedIncarnation,
 };
 use serde_json::json;
-use std::{fs, path::Path, process::Command, time::Duration};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 #[test]
 fn legacy_canonical_read_failure_completes_ingress_and_another_getter() {
@@ -23,6 +29,7 @@ fn legacy_channel_registration_serializes_hook_disk_and_memory_publication() {
 
 fn run_legacy_ingress(race_channel_registration: bool) {
     const CHILD_ENV: &str = "ADK_CODEX_LEGACY_LOCK_CHILD";
+    const CHILD_READY: &str = "ADK_CODEX_LEGACY_LOCK_READY";
     if std::env::var_os(CHILD_ENV).is_none() {
         let name = if race_channel_registration {
             "legacy_channel_registration_serializes_hook_disk_and_memory_publication"
@@ -38,17 +45,41 @@ fn run_legacy_ingress(race_channel_registration: bool) {
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let stdout = child.stdout.take().unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let output = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.unwrap();
+                if line == CHILD_READY {
+                    let _ = ready_tx.send(Instant::now());
+                }
+                println!("{line}");
+            }
+        });
+        // Allow slow child startup and fixtures without extending the STATE hang check.
+        let ready_at = match ready_rx.recv_timeout(Duration::from_secs(180)) {
+            Ok(ready_at) => ready_at,
+            Err(error) => {
+                let _ = child.kill();
+                let status = child.wait().unwrap();
+                output.join().unwrap();
+                panic!("legacy ingress child did not become ready: {error} ({status})");
+            }
+        };
+        let deadline = ready_at + Duration::from_secs(15);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
+                output.join().unwrap();
                 assert!(status.success(), "legacy ingress child failed: {status}");
                 return;
             }
             if Instant::now() >= deadline {
                 child.kill().unwrap();
                 child.wait().unwrap();
+                output.join().unwrap();
                 panic!("legacy ingress held STATE after canonical context read failure");
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -140,6 +171,8 @@ fn run_legacy_ingress(race_channel_registration: bool) {
         });
         registration
     });
+    println!("{CHILD_READY}");
+    std::io::stdout().flush().unwrap();
     let outcome = observe_binding_hook(
         "codex",
         "SessionStart",
@@ -227,4 +260,37 @@ fn run_legacy_ingress(race_channel_registration: bool) {
     binding_events::forget_channel_for_tests(584_509);
     binding_events::set_test_root(None);
     super::super::reset_state_for_tests();
+}
+
+#[test]
+fn marker_io_guard_rejects_only_this_threads_binding_publication() {
+    use crate::services::cluster::stream_relay::source_read_proof::tests::hold_revisions_for_tests;
+    let _dedupe_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _state = crate::services::tui_prompt_dedupe::hold_binding_peek_lock_for_tests();
+        let _revisions = hold_revisions_for_tests();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().unwrap();
+    // A concurrent test thread holding either mutex is not this thread's marker IO.
+    assert_marker_publication_unlocked_for_tests();
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    // Catching inside the publication keeps the unwind from poisoning STATE for other tests.
+    let panic = with_runtime_binding_authority("marker-guard-same-thread", |_| {
+        std::panic::catch_unwind(assert_marker_publication_unlocked_for_tests)
+    })
+    .expect_err("marker IO inside this thread's binding publication must be rejected");
+    let message = panic
+        .downcast_ref::<&str>()
+        .map(|message| message.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned());
+    assert_eq!(
+        message.as_deref(),
+        Some("binding cache mutex must not cover marker IO")
+    );
 }

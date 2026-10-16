@@ -147,6 +147,24 @@ impl ReplayStart {
     }
 }
 
+/// Execution and replay custody remain separate outcomes through queued and worker settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IntakeExecution {
+    Executed,
+    Deferred,
+    ConsumedProtected,
+}
+
+impl IntakeExecution {
+    pub(crate) fn deferred(channel: poise::serenity_prelude::ChannelId) -> Self {
+        if super::checkpoint_waits_for_admission(channel) {
+            Self::Deferred
+        } else {
+            Self::Executed
+        }
+    }
+}
+
 /// Why a start did not happen; the request keeps its custody either way.
 #[derive(Debug)]
 pub(crate) enum StartStop {
@@ -306,6 +324,7 @@ pub(crate) enum StartRefusal {
     Protected(i64),
     AlreadyClassified(i64),
     SessionUnbound,
+    BusySessionRebind,
     Write(WriteError),
     PermitMismatch,
 }
@@ -330,6 +349,9 @@ pub(crate) async fn prepare_effect_start(
         input_hash: &projection.input_hash,
         binding: &projection.binding,
     };
+    if effect.requires_prior_ack() && projection.session_key.is_some() {
+        return Err(StartRefusal::BusySessionRebind);
+    }
     let ack = match (continuation, candidate.retry_receipt) {
         (None, None) => {
             let receipt = write::register_or_reuse(ctx.pool, input, ctx.instance)
@@ -343,6 +365,13 @@ pub(crate) async fn prepare_effect_start(
                 _ => return Err(StartRefusal::Protected(receipt.id)),
             }
             let nonce = receipt.episode_nonce.as_deref().unwrap_or_default();
+            if effect.requires_prior_ack() {
+                let saved = effect.save(ctx.pool, receipt.id, nonce).await;
+                #[cfg(test)]
+                let saved =
+                    test_activation::lose_ack(&format!("projection:{}", input.channel), saved);
+                saved.map_err(StartRefusal::Write)?;
+            }
             if let Some(session_key) = projection.session_key.as_deref() {
                 write::bind_session(ctx.pool, session_key, receipt.id, nonce)
                     .await
@@ -406,10 +435,18 @@ pub(crate) mod test_activation {
         ACK_LOST.lock().unwrap().push(channel.to_string());
     }
 
-    pub(super) fn lose_ack(
+    /// The next committed busy projection loses its acknowledgement.
+    pub(crate) fn lose_next_projection_ack(channel: u64) {
+        ACK_LOST
+            .lock()
+            .unwrap()
+            .push(format!("projection:{channel}"));
+    }
+
+    pub(super) fn lose_ack<T>(
         channel: &str,
-        ack: Result<super::write::BeginAck, super::WriteError>,
-    ) -> Result<super::write::BeginAck, super::WriteError> {
+        ack: Result<T, super::WriteError>,
+    ) -> Result<T, super::WriteError> {
         let mut lost = ACK_LOST.lock().unwrap();
         match lost.iter().position(|lost| lost == channel) {
             Some(index) if ack.is_ok() => {

@@ -10,6 +10,7 @@ use crate::services::discord::input_runtime::supervisor::admission::Admission;
 pub(crate) use crate::services::discord::input_runtime::supervisor::command::SupervisorCmd;
 
 use super::{BUDGET, Cursor, Landing, Ports, Supervisor, clear_loan, held, loan};
+use crate::services::discord::PresenceLease;
 use crate::services::discord::input_runtime::clear::{self, ClearHost, Outcome, Unresolved};
 use crate::services::discord::input_runtime::fence::{self, Closing};
 use crate::services::discord::input_runtime::reconcile::{self, HoldCause};
@@ -270,6 +271,8 @@ pub(crate) struct ChannelDrive<D: DrivePorts> {
     lost: bool,
     pub(super) clearing: Option<Clearing>,
     hold: Option<(&'static str, Instant)>,
+    /// Withdrawn at Close and at every end; a presence registration made later is not its own.
+    presence: PresenceLease,
     #[cfg(test)]
     pub(crate) counts: Counts,
 }
@@ -284,6 +287,7 @@ impl<D: DrivePorts> ChannelDrive<D> {
 /// open gate. A loan it abandoned keeps the slot lent, so that worker's writes stay its own.
 impl<D: DrivePorts> Drop for ChannelDrive<D> {
     fn drop(&mut self) {
+        self.presence.withdraw("input_drive_ended");
         if self.ready {
             let _ = self.closing.hold();
         }
@@ -378,6 +382,13 @@ impl<P: Ports> Supervisor<P> {
             Vec::new()
         };
         probe.adopt(expected, runtimes);
+        #[cfg(test)]
+        let publish = !super::mutant("c2_skip_ready_publish");
+        #[cfg(not(test))]
+        let publish = true;
+        if publish {
+            self.publish_intake();
+        }
         loop {
             let landing = self.boot().await;
             self.retry_notices().await;
@@ -400,10 +411,115 @@ impl<P: Ports> Supervisor<P> {
         }
     }
 
+    /// S1 to S7; exhaustion and Close are process-local admission barriers.
+    pub(crate) async fn boot(&mut self) -> Landing {
+        self.admitted = false;
+        let result = match self.boot_guard() {
+            Err(cause) => Err(cause),
+            Ok(()) => {
+                self.invalidate_order();
+                match self.boot_guard() {
+                    Err(cause) => Err(cause),
+                    Ok(()) => self.stages().await,
+                }
+            }
+        };
+        match result {
+            Ok(landing) => landing,
+            Err(cause) => {
+                self.registration.report(&cause, true);
+                Landing::Held(cause)
+            }
+        }
+    }
+
+    fn boot_guard(&self) -> Result<(), HoldCause> {
+        if let Some(cause) = self.registration.latched() {
+            return Err(cause);
+        }
+        let exhausted = self.order.exhausted();
+        #[cfg(test)]
+        let exhausted = exhausted && !super::mutant("boot_reopens_exhausted_admission");
+        if exhausted {
+            return Err(held("generation_exhausted"));
+        }
+        if self.closed {
+            return Err(held("closed"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn invalidate_order(&mut self) {
+        match self
+            .admission_gen
+            .checked_add(1)
+            .filter(|epoch| *epoch != u64::MAX)
+        {
+            Some(epoch) => {
+                self.admission_gen = epoch;
+                self.order.invalidate(epoch);
+            }
+            None => self.order.exhaust(),
+        }
+        if self.order.exhausted() {
+            self.admitted = false;
+        }
+    }
+
+    pub(super) async fn close_command(
+        &mut self,
+        ack: tokio::sync::oneshot::Sender<
+            Result<super::command::ClosedAndFlushed, super::receipt::Deferred>,
+        >,
+    ) {
+        use super::receipt::Deferred;
+        self.closed = true;
+        self.invalidate_order();
+        let closing = {
+            let closings = self
+                .registration
+                .registry
+                .closings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            closings.get(&self.registration.key).cloned()
+        };
+        #[cfg(test)]
+        let observer = self.after_close_loan.get_mut().unwrap().take();
+        let (result, flushed) = super::command::close_slot(
+            &mut self.slot,
+            closing,
+            &self.config.provider,
+            self.config.channel,
+            ack,
+            #[cfg(test)]
+            observer,
+        )
+        .await;
+        if result.is_ok() || matches!(result, Err(Deferred::Gate(_))) {
+            self.registration
+                .report(&held("ledger_close_gate_unconfirmed"), result.is_err());
+        }
+        if flushed
+            || matches!(
+                result,
+                Err(Deferred::Persistence | Deferred::SupervisorLost)
+            )
+        {
+            self.registration
+                .report(&held("ledger_close_flush_unconfirmed"), !flushed);
+        }
+        #[cfg(test)]
+        if result.is_err() && super::mutant("close_failure_reopens_admission") {
+            self.closed = false;
+            self.admitted = true;
+        }
+    }
+
     /// S8: a drive over the whole binding log so far. Nothing opens before its first pass, and
     /// nothing starts before admission.
     pub(crate) fn start_drive<D: DrivePorts>(&mut self, ports: D) -> Option<Started<D>> {
-        if !self.admitted || self.registration.latched().is_some() {
+        if !self.admission_open() {
             return None;
         }
         let gate = fence::lookup(&self.config.provider, self.config.channel)?;
@@ -418,6 +534,7 @@ impl<P: Ports> Supervisor<P> {
             lost: false,
             clearing: None,
             hold: None,
+            presence: PresenceLease::take(&self.config.provider, self.config.channel),
             #[cfg(test)]
             counts: Counts::default(),
         };
@@ -462,9 +579,10 @@ impl<P: Ports> Supervisor<P> {
                 }
                 Some(SupervisorCmd::Clear) => self.clear(&mut drive, Instant::now()).await,
                 Some(SupervisorCmd::Close { ack }) => {
-                    self.gate(&mut drive, false);
-                    self.input_command(SupervisorCmd::Close { ack }, false)
-                        .await;
+                    // Not a parent Idle: only the presence lease this drive holds is taken back.
+                    drive.presence.withdraw("input_close");
+                    self.close_command(ack).await;
+                    drive.ready = false;
                 }
                 Some(command) => {
                     let latest = self.cursor.as_mut().map_or(Ok(Vec::new()), |cursor| {
@@ -615,8 +733,45 @@ impl<P: Ports> Supervisor<P> {
         if drive.life.view().key().is_none() {
             drive.counts.held_steps += 1;
         }
+        let material = rows.receipt_identity(key).and_then(|identity| {
+            super::source::Source::new(key, identity, row.input.clone(), vec![]).ok()
+        });
+        // Policy IO runs before the WAL loan; a changed policy keeps the accepted row intact.
+        let approval = material
+            .as_ref()
+            .zip(row.received_seq)
+            .map(|(source, seq)| {
+                actor::PolicyOffer::new(source.key(), source.identity().clone(), seq)
+            });
+        let permitted = match material.as_ref() {
+            Some(source) => self.ports.source_policy(source).await,
+            None => false,
+        };
+        #[cfg(test)]
+        let permitted = permitted || super::mutant("c2_skip_offer_policy");
+        if !permitted {
+            drive.life.restore(instance);
+            return self
+                .hold(drive, cause("source_policy_not_target"), now)
+                .await;
+        }
+        let overflow = self.pending_overflow();
+        let generation = overflow.generation();
+        let ready = self.admission_open() && self.order.offer_ready() && approval.is_some();
+        #[cfg(test)]
+        let ready = ready || super::mutant("c2b_skip_policy_order_recheck");
+        if !ready {
+            drive.life.restore(instance);
+            return;
+        }
         let guard = self.guard();
         let stepped = loan(&mut self.slot, move |lease| {
+            let unchanged = overflow.generation() == generation;
+            #[cfg(test)]
+            let unchanged = unchanged || super::mutant("c2b_skip_policy_order_recheck");
+            if !unchanged {
+                return (instance, Err(held("pending_changed")));
+            }
             // A late edge stops the actor before it can submit; the row keeps its responsibility.
             if let Err(cause) = guard.check("offer") {
                 return (instance, Err(cause));
@@ -633,9 +788,12 @@ impl<P: Ports> Supervisor<P> {
             let actor = built.actor.as_mut().expect("actor built before the step");
             let fact = instance.fact.as_ref();
             // The actor's tmux and file IO is blocking, so it runs only on this worker.
-            let step = lease
-                .get()
-                .and_then(|ledger| futures::executor::block_on(actor.step(ledger, fact, now)));
+            let step = lease.get().and_then(|ledger| match approval.as_ref() {
+                Some(approval) => {
+                    futures::executor::block_on(actor.step_for_source(ledger, fact, now, approval))
+                }
+                None => Ok(Step::Wait("source_policy_changed")),
+            });
             lease.needs_reopen |= step.is_err();
             (instance, Ok(step))
         })
@@ -743,6 +901,18 @@ impl<P: Ports> Supervisor<P> {
             drive.ready = false;
             return self.registration.report(&cause, true);
         }
+        if ready {
+            let advance = true;
+            #[cfg(test)]
+            let advance = advance && !super::mutant("drop_gate_generation");
+            if advance {
+                self.invalidate_order();
+            }
+            if !self.admission_open() {
+                drive.ready = false;
+                return;
+            }
+        }
         #[cfg(test)]
         match ready {
             true => drive.counts.opens += 1,
@@ -759,7 +929,7 @@ impl<P: Ports> Supervisor<P> {
         let advance = moved.is_ok();
         #[cfg(test)]
         let advance = advance && !super::mutant("drop_gate_generation");
-        if advance {
+        if advance && !ready {
             self.invalidate_order();
         }
         drive.ready = ready && moved.is_ok();

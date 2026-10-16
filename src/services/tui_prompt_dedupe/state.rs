@@ -42,7 +42,7 @@ impl TuiPromptDedupeState {
         let expired = self.runtime_by_tmux.iter().filter(|(_, entry)| now.duration_since(entry.recorded_at) > SESSION_MAPPING_TTL).map(|(tmux, _)| tmux.clone()).collect::<Vec<_>>();
         for tmux in expired {
             #[rustfmt::skip]
-            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |_| self.runtime_by_tmux.remove(&tmux));
+            let _ = crate::services::tmux_common::try_with_tmux_source_authority(&tmux, |authority| { authority.invalidate(); self.runtime_by_tmux.remove(&tmux) });
         }
         // #3885 follow-up: anchors live `PROMPT_ANCHOR_SUBMIT_TTL` (4h) so a long
         // streaming turn's anchor is not purged mid-stream (see the constant). The
@@ -73,6 +73,7 @@ impl TuiPromptDedupeState {
             !queue.is_empty()
         });
         self.purge_expired_injected_steers(now);
+        self.expire_handoffs(now);
         // Prompt ids wait for the scanner, which reaches a row only after the turn
         // ends; 4h is the observation-delay budget, not a guaranteed turn bound.
         self.relayed_prompt_ids_by_tmux.retain(|_, queue| {
@@ -87,8 +88,16 @@ impl TuiPromptDedupeState {
 
     pub(super) fn purge_expired_runtime_binding_under_authority(
         &mut self,
-        tmux_session_name: &str,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) {
+        let tmux_session_name = authority.session();
+        if self
+            .runtime_by_tmux
+            .get(tmux_session_name)
+            .is_some_and(|entry| entry.recorded_at.elapsed() > SESSION_MAPPING_TTL)
+        {
+            authority.invalidate();
+        }
         #[rustfmt::skip]
         self.runtime_by_tmux.retain(|key, entry| key != tmux_session_name || entry.recorded_at.elapsed() <= SESSION_MAPPING_TTL);
     }
@@ -102,4 +111,37 @@ impl TuiPromptDedupeState {
             .retain(|_, entry| entry.value != tmux_session_name);
         before != self.tmux_by_provider_session.len()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    // Binding publications open on this thread; other test threads may hold STATE meanwhile.
+    static BINDING_PUBLICATION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) struct BindingPublicationHeld;
+
+#[cfg(test)]
+impl BindingPublicationHeld {
+    pub(super) fn enter() -> Self {
+        BINDING_PUBLICATION_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for BindingPublicationHeld {
+    fn drop(&mut self) {
+        BINDING_PUBLICATION_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_marker_publication_unlocked_for_tests() {
+    assert!(
+        BINDING_PUBLICATION_DEPTH.with(std::cell::Cell::get) == 0,
+        "binding cache mutex must not cover marker IO"
+    );
+    crate::services::cluster::stream_relay::source_read_proof::assert_revision_unlocked_for_tests();
 }

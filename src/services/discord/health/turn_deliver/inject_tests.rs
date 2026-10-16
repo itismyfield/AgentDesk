@@ -206,6 +206,29 @@ impl InjectPane {
         crate::services::discord::inflight::save_inflight_state(&row).expect("reseated row");
     }
 
+    /// Rewrites the channel's row without its start offset, so it names no single turn.
+    pub(crate) fn unname_turn(&self) {
+        let provider = ProviderKind::Claude;
+        let load = crate::services::discord::inflight::load_inflight_state_read_only;
+        let mut row = load(&provider, self.channel).expect("seeded row");
+        row.turn_start_offset = None;
+        crate::services::discord::inflight::save_inflight_state(&row).expect("unnamed row");
+    }
+
+    /// The seeded row's `(started_at, turn_start_offset)`.
+    pub(crate) fn row_start(&self) -> (String, Option<u64>) {
+        let load = crate::services::discord::inflight::load_inflight_state_read_only;
+        let row = load(&ProviderKind::Claude, self.channel).expect("seeded row");
+        (row.started_at, row.turn_start_offset)
+    }
+
+    /// The nonce in the header line of the last buffer the server loaded.
+    pub(crate) fn nonce(&self) -> Option<String> {
+        let buffer = self.read("buffer")?;
+        let header = buffer.lines().next()?.strip_suffix(']')?;
+        Some(header.rsplit(" · ").next()?.to_string())
+    }
+
     /// Leaves only the channel name to name the pane.
     async fn drop_row(&self, shared: &SharedData) {
         crate::services::discord::inflight::clear_inflight_state(
@@ -626,7 +649,8 @@ fn any_holder_takes_input_unless_a_claimed_input_has_not_reached_its_row() {
         pending_user_dispatch: Some(MessageId::new(11)),
         ..ChannelMailboxSnapshot::default()
     };
-    let backlog = [&idle, &queued_item, &reserved].map(inject::backlog);
+    let backlog = [&idle, &queued_item, &reserved]
+        .map(|snapshot| inject::backlog(snapshot, &ProviderKind::Claude, ChannelId::new(9)));
     let nonempty = Err(inject::QUEUE_NONEMPTY);
     assert_eq!(backlog, [Ok(()), nonempty, nonempty]);
 }

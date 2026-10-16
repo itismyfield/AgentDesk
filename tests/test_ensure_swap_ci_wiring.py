@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shlex
@@ -51,12 +52,23 @@ EXPECTED_SWAP_JOBS = {
 LIB_BUILD_MARKERS = (
     re.compile(r"cargo test\b[^\n]*--lib\b"),
     re.compile(r"\bjust test-postgres"),
+    re.compile(r"\btest-selection\.py run\b"),
     re.compile(r"--observe-selection"),
     re.compile(r"run_relay_authority_mutations\.sh"),
     re.compile(r"check_relay_authority_contract\.py"),
     re.compile(r"\bjust cargo-check\b|\bcargo check\b[^\n]*--all-targets\b"),
 )
 CLIPPY_MARKER = re.compile(r"\bjust lint\b|\bcargo clippy\b")
+CI_SCRIPT_CHECKS = REPO_ROOT / "scripts/ci-script-checks.sh"
+# The shared lib producer replaced these duplicate per-job selection observers.
+REMOVED_OBSERVER_STEPS = ("Observe curated lane selections", "Require observer summary")
+MEM_PROBE = re.compile(r"mem-measure\.sh \S+ --")
+# The one memory probe left in PR CI; its line must be bare so `set -e` sees the status.
+LIB_INVENTORY_PROBE = re.compile(
+    r'^AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure\.sh lib-inventory -- '
+    r'"\$PYTHON" scripts/ci-timeout\.py \d+ "\$PYTHON" '
+    r"scripts/check_test_target_integrity\.py --verify-lib-inventory$"
+)
 
 
 def needs_swap(step: dict, job: dict) -> bool:
@@ -75,6 +87,24 @@ def runs_on_ubuntu(job: dict) -> bool:
         oses = ((job.get("strategy") or {}).get("matrix") or {}).get("os") or []
         return any("ubuntu" in str(os_name) for os_name in oses)
     return "ubuntu" in runs_on
+
+
+def memory_observer_problems(jobs: dict, script: str) -> list[str]:
+    """Why PR CI's memory observers would no longer report their command's own status."""
+    problems = [
+        f"{job_id} still runs {step.get('name')!r}"
+        for job_id, job in jobs.items() for step in job.get("steps", [])
+        if step.get("name") in REMOVED_OBSERVER_STEPS
+        or "--observe-selection" in str(step.get("run", ""))
+    ]
+    lines = [line.strip() for line in script.splitlines()]
+    if lines[1:2] != ["set -euo pipefail"]:
+        problems.append("ci-script-checks.sh must start with set -euo pipefail")
+    problems += [f"relaxed shell option: {line!r}" for line in lines if re.match(r"set \+", line)]
+    probes = [line for line in lines if MEM_PROBE.search(line) and not line.startswith("#")]
+    if len(probes) != 1 or not LIB_INVENTORY_PROBE.match(probes[0]):
+        problems.append(f"expected one bare lib-inventory memory probe, found {probes!r}")
+    return problems
 
 
 def expected_df(target: Path) -> str:
@@ -124,23 +154,49 @@ class SwapStepWiring(unittest.TestCase):
                     first_build = next(s for s in steps if needs_swap(s, jobs[job_id]))
                     self.assertIn(steps[swap].get("if"), (None, first_build.get("if")))
 
-    def test_observe_steps_report_memory_without_changing_their_pipeline(self) -> None:
+    def observer_inputs(self) -> tuple[dict, str]:
         jobs = yaml.safe_load(
             (REPO_ROOT / ".github/workflows/ci-pr.yml").read_text("utf-8")
         )["jobs"]
+        return jobs, CI_SCRIPT_CHECKS.read_text("utf-8")
+
+    def test_observe_steps_report_memory_without_changing_their_pipeline(self) -> None:
+        jobs, script = self.observer_inputs()
         for job_id in ("test_fast", "high-risk-recovery"):
             with self.subTest(job=job_id):
-                observe = next(
-                    s for s in jobs[job_id]["steps"]
-                    if s.get("name") == "Observe curated lane selections"
-                )
-                lines = [line.strip() for line in observe["run"].splitlines() if line.strip()]
-                self.assertEqual(lines[0], "set -o pipefail")
-                self.assertRegex(
-                    lines[1],
-                    r"^bash scripts/ci/mem-measure\.sh \S+ -- python3 "
-                    r"scripts/check_test_target_integrity\.py --observe-selection .* \| tee ",
-                )
+                names = [step.get("name") for step in jobs[job_id]["steps"]]
+                for removed in REMOVED_OBSERVER_STEPS:
+                    self.assertNotIn(removed, names)
+        self.assertEqual(memory_observer_problems(jobs, script), [])
+
+    def test_observers_that_change_or_hide_their_status_fail(self) -> None:
+        jobs, script = self.observer_inputs()
+        probe = next(line for line in script.splitlines() if LIB_INVENTORY_PROBE.match(line))
+        restored = {
+            "name": REMOVED_OBSERVER_STEPS[0], "shell": "bash",
+            "run": "set -o pipefail\nbash scripts/ci/mem-measure.sh observe-high-risk -- python3 "
+                   "scripts/check_test_target_integrity.py --observe-selection "
+                   "--workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee x.log\n",
+        }
+        script_mutants = {
+            "no-errexit": script.replace("set -euo pipefail", "set -uo pipefail", 1),
+            "no-pipefail": script.replace("set -euo pipefail", "set -eu", 1),
+            "relaxed-later": script.replace(probe, f"set +e\n{probe}", 1),
+            "or-true": script.replace(probe, f"{probe} || true", 1),
+            "piped-tee": script.replace(probe, f'{probe} | tee "$RUNNER_TEMP/inventory.log"', 1),
+            "backgrounded": script.replace(probe, f"{probe} &", 1),
+            "probe-removed": script.replace(probe + "\n", "", 1),
+            "second-probe": script.replace(probe, f"{probe}\n{probe}", 1),
+        }
+        for label, mutant in script_mutants.items():
+            with self.subTest(script=label):
+                self.assertNotEqual(mutant, script)
+                self.assertNotEqual(memory_observer_problems(jobs, mutant), [])
+        for job_id in ("test_fast", "high-risk-recovery"):
+            with self.subTest(restored_observer=job_id):
+                mutant_jobs = copy.deepcopy(jobs)
+                mutant_jobs[job_id]["steps"].insert(1, dict(restored))
+                self.assertNotEqual(memory_observer_problems(mutant_jobs, script), [])
 
 
 class EnsureSwapBehavior(unittest.TestCase):

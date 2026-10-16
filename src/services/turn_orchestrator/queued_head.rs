@@ -174,8 +174,8 @@ pub(super) fn parse_snapshot(
     Ok((snapshot.items, Some(snapshot.meta)))
 }
 
-/// The head and submitted sources a queue file holds; `None` for a missing file or a legacy
-/// array, an error for a file that cannot be read or parsed, legacy or not.
+/// The head and submitted sources a queue file holds; `None` for a missing file or a legacy array,
+/// an error for a file that cannot be read or parsed, legacy or not.
 fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -192,7 +192,7 @@ fn read_snapshot_meta(path: &Path) -> Result<Option<SnapshotMeta>, String> {
 pub(super) fn purge_keeps(queue_file: &Path) -> bool {
     let reason = match read_snapshot_meta(queue_file) {
         Ok(None) => return false,
-        Ok(Some(_)) => "the snapshot holds a head reservation or submitted sources".to_string(),
+        Ok(Some(_)) => "the snapshot holds a head or submitted sources".to_string(),
         Err(error) => error,
     };
     let path = queue_file.display();
@@ -224,11 +224,11 @@ pub(super) struct HeadLedger {
     adopted: Option<(ProviderKind, String)>,
     pub(super) meta: SnapshotMeta,
     lease: Option<Arc<HeadLease>>,
-    persisted_meta: Option<serde_json::Value>,
+    pub(super) persisted_meta: Option<serde_json::Value>,
 }
 
-/// Reads this namespace's head and terminal record before the first write; a snapshot the reader
-/// cannot classify refuses, so no write replaces state it never read.
+/// Reads this namespace's head and terminal record before the first write; a snapshot the
+/// reader cannot classify refuses, so no write replaces state it never read.
 pub(super) fn adopt(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -255,7 +255,7 @@ pub(super) fn adopt(
     Ok(())
 }
 
-fn meta_value(meta: &SnapshotMeta) -> Option<serde_json::Value> {
+pub(super) fn meta_value(meta: &SnapshotMeta) -> Option<serde_json::Value> {
     meta.is_set()
         .then(|| serde_json::to_value(meta).expect("snapshot metadata serializes"))
 }
@@ -264,6 +264,7 @@ pub(super) fn record_write(state: &mut ChannelMailboxState) {
     state.queued_head.persisted_meta = meta_value(&state.queued_head.meta);
 }
 
+/// Refuses unless the metadata on disk is what this owner last wrote.
 fn validate_disk(
     state: &mut ChannelMailboxState,
     channel: ChannelId,
@@ -290,11 +291,39 @@ pub(super) fn refuse_destructive(
     reap(&mut state.queued_head);
     if let Some(head) = &state.queued_head.meta.head_injection {
         return Err(format!(
-            "channel {channel} queued head is {:?}; clear/purge refused",
+            "channel {channel} queued head is {:?}; purge refused",
             head.phase
         ));
     }
     Ok(())
+}
+
+/// An explicit clear drops the head and its lease, and takes the disk record as read even when it
+/// changed outside its owner, so the clear's write replaces it. Returns the ledger to restore.
+pub(super) fn release_for_clear(
+    state: &mut ChannelMailboxState,
+    channel: ChannelId,
+    persistence: &QueuePersistenceContext,
+) -> Result<HeadLedger, String> {
+    adopt(state, channel, persistence)?;
+    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
+        .ok_or("pending queue root unavailable")?;
+    let disk = read_snapshot_meta(&path)?.unwrap_or_default();
+    let previous = std::mem::take(&mut state.queued_head);
+    let mut meta = disk.clone();
+    meta.head_injection = None;
+    // Sources the owner recorded as submitted stay recorded, so none of them can replay.
+    let owned = previous.meta.terminal_identities.iter();
+    let missing = owned.filter(|t| !disk.terminal_identities.contains(t));
+    meta.terminal_identities
+        .extend(missing.cloned().collect::<Vec<_>>());
+    state.queued_head = HeadLedger {
+        adopted: previous.adopted.clone(),
+        meta,
+        lease: None,
+        persisted_meta: meta_value(&disk),
+    };
+    Ok(previous)
 }
 
 /// A head nobody owns, after a restart or a dropped ticket: a reservation never pasted is
@@ -330,7 +359,7 @@ fn is_head(head: &PersistedHeadInjection, item: &Intervention, channel_id: Chann
         && same(&canonical_item(item, channel_id), &head.original)
 }
 
-/// Runs before every queue write: submitted sources leave every item, and a reserved head must
+/// Runs before every queue write: submitted sources leave every item and a reserved head must
 /// still lead the queue unchanged, or the write is refused.
 pub(super) fn prepare_write(
     state: &mut ChannelMailboxState,
@@ -444,25 +473,31 @@ pub(super) fn blocks_claims(
     state.queued_head.meta.head_injection.is_some()
 }
 
-#[cfg(test)]
-pub(super) use claim::step;
-#[cfg(test)]
-pub(crate) use claim::{
-    HeadMsg, HeadOutcome, HeadSettle, HeadTicket, QueuedHeadClaim, downgrade_channel_snapshot,
-};
+pub(crate) mod prefix;
 
-/// The claim and settlement the busy-TUI executor will drive; not wired to an executor yet.
+pub(super) use claim::step;
+pub(crate) use claim::{HeadMsg, HeadOutcome, HeadSettle, QueuedHeadClaim};
 #[cfg(test)]
+pub(crate) use claim::{HeadTicket, downgrade_channel_snapshot};
+
+/// The claim and settlement driven by the busy-TUI executor.
 mod claim {
     use super::*;
-
-    /// Input a typed paste must not carry: commands, mentions and dispatch prefixes.
-    const NOT_TYPED_LEAD: [&str; 4] = ["!", "/", "<@", "DISPATCH:"];
 
     pub(crate) struct HeadTicket {
         lease: Arc<HeadLease>,
         identity: QueueIdentity,
+        item: Box<Intervention>,
     }
+
+    impl HeadTicket {
+        pub(crate) fn item(&self) -> &Intervention {
+            &self.item
+        }
+    }
+
+    type HeadChannelGate = fn(ChannelId, Option<ChannelId>) -> bool;
+    type HeadAdmission = (ChannelId, Option<ChannelId>, HeadChannelGate);
 
     pub(crate) enum QueuedHeadClaim {
         Reserved(HeadTicket),
@@ -494,6 +529,7 @@ mod claim {
         Claim {
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
+            admission: Option<HeadAdmission>,
             reply: oneshot::Sender<QueuedHeadClaim>,
         },
         Settle {
@@ -525,36 +561,6 @@ mod claim {
         }
     }
 
-    /// A lone human source whose single segment is the whole plain-text body: the shape a live
-    /// enqueue normalizes to and a disk round trip restores.
-    pub(super) fn eligible(item: &Intervention) -> bool {
-        let id = item.message_id;
-        let [source] = item.source_message_queued_generations.as_slice() else {
-            return false;
-        };
-        let raw_segments = match item.source_text_segments.as_slice() {
-            [] => true,
-            [segment] => segment.message_id == id && segment.text == item.text,
-            _ => false,
-        };
-        let segments = item.source_text_segments();
-        let lead = item.text.trim_start();
-        item.mode == InterventionMode::Soft
-            && !item.author_is_bot
-            && source.message_id == id
-            && source.queued_generation == item.queued_generation
-            && source.preserve_on_cancel
-            && item.source_message_ids == [id]
-            && raw_segments
-            && matches!(segments.as_slice(), [s] if s.message_id == id && s.text == item.text)
-            && !lead.is_empty()
-            && !NOT_TYPED_LEAD.iter().any(|prefix| lead.starts_with(prefix))
-            && item.pending_uploads.is_empty()
-            && item.voice_announcement.is_none()
-            && item.reply_context.is_none()
-            && !item.has_reply_boundary
-    }
-
     pub(in crate::services::turn_orchestrator) fn step(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
@@ -564,8 +570,23 @@ mod claim {
             HeadMsg::Claim {
                 expected,
                 persistence,
+                admission,
                 reply,
             } => {
+                let enabled = match admission {
+                    Some((channel, parent, gate)) => channel == channel_id
+                        && crate::services::discord::health::InjectOrigin::queued_head_gate_enabled(
+                            &persistence.provider,
+                            channel,
+                            parent,
+                            gate,
+                        ),
+                    None => cfg!(test),
+                };
+                if !enabled {
+                    let _ = reply.send(QueuedHeadClaim::NotEligible);
+                    return;
+                }
                 state.last_persistence = Some(persistence.clone());
                 let _ = reply.send(claim(state, channel_id, &expected, &persistence));
             }
@@ -581,8 +602,8 @@ mod claim {
         }
     }
 
-    /// Reserves the queue head when it is still `expected`, eligible and owned by nobody else; the
-    /// reservation is durable before a ticket exists.
+    /// Reserves the first ready input when it is still `expected`, eligible and unowned. Parked
+    /// inputs ahead of it move behind it in the one write that makes the reservation durable.
     fn claim(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
@@ -608,9 +629,10 @@ mod claim {
             return QueuedHeadClaim::PersistenceFailed(error);
         }
         let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
-        let marker = super::super::load_channel_pending_dispatch_marker_checked(
-            provider, token_hash, channel_id,
-        );
+        let marker =
+            super::super::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
+                provider, token_hash, channel_id,
+            );
         let marker_held = match marker {
             Ok(marker) => marker.is_some(),
             Err(error) => return QueuedHeadClaim::PersistenceFailed(error),
@@ -618,18 +640,34 @@ mod claim {
         let owned = marker_held
             || state.pending_user_dispatch.is_some()
             || super::super::injected_inputs::holds_order(state);
-        let Some(head) = state.intervention_queue.first() else {
+        if state.intervention_queue.is_empty() {
             return QueuedHeadClaim::NotEligible;
-        };
-        let identity = QueueIdentity::of(head);
-        if identity != *expected || owned {
+        }
+        // Ownership outranks retry state: an owned queue is contended whatever is parked in it.
+        if owned {
             return QueuedHeadClaim::Contended;
         }
-        if !eligible(head) {
+        // Read again under the actor: what the caller saw as parked or ready may have changed.
+        use crate::services::discord::busy_followup_retry_store::input_class;
+        let class = |item: &Intervention| input_class(provider, channel_id, item);
+        let prefix::Prefix::Ready { at } = prefix::select(&state.intervention_queue, class) else {
+            return QueuedHeadClaim::NotEligible;
+        };
+        let head = &state.intervention_queue[at];
+        let identity = QueueIdentity::of(head);
+        if identity != *expected {
+            return QueuedHeadClaim::Contended;
+        }
+        // The first ready input decides alone; a later one never stands in for it.
+        if !prefix::eligible(head) {
             return QueuedHeadClaim::NotEligible;
         }
+        let item = Box::new(head.clone());
         let original = canonical_item(head, channel_id);
         let lease = Arc::new(HeadLease);
+        let previous_queue = state.intervention_queue.clone();
+        let previous_meta = state.queued_head.meta.clone();
+        state.intervention_queue[..=at].rotate_right(1);
         let ledger = &mut state.queued_head;
         let phase = HeadPhase::Reserved;
         ledger.meta.head_injection = Some(PersistedHeadInjection {
@@ -639,15 +677,20 @@ mod claim {
         });
         ledger.lease = Some(lease.clone());
         if let Err(error) = persist_queue(state, channel_id, persistence) {
-            state.queued_head.meta.head_injection = None;
+            state.intervention_queue = previous_queue;
+            state.queued_head.meta = previous_meta;
             state.queued_head.lease = None;
             return QueuedHeadClaim::PersistenceFailed(error);
         }
-        QueuedHeadClaim::Reserved(HeadTicket { lease, identity })
+        QueuedHeadClaim::Reserved(HeadTicket {
+            lease,
+            identity,
+            item,
+        })
     }
 
     /// Moves the ticket's head on. A write that may have landed after a paste could have started
-    /// leaves the head Unknown in memory, which only a restart or an operator resolves.
+    /// leaves the head Unknown, which holds the queue until an explicit clear discards it.
     fn settle(
         state: &mut ChannelMailboxState,
         channel_id: ChannelId,
@@ -718,15 +761,38 @@ mod claim {
     }
 
     impl ChannelMailboxHandle {
+        #[cfg(test)]
         pub(crate) async fn claim_queued_head(
             &self,
             expected: QueueIdentity,
             persistence: QueuePersistenceContext,
         ) -> QueuedHeadClaim {
+            self.request_head_claim(expected, persistence, None).await
+        }
+
+        pub(crate) async fn claim_queued_head_if_enabled(
+            &self,
+            expected: QueueIdentity,
+            persistence: QueuePersistenceContext,
+            channel: ChannelId,
+            parent: Option<ChannelId>,
+            gate: HeadChannelGate,
+        ) -> QueuedHeadClaim {
+            self.request_head_claim(expected, persistence, Some((channel, parent, gate)))
+                .await
+        }
+
+        async fn request_head_claim(
+            &self,
+            expected: QueueIdentity,
+            persistence: QueuePersistenceContext,
+            admission: Option<HeadAdmission>,
+        ) -> QueuedHeadClaim {
             self.request(|reply| {
                 head_msg(HeadMsg::Claim {
                     expected,
                     persistence,
+                    admission,
                     reply,
                 })
             })
@@ -755,6 +821,7 @@ mod claim {
 
     /// Offline, gate off: rewrites a V1 snapshot as the legacy array an older binary reads, refused
     /// while a head is held, a marker stands or a submitted source is not `replay_safe`.
+    #[cfg(test)]
     pub(crate) fn downgrade_channel_snapshot(
         provider: &ProviderKind,
         token_hash: &str,

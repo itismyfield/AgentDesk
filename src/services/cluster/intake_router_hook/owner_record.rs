@@ -1,23 +1,7 @@
-//! Dormant generation-fenced owner-CAS primitives (#4538 PR-A).
-//!
-//! These helpers are the durable placement-owner authority for intake
-//! routing: a channel's `(provider, raw_channel_id)` identity maps to at most
-//! one `active` owner row, ownership moves forward through monotonic
-//! generations, and every authoritative outbox write is fenced on
-//! `(owner_instance_id, generation)`. The design is `voice_turn_link`
-//! (migration 0060) generalized to a `(provider, raw_channel_id)` identity;
-//! see the #4538 v3.1 design (§3.2–§3.10) and migration 0094.
-//!
-//! PR-A ships them DORMANT: no production caller resolves ownership, routes
-//! intake, or dispatches through these functions. They are validated by the
-//! test module below only. Reader flip, admission wiring, and the fence
-//! rollout gate land in PR-B/PR-C (#4548 handoff). The whole module is
-//! `#![allow(dead_code)]` for exactly that reason — every item is reachable
-//! only from `#[cfg(test)]` until the activation slice calls it.
+//! Durable channel identity, owner generations, and transfer serialization.
+//! Acquire/adopt and stamped admission remain dormant; identity, retirement, and owner reads are live.
 
-// reason: PR-A owner-CAS primitives are intentionally uncalled by production
-// until #4538 PR-C activates the authority; exercised by the PG test module
-// only. Remove this allow when the activation slice wires a live caller.
+// reason: acquire/adopt and stamped admission await production activation; tests exercise them.
 #![allow(dead_code)]
 
 use crate::db::intake_outbox::{InsertPendingPayload, IntakeOutboxRow};
@@ -26,10 +10,7 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
-/// Canonical intake ownership identity. Both fields are stored normalized
-/// (§3.10): `provider = lower(btrim())`, `raw_channel_id = btrim()`. The
-/// advisory-lock key is derived from the same normalized bytes so the DB
-/// WHERE identity and the app-side serialization lock always agree.
+/// Canonical identity uses Rust trim/lowercase; queries and advisory keys use these same bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OwnerIdentity {
     provider: String,
@@ -523,7 +504,8 @@ INSERT INTO intake_outbox (
     merge_consecutive, reply_to_user_message, defer_watcher_resume,
     wait_for_completion, preserve_on_cancel, agent_id, provider,
     owner_instance_id, owner_generation, admission_kind, idempotency_key,
-    status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs
+    status, attempt_no, parent_outbox_id, execution_requirements, attachment_refs,
+    replay_source_message_ids
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6, $7,
@@ -531,7 +513,7 @@ INSERT INTO intake_outbox (
     $13, $14, $15,
     $16, $17, $18, $19,
     $20, $21, $22, $23,
-    $24, $25, $26, $27, $28
+    $24, $25, $26, $27, $28, $29
 )
 RETURNING id
 "#;
@@ -600,6 +582,7 @@ pub(crate) async fn insert_admission_savepoint(
         .bind(None::<i64>)
         .bind(&payload.execution_requirements)
         .bind(&payload.attachment_refs)
+        .bind(payload.replay_source_message_ids.as_deref())
         .fetch_one(&mut **tx)
         .await;
 
@@ -871,41 +854,12 @@ where
 // Stale-claim sweep with owner fence (§3.5.3, Fix3)
 // ---------------------------------------------------------------------------
 
-/// Re-arm stale `claimed` rows to `pending`, but ONLY when the row's stamped
-/// `(owner, generation)` is still the channel's `active` owner (Fix3). The
-/// correlated columns are qualified with the outer `io` alias and normalized
-/// (`lower(btrim(io.provider))`, `btrim(io.channel_id)`); leaving them
-/// unqualified would bind to the inner `o` table and degrade the fence into a
-/// tautology, letting another provider's active generation on the same raw
-/// channel wrongly resurrect a stale/orphaned claim. Fence-failing rows
-/// (superseded / transferred / legacy NULL) are intentionally left `claimed`
-/// for activation parking. `$1` = age, `$2` = Pending; claimed stays literal for the partial index.
-const SWEEP_STALE_CLAIMS_SQL: &str = r#"
-UPDATE intake_outbox AS io
-   SET status = $2, claim_owner = NULL, claimed_at = NULL
- WHERE io.status = 'claimed'
-   AND io.claimed_at < NOW() - ($1::BIGINT * INTERVAL '1 second')
-   AND EXISTS (
-        SELECT 1 FROM intake_session_owners o
-         WHERE o.provider       = lower(btrim(io.provider))
-           AND o.raw_channel_id = btrim(io.channel_id)
-           AND o.status = 'active'
-           AND o.owner_instance_id = io.owner_instance_id
-           AND o.generation        = io.owner_generation)
-"#;
-
-/// Re-arm fence-valid stale claims (§3.5.3). Returns the number of rows reset.
-/// Fence-failing stale rows are NOT re-armed here.
+/// Rearm only current stamped claims. An error can follow independently committed earlier rows.
 pub(crate) async fn sweep_stale_pre_accept_claims_fenced(
     pool: &PgPool,
     stale_after_secs: i64,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(SWEEP_STALE_CLAIMS_SQL)
-        .bind(stale_after_secs.max(1))
-        .bind(IntakeOutboxStatus::Pending)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
+    crate::db::intake_outbox::sweep_stamped_claims(pool, stale_after_secs).await
 }
 
 /// Atomically retire a stale pending forwarded route before local recovery.
@@ -1066,6 +1020,7 @@ mod tests {
             required_labels: json!([]),
             channel_id: channel.to_string(),
             user_msg_id: msg.to_string(),
+            replay_source_message_ids: None,
             request_owner_id: "user-1".to_string(),
             request_owner_name: Some("Tester".to_string()),
             user_text: "hello".to_string(),
@@ -1603,7 +1558,7 @@ mod tests {
 
         let winner_pool = pool.clone();
         let winner_read = both_read.clone();
-        let mut winner = tokio::spawn(async move {
+        let winner = tokio::spawn(async move {
             let id = identity("claude", "rc");
             let mut tx = winner_pool.begin().await.unwrap();
             let backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")

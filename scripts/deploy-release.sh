@@ -230,12 +230,16 @@ DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS="${AGENTDESK_DEPLOY_PEER_VERDICT_POLL_INT
 # Parse flags non-destructively into shell vars + env so that the lock-acquire
 # re-exec (lockf/flock pass-through) and the detached-helper tmux script both
 # see the same configuration without us having to reconstruct $@.
+DEPLOY_STRICT_PROMPTS=0
 PARSED_ARGS=()
 _idx=0
 _args=("$@")
 while [ "$_idx" -lt "${#_args[@]}" ]; do
     case "${_args[$_idx]}" in
         --skip-review|--skip-health)
+            PARSED_ARGS+=("${_args[$_idx]}") ;;
+        --strict-prompts)
+            DEPLOY_STRICT_PROMPTS=1
             PARSED_ARGS+=("${_args[$_idx]}") ;;
         --fast)
             DEPLOY_FAST=1
@@ -2566,7 +2570,18 @@ if [ -d "$OBSIDIAN_AGENTS_SRC" ]; then
     rm -rf "$PROMPTS_STAGED"
     mkdir -p "$PROMPTS_STAGED"
     rsync -a "$OBSIDIAN_AGENTS_SRC/" "$PROMPTS_STAGED/"
-    if ! python3 "$REPO/scripts/check_prompt_api_routes.py" --repo "$REPO" --prompts "$PROMPTS_STAGED"; then echo "⚠ Prompt API route inspection warning; core release deploy will continue."; fi
+    prompt_check_rc=0
+    python3 "$REPO/scripts/check_prompt_api_routes.py" --repo "$REPO" --prompts "$PROMPTS_STAGED" || prompt_check_rc=$?
+    if [ "$prompt_check_rc" -ne 0 ]; then
+        if [ "$DEPLOY_STRICT_PROMPTS" = "1" ]; then
+            case "$prompt_check_rc" in
+                1) echo "✗ Prompt API route check failed: unknown paths (exit=1); --strict-prompts stops release deploy." ;;
+                *) echo "✗ Prompt API route inspection unavailable (exit=$prompt_check_rc); --strict-prompts stops release deploy." ;;
+            esac
+            exit "$prompt_check_rc"
+        fi
+        echo "⚠ Prompt API route inspection warning; core release deploy will continue."
+    fi
 else
     if [ -n "${AGENTDESK_OBSIDIAN_AGENTS_SRC:-}" ]; then
         echo "⚠ Optional connector obsidian_agent_prompts invalid: $OBSIDIAN_AGENTS_SRC"
@@ -2821,6 +2836,7 @@ _install_pg_tunnel_plist() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>$root_x/logs/pg-tunnel.launchd.out.log</string>
   <key>StandardErrorPath</key><string>$root_x/logs/pg-tunnel.launchd.err.log</string>
   <key>EnvironmentVariables</key>
@@ -3678,6 +3694,8 @@ POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
 POST_DEPLOY_SMOKE_SESSIONS_BODY=""
 POST_DEPLOY_SMOKE_FAILURES=()
+POST_DEPLOY_SMOKE_KNOWN_GAPS=()
+POST_DEPLOY_SMOKE_UNEXPECTED_PASSES=()
 POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
 POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
 POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE="evaluated"
@@ -4076,9 +4094,20 @@ _post_deploy_smoke_wait_for_startup_recovery() {
     return 1
 }
 
+_post_deploy_smoke_classified_note() {
+    local verdict="$1"
+    case "$verdict" in
+        "KNOWN_GAP: "*) POST_DEPLOY_SMOKE_KNOWN_GAPS+=("$verdict") ;;
+        "UNEXPECTED_PASS: "*) POST_DEPLOY_SMOKE_UNEXPECTED_PASSES+=("$verdict") ;;
+        *) return 1 ;;
+    esac
+    _post_deploy_smoke_note "$verdict"
+}
+
 _post_deploy_smoke_check_relay_round_trip() {
     local cluster_standby channel_id relay_output relay_log
-    local resolve_rc cell_busy cell_guard_rc
+    local resolve_rc cell_busy cell_guard_rc rc=0 verdict
+    local run_id
     local config_path="$ADK_REL/config/agentdesk.yaml"
     if [ -z "$POST_DEPLOY_SMOKE_HEALTH_BODY" ] || [ ! -s "$POST_DEPLOY_SMOKE_HEALTH_BODY" ]; then
         _post_deploy_smoke_fail "relay E-1 NOT VERIFIED: /api/health body unavailable for standby gate; round-trip did not run (smoke coverage gap, not a relay failure)" || true
@@ -4224,24 +4253,35 @@ PY
         fi
     fi
 
+    run_id="${POST_DEPLOY_SMOKE_STAMP}-E-1-${POST_DEPLOY_SMOKE_RELAY_CELL}"
     relay_output="$ADK_REL/logs/post-deploy-smoke-relay-${POST_DEPLOY_SMOKE_STAMP}"
     relay_log="$POST_DEPLOY_SMOKE_TMP_DIR/relay-e1.log"
     _post_deploy_smoke_note \
         "relay E-1 cell=${POST_DEPLOY_SMOKE_RELAY_CELL} channel=${channel_id} output=${relay_output}" \
         || return 1
-    if ! (
+    (
         cd "$REPO" || exit 1
         python3 scripts/e2e/run_tui_relay.py \
             --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
             --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" \
             --channel-id "$channel_id" \
             --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
-            --filter E-1 \
+            --filter E-1 --run-id "$run_id" \
             --output "$relay_output" \
             --queue-runtime-root "$ADK_REL/runtime" \
             --required-agent-mode real_live \
             --required-coverage-class live
-    ) > "$relay_log" 2>&1; then
+    ) > "$relay_log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge \
+            --config "$config_path" --run-id "$run_id" --report "$relay_output/report.${POST_DEPLOY_SMOKE_RELAY_CELL}.json" \
+            --scenarios "$REPO/tests/e2e/tui_relay/scenarios" --scenario E-1 \
+            --cell "$POST_DEPLOY_SMOKE_RELAY_CELL" --channel-id "$channel_id" --driver-rc "$rc" \
+            2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || verdict=""
+        if [[ "$verdict" == "KNOWN_GAP: "* ]]; then
+            _post_deploy_smoke_classified_note "$verdict" || return 1
+            return 0
+        fi
         tail -n 40 "$relay_log" >> "$POST_DEPLOY_SMOKE_EVIDENCE" 2>/dev/null || true
         _post_deploy_smoke_fail "relay E-1 round-trip failed (evidence: ${relay_output})" || true
         return 1
@@ -4300,6 +4340,7 @@ _post_deploy_smoke_run_turn_scenario() {
     local excerpt="$POST_DEPLOY_SMOKE_TMP_DIR/dcserver-${scenario}.log"
     local idle start_stat start_size="" head_bytes=0 start_head=""
     local verdict rc=0 judge_rc=0
+    local run_id="${POST_DEPLOY_SMOKE_STAMP}-${scenario}-${cell}"
     # Same idle proof as E-1, read fresh: an earlier phase may have left the cell busy.
     if ! idle=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py preflight \
         --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" --cell "$cell" \
@@ -4327,7 +4368,7 @@ _post_deploy_smoke_run_turn_scenario() {
             --base-url "http://${ADK_DEFAULT_LOOPBACK}:${REL_PORT}" \
             --cell "$cell" --channel-id "$channel_id" \
             --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
-            --filter "$scenario" --no-reset-before-each \
+            --filter "$scenario" --run-id "$run_id" --no-reset-before-each \
             --phase-deadline-s "$deadline_s" \
             --output "$output" --queue-runtime-root "$ADK_REL/runtime" \
             --required-agent-mode real_live --required-coverage-class live
@@ -4340,12 +4381,23 @@ _post_deploy_smoke_run_turn_scenario() {
         || ! tail -c "+$((start_size + 1))" "$POST_DEPLOY_SMOKE_LOG_PATH" > "$excerpt"; then
         excerpt=""
     fi
-    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge \
+    local classification_args=()
+    if [ "$scenario" = E-50 ]; then
+        classification_args=(--config "$ADK_REL/config/agentdesk.yaml" --run-id "$run_id")
+    fi
+    verdict=$(cd "$REPO" && python3 scripts/e2e/post_deploy_turn_smoke.py judge ${classification_args[@]+"${classification_args[@]}"} \
         --report "$output/report.${cell}.json" \
         --scenarios "$REPO/tests/e2e/tui_relay/scenarios" \
         --scenario "$scenario" --cell "$cell" --channel-id "$channel_id" \
         --log-excerpt "$excerpt" --driver-rc "$rc" 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || judge_rc=$?
     if [ "$judge_rc" -eq 0 ] && [ -n "$verdict" ]; then
+        case "$verdict" in
+            "KNOWN_GAP: "*|"UNEXPECTED_PASS: "*)
+                _post_deploy_smoke_classified_note "$verdict" || return 1
+                POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=${verdict%%:*}"
+                return 0
+                ;;
+        esac
         _post_deploy_smoke_note "$verdict" || return 1
         POST_DEPLOY_SMOKE_TURN_COVERAGE+=" ${scenario}=pass"
         return 0
@@ -4418,6 +4470,8 @@ _run_post_deploy_functional_smoke() {
     _post_deploy_smoke_wedge_reset
     POST_DEPLOY_SMOKE_READY=false
     POST_DEPLOY_SMOKE_FAILURES=()
+    POST_DEPLOY_SMOKE_KNOWN_GAPS=()
+    POST_DEPLOY_SMOKE_UNEXPECTED_PASSES=()
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
     POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
     POST_DEPLOY_SMOKE_TURN_COVERAGE="not run: turn scenarios did not execute"
@@ -4483,6 +4537,14 @@ _report_post_deploy_smoke_failure() {
         printf -- "- Turn scenarios: \`%s\`\n\n" "${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
         printf '## Findings\n\n'
         for finding in "${POST_DEPLOY_SMOKE_FAILURES[@]}"; do
+            printf -- '- %s\n' "$finding"
+        done
+        printf '\n## Known gaps\n\n'
+        for finding in ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}; do
+            printf -- '- %s\n' "$finding"
+        done
+        printf '\n## Unexpected passes\n\n'
+        for finding in ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}; do
             printf -- '- %s\n' "$finding"
         done
         printf '\n## Deploy disposition\n\n'
@@ -4566,24 +4628,34 @@ echo "▸ Running post-deploy functional smoke (#4262)..."
 # The smoke function runs from an `if` guard, suspending `set -e` within it;
 # each fallible step is nevertheless explicitly guarded or carries `|| return`.
 if _run_post_deploy_functional_smoke; then
-    if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
-        *) false ;;
-    esac
-    then
-    case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
-            echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-        *)
-            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-    esac
-            echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
-            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-    else
-            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+    if [ -n "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}" ]; then
+        echo "△ Post-deploy functional smoke completed with known gaps (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+        printf '  %s\n' ${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]+"${POST_DEPLOY_SMOKE_KNOWN_GAPS[@]}"}
+    fi
+    if [ -n "${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
+        echo "△ Post-deploy functional smoke completed with unexpected passes (evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+        printf '  %s\n' ${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]+"${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[@]}"}
+    fi
+    if [ -z "${POST_DEPLOY_SMOKE_KNOWN_GAPS[*]:-}${POST_DEPLOY_SMOKE_UNEXPECTED_PASSES[*]:-}" ]; then
+        if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+            *) false ;;
+        esac
+        then
+        case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
+            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
+                echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                ;;
+            *)
+                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                ;;
+        esac
+                echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
+                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        else
+                echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        fi
     fi
 else
     echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"

@@ -1,6 +1,5 @@
-//! Starts the O writer on the gateway runtime: one actor per channel this home may adopt, creating
-//! a new channel's first store unless Legacy took it. Ready only while resumed and Owned. A
-//! delegated channel waits on, posts under and is ready by its registered home gate instead.
+//! One actor per adopted channel, creating its first store unless Legacy took it.
+//! Ready while resumed and Owned; delegated channels use their registered home gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -11,14 +10,13 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::activation::{self, ActivationFacts};
+use super::activation::ActivationFacts;
 use super::actor::{self, Demand, Owing, Undelivered};
-use super::adoption::{self, LegacyView};
+use super::adoption::LegacyView;
 use super::binding::BindingEvents;
-use super::deferred;
 use super::deliver::{ChannelWriter, StopCause};
 use super::resume::{self, Backoff};
-use super::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm, WriterConfig};
+use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::channel_home::{self, HomeOwnership};
 use crate::services::cluster::home_availability;
@@ -29,9 +27,10 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
+mod first_init;
 mod recover;
+mod transition;
 use recover::{Recovered, recover};
-
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
     type Port: DiscordPort;
@@ -47,6 +46,10 @@ pub trait HostIo: Send + Sync + 'static {
     }
     fn alarms(&self) -> Self::Alarms;
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<Self::Bindings>;
+    /// Enables new late-adoption attempts; a reserved channel stays Legacy while off.
+    fn late_adopt_enabled(&self) -> bool {
+        false
+    }
     /// Asked only for a channel with no store yet, before its first `init`, while the gate is Owned.
     fn activation_facts(
         &self,
@@ -61,8 +64,7 @@ pub trait HostIo: Send + Sync + 'static {
     ) -> impl Future<Output = Result<FencedFacts, String>> + Send {
         std::future::ready(Err("this host has no intake fence".into()))
     }
-    /// What local Legacy inflight, custody or a pending start holds of the channel. Read under its
-    /// adoption lock right before the first `init`, so it must not judge TUI output itself.
+    /// Legacy custody under its adoption lock before first `init`; never judges TUI output.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String>;
     /// Legacy's relay state, asked only for a Claude channel whose sources already hold output.
     fn legacy(&self) -> Arc<dyn LegacyView>;
@@ -77,21 +79,18 @@ pub trait HostIo: Send + Sync + 'static {
         None
     }
 }
-
 /// A host's re-post turn for one channel writer.
 pub(crate) type RepostTurn<I> = Box<
     dyn crate::services::tui_o::repost::runner::RepostHook<
             ChannelWriter<<I as HostIo>::Port, <I as HostIo>::Lease, <I as HostIo>::Alarms>,
         >,
 >;
-
 /// The facts and queued Legacy bodies read while intake writes are fenced.
 pub struct FencedFacts {
     pub hold: crate::db::o_channel_activation::IntakeFence,
     pub facts: ActivationFacts,
     pub queued_bodies: i64,
 }
-
 /// Legacy's local hold on a channel as the gateway reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Custody {
@@ -120,8 +119,7 @@ pub struct ReadinessClaim {
 }
 
 impl ReadinessClaim {
-    /// Ends this hosting: not ready, no live view, and the channel free to host again. Called
-    /// only once its host and actor ended, so a new actor never runs beside them.
+    /// Clears readiness and frees the channel only after its host and actor ended.
     fn release(self) {
         self.clear(true);
     }
@@ -153,10 +151,11 @@ struct Live {
     unsettled: watch::Receiver<Option<usize>>,
     owed: OwedView,
     stopping: watch::Receiver<bool>,
+    submission: Option<actor::codex_submission::Port>,
+    transition: Option<super::transition_port::TransitionPort>,
 }
 
-/// A hosted channel's owed pieces as a drain reads them: the actor's published view, and the
-/// demand that makes the actor read its store at all.
+/// The actor's published owed view and the demand that requests a store read.
 #[derive(Clone)]
 pub struct OwedView {
     pub published: watch::Receiver<Option<Undelivered>>,
@@ -214,12 +213,13 @@ impl Readiness {
             unsettled,
             owed,
             stopping,
+            submission: None,
+            transition: None,
         };
         locked(&self.live).insert(channel, live);
     }
 
-    /// Ready and, read now rather than from the published flag that trails them, the gate is Owned
-    /// and the actor is still running resumed.
+    /// Ready, with the gate Owned and actor running resumed as read now.
     pub fn accepts(&self, channel: u64) -> bool {
         let live = locked(&self.live);
         let Some(live) = live.get(&channel).filter(|_| self.is_ready(channel)) else {
@@ -241,11 +241,39 @@ impl Readiness {
         *unsettled.borrow()
     }
 
-    /// The running actor's view of what the channel still owes; `None` when no actor runs. The
-    /// map is locked only to clone it.
+    /// Running actor's owed view, cloned under the map lock; `None` without an actor.
     pub fn undelivered(&self, channel: u64) -> Option<OwedView> {
         let live = locked(&self.live);
         Some(live.get(&channel)?.owed.clone())
+    }
+
+    pub(crate) fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
+        locked(&self.live).get(&channel)?.submission.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drop_submission_for_tests(&self, channel: u64) {
+        if let Some(live) = locked(&self.live).get_mut(&channel) {
+            live.submission = None;
+        }
+    }
+
+    pub(super) fn with_submission<T>(
+        &self,
+        channel: u64,
+        consume: impl FnOnce(&actor::codex_submission::Port) -> Result<T, &'static str>,
+    ) -> Result<T, &'static str> {
+        let live = locked(&self.live);
+        let live = live.get(&channel).ok_or("actor_unavailable")?;
+        if *live.stopping.borrow()
+            || live.resumed.has_changed().is_err()
+            || !self.is_ready(channel)
+            || !*live.resumed.borrow()
+            || !owned_now(channel, &live.gate)
+        {
+            return Err("actor_unavailable");
+        }
+        consume(live.submission.as_ref().ok_or("actor_unavailable")?)
     }
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
@@ -325,7 +353,7 @@ pub struct HostParts<I> {
 
 /// Whether `channel` is Owned now: by its registered home gate with a lapsed hold ended, else by
 /// the writer's gate.
-fn owned_now(channel: u64, gate: &OwnershipGate) -> bool {
+pub(super) fn owned_now(channel: u64, gate: &OwnershipGate) -> bool {
     match channel_home::registered_channel(channel) {
         Some(home) => matches!(home.ownership(), HomeOwnership::Owned { .. }),
         None => matches!(gate.current(), GatewayOwnership::Owned { .. }),
@@ -441,8 +469,7 @@ impl ManagedWriterHandle {
     }
 }
 
-/// [`start`] over `owned`, returning a handle per hosted channel. A channel whose delegation is
-/// unavailable is held with an alarm and not claimed.
+/// [`start`] over `owned`; unavailable delegations are held without a claim.
 pub fn start_managed<I: HostIo>(
     provider: ShadowProvider,
     pg_gateway: bool,
@@ -468,13 +495,16 @@ pub fn start_managed<I: HostIo>(
     } = prepare();
     let mut tasks = Vec::new();
     for (channel, candidate) in channels {
-        if let Some(reason) = home_availability::refusal(channel) {
-            hold(&io.alarms(), channel, reason.as_str());
-            continue;
-        }
         let Some(claim) = readiness.claim(channel) else {
             continue;
         };
+        let reservation = candidate.late_cleanup_guard(channel, runtime_root.clone());
+        if let Some(reason) = home_availability::refusal(channel) {
+            hold(&io.alarms(), channel, reason.as_str());
+            drop(reservation);
+            claim.release();
+            continue;
+        }
         let home = channel_home::registered_channel(channel);
         let root = match (pg_gateway || home.is_some(), &runtime_root) {
             (false, _) => Err("no PG gateway lease"),
@@ -485,6 +515,7 @@ pub fn start_managed<I: HostIo>(
             Ok(root) => root,
             Err(detail) => {
                 hold(&io.alarms(), channel, detail);
+                drop(reservation);
                 claim.release();
                 continue;
             }
@@ -506,6 +537,7 @@ pub fn start_managed<I: HostIo>(
                 (&claim, stopping),
             )
             .await;
+            drop(reservation);
             if claim.settled.load(Ordering::SeqCst) {
                 claim.release();
             }
@@ -593,111 +625,20 @@ async fn host_channel<I: HostIo>(
         }
         Ok(Recovered::Store(store)) => store,
         Ok(Recovered::Fresh(fresh)) => {
-            let log = bindings.insert(io.bindings(channel, provider));
-            let held =
-                provider == ShadowProvider::Claude && adoption::holds_output(&**log, channel);
-            let legacy = held.then(|| io.legacy());
-            if let Some(legacy) = &legacy
-                && unless_stopped(&stopping, adoption::legacy_started(&**legacy)).await
-                    != Some(true)
-            {
-                return release(
-                    &candidate,
-                    &alarms,
-                    channel,
-                    "legacy cursor not established",
-                );
-            }
-            let facts = loop {
-                if unless_stopped(&stopping, until_owned(&gate))
-                    .await
-                    .is_none()
-                {
-                    return;
-                }
-                let Some(facts) =
-                    unless_stopped(&stopping, io.activation_facts(channel, provider)).await
-                else {
-                    return;
-                };
-                // Facts read before a lost gate are not acted on; wait for Owned and read again.
-                if owned_now(channel, &gate) {
-                    break facts;
-                }
+            let ids = (channel, provider);
+            let started = first_init::start(
+                &io,
+                ids,
+                &runtime_root,
+                fresh,
+                &candidate,
+                (&gate, &stopping),
+            );
+            let Some(started) = started.await else {
+                return;
             };
-            let local = || Ok(io.local_custody(channel, provider)? != Custody::Free);
-            let created = match legacy {
-                None => activation::activate(&fresh, channel, facts, &**log, local, &candidate),
-                Some(legacy) => 'held: {
-                    // Sessions on another node or an override end it before an open turn defers it.
-                    let last = facts.as_ref().ok().and_then(ActivationFacts::final_blocker);
-                    if let Some(detail) = last {
-                        return release(&candidate, &alarms, channel, &detail);
-                    }
-                    let events = log.binding_events_since(channel, 0);
-                    let events = events.map_err(|error| format!("binding log: {error}"));
-                    // O's own copy names each file once; the shared log keeps every dev it read.
-                    let events = events.map(super::renumbered::first_named);
-                    let seq = events.as_ref().map_or(0, |e| e.last().map_or(0, |e| e.seq));
-                    let current = events.as_deref().ok().and_then(adoption::current);
-                    let first = deferred::first(&*io, channel, provider, &legacy, events);
-                    let Some(first) = unless_stopped(&stopping, first).await else {
-                        return;
-                    };
-                    let snapshot = match first {
-                        deferred::First::Adopt(snapshot) => snapshot,
-                        deferred::First::Wait(refused) => {
-                            let detail = refused.to_string();
-                            let Some((source, _)) = current else {
-                                return release(&candidate, &alarms, channel, &detail);
-                            };
-                            if !candidate.defer(channel) {
-                                return release(&candidate, &alarms, channel, &detail);
-                            }
-                            tracing::info!(channel, %refused, "[tui_o] adoption waits for Legacy");
-                            let waiting = deferred::Waiting {
-                                io: &*io,
-                                channel,
-                                provider,
-                                candidate: &candidate,
-                                gate: &*gate,
-                                store: &fresh,
-                                log: &**log,
-                                legacy,
-                                bound: (source, seq),
-                            };
-                            let retried = deferred::retry(waiting, refused, seq);
-                            if unless_stopped(&stopping, retried).await != Some(true) {
-                                return;
-                            }
-                            break 'held Ok(());
-                        }
-                        deferred::First::Leave(refused) => {
-                            return release(&candidate, &alarms, channel, &refused.to_string());
-                        }
-                    };
-                    let sources = || {
-                        snapshot
-                            .recheck(&*legacy, &**log, channel)
-                            .map_err(String::from)
-                    };
-                    activation::activate_with(&fresh, channel, facts, local, &candidate, sources)
-                }
-            };
-            if let Err(detail) = created {
-                let detail = format!("first activation: {detail}");
-                return stop(&candidate, &alarms, channel, &detail);
-            }
-            match recover(&runtime_root, channel, None) {
-                Ok(Recovered::Store(store)) => {
-                    io.adopted(channel, provider);
-                    store
-                }
-                Ok(Recovered::Fresh(_)) => {
-                    return hold(&alarms, channel, "init missing after activation");
-                }
-                Err(error) => return hold(&alarms, channel, &error.detail),
-            }
+            bindings = Some(started.bindings);
+            started.store
         }
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
@@ -737,8 +678,7 @@ struct Hosted<'a, I: HostIo> {
 }
 
 impl<I: HostIo> Hosted<'_, I> {
-    /// Runs the actor; after a transient store halt, waits and starts it again from the store as
-    /// a restart recovers it, until it stops for any other reason.
+    /// Restarts from the recovered store after transient halts; other stops end hosting.
     async fn serve(self, mut store: ChannelStore) {
         let (channel, alarms) = (self.channel, &self.alarms);
         let mut backoff = Backoff::default();
@@ -782,10 +722,11 @@ impl<I: HostIo> Hosted<'_, I> {
         let (channel, gate) = (self.channel, self.gate);
         let (port, lease) = (Arc::clone(&self.port), self.io.lease());
         // Built for each start, so a restarted actor reopens the sidecar and keeps no stale probe.
-        let repost = self.io.repost(channel, &port);
-        let writer = ChannelWriter::new(store, Arc::clone(gate), port, lease, self.alarms.clone())
-            .with_repost(repost)
-            .with_repost_stop(self.stopping.clone());
+        let (repost, alarms) = (self.io.repost(channel, &port), self.alarms.clone());
+        let hosted = ChannelWriter::hosted(store, Arc::clone(gate), port, lease, alarms, repost);
+        // A stop during the receipt read ends this start before any actor exists.
+        let writer = unless_stopped(&self.stopping, hosted).await?;
+        let writer = writer.with_repost_stop(self.stopping.clone());
         let (stop_tx, stop) = watch::channel(false);
         let (resumed_tx, resumed) = watch::channel(false);
         // Each start publishes its own count; the ended actor's closed one reads as `None`.
@@ -798,12 +739,17 @@ impl<I: HostIo> Hosted<'_, I> {
         let config = WriterConfig { enabled: true };
         let bindings = Arc::clone(&self.bindings);
         let watches = (stop, resumed_tx, unsettled_tx, owing);
-        let spawned = actor::spawn_projecting(&config, writer, self.provider, bindings, watches);
+        let readers = crate::services::tui_o::channel_policy::boot()
+            .filter(|boot| boot.dormant_channels().contains(&channel))
+            .map(|_| ReaderConfig { dormant: true });
+        let spawn =
+            || actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
+        let (ports, spawned) = self.spawn_ports(spawn);
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
-        self.claim
-            .readiness
-            .track(channel, Arc::clone(gate), watched);
+        let readiness = &self.claim.readiness;
+        readiness.track(channel, Arc::clone(gate), watched);
+        let port = readiness.register_ports(channel, ports);
         let on_resumed = || {
             if attempt > 0 {
                 self.alarms.resume_pending(channel, false);
@@ -818,6 +764,7 @@ impl<I: HostIo> Hosted<'_, I> {
         let ended = publish(channel, self.claim, watched, (actor, &stop_tx), on_resumed);
         let cause = ended.await;
         drop(stop_tx);
+        readiness.close_transition(channel, port);
         cause
     }
 

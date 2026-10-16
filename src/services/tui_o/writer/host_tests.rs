@@ -12,6 +12,14 @@ use crate::services::tui_o::writer::host::{
 };
 
 use super::*;
+#[path = "late_adopt_binding_tests.rs"]
+mod late_binding;
+#[path = "late_adopt_cleanup_tests.rs"]
+mod late_cleanup;
+#[path = "late_adopt_delegated_tests.rs"]
+mod late_delegated;
+#[path = "late_adopt_host_tests.rs"]
+mod late_host;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 #[cfg(unix)]
 use chrono::{DateTime, TimeDelta};
@@ -83,6 +91,7 @@ struct TestIo {
     legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     busy: std::sync::atomic::AtomicBool,
     relaying: std::sync::atomic::AtomicBool,
+    late_enabled: std::sync::atomic::AtomicBool,
     /// Each lease handed to a new writer: when, how many writers still held one, and how many
     /// piece leases were back by then.
     leases: Mutex<Vec<(tokio::time::Instant, usize, usize)>>,
@@ -100,7 +109,15 @@ impl<W> RepostHook<W> for CountedTurn {
     }
 
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
-        Box::pin(std::future::ready(OriginalGate::Send))
+        Box::pin(std::future::ready(OriginalGate::SendLocal))
+    }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
     }
 }
 
@@ -120,6 +137,7 @@ impl TestIo {
             legacy: Mutex::default(),
             busy: Default::default(),
             relaying: Default::default(),
+            late_enabled: Default::default(),
             leases: Mutex::default(),
             repost_turns: Arc::default(),
         })
@@ -171,6 +189,10 @@ impl HostIo for TestIo {
     fn bindings(&self, channel: u64, provider: ShadowProvider) -> Arc<ChannelBindingLog> {
         self.calls.lock().unwrap().push(("bindings", channel));
         Arc::new(ChannelBindingLog::new(channel, provider))
+    }
+
+    fn late_adopt_enabled(&self) -> bool {
+        self.late_enabled.load(Ordering::SeqCst)
     }
 
     fn activation_facts(
@@ -249,12 +271,18 @@ fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -
     hosted(harness, io, pg, ready).len()
 }
 
-fn hosted(
+type Hosts = Vec<tokio::task::JoinHandle<()>>;
+
+fn hosted(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -> Hosts {
+    hosted_as(ShadowProvider::Claude, harness, io, (pg, ready))
+}
+
+fn hosted_as(
+    provider: ShadowProvider,
     harness: &Harness,
     io: &Arc<TestIo>,
-    pg: bool,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+    (pg, ready): (bool, &Arc<Readiness>),
+) -> Hosts {
     p5::set_test_root(Some(harness._runtime.path()));
     let parts = || HostParts {
         io: Arc::clone(io),
@@ -262,7 +290,7 @@ fn hosted(
         gate: Arc::clone(&harness.gate),
         readiness: Arc::clone(ready),
     };
-    start(ShadowProvider::Claude, pg, parts)
+    start(provider, pg, parts)
 }
 
 fn empty_init(channel: u64) -> Initialized {
@@ -455,29 +483,40 @@ async fn without_a_pg_gateway_lease_a_selected_channel_is_held_and_stays_with_o(
     assert_eq!(owned, Ok(true), "Legacy does not take the body back");
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
-    let (harness, _, _) = switched_over(&row("m0", "before the switch"));
-    harness.gate.acquired();
-    let mut writer = harness.writer();
-    assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
-    let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
-        panic!("piece not posted");
-    };
-    drop(writer);
+#[test]
+fn a_recovered_channel_knows_its_newest_post_while_the_gateway_is_down() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let (harness, posted) = runtime.block_on(async {
+        let (harness, _, _) = switched_over(&row("m0", "before the switch"));
+        harness.gate.acquired();
+        let mut writer = harness.writer();
+        assert_eq!(writer.deliver(&piece("m1", "hello")).await, Step::Done);
+        let Some(PieceOutcome::Posted(posted)) = outcome(&mut writer, "m1") else {
+            panic!("piece not posted");
+        };
+        drop(writer);
+        (harness, posted)
+    });
+    // Serialize the simulated reboot on the test thread, outside the actor future.
     let _restart = deliver::forget_posted_for_tests(CHANNEL);
-    let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
-    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
-    io.port_down.store(true, Ordering::SeqCst);
-    let tasks = hosted(&harness, &io, true, &ready);
-    polls(3).await;
-    assert_eq!(
-        io.calls(),
-        [("port", 0)],
-        "the actor still waits for its gateway"
-    );
-    assert!(deliver::last_posted(CHANNEL) >= Some(posted));
-    abort(tasks);
+    runtime.block_on(async {
+        let _selected = test_override::force_channels(&[(CHANNEL, ClaudeTui)]);
+        let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+        io.port_down.store(true, Ordering::SeqCst);
+        let tasks = hosted(&harness, &io, true, &ready);
+        polls(3).await;
+        assert_eq!(
+            io.calls(),
+            [("port", 0)],
+            "the actor still waits for its gateway"
+        );
+        assert!(deliver::last_posted(CHANNEL) >= Some(posted));
+        abort(tasks);
+    });
 }
 
 fn p5_log(root: &Path, channel: u64, line: &[u8]) {
@@ -602,19 +641,8 @@ fn abort(tasks: Vec<tokio::task::JoinHandle<()>>) {
     tasks.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
-fn start_host(
-    harness: &Harness,
-    io: &Arc<TestIo>,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    p5::set_test_root(Some(harness._runtime.path()));
-    let parts = || HostParts {
-        io: Arc::clone(io),
-        runtime_root: Some(root(harness)),
-        gate: Arc::clone(&harness.gate),
-        readiness: Arc::clone(ready),
-    };
-    start(ShadowProvider::Claude, true, parts)
+fn start_host(harness: &Harness, io: &Arc<TestIo>, ready: &Arc<Readiness>) -> Hosts {
+    hosted(harness, io, true, ready)
 }
 
 #[tokio::test(start_paused = true)]
@@ -973,8 +1001,8 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
-struct ProducerPane {
-    tmux: &'static str,
+pub(super) struct ProducerPane {
+    pub(super) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
     _root: tempfile::TempDir,
@@ -986,7 +1014,7 @@ struct ProducerPane {
 
 #[cfg(unix)]
 impl ProducerPane {
-    fn launch(a: &str, a_path: &Path) -> Self {
+    pub(super) fn launch(a: &str, a_path: &Path) -> Self {
         use crate::services::tui_prompt_dedupe as dedupe;
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1054,7 +1082,7 @@ impl Drop for ProducerPane {
 }
 
 #[cfg(unix)]
-fn session_row(session: &str) -> Vec<u8> {
+pub(super) fn session_row(session: &str) -> Vec<u8> {
     let row = serde_json::json!({"type": "mode", "sessionId": session});
     let mut line = serde_json::to_vec(&row).unwrap();
     line.push(b'\n');
@@ -1236,9 +1264,24 @@ mod rotation_unsettled;
 #[path = "host_home_tests.rs"]
 mod home;
 
+#[path = "host_first_init_tests.rs"]
+mod first_init;
+
 #[path = "host_managed_tests.rs"]
 mod managed;
 
 #[cfg(unix)]
 #[path = "host_renumber_tests.rs"]
 mod renumber;
+
+#[cfg(unix)]
+#[path = "readers_host_tests.rs"]
+mod readers_host;
+
+#[cfg(unix)]
+#[path = "s2a_actor_tests.rs"]
+mod s2a;
+
+#[cfg(unix)]
+#[path = "../repost/projection_tests.rs"]
+mod receipt_projection;

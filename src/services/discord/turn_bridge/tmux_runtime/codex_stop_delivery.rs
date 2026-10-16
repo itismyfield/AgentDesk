@@ -466,6 +466,10 @@ pub(super) async fn herdr_command_stop(
     let admitted = mailbox
         .admit_herdr_user_stop_if_current(token.clone(), reason.to_string())
         .await;
+    #[cfg(all(test, unix))]
+    if admitted.token.is_some() && !admitted.already_stopping {
+        tests::cut::reached(tests::cut::Cut::IntentRecorded, None);
+    }
     let stop = match admitted.token {
         None => HerdrStop::Refused(HerdrNotSent::Generation),
         Some(_) if admitted.already_stopping => HerdrStop::AlreadyRequested,
@@ -823,9 +827,15 @@ fn deliver(
                 target.discard_pin();
                 return Err(SwitchOff);
             }
-            crate::services::discord::turn_presence::entrypoints::withdraw(channel, "herdr_escape");
+            if mutant("restart_cutpoint_not_reached") {
+                target.discard_pin();
+                return Err(Pending);
+            }
             attempted.store(true, Ordering::Release);
+            let swapped = mutant("stop_sent_as_indeterminate");
             let result = match target.send_keys(&[HostKey::Escape]) {
+                Ok(HostMutation::Confirmed) if swapped => Ok(HerdrDelivery::Indeterminate),
+                Ok(HostMutation::Indeterminate(_)) if swapped => Ok(HerdrDelivery::Sent),
                 Ok(HostMutation::Confirmed) => Ok(HerdrDelivery::Sent),
                 Ok(HostMutation::Indeterminate(_)) => Ok(HerdrDelivery::Indeterminate),
                 _ => Err(Gate),
@@ -834,7 +844,7 @@ fn deliver(
             if let Some(action) = tests::take_after_send() {
                 action();
             }
-            match generation.generation.take() {
+            let delivered = match generation.generation.take() {
                 Some(_)
                     if mutant("indeterminate_claim")
                         && result == Ok(HerdrDelivery::Indeterminate) =>
@@ -843,7 +853,10 @@ fn deliver(
                 }
                 Some(generation) => generation.commit_success(result),
                 None => result,
-            }
+            };
+            #[cfg(all(test, unix))]
+            tests::cut::reached(tests::cut::Cut::EscapeReturned, Some(delivered));
+            delivered
         };
         match provider {
             ProviderKind::Claude => {

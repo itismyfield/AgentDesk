@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::attempt::{AttemptMeta, Disposition, Effect, Tracking, WitnessKind, fresh_token};
 use super::ledger::Ledger;
+use super::rows::receipt_identity::ReceiptIdentity;
 use super::rows::{AttemptEvidence, DoneReason, Entry, HeldReason, Row, RowState, Rows};
 use crate::services::tui_o::shadow::capture::SourceCapture;
 
@@ -34,6 +35,29 @@ pub enum Step {
     /// The head row waits for a person or a later stage; younger rows stay behind it.
     Blocked(u64, RowState),
     Moved(u64, RowState),
+}
+
+/// Policy approval names the exact durable source checked before the actor's witness scan.
+pub(crate) struct PolicyOffer {
+    key: u64,
+    identity: ReceiptIdentity,
+    received_seq: u64,
+}
+
+impl PolicyOffer {
+    pub(crate) fn new(key: u64, identity: ReceiptIdentity, received_seq: u64) -> Self {
+        Self {
+            key,
+            identity,
+            received_seq,
+        }
+    }
+
+    fn matches(&self, rows: &Rows, key: u64, row: &Row) -> bool {
+        key == self.key
+            && row.received_seq == Some(self.received_seq)
+            && rows.receipt_identity(key).as_ref() == Some(&self.identity)
+    }
 }
 
 struct Attempt {
@@ -87,6 +111,27 @@ impl<P: Pane> InputActor<P> {
         fact: Option<&ChannelFact>,
         now: Instant,
     ) -> io::Result<Step> {
+        self.step_with_policy(ledger, fact, now, None).await
+    }
+
+    pub(crate) async fn step_for_source(
+        &mut self,
+        ledger: &mut Ledger,
+        fact: Option<&ChannelFact>,
+        now: Instant,
+        approval: &PolicyOffer,
+    ) -> io::Result<Step> {
+        self.step_with_policy(ledger, fact, now, Some(approval))
+            .await
+    }
+
+    async fn step_with_policy(
+        &mut self,
+        ledger: &mut Ledger,
+        fact: Option<&ChannelFact>,
+        now: Instant,
+        approval: Option<&PolicyOffer>,
+    ) -> io::Result<Step> {
         let Some((rows, foreign)) = self.observe(ledger)? else {
             return Ok(Step::Wait("witness_scan"));
         };
@@ -105,6 +150,15 @@ impl<P: Pane> InputActor<P> {
             self.attempt = None;
             return Ok(Step::Idle);
         };
+        let approved = approval.is_none_or(|approval| approval.matches(&rows, key, &row));
+        #[cfg(test)]
+        let approved = approved
+            || std::env::var("ADK_TEST_INPUT_G1A_MUTANT")
+                .is_ok_and(|name| name == "c2b_policy_source_not_bound");
+        // Completion witnesses remain durable; a different new offer needs its own policy pass.
+        if matches!(row.state, RowState::Received | RowState::Ready) && !approved {
+            return Ok(Step::Wait("source_policy_changed"));
+        }
         // Ready follows only NotSent, which left the pane untouched: the next attempt replaces it.
         if row.state == RowState::Ready {
             row.attempt = None;

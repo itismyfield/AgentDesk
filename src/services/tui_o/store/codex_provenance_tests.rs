@@ -105,6 +105,31 @@ fn rejected<T: std::fmt::Debug>(result: Result<T, StoreError>) -> bool {
 }
 
 #[test]
+fn s2a_existing_owed_reader_decodes_schema2_without_migrating_or_writing() {
+    use crate::services::tui_o::writer::owed::{Reevaluation, reevaluate};
+    let mut fixture = Fixture::new("{}\n{}\n");
+    fixture.channel.init_codex_provenance().unwrap();
+    let closed = span(&fixture.source, "old", 0, Some(fixture.records[0].end));
+    fixture.channel.persist_codex_span(closed.clone()).unwrap();
+    fixture.channel.persist_codex_deny(deny(&closed)).unwrap();
+    let mut document = serde_json::to_value(fixture.present()).unwrap();
+    document["schema"] = 2.into();
+    document["floors"] = serde_json::json!([]);
+    let path = fixture.path(CODEX_PROVENANCE_FILE);
+    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    SIDECAR_IO.with(|io| io.set((0, 0)));
+    assert_eq!(
+        reevaluate(&mut fixture.channel, &mut []).unwrap(),
+        Reevaluation::Present { attributed: 0 },
+        "the gated schema2 reader must decode the new envelope"
+    );
+    assert_eq!(SIDECAR_IO.with(std::cell::Cell::get), (1, 0));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(fixture.present().spans, [closed]);
+}
+
+#[test]
 fn episode_storage_closes_once_and_rejects_identity_or_deny_loss_without_failing_the_store() {
     let mut fixture = Fixture::new("{}\n{}\n");
     let (source, end) = (fixture.source.clone(), fixture.records[0].end);

@@ -39,7 +39,7 @@ fn publish_nonce(context: &BindingContext) {
     std::fs::write(marker, &context.execution_nonce).unwrap();
 }
 
-fn durable_canary_without_launch_files(root: &Path) -> BindingContext {
+fn durable_canary_without_launch_files(root: &Path) -> (BindingContext, PathBuf, PathBuf) {
     let context = context(root, CANARY_TMUX, "verified");
     let prepared = PreparedIncarnation::create(context.clone()).unwrap();
     publish_nonce(&context);
@@ -78,7 +78,11 @@ fn durable_canary_without_launch_files(root: &Path) -> BindingContext {
         "durable proof required: {ingress:?}, {fold:?}"
     );
     assert!(dedupe::runtime_binding_for_tmux_session(CANARY_TMUX).is_some());
-    std::fs::remove_file(prepared.path).unwrap();
+    // Preserve the launch inode while its canonical path is absent.
+    let retained = root.join(format!(".held-context-{}", context.execution_nonce));
+    std::fs::hard_link(&prepared.path, &retained).unwrap();
+    let canonical = prepared.path;
+    std::fs::remove_file(&canonical).unwrap();
     std::fs::remove_file(crate::services::tmux_common::session_temp_path(
         CANARY_TMUX,
         crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
@@ -100,7 +104,7 @@ fn durable_canary_without_launch_files(root: &Path) -> BindingContext {
         dedupe::binding_events::codex::read_ownership(&context).unwrap(),
         fold
     );
-    context
+    (context, canonical, retained)
 }
 
 fn output_line(kind: &str, payload: serde_json::Value) -> Vec<u8> {
@@ -137,7 +141,7 @@ async fn exercise_actor(alternate_owner: bool) {
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
-    let old_context = durable_canary_without_launch_files(root.path());
+    let (old_context, _, _) = durable_canary_without_launch_files(root.path());
     let old_fold = dedupe::binding_events::codex::read_ownership(&old_context).unwrap();
     for herdr in [false, true] {
         dedupe::reset_state_for_tests();

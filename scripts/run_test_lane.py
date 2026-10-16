@@ -524,14 +524,11 @@ def _report_set(errors: list[str], label: str, ids: set[str] | frozenset[str],
     errors.append(f"{len(ids)} {label} id(s), named above. {explanation}")
 
 
-def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
-             expected_selected: frozenset[str], max_summaries: int
-             ) -> tuple[list[str], list[str], dict[str, int]]:
+def verify_structure(outcome: Outcome, declared_ignored: set[str] | frozenset[str],
+                     expected_selected: frozenset[str], max_summaries: int
+                     ) -> list[str]:
+    """Checks (1)-(3b): which ids ran and which failed, before any ledger policy applies."""
     errors: list[str] = []
-    warnings: list[str] = []
-
-    declared_ignored = {entry.pattern for entry in entries
-                        if entry.mode == "ignored"}
     observed_selected = outcome.executed | outcome.ignored
     expected_executed = expected_selected - declared_ignored
 
@@ -640,6 +637,18 @@ def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
                 "list does not. A foreign write was read as a verdict, or a "
                 "verdict was attributed to the wrong id.",
             )
+    return errors
+
+
+def evaluate(lane: str, rc: int, outcome: Outcome, entries: list[LedgerEntry],
+             expected_selected: frozenset[str], max_summaries: int
+             ) -> tuple[list[str], list[str], dict[str, int]]:
+    warnings: list[str] = []
+    declared_ignored = {entry.pattern for entry in entries
+                        if entry.mode == "ignored"}
+    observed_selected = outcome.executed | outcome.ignored
+    errors = verify_structure(outcome, declared_ignored, expected_selected,
+                              max_summaries)
 
     known: set[str] = set()
     unexpected: list[str] = []
@@ -731,6 +740,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(__file__).resolve().parent
                         / "known_test_failures.txt")
     parser.add_argument("--log", type=Path)
+    parser.add_argument("--expected-ids", type=Path,
+                        help="a selection plan's id set, replacing the manifest-derived one")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
 
@@ -742,8 +753,18 @@ def main(argv: list[str] | None = None) -> int:
 
     today = _datetime.date.today()
     entries, ledger_errors = parse_ledger(args.ledger, args.lane, today)
-    expected_selected, manifest_errors = derive_expected_selection(
-        args.inventory_manifest, args.platform, args.skip)
+    if args.expected_ids is None:
+        expected_selected, manifest_errors = derive_expected_selection(
+            args.inventory_manifest, args.platform, args.skip)
+    else:
+        try:
+            expected_selected = frozenset(args.expected_ids.read_text("utf-8").split())
+            manifest_errors = []
+        except OSError as error:
+            expected_selected, manifest_errors = frozenset(), [f"expected ids: {error}"]
+        # A planned subset reports ignored only the declared ids it selected.
+        entries = [entry for entry in entries
+                   if entry.mode != "ignored" or entry.pattern in expected_selected]
 
     # A lane that declares fewer skips than it executes would shrink its own
     # expectation to match whatever it chose to run. Refuse before running.
@@ -774,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     rc, outcome = run_and_capture(command, args.log)
     errors, warnings, counters = evaluate(args.lane, rc, outcome, entries,
                                           expected_selected, args.max_summaries)
+    if args.expected_ids is not None and not counters["executed"]:
+        errors.append("no planned test executed; a plan whose ids are all ignored proves nothing")
     for warning in warnings:
         print(f"::warning::{warning}")
     for error in errors:

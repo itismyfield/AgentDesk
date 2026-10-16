@@ -2,11 +2,10 @@ use super::*;
 #[path = "tmux_watcher/cancel_handoff.rs"]
 pub(in crate::services::discord) mod cancel_handoff;
 use crate::services::discord::InflightTurnState;
-use crate::services::discord::http::{edit_channel_message, send_channel_message};
 use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
 use crate::services::discord::replace_outcome_policy::{
     WatcherRewindAttemptDisposition, classify_watcher_send_failure,
-    watcher_rewind_attempt_disposition, watcher_send_failure_retry_plan,
+    watcher_rewind_attempt_disposition,
 };
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 

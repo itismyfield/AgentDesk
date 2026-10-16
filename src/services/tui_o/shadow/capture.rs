@@ -3,7 +3,9 @@
 use std::fs::{File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::SystemTime;
 
 use super::{CaptureBatch, CaptureOutcome, CaptureSource, CapturedRecord, SourceAnomaly};
 use super::{SourceAnomalyKind as Kind, SourceId};
@@ -42,6 +44,59 @@ pub fn file_match(source: &SourceId, (dev, ino): (u64, u64)) -> FileMatch {
         (true, true) => FileMatch::Exact,
         (true, false) => FileMatch::Renumbered,
         (false, _) => FileMatch::Other,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fingerprint {
+    pub len: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub modified: SystemTime,
+    pub change: (i64, i64),
+}
+
+impl Fingerprint {
+    pub fn of(meta: &Metadata) -> io::Result<Self> {
+        let (dev, ino) = file_identity(meta);
+        #[cfg(unix)]
+        let change = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.ctime(), meta.ctime_nsec())
+        };
+        #[cfg(not(unix))]
+        let change = (0, 0);
+        Ok(Self {
+            len: meta.len(),
+            dev,
+            ino,
+            modified: meta.modified()?,
+            change,
+        })
+    }
+
+    pub fn path(source: &SourceId) -> Result<Self, (Kind, String)> {
+        let unreadable = |e: io::Error| (Kind::Unreadable, e.to_string());
+        let meta = match std::fs::metadata(&source.path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(match std::fs::symlink_metadata(&source.path) {
+                    Err(entry) if entry.kind() == io::ErrorKind::NotFound => {
+                        (Kind::Missing, e.to_string())
+                    }
+                    Ok(_) => (
+                        Kind::Replaced,
+                        "pathname entry no longer resolves to the source".into(),
+                    ),
+                    Err(entry) => unreadable(entry),
+                });
+            }
+            Err(e) => return Err(unreadable(e)),
+        };
+        if file_match(source, file_identity(&meta)) == FileMatch::Other {
+            return Err((Kind::Replaced, "path names a different inode".into()));
+        }
+        Self::of(&meta).map_err(unreadable)
     }
 }
 
@@ -105,6 +160,8 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
     file.take(len).read_to_end(&mut bytes)?;
+    #[cfg(test)]
+    self::io_trace::record(offset, bytes.len() as u64, false);
     Ok(bytes)
 }
 
@@ -112,11 +169,20 @@ fn read_at(mut file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
 fn hash_prefix(mut file: &File, len: u64) -> io::Result<(Sha256, Vec<u8>)> {
     file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    if io::copy(&mut file.take(len), &mut hasher)? < len {
+    let copied = io::copy(&mut file.take(len), &mut hasher)?;
+    #[cfg(test)]
+    self::io_trace::record(0, copied, true);
+    if copied < len {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
     let guard_len = len.min(TAIL_GUARD_BYTES);
     Ok((hasher, read_at(file, len - guard_len, guard_len)?))
+}
+
+fn update_guard(guard: &mut Vec<u8>, chunk: &[u8]) {
+    guard.extend_from_slice(chunk);
+    let excess = guard.len().saturating_sub(TAIL_GUARD_BYTES as usize);
+    guard.drain(..excess);
 }
 
 impl SourceCapture {
@@ -179,12 +245,12 @@ impl SourceCapture {
         self.captured_through
     }
 
-    /// Hex sha256 of bytes `0..captured_through`.
     /// Bytes read so far, including a buffered line still missing its newline.
     pub fn read_through(&self) -> u64 {
         self.captured_through + self.partial.len() as u64
     }
 
+    /// Hex sha256 of bytes `0..captured_through`.
     pub fn prefix_hash(&self) -> String {
         hex::encode(self.prefix.clone().finalize())
     }
@@ -200,11 +266,45 @@ impl SourceCapture {
         Ok(hex::encode(disk.finalize()) == self.prefix_hash())
     }
 
-    fn poll_inner(&mut self, max_bytes: u64) -> Result<CaptureBatch, (Kind, String)> {
+    pub fn fingerprint(&self) -> io::Result<Fingerprint> {
+        Fingerprint::of(&self.file.metadata()?)
+    }
+
+    /// Checks the retained FD even when its pathname has been unlinked.
+    pub fn verify_eof(&self, through: u64, hash: &str) -> io::Result<Fingerprint> {
+        let invalid = |detail| io::Error::new(io::ErrorKind::InvalidData, detail);
+        if self.captured_through != through
+            || self.read_through() != through
+            || self.prefix_hash() != hash
+        {
+            return Err(invalid("capture differs from the drained durable cursor"));
+        }
+        let before = self.fingerprint()?;
+        if before.len != through
+            || (before.dev, before.ino) != self.opened
+            || !self.verify_prefix()?
+        {
+            return Err(invalid("open source is not at its verified EOF"));
+        }
+        if before != self.fingerprint()? {
+            return Err(invalid("metadata changed during EOF validation"));
+        }
+        Ok(before)
+    }
+
+    fn poll_inner(
+        &mut self,
+        max_bytes: u64,
+        retained: bool,
+    ) -> Result<CaptureBatch, (Kind, String)> {
         let io_err = |error: io::Error| (Kind::Unreadable, error.to_string());
         let len = self.file.metadata().map_err(io_err)?.len();
-        let path_identity = std::fs::metadata(&self.source.path).map(|meta| file_identity(&meta));
-        if path_identity.ok() != Some(self.opened) {
+        let path = if retained {
+            Fingerprint::of(&self.file.metadata().map_err(io_err)?).map_err(io_err)?
+        } else {
+            Fingerprint::path(&self.source)?
+        };
+        if (path.dev, path.ino) != self.opened {
             return Err((Kind::Replaced, "path no longer names the open file".into()));
         }
         let cursor = self.captured_through + self.partial.len() as u64;
@@ -237,9 +337,7 @@ impl SourceCapture {
                 return Err((Kind::PrefixMismatch, "buffered partial line changed".into()));
             }
         }
-        self.guard.extend_from_slice(&chunk);
-        let excess = self.guard.len().saturating_sub(TAIL_GUARD_BYTES as usize);
-        self.guard.drain(..excess);
+        update_guard(&mut self.guard, &chunk);
         let mut search = self.partial.len();
         self.partial.extend_from_slice(&chunk);
         let (mut records, mut consumed) = (Vec::new(), 0);
@@ -264,17 +362,24 @@ impl SourceCapture {
     }
 }
 
-impl CaptureSource for SourceCapture {
-    fn source(&self) -> &SourceId {
-        &self.source
+impl SourceCapture {
+    /// Verified ownership retries path races; rotated sources still prove the retained FD and prefix.
+    pub(crate) fn poll_verified(&mut self, max_bytes: u64, retained: bool) -> CaptureOutcome {
+        if self
+            .halted
+            .as_ref()
+            .is_some_and(|anomaly| matches!(anomaly.kind, Kind::Missing | Kind::Replaced))
+        {
+            self.halted = None;
+        }
+        self.poll_checked(max_bytes, retained)
     }
 
-    /// The first anomaly halts the source; later polls repeat it.
-    fn poll(&mut self, max_bytes: u64) -> CaptureOutcome {
+    fn poll_checked(&mut self, max_bytes: u64, retained: bool) -> CaptureOutcome {
         if let Some(anomaly) = &self.halted {
             return CaptureOutcome::Anomaly(anomaly.clone());
         }
-        let (kind, detail) = match self.poll_inner(max_bytes) {
+        let (kind, detail) = match self.poll_inner(max_bytes, retained) {
             Ok(batch) => return CaptureOutcome::Batch(batch),
             Err(failure) => failure,
         };
@@ -287,6 +392,16 @@ impl CaptureSource for SourceCapture {
         };
         self.halted = Some(anomaly.clone());
         CaptureOutcome::Anomaly(anomaly)
+    }
+}
+
+impl CaptureSource for SourceCapture {
+    fn source(&self) -> &SourceId {
+        &self.source
+    }
+
+    fn poll(&mut self, max_bytes: u64) -> CaptureOutcome {
+        self.poll_checked(max_bytes, false)
     }
 }
 
@@ -418,5 +533,122 @@ mod tests {
             .unwrap();
         file.write_all(b"a").unwrap();
         assert_eq!(poll(&mut capture, budget), Err(Kind::Oversized));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn readers_s1a_access_error_is_unreadable_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, b"line\n").unwrap();
+        let source = source_id_for("session", &path).unwrap();
+        let mut capture = SourceCapture::open(source, 0).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        assert!(
+            std::fs::metadata(&path).is_err(),
+            "fixture really fails to stat"
+        );
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Unreadable));
+    }
+    #[test]
+    #[cfg(unix)]
+    fn readers_s1a_missing_is_exact_and_first_anomaly_is_sticky() {
+        use std::os::unix::fs::symlink;
+        let (dir, path, mut capture) = open_fixture(0);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Missing));
+        let mut capture = {
+            std::fs::write(&path, FIXTURE).unwrap();
+            SourceCapture::open(source_id_for("s", &path).unwrap(), 0).unwrap()
+        };
+        std::fs::rename(&path, dir.path().join("retained")).unwrap();
+        symlink(dir.path().join("absent"), &path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Replaced));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(poll(&mut capture, MAX), Err(Kind::Replaced));
+    }
+
+    #[test]
+    fn readers_s1a_open_fd_verification_rejects_full_prefix_change_and_partial() {
+        let (_dir, path, mut capture) = open_fixture(0);
+        poll(&mut capture, MAX).unwrap();
+        let through = capture.captured_through();
+        let hash = capture.prefix_hash();
+        assert!(capture.verify_eof(through, &hash).is_ok());
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"partial")
+            .unwrap();
+        poll(&mut capture, MAX).unwrap();
+        assert!(capture.verify_eof(through, &hash).is_err());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, &bytes[..through as usize]).unwrap();
+        assert!(!capture.verify_prefix().unwrap());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn readers_s1a_permission_denied_is_never_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, path, mut capture) = open_fixture(0);
+        let prior = std::fs::metadata(dir.path()).unwrap().permissions();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o0)).unwrap();
+        let raw = std::fs::metadata(&path);
+        let result = poll(&mut capture, MAX);
+        std::fs::set_permissions(dir.path(), prior).unwrap();
+        assert_eq!(raw.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(result, Err(Kind::Unreadable));
+    }
+}
+
+pub mod observation;
+
+#[cfg(test)]
+pub(crate) mod io_trace {
+    use std::cell::RefCell;
+    thread_local! {
+        static READS: RefCell<Vec<(u64, u64, bool)>> = const { RefCell::new(Vec::new()) };
+    }
+    #[test]
+    fn s0o_read_range_probe_records_actual_seek_reads() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"abcdef").unwrap();
+        take();
+        assert_eq!(super::read_at(&file, 2, 3).unwrap(), b"cde");
+        assert_eq!(take(), vec![(2, 5, false)]);
+    }
+    struct ReadHook {
+        at: u64,
+        action: Box<dyn FnOnce()>,
+    }
+    thread_local! {
+        static HOOK: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
+    }
+    pub(crate) fn after_read_at(at: u64, action: impl FnOnce() + 'static) {
+        HOOK.with_borrow_mut(|hook| {
+            *hook = Some(ReadHook {
+                at,
+                action: Box::new(action),
+            })
+        });
+    }
+    pub(crate) fn record(start: u64, len: u64, hash: bool) {
+        READS.with_borrow_mut(|reads| reads.push((start, start + len, hash)));
+        let action = HOOK.with_borrow_mut(|hook| {
+            if len > 0 && hook.as_ref().is_some_and(|h| h.at == start) {
+                hook.take()
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = action {
+            (hook.action)();
+        }
+    }
+    pub(crate) fn take() -> Vec<(u64, u64, bool)> {
+        READS.with_borrow_mut(std::mem::take)
     }
 }

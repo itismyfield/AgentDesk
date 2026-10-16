@@ -38,7 +38,7 @@ async fn withdraw_while_429(kind: u8) {
             .with_repost_stop(actor_stop)
             .with_repost_stop(host_stop);
         writer.set_live(true);
-        writer.bind_switch(switch.live());
+        writer.bind_switch(switch.live_for(CHANNEL));
         let mut runner = Runner::new(switch, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.throttle_first.store(true, Ordering::SeqCst);
@@ -103,7 +103,7 @@ async fn d4act_switch_withdrawal_after_first_poll_keeps_started_http_and_slot_pg
         let switch = RepostSwitch::new(None, watched);
         let mut writer = harness.writer();
         writer.set_live(true);
-        writer.bind_switch(switch.live());
+        writer.bind_switch(switch.live_for(CHANNEL));
         let mut runner = Runner::new(switch, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.hold.store(true, Ordering::SeqCst);
@@ -206,7 +206,7 @@ impl RepostHook<Writer> for ActorDispatch {
             }
             // Isolate the actor's receiver wiring; the seriality test covers the timed probe.
             let on = switch(true);
-            writer.bind_switch(on.live());
+            writer.bind_switch(on.live_for(CHANNEL));
             writer.set_live(true);
             let mut runner = Runner::new(on, self.pool.clone(), BOT, run_scope());
             let started = start(&mut runner, writer, &self.pool, &self.key, &self.io).await;
@@ -217,6 +217,14 @@ impl RepostHook<Writer> for ActorDispatch {
 
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
         Box::pin(std::future::ready(OriginalGate::Admitted))
+    }
+
+    fn receipts(
+        &mut self,
+    ) -> Turned<'_, crate::services::tui_o::repost::projection::ReceiptOverlay> {
+        Box::pin(std::future::ready(
+            crate::services::tui_o::repost::projection::ReceiptOverlay::Disabled,
+        ))
     }
 }
 
@@ -238,7 +246,7 @@ async fn d4act_scope_revoked_after_grant_and_during_429_wait_pg() {
         let mut writer = harness.writer();
         writer.set_live(true);
         let on = switch(true);
-        writer.bind_switch(on.live());
+        writer.bind_switch(on.live_for(CHANNEL));
         let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.throttle_first.store(waiting, Ordering::SeqCst);
@@ -368,8 +376,12 @@ impl DiscordPort for ObservedPort {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.port.history_after(channel, after)
     }
-    fn history_readable(&self, channel: u64) -> bool {
-        self.port.history_readable(channel)
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        self.port.message(channel, id)
     }
 }
 
@@ -401,11 +413,15 @@ async fn f6_unsent_and_429_do_not_raise_uncertain_alarm_pg() {
             harness.alarms.clone(),
         );
         writer.set_live(true);
+        if index == 2 {
+            // A listed message shows the history readable.
+            harness.port.say(BOT + 1, "chatter");
+        }
         let io = Io::over(&harness.port);
         io.throttle_first.store(index == 1, Ordering::SeqCst);
         *io.outcome.lock().unwrap() = outcome;
         let on = switch(true);
-        writer.bind_switch(on.live());
+        writer.bind_switch(on.live_for(CHANNEL));
         let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let admission = runner.try_next_dispatch(
             &mut writer,
@@ -475,7 +491,7 @@ async fn f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg() {
             io.throttle_first.store(true, Ordering::SeqCst);
             *io.outcome.lock().unwrap() = Some(WireOutcome::Throttled);
             let on = switch(true);
-            writer.bind_switch(on.live());
+            writer.bind_switch(on.live_for(CHANNEL));
             let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
             start(&mut runner, &mut writer, &pool, &key, &io)
                 .await
@@ -520,7 +536,7 @@ async fn f6_not_sent_replay_keeps_original_suppressed_and_budget_spent_pg() {
             io.throttle_first.store(false, Ordering::SeqCst);
             *io.outcome.lock().unwrap() = Some(WireOutcome::Uncertain("lost reply".into()));
             let on = switch(true);
-            recovered.bind_switch(on.live());
+            recovered.bind_switch(on.live_for(CHANNEL));
             let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
             start(&mut runner, &mut recovered, &pool, &later, &io)
                 .await
@@ -569,7 +585,7 @@ async fn f6_herdr_repost_counts_as_inflight_until_request_ends_pg() {
         );
         let count = writer.repost_posts_counter();
         let on = switch(true);
-        writer.bind_switch(on.live());
+        writer.bind_switch(on.live_for(CHANNEL));
         let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         *io.drop_count.lock().unwrap() = Some(Arc::clone(&count));
@@ -781,7 +797,7 @@ async fn source_revocation(stage: u8) {
             "the retained source begins Legacy"
         );
         let on = switch(true);
-        writer.bind_switch(on.live());
+        writer.bind_switch(on.live_for(CHANNEL));
         let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
         let io = Io::over(&harness.port);
         io.throttle_first.store(stage == 2, Ordering::SeqCst);
@@ -891,7 +907,7 @@ async fn d4act_unbound_writer_blocks_grant_prepared_and_wire_pg() {
     let mut writer = harness.writer();
     writer.set_live(true);
     let on = switch(true);
-    let effective = on.live();
+    let effective = on.live_for(CHANNEL);
     let mut runner = Runner::new(on, pool.clone(), BOT, run_scope());
     let io = Io::over(&harness.port);
     let admission = runner

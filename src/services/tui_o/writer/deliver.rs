@@ -20,12 +20,13 @@ use crate::services::cluster::channel_home;
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
 use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
+use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
-    LedgerEntry, LedgerState, PieceDisposition, PieceOutcome, PieceRecord, Unsent,
+    LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord, Unsent,
 };
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::EpisodePermissionRecord;
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin;
@@ -35,7 +36,7 @@ pub const POST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Posted, settled, already delivered or excluded; go on to the next item.
+    /// Posted, settled, already delivered or excluded; recheck the ledger before advancing.
     Done,
     /// Another holder has the delivery lease; retry this item later.
     LeaseBusy,
@@ -53,6 +54,8 @@ pub(crate) type Admission<'a> = (&'a EpisodePermissionRecord, &'a OwedOrigin);
 /// Highest message id O posted per channel in this process; Legacy keeps its live panel below it.
 static LAST_POSTED: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Mutex::default);
 
+// Tests read the position they set as a late-O-post stimulus; no production path reads it.
+#[cfg(test)]
 pub fn last_posted(channel: u64) -> Option<u64> {
     let posted = LAST_POSTED
         .lock()
@@ -180,6 +183,7 @@ enum Refusal {
     },
     Violation(String),
     Withheld(&'static str),
+    Later,
 }
 
 /// A writer's first stop, the store I/O error behind it, and a prepared piece it never posted.
@@ -221,6 +225,8 @@ pub struct ChannelWriter<P, L, A> {
     repost_live: RepostLive,
     repost_switch: Mutex<Option<RepostCheck>>,
     repost_stops: Vec<watch::Receiver<bool>>,
+    /// Shared receipts read at start; a receipted rejection or approval reads as settled.
+    receipts: ReceiptOverlay,
 }
 
 /// Whether a re-post request may still leave: re-post on and the writer neither stopped nor gone.
@@ -243,6 +249,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         lease: L,
         alarms: A,
     ) -> Self {
+        Self::with_receipts(store, gate, port, lease, alarms, ReceiptOverlay::Disabled)
+    }
+
+    /// As [`Self::new`], judging the recovered refusals with the shared receipts read before start.
+    pub(crate) fn with_receipts(
+        store: ChannelStore,
+        gate: Arc<OwnershipGate>,
+        port: Arc<P>,
+        lease: L,
+        alarms: A,
+        receipts: ReceiptOverlay,
+    ) -> Self {
         let channel = store.init().channel;
         let (stopped, paused) = (None, false);
         let herdr = crate::config::session_hosts::herdr_endpoint(channel).is_some();
@@ -264,10 +282,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             repost_live: RepostLive::default(),
             repost_switch: Mutex::new(None),
             repost_stops: Vec::new(),
+            receipts,
         };
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
-        let refused = ledger.blocked();
+        let refused = writer.receipts.blocked(ledger);
         if let Some(detail) = ledger.violation().map(str::to_string) {
             writer.stop(WriterAlarm::LedgerViolation { detail });
         } else if let Some((serial, status)) = refused {
@@ -280,6 +299,22 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             writer.stop(WriterAlarm::Blocked { status });
         }
         writer
+    }
+
+    /// As [`Self::with_receipts`] over the receipts `repost` reads first, then gives it the turn.
+    pub(crate) async fn hosted(
+        store: ChannelStore,
+        gate: Arc<OwnershipGate>,
+        port: Arc<P>,
+        lease: L,
+        alarms: A,
+        mut repost: Option<Box<dyn RepostHook<Self>>>,
+    ) -> Self {
+        let receipts = match repost.as_mut() {
+            Some(turn) => turn.receipts().await,
+            None => ReceiptOverlay::Disabled,
+        };
+        Self::with_receipts(store, gate, port, lease, alarms, receipts).with_repost(repost)
     }
 
     /// Gives the writer its re-post turn, if its host has one.
@@ -328,6 +363,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 
     pub fn store(&mut self) -> &mut ChannelStore {
         &mut self.store
+    }
+
+    /// The ledger's approved retries less those a shared receipt already settled.
+    pub(super) fn resume_pieces(&self) -> Vec<(u64, PieceRecord)> {
+        let ledger = self.store.ledger();
+        let open = |piece: &PieceRecord| {
+            let at = (&piece.unit_key, piece.piece_index);
+            self.receipts.disposition(ledger, at.0, at.1) != PieceDisposition::Settled
+        };
+        let pieces = ledger.resume_pieces().filter(|(_, piece)| open(piece));
+        pieces
+            .map(|(serial, piece)| (serial, piece.clone()))
+            .collect()
     }
 
     pub fn channel(&self) -> u64 {
@@ -412,6 +460,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if let Err(step) = self.settle_open().await {
             return step;
         }
+        if self.has_local_retry() {
+            return Step::LeaseBusy;
+        }
         match item {
             Derived::Blocked { reason } => self.stop(WriterAlarm::SchemaBlocked {
                 reason: reason.clone(),
@@ -435,7 +486,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if ledger.excluded(&piece.unit_key).is_some() {
             return Step::Done;
         }
-        let (piece, approved) = match ledger.disposition(&piece.unit_key, piece.index) {
+        let disposition = self
+            .receipts
+            .disposition(ledger, &piece.unit_key, piece.index);
+        let (piece, approved) = match disposition {
             PieceDisposition::Blocked { serial, status } => {
                 tracing::warn!(channel = self.channel, serial, status, unit_key = ?piece.unit_key,
                     "[tui_o] latest rejected piece needs operator approval");
@@ -469,10 +523,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             PieceDisposition::Fresh => (piece.clone(), None),
         };
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+        let mut retry_owner = OriginalGate::SendLocal;
         if approved.is_none()
             && let Some(mut hook) = self.repost.take()
         {
             let record = PieceRecord {
+                local_retry: None,
+                outcome_at: None,
                 unit_key: piece.unit_key.clone(),
                 piece_index: piece.index,
                 payload: piece.payload.clone(),
@@ -483,24 +540,50 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             };
             let gate = hook.original(serial, record).await;
             self.repost = Some(hook);
+            retry_owner = gate;
             match gate {
-                OriginalGate::Send => {}
+                OriginalGate::SendLocal | OriginalGate::SendPgManaged => {}
                 // Re-post owns an admitted piece's sends; its original is never sent again.
                 OriginalGate::Admitted => return Step::Done,
                 // Unknown admission holds the piece and retries it on a later poll.
                 OriginalGate::Unknown => return Step::LeaseBusy,
             }
         }
+        let local_retry =
+            (approved.is_none() && admission.is_none() && retry_owner == OriginalGate::SendLocal)
+                .then_some(LocalRetryMark::Budget);
+        self.send_piece(&piece, admission, local_retry, approved)
+            .await
+    }
+
+    /// Originals and the single local retry share the lease, durable prepare and first POST poll.
+    pub(super) async fn send_piece(
+        &mut self,
+        piece: &PieceWork,
+        admission: Option<Admission<'_>>,
+        local_retry: Option<LocalRetryMark>,
+        approved: Option<u64>,
+    ) -> Step {
+        let (serial, anchor_id) = (
+            self.store.ledger().next_serial(),
+            self.store.ledger().anchor(),
+        );
         let Some(held) = self.lease.try_acquire(self.channel, serial) else {
             return Step::LeaseBusy;
         };
         let (gate, port, channel) = (Arc::clone(&self.gate), Arc::clone(&self.port), self.channel);
         let mut posts = self.posts.clone();
+        let stops = self.repost_stops.clone();
         let store = &mut self.store;
         // The first poll of the request runs under the gate, so no request starts after a
         // transition; the rest runs outside the lock.
         let admitted = poll_fn(|cx| {
             Poll::Ready(admit(&gate, channel, |epoch| {
+                if stops.iter().any(|stop| *stop.borrow())
+                    || !super::local_retry::may_prepare(store.ledger(), piece, local_retry.as_ref())
+                {
+                    return Err(Refusal::Later);
+                }
                 // The exact permit is checked first and its lock held through the first poll.
                 let mut start = || {
                     let prepared = || LedgerEntry::Prepared {
@@ -510,6 +593,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         payload: piece.payload.clone(),
                         anchor_id,
                         epoch,
+                        local_retry: local_retry.clone(),
                     };
                     // Returning here comes before `port.post`, so this piece's POST was never created.
                     store
@@ -523,7 +607,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     }
                     if let Some(rejected_serial) = approved {
                         tracing::info!(channel, rejected_serial, serial, unit_key = ?piece.unit_key,
-                        "[tui_o] operator approval consumed by Prepared");
+                            "[tui_o] operator approval consumed by Prepared");
                     }
                     let running = posts.take().map(Running::start);
                     let post = port.post(channel, piece.payload.clone());
@@ -568,6 +652,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     "[tui_o] verified piece withheld before Prepared");
                 return Step::Withheld;
             }
+            Some(Err(Refusal::Later)) => return Step::LeaseBusy,
             Some(Ok(started)) => started,
         };
         // Admitted under an owned gateway, so the pause is over for health as well.
@@ -615,11 +700,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 }
             }
             PostOutcome::Refused(status) => {
+                let reason = if self.store.ledger().piece(serial).is_some_and(|piece| {
+                    matches!(piece.local_retry, Some(LocalRetryMark::Attempt { .. }))
+                }) {
+                    "local retry budget exhausted"
+                } else {
+                    "this serial needs a new operator approval"
+                };
                 tracing::warn!(
                     channel = self.channel,
                     serial,
                     status,
-                    "[tui_o] POST rejected; this serial needs a new operator approval"
+                    "[tui_o] POST rejected; {reason}"
                 );
                 if let Err(step) = self.record(LedgerEntry::Rejected { serial, status }) {
                     return step;
@@ -637,7 +729,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Settles the one `Prepared` without a result, if any, before anything else is posted.
-    async fn settle_open(&mut self) -> Result<(), Step> {
+    pub(super) async fn settle_open(&mut self) -> Result<(), Step> {
         let ledger = self.store.ledger();
         let Some((serial, open)) = ledger.unresolved() else {
             return Ok(());
@@ -657,12 +749,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     );
                     unsettled && piece.payload == payload
                 });
+        // This bot's latest posts here, newest first; one read back by id proves history readable.
+        let posted = (0..serial)
+            .rev()
+            .filter_map(|earlier| match ledger.piece(earlier)?.outcome {
+                Some(PieceOutcome::Posted(msg_id)) => Some(msg_id),
+                _ => None,
+            });
+        let proof_ids: Vec<u64> = posted.take(confirm::PROOF_IDS).collect();
         let verdict = confirm::settle(
             &*self.port,
             self.channel,
             anchor,
             &payload,
             earlier_same_payload,
+            &proof_ids,
         )
         .await;
         let (entry, alarm) = match verdict {
@@ -738,7 +839,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             .collect();
         Arc::new(move || {
             live.load(Ordering::SeqCst)
-                && effective.as_ref().is_some_and(|enabled| enabled())
+                && effective.as_ref().is_some_and(|allowed| allowed())
                 && stops.iter().all(|stop| !*stop.borrow())
                 && channel_home::registered_channel(channel).is_none()
                 && crate::services::cluster::home_availability::refusal(channel).is_none()
@@ -764,6 +865,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
             payload: permit.payload().to_owned(),
             anchor_id,
             epoch,
+            local_retry: None,
         };
         // As for an original: a failed append created no request, and recovery may drop it.
         if let Err(error) = self.store.append_ledger(prepared()) {

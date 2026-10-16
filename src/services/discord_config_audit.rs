@@ -168,7 +168,7 @@ pub(crate) fn load_runtime_config(root: &Path) -> Result<LoadedRuntimeConfig, St
     let existed = path.is_file();
     let mut config = if existed {
         crate::config::load_from_path(&path)
-            .map_err(|err| format!("Failed to load config '{}': {err}", path.display()))?
+            .map_err(|err| format!("Failed to load config '{}': {err:#}", path.display()))?
     } else {
         Config::default()
     };

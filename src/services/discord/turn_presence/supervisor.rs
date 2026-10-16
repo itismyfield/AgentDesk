@@ -57,6 +57,7 @@ fn registered(provider: &ProviderKind) -> Vec<u64> {
 
 /// Spawns the provider's supervisor; call once its bot token is set so no send precedes HTTP.
 pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: ProviderKind) {
+    super::activity::initialize_tail();
     LazyLock::force(&PROCESS_STARTED);
     let effects = Arc::new(LiveEffects { shared, provider });
     tokio::spawn(Supervisor::new(effects).run());
@@ -68,11 +69,7 @@ pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
         return None;
     }
     let presence = lock(&PRESENCE).get(&channel).cloned()?;
-    let mut status = { lock(&presence).json() };
-    status["n1_observation"] =
-        serde_json::to_value(crate::services::tui_o::n1_observation::snapshot(channel))
-            .unwrap_or_else(|_| serde_json::json!({"status": "unavailable"}));
-    Some(status)
+    Some(lock(&presence).json())
 }
 
 #[derive(Debug)]
@@ -241,10 +238,12 @@ impl<E: Effects> Supervisor<E> {
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
-            let published = reading.publish_if_current(|| {
-                let mut presence = lock(&presence);
-                apply(&mut presence, channel, now, &reading, token, head)
-            });
+            let published = reading
+                .publish_if_current(|| {
+                    let mut presence = lock(&presence);
+                    apply(&mut presence, channel, now, &reading, token, head)
+                })
+                .await;
             let Some(actions) = published else {
                 tracing::debug!(channel, "[turn_presence] superseded reading not published");
                 continue;
@@ -328,11 +327,12 @@ impl<E: Effects> Supervisor<E> {
             Action::Notice(text) => {
                 tracing::warn!(channel, "[turn_presence] unknown_notice channel={channel}");
                 let effects = self.effects.clone();
-                tokio::spawn(async move {
+                let notice = async move {
                     if let Err(error) = effects.notice(channel, text).await {
                         tracing::warn!(channel, %error, "[turn_presence] notice failed");
                     }
-                });
+                };
+                tokio::spawn(notice);
             }
         }
     }

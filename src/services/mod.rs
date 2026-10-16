@@ -12,7 +12,6 @@ pub mod claude;
 pub(crate) mod claude_command;
 pub mod claude_compact_context;
 pub mod claude_compact_trigger;
-pub mod claude_e;
 pub mod claude_tui;
 pub mod cluster;
 pub mod codex;
@@ -51,6 +50,7 @@ pub mod health_active_session_audit;
 pub mod health_diagnostics;
 pub(crate) mod herdr_admission;
 pub(crate) mod herdr_launch;
+pub(crate) mod imsg_reply;
 pub mod issue_announcements;
 pub mod kakao;
 pub mod kakao_message;
@@ -108,6 +108,9 @@ pub(crate) mod provider_teardown;
 pub mod queue;
 pub mod qwen;
 pub mod qwen_tmux_wrapper;
+// Scheduling contracts remain unavailable to runtime callers until activation.
+#[cfg(test)]
+pub(crate) mod recovery_defer;
 pub(crate) mod release_source;
 pub mod remote_stub;
 pub mod retrospectives;
@@ -156,7 +159,6 @@ pub(crate) mod tui_o {
     pub(crate) mod exact_submission;
     #[cfg(all(test, unix))]
     mod gates_m1;
-    pub(crate) mod n1_observation;
     pub(crate) mod ownership;
     pub(crate) mod repost;
     pub(crate) mod shadow;

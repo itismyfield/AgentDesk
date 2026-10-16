@@ -3,6 +3,7 @@
 Unknown primitive helpers, aliases/reexports, macros and external symbol references fail closed.
 """
 import hashlib
+import argparse
 import re
 import sys
 from collections import Counter
@@ -14,19 +15,12 @@ except ModuleNotFoundError:
 
 D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
-H = D + "health/legacy_supervision/boot_status.rs"
-ENTRIES = {
-    R + ".rs": "new install_process install_in",
-    R + "/cohort.rs": "new epoch update try_start_confirmation mark_timed_out wait_released snapshot begin work_once arrive_reaped exclude_no_runtime transition fail drop",
-    R + "/completion.rs": "value matches new run_once start join_work receive",
-    R + "/publication.rs": "matches new confirm publish_with seal",
-    H: "",
-}
+ENTRIES = {}
 # Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
 # "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': '957638b9ccd2e0a26234ddbed02e24dbfe15a6b5436b5d4cac9064d3ff279af7'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'de34ae33a679f5db0c88dc5a2446f992e0dd323dd2e296bc29876f0702458060'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
@@ -36,7 +30,7 @@ PROTECTED = {
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
     'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': 'dc4f69221f468ab3a3943975e9812ae8b3ce7db43ccccb1cf9a387c1ca86c6d0'}}
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1d692d44f1073550b7163ffac6d16a1c2ed51c42f23edd1d5524dc824181ae27'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 
@@ -110,27 +104,57 @@ def check(root):
     names = "canonical_retired_production_writers boot_cohort_application_install_calls boot_barrier_application_wait_calls boot_publication_application_calls typed_completion_live_reaper_connections boot_health_endpoint_connections"
     return True, "B1_DORMANT=PASS\n" + "\n".join(name + "=0" for name in names.split()) + "\nactivation_ready=false"
 
-def sync_skips(root):
+def sync_skips(root, promoted_paths=(), deleted_paths=()):
     pin = classifier._SKIP_PIN
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
     path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
+    actual = {p.relative_to(root).as_posix() for p in basename | resolved}
+    existing = {p.relative_to(root).as_posix() for p in files}
+    promoted = set(promoted_paths)
+    deleted = set(deleted_paths)
+    for rel in sorted(deleted):
+        if (root / rel).exists() or (root / rel).is_symlink():
+            raise RuntimeError("deletion path still exists: " + rel)
+        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+            raise RuntimeError("deletion is not pinned: " + rel)
+    for rel in sorted(promoted):
+        if rel not in existing:
+            raise RuntimeError("promotion path missing: " + rel)
+        if rel in actual:
+            raise RuntimeError("promotion remains test-only: " + rel)
+        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+            raise RuntimeError("promotion is not pinned: " + rel)
+    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted - deleted:
+        raise RuntimeError("refusing pin removal")
+    for rel in sorted(promoted | deleted):
+        pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
+        source, count = re.subn(pattern, '', source)
+        if count != 1:
+            raise RuntimeError("removal pin is ambiguous: " + rel)
     for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
         measured = {p.relative_to(root).as_posix() for p in paths}
-        actual = {p.relative_to(root).as_posix() for p in basename | resolved}
-        if pin.PINNED_TEST_ONLY_MODULE_FILES - actual:
-            raise RuntimeError("refusing pin removal")
-        end = source.index("\n    }\n)", source.index(name + " ="))
-        additions = "".join('\n        "' + p + '",' for p in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES))
-        source = source[:end] + additions + source[end:]
+        for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
+            start = source.index(name + " =")
+            end = source.index("\n    }\n)", start)
+            directory = re.escape(Path(rel).parent.as_posix() + '/')
+            sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
+            at = start + sibling.start() if sibling else end
+            source = source[:at] + '\n        "' + rel + '",' + source[at:]
     path.write_text(source)
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--sync-skips"]:
-        sync_skips(Path.cwd())
+    if sys.argv[1:2] == ["--sync-skips"]:
+        parser = argparse.ArgumentParser(description="Synchronize lexical test-only pins")
+        parser.add_argument('--promote', action='append', default=[], metavar='PATH',
+                            help='explicitly remove this existing production module from the skip pin')
+        parser.add_argument('--remove-deleted', '--delete-pin', action='append', default=[], metavar='PATH',
+                            help='explicitly remove this deleted file from the skip pin')
+        args = parser.parse_args(sys.argv[2:])
+        sync_skips(Path.cwd(), args.promote, args.remove_deleted)
         sys.exit(0)
     ok, report = check(Path.cwd())
     print(report)

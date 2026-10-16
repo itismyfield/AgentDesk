@@ -1070,14 +1070,8 @@ async fn collect_turn_stream_body(
     }
 
     commit_collect_state!();
-    let source_authority = WatcherSourceAuthority {
-        source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance {
-            None
-        } else {
-            source_authority.source_stamp
-        },
-        ..source_authority
-    };
+    #[rustfmt::skip]
+    let source_authority = WatcherSourceAuthority { source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance { None } else { source_authority.source_stamp }, ..source_authority };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
         source_authority,

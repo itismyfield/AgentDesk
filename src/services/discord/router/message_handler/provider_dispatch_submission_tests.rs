@@ -31,6 +31,7 @@ struct Outcome {
     at_provider: AtProvider,
     row: Option<crate::services::discord::inflight::InflightTurnState>,
     mailbox_active: bool,
+    requeued: usize,
     /// Every Discord write of the turn, so a generic failure post is visible.
     discord: Vec<String>,
 }
@@ -42,6 +43,8 @@ struct Cell {
     warm: bool,
     refuse: bool,
     fail_after_fence: bool,
+    guarded: bool,
+    cancel_pending: bool,
 }
 
 const PROVIDER_EXIT: &str = "zp1 provider exited after submit";
@@ -82,9 +85,14 @@ async fn run_turn(
         fault::arm(channel.get(), fault::FenceWriteFault::Write);
     }
     let (report, at_provider) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let driver_shared = Arc::clone(shared);
     *super::CLAUDE_LEGACY_PROBE.lock().unwrap() = Some((
         channel.get(),
         Box::new(move || {
+            if cell.guarded {
+                crate::services::claude_tui::guarded_outcome::begin();
+            }
             let phase_at_entry = durable_phase(channel);
             let fence = crate::services::claude_tui::submission_fence::before_first_payload();
             let _ = report.send(AtProvider {
@@ -92,6 +100,29 @@ async fn run_turn(
                 fence: fence.clone(),
                 phase_after_fence: durable_phase(channel),
             });
+            if cell.guarded && fence.is_ok() {
+                if cell.cancel_pending {
+                    let mailbox = driver_shared.mailbox_peek(channel).unwrap();
+                    let snapshot = tokio::runtime::Handle::current().block_on(mailbox.snapshot());
+                    snapshot
+                        .cancel_token
+                        .unwrap()
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(20))
+                        .unwrap();
+                }
+                use crate::services::claude_tui::{
+                    guarded_outcome::SubmissionError,
+                    host_input::{InputRun, StopCause},
+                };
+                return Err(SubmissionError::Guarded(InputRun::Indeterminate {
+                    confirmed: 0,
+                    cause: StopCause::Send("guarded payload ACK unknown".into()),
+                })
+                .into_legacy());
+            }
             match fence {
                 Ok(()) if cell.fail_after_fence => Err(PROVIDER_EXIT.to_string()),
                 fence => fence,
@@ -176,15 +207,17 @@ async fn run_turn(
         at_provider,
         row,
         mailbox_active: mailbox.cancel_token.is_some(),
+        requeued: mailbox.intervention_queue.len(),
         discord,
     };
+    let _ = release.send(());
     tokio::time::timeout(timeout, gate.close().unwrap().drain())
         .await
         .expect("no input effect outlives the turn");
     outcome
 }
 
-async fn creator_cells(creator: Creator) {
+async fn creator_cells(creator: Creator, guarded: bool) {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().unwrap();
     let _tmux = crate::services::tui_prompt_dedupe::binding_context::tests::fake_tmux(&root);
@@ -210,14 +243,31 @@ async fn creator_cells(creator: Creator) {
         warm,
         refuse,
         fail_after_fence,
+        guarded: false,
+        cancel_pending: false,
     };
-    let cells = [
-        cell(false, false, false),
-        cell(true, false, false),
-        cell(false, true, false),
-        cell(true, true, false),
-        cell(false, false, true),
-    ];
+    let cells = if guarded {
+        vec![
+            Cell {
+                guarded: true,
+                ..cell(true, false, false)
+            },
+            Cell {
+                guarded: true,
+                cancel_pending: true,
+                ..cell(true, false, false)
+            },
+        ]
+    } else {
+        vec![
+            cell(false, false, false),
+            cell(true, false, false),
+            cell(false, true, false),
+            cell(true, true, false),
+            cell(false, false, true),
+        ]
+    };
+    let mut guarded_failures = 0;
     for (index, cell) in cells.into_iter().enumerate() {
         let channel = ChannelId::new(base + index as u64 * 10);
         mock.allow_channel(channel.get());
@@ -239,7 +289,41 @@ async fn creator_cells(creator: Creator) {
         // The headless fixture is a silent turn, so only intake surfaces a failure post.
         let visible = creator == Creator::Intake;
         let posted = |text: &str| outcome.discord.iter().any(|write| write.contains(text));
-        if cell.refuse {
+        if let Ok(directory) = std::env::var("CG_B2C_EVIDENCE_DIR") {
+            let row_phase = outcome
+                .row
+                .as_ref()
+                .and_then(|row| row.managed_submission.as_ref())
+                .map(|record| format!("{:?}", record.phase));
+            let writes: Vec<_> = outcome
+                .discord
+                .iter()
+                .map(|write| {
+                    write
+                        .replace(&workspace.path().display().to_string(), "<workspace>")
+                        .replace(&root.display().to_string(), "<root>")
+                })
+                .collect();
+            let record = serde_json::json!({"case": case, "phase_at_entry": format!("{:?}", at.phase_at_entry), "fence": at.fence, "phase_after_fence": format!("{:?}", at.phase_after_fence), "row_phase": row_phase, "mailbox_active": outcome.mailbox_active, "requeued": outcome.requeued, "writes": writes});
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                std::path::Path::new(&directory).join(format!("{creator:?}-{index}.json")),
+                serde_json::to_vec_pretty(&record).unwrap(),
+            )
+            .unwrap();
+        }
+        if cell.guarded {
+            let phase = outcome
+                .row
+                .as_ref()
+                .and_then(|row| row.managed_submission.as_ref())
+                .map(|record| &record.phase);
+            let held = phase == Some(&SubmissionPhase::MayHaveSubmitted)
+                && outcome.mailbox_active
+                && outcome.requeued == 0
+                && !posted("guarded payload ACK unknown");
+            guarded_failures += usize::from(!held);
+        } else if cell.refuse {
             let error = at.fence.as_ref().expect_err(&case);
             assert!(error.contains("held before submit"), "{case}: {error}");
             let row = outcome.row.as_ref().unwrap_or_else(|| {
@@ -286,6 +370,10 @@ async fn creator_cells(creator: Creator) {
         shared.mailboxes.remove_fixture_for_test(channel);
     }
     server.abort();
+    assert_eq!(
+        guarded_failures, 0,
+        "guarded stops and pending cancellation retain the row and slot"
+    );
 }
 
 #[tokio::test]
@@ -296,7 +384,7 @@ async fn headless_creator_installs_waiting_and_holds_a_refused_prompt() {
     )) {
         return;
     }
-    creator_cells(Creator::Headless).await;
+    creator_cells(Creator::Headless, false).await;
 }
 
 #[tokio::test]
@@ -307,5 +395,453 @@ async fn intake_creator_installs_waiting_and_holds_a_refused_prompt() {
     )) {
         return;
     }
-    creator_cells(Creator::Intake).await;
+    creator_cells(Creator::Intake, false).await;
+}
+
+#[tokio::test]
+async fn cg_b2c_headless_bridge_holds_guarded_stop_and_pending_cancel() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_b2c_headless_bridge_holds_guarded_stop_and_pending_cancel"
+    )) {
+        return;
+    }
+    creator_cells(Creator::Headless, true).await;
+}
+
+#[tokio::test]
+async fn cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel() {
+    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_b2c_intake_bridge_holds_guarded_stop_and_pending_cancel"
+    )) {
+        return;
+    }
+    creator_cells(Creator::Intake, true).await;
+}
+
+type OwnerReport = (
+    u64,
+    std::path::PathBuf,
+    tokio::sync::oneshot::Sender<Option<crate::services::discord::inflight::ManagedSubmission>>,
+);
+pub(super) static D1_OWNER: std::sync::Mutex<Option<OwnerReport>> = std::sync::Mutex::new(None);
+
+pub(super) fn observe_owner(
+    channel: u64,
+    submission: Option<&crate::services::discord::inflight::ManagedSubmission>,
+    prompt: &str,
+) {
+    let mut probe = D1_OWNER.lock().unwrap();
+    if probe.as_ref().is_some_and(|(id, _, _)| *id == channel) {
+        let (_, renderer, sender) = probe.take().unwrap();
+        std::fs::write(renderer.join("expected"), prompt).unwrap();
+        let _ = sender.send(submission.cloned());
+    }
+}
+
+/// Counts fence requests, so a held retry is shown to stop before any durable boundary.
+#[derive(Default)]
+struct CountingFence(std::sync::atomic::AtomicUsize);
+impl crate::services::claude_tui::submission_fence::SubmissionFence for CountingFence {
+    fn before_first_payload(
+        &self,
+    ) -> Result<(), crate::services::claude_tui::submission_fence::PreSubmitPersistenceRefused>
+    {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn refusal(
+        &self,
+    ) -> Option<crate::services::claude_tui::submission_fence::PreSubmitPersistenceRefused> {
+        None
+    }
+}
+
+/// The cancelled turn still owns its birth row, fenced phase and own mailbox slot, unrequeued.
+async fn assert_kept(
+    stage: &str,
+    shared: &SharedData,
+    channel: ChannelId,
+    born: &crate::services::discord::inflight::InflightEpisodePin,
+    token: &Arc<crate::services::provider::CancelToken>,
+) {
+    let row = crate::services::discord::inflight::load_inflight_state(
+        &ProviderKind::Claude,
+        channel.get(),
+    )
+    .unwrap_or_else(|| panic!("{stage}: the cancelled turn's row was finalized"));
+    assert!(
+        crate::services::discord::inflight::InflightEpisodePin::from_state(&row)
+            .is_same_episode_as(born),
+        "{stage}: the row is the original birth episode, not a successor"
+    );
+    assert_eq!(
+        row.managed_submission
+            .as_ref()
+            .map(|record| record.phase.clone()),
+        Some(SubmissionPhase::MayHaveSubmitted),
+        "{stage}: the fenced phase never drops back"
+    );
+    let mailbox = shared.mailbox_peek(channel).unwrap().snapshot().await;
+    assert!(
+        mailbox
+            .cancel_token
+            .as_ref()
+            .is_some_and(|slot| Arc::ptr_eq(slot, token)),
+        "{stage}: the slot still holds the cancelled turn's own token"
+    );
+    assert!(mailbox.intervention_queue.is_empty(), "{stage}: requeued");
+    assert!(
+        crate::services::discord::busy_followup_retry_store::load(
+            &ProviderKind::Claude,
+            channel.get(),
+            row.effective_busy_followup_retry_user_msg_id(),
+        )
+        .is_none(),
+        "{stage}: no busy follow-up retry was persisted"
+    );
+}
+
+async fn actual_creator(creator: Creator) {
+    use crate::services::claude_tui::host_input::guarded_submission::executor_tests::{
+        d1_execution_proof, d1_fixture_config, install_shim, renderer, screen,
+    };
+    use crate::services::claude_tui::{guarded_outcome, input, submission_fence, submit_canary};
+    use crate::services::discord::inflight::{InflightEpisodePin, SubmissionFailure};
+    use crate::services::tui_input::submission_tmux::guarded::transport_tests::Fixture as Tmux;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Tmux::after_shared_test_env_lock();
+    install_shim(&f);
+    let id = match creator {
+        Creator::Headless => 6_809_001,
+        Creator::Intake => 6_809_002,
+    };
+    let channel = ChannelId::new(id);
+    let (_env, config) = d1_fixture_config(&f, &[id]);
+    crate::config::session_hosts::install(&config).unwrap();
+    crate::services::tui_o::channel_policy::install(&config).unwrap();
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+        "http://127.0.0.1:9".into(),
+    );
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
+    crate::services::discord::internal_api::init(api.port, None);
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().provider = ProviderKind::Claude;
+    Arc::get_mut(&mut shared).unwrap().api_port = api.port;
+    let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(id);
+    let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    let workspace = f.root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let channel_name = format!("cg-d1-real-{id}");
+    let name = ProviderKind::Claude.build_tmux_session_name(&channel_name);
+    const BODY: &str = "cg d1 actual";
+    renderer(&f, &name, BODY, &screen(""), &screen(BODY), &screen(""));
+    let proof = d1_execution_proof(&name, id);
+    let sid = proof.context.expected_native_session_id.as_deref().unwrap();
+    let transcript = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+        &workspace,
+        sid,
+        Some(f.root.path()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+        &name,
+        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: transcript.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(sid.into()),
+            last_offset: 0,
+            relay_last_offset: None,
+        },
+    );
+    crate::services::discord::host_defer_gate::tests::map_channel(&shared, channel, &channel_name)
+        .await;
+    {
+        let mut core = shared.core.lock().await;
+        let session = core.sessions.get_mut(&channel).unwrap();
+        session.current_path = Some(workspace.display().to_string());
+        session.session_id = Some(sid.into());
+    }
+    let shim = f.root.path().join("tmux");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    let entered = f.root.path().join("d1-payload-barrier");
+    let release = f.root.path().join("d1-payload-release");
+    let quote =
+        |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+    let barrier = format!(
+        "if [ \"$payload\" = 1 ]; then\n touch {entered}\n {real} -L {socket} -f /dev/null \"$@\" >/dev/null\n while [ ! -f {release} ]; do sleep .02; done\n exit 0\nfi\n",
+        real = quote(&f.real),
+        socket = f.socket,
+        entered = quote(&entered),
+        release = quote(&release)
+    );
+    let old = format!(
+        "exec {} -L {} -f /dev/null \"$@\"",
+        quote(&f.real),
+        f.socket
+    );
+    assert!(script.contains(&old));
+    std::fs::write(&shim, script.replace(&old, &(barrier + &old))).unwrap();
+    let gate = fence::Gate::protect(ProviderKind::Claude, id).unwrap();
+    let _health = fence::test_health::Clear::new(&gate);
+    let (observed, owner) = tokio::sync::oneshot::channel();
+    *D1_OWNER.lock().unwrap() = Some((id, f.root.path().join(&name), observed));
+    let (finished, bridge) = tokio::sync::oneshot::channel();
+    *crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE
+        .lock()
+        .unwrap() = Some((channel, finished));
+    assert!(
+        super::CLAUDE_LEGACY_PROBE.lock().unwrap().is_none(),
+        "no stand-in driver may replace the real input entry"
+    );
+    let timeout = std::time::Duration::from_secs(20);
+    match creator {
+        Creator::Headless => {
+            tokio::time::timeout(
+                timeout,
+                start_reserved_headless_turn_with_owner(
+                    &ctx,
+                    channel,
+                    BODY,
+                    "owner",
+                    UserId::new(7),
+                    &shared,
+                    "",
+                    None,
+                    Some(serde_json::json!({"silent":true})),
+                    None,
+                    None,
+                    Some(true),
+                    reserve_headless_turn(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        Creator::Intake => {
+            let request = IntakeRequest {
+                intake_outbox_id: None,
+                channel_id: channel,
+                user_msg_id: MessageId::new(channel.get() + 1),
+                source_message_ids: Vec::new(),
+                busy_followup_retry_user_msg_id: MessageId::new(channel.get() + 1),
+                request_owner: UserId::new(7),
+                request_owner_name: "owner".into(),
+                user_text: BODY.into(),
+                reply_to_user_message: false,
+                defer_watcher_resume: false,
+                wait_for_completion: false,
+                merge_consecutive: false,
+                reply_context: None,
+                has_reply_boundary: false,
+                dm_hint: Some(false),
+                turn_kind: TurnKind::Foreground,
+                preserve_on_cancel: false,
+            };
+            tokio::time::timeout(
+                timeout,
+                execute_intake_turn_core(&api.http, &shared, "", request, Vec::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+    let cap = tokio::time::timeout(timeout, owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the actual creator installed a managed capability");
+    let mailbox = shared.mailbox_peek(channel).unwrap();
+    let token = mailbox
+        .snapshot()
+        .await
+        .cancel_token
+        .expect("an active real provider");
+    struct Release {
+        token: Arc<crate::services::provider::CancelToken>,
+        path: std::path::PathBuf,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::write(&self.path, "release");
+        }
+    }
+    let release_guard = Release {
+        token: Arc::clone(&token),
+        path: release.clone(),
+    };
+    tokio::time::timeout(timeout, async {
+        while !f.root.path().join(&name).join("payloads").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        entered.exists(),
+        "boot selection must reach the real guarded conditional payload, not Legacy"
+    );
+    assert_eq!(
+        durable_phase(channel),
+        Some(SubmissionPhase::MayHaveSubmitted)
+    );
+    // T0: the executor is parked in its first payload, so only selected()'s own begin() can
+    // have made the owner Running; nothing in this test calls begin().
+    assert!(
+        matches!(cap.classify_failure(), SubmissionFailure::GuardedRunning),
+        "T0: selected() must notify begin before the executor's first payload"
+    );
+    let pane = f.root.path().join(&name);
+    let count = |file: &std::path::Path| std::fs::read(file).map_or(0, |bytes| bytes.len());
+    let exec_enters = f.root.path().join("exec-enters");
+    assert_eq!(
+        (
+            count(&pane.join("payloads")),
+            count(&pane.join("enters")),
+            count(&exec_enters)
+        ),
+        (1, 0, 0),
+        "T0: one payload and no Enter"
+    );
+    let frame = std::fs::read(pane.join("frame")).unwrap();
+    let delivered = match std::fs::read_to_string(pane.join("kind")).unwrap().as_str() {
+        "paste" => [b"\x1b[200~".as_slice(), &frame, b"\x1b[201~"].concat(),
+        _ => frame,
+    };
+    assert_eq!(std::fs::read(pane.join("received")).unwrap(), delivered);
+    let born = InflightEpisodePin::from_state(
+        &crate::services::discord::inflight::load_inflight_state(&ProviderKind::Claude, id)
+            .unwrap(),
+    );
+    token
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(timeout, bridge)
+        .await
+        .unwrap()
+        .unwrap();
+    // T1: the bridge is done while the executor still has no result to report.
+    assert_kept("T1", &shared, channel, &born, &token).await;
+    assert!(matches!(
+        cap.classify_failure(),
+        SubmissionFailure::GuardedRunning
+    ));
+    assert_eq!(
+        guarded_outcome::held(&name),
+        None,
+        "T1: the executor has not returned before the bridge finished"
+    );
+    assert_eq!(count(&exec_enters), 0);
+    assert_eq!(
+        std::fs::read(f.root.path().join(&name).join("frame")).unwrap(),
+        std::fs::read(f.root.path().join(&name).join("expected")).unwrap()
+    );
+    let submitted = std::fs::read_to_string(f.root.path().join(&name).join("expected")).unwrap();
+    assert!(
+        submitted.contains(BODY),
+        "the real creator must preserve the requested body"
+    );
+    let mut writes = mock.written_texts();
+    writes.extend(api.take());
+    assert!(
+        !writes
+            .iter()
+            .any(|write| write.contains("guarded submission") || write.contains("ACK unknown"))
+    );
+    println!(
+        "CG_D1_ACTUAL_CREATOR {creator:?} phase=MayHaveSubmitted owner=Running payload=1 enter=0 requeue=0"
+    );
+    drop(release_guard);
+    tokio::time::timeout(timeout, gate.close().unwrap().drain())
+        .await
+        .unwrap();
+    // T2: the late executor result is a typed hold kept on the session; the turn stays held.
+    let SubmissionFailure::GuardedStopped(
+        stopped @ crate::services::claude_tui::host_input::InputRun::Indeterminate { .. },
+    ) = cap.classify_failure()
+    else {
+        panic!("T2: a payload already sent must stop as a typed Indeterminate hold");
+    };
+    assert_eq!(guarded_outcome::held(&name), Some(stopped.clone()));
+    assert_kept("T2", &shared, channel, &born, &token).await;
+    // T3: the same effective prompt on a fresh, uncancelled token returns the stored hold.
+    let fence = Arc::new(CountingFence::default());
+    let fresh = crate::services::provider::CancelToken::new();
+    for warm in [false, true] {
+        let again = guarded_outcome::with_owner(Some(cap.observer()), || {
+            submission_fence::with_scope(Some(Arc::clone(&fence) as _), || {
+                submit_canary::with_channel(id, || match warm {
+                    true => input::send_followup_prompt_or_idle_transcript(
+                        &name,
+                        &submitted,
+                        Some(&fresh),
+                        &transcript,
+                    ),
+                    false => input::send_fresh_prompt(&name, &submitted, Some(&fresh)),
+                })
+            })
+        });
+        assert_eq!(
+            again,
+            Err(format!("claude tui guarded submission held: {stopped:?}")),
+            "T3 warm={warm}"
+        );
+    }
+    assert_eq!(fence.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        (
+            std::fs::read(pane.join("received")).unwrap(),
+            count(&pane.join("enters")),
+            count(&exec_enters)
+        ),
+        (delivered, 0, 0),
+        "T3: no duplicate payload, Enter or cleanup key reached the pane"
+    );
+    assert_kept("T3", &shared, channel, &born, &token).await;
+    println!("CG_C32 {creator:?} T2={stopped:?} T3=held(fresh,warm) fence=0 payload=1 enter=0");
+    crate::services::claude_tui::guarded_outcome::forget_test_hold(&name);
+    shared.mailboxes.remove_fixture_for_test(channel);
+    server.abort();
+}
+
+fn guarded_creator_child(test: &str) -> bool {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _guard = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock(
+        "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS",
+    );
+    unsafe { std::env::remove_var("AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS") };
+    crate::services::discord::admin_host_guard::tests::api_child(test)
+}
+
+#[tokio::test]
+async fn cg_d1_headless_actual_begin_preserves_running_cancelled_bridge() {
+    if !guarded_creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_d1_headless_actual_begin_preserves_running_cancelled_bridge"
+    )) {
+        return;
+    }
+    actual_creator(Creator::Headless).await;
+}
+#[tokio::test]
+async fn cg_d1_intake_actual_begin_preserves_running_cancelled_bridge() {
+    if !guarded_creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::submission_tests::",
+        "cg_d1_intake_actual_begin_preserves_running_cancelled_bridge"
+    )) {
+        return;
+    }
+    actual_creator(Creator::Intake).await;
 }

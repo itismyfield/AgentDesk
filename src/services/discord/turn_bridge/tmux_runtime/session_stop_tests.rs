@@ -13,7 +13,7 @@ use crate::services::tui_prompt_dedupe::binding_events as p5;
 
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 
-fn bind(
+fn bind_live(
     shared: &SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
@@ -33,9 +33,46 @@ fn bind(
             last_heartbeat_ts_ms: Arc::new(chrono::Utc::now().timestamp_millis().into()),
         },
     );
+    let log = binding_log(channel);
+    let _ = std::fs::remove_file(log);
+    write_binding_event(provider, channel, session, path, 1);
+}
+
+fn binding_log(channel: ChannelId) -> std::path::PathBuf {
+    p5::test_root()
+        .unwrap()
+        .join(p5::BINDING_EVENTS_DIR)
+        .join(format!("{}.log", channel.get()))
+}
+
+fn bind_owner_only(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    session: &str,
+    path: &std::path::Path,
+    seq: u64,
+) {
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(session, channel);
+    write_binding_event(provider, channel, session, path, seq);
+    assert!(
+        shared.tmux_watchers.channel_binding(&channel).is_none(),
+        "owner authority must not imply watcher coverage"
+    );
+}
+
+fn write_binding_event(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    session: &str,
+    path: &std::path::Path,
+    seq: u64,
+) {
     let (dev, ino) = file_identity(&std::fs::metadata(path).unwrap());
     let event = p5::BindingEvent {
-        seq: 1,
+        seq,
         channel_id: channel.get(),
         provider: provider.as_str().into(),
         tmux_session: session.into(),
@@ -57,9 +94,15 @@ fn bind(
     };
     let root = p5::test_root().unwrap().join(p5::BINDING_EVENTS_DIR);
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(
-        root.join(format!("{}.log", channel.get())),
-        format!("{}\n", serde_json::to_string(&event).unwrap()),
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(binding_log(channel))
+            .unwrap(),
+        "{}",
+        serde_json::to_string(&event).unwrap()
     )
     .unwrap();
 }
@@ -116,7 +159,7 @@ fn c1_stop_some_none_and_unreachable_preserve_exact_authority() {
         let session = "c1-stop-parent";
         let path = root.path().join("parent.jsonl");
         open(&path, "first");
-        bind(&shared, &provider, channel, session, &path);
+        bind_live(&shared, &provider, channel, session, &path);
         let _confirmed = TestConfirmation::new(channel.get());
         let token = bound_token(&provider, session);
         assert!(
@@ -180,12 +223,13 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1b-direct-parent";
         let path = root.path().join("parent.jsonl");
         open(&path, "first");
-        bind(&shared, &data.provider, channel, session, &path);
+        bind_live(&shared, &data.provider, channel, session, &path);
         let _confirmed = TestConfirmation::new(channel.get());
         assert!(shared.mailbox_peek(channel).is_none());
         let generation_owner = bound_token(&ProviderKind::Claude, session);
@@ -309,7 +353,7 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"codex-parent"}});
         let codex_meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path()}});
         std::fs::write(&codex_path, format!("{codex_meta}\n{codex_open}\n")).unwrap();
-        bind(&shared, &data.provider, channel, codex_session, &codex_path);
+        bind_live(&shared, &data.provider, channel, codex_session, &codex_path);
         fx.ready(codex_session);
         command(&ctx, &data, channel).await;
         let calls = fx.take_calls();
@@ -336,7 +380,7 @@ fn n1b_actual_stop_targets_open_parent_without_lease_and_keeps_idle_or_refused()
             "Codex idle cannot probe or interrupt"
         );
         data.provider = ProviderKind::Claude;
-        bind(&shared, &data.provider, channel, session, &path);
+        bind_live(&shared, &data.provider, channel, session, &path);
 
         drop(_confirmed);
         let log = root
@@ -423,13 +467,14 @@ fn codex_parent_without_session_meta_refuses_stop_and_replies() {
             provider: ProviderKind::Codex,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "codex-without-parent-header";
         let path = root.path().join("codex-no-meta.jsonl");
         let turn = json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"parent"}});
         std::fs::write(&path, format!("{turn}\n")).unwrap();
-        bind(&shared, &data.provider, channel, session, &path);
+        bind_live(&shared, &data.provider, channel, session, &path);
         let _confirmed = TestConfirmation::new(channel.get());
         fx.ready(session);
         command(&ctx, &data, channel).await;
@@ -474,12 +519,13 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let channel = ChannelId::new(discord_mock::CHANNEL_ID);
         let session = "n1c-discord-turn";
         let path = root.path().join("parent.jsonl");
         open(&path, "discord");
-        bind(&shared, &data.provider, channel, session, &path);
+        bind_live(&shared, &data.provider, channel, session, &path);
         let _confirmed = TestConfirmation::new(channel.get());
 
         let log = root
@@ -525,49 +571,369 @@ fn n1c_confirmed_stop_keeps_a_discord_token_on_the_channel_stop_and_refuses_an_u
     });
 }
 
-// The withdrawal rides the delivery-time recheck: neither the judgment nor a recheck that finds
-// another parent turn withdraws the channel's approval.
-#[test]
-fn b2b1_a_session_stop_withdraws_at_its_delivery_recheck_not_at_its_judgment() {
-    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(concat!(
-        module_path!(),
-        "::b2b1_a_session_stop_withdraws_at_its_delivery_recheck_not_at_its_judgment"
-    )) {
+#[derive(Clone, Copy)]
+enum OwnerCase {
+    Slash,
+    CodexText,
+    Multiple,
+    ForeignProvider,
+    Nonowner,
+    Mirror,
+    OwnerChanged,
+    SourceChanged,
+    InvalidBinding,
+}
+
+fn owner_stop_case(name: &str, case: OwnerCase) {
+    if !crate::services::tui_o::cutover::test_override::isolated_binding_case(name) {
         return;
     }
-    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
     let fx = Fixture::new();
     let root = tempfile::tempdir().unwrap();
     let _binding_root = TestBindingRoot::enter(Some(root.path()));
     run(async {
+        use crate::services::discord::commands::{
+            HOST_REFUSED_STOP_RESPONSE, NO_ACTIVE_TURN_RESPONSE, STOPPING_RESPONSE,
+            stop::run_slash_stop,
+        };
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let probe = Probe::install(&shared);
-        let channel = ChannelId::new(6_325_445);
-        let provider = ProviderKind::Claude;
-        let session = "b2b1-session-stop-parent";
-        let path = root.path().join("parent.jsonl");
-        open(&path, "first");
-        bind(&shared, &provider, channel, session, &path);
+        let channel = ChannelId::new(discord_mock::CHANNEL_ID);
+        let provider = if matches!(case, OwnerCase::CodexText) {
+            ProviderKind::Codex
+        } else {
+            ProviderKind::Claude
+        };
         let _confirmed = TestConfirmation::new(channel.get());
-        mark(session, Mark::Absent);
-        let ticket = probe.arm(channel.get());
-        let CommandStop::Session(stop) = SessionStop::judge(&shared, &provider, channel).await
-        else {
-            panic!("open parent must be judged");
+        let session = "owner-only-a";
+        let path = root.path().join("parent.jsonl");
+        if matches!(case, OwnerCase::CodexText) {
+            let meta = json!({"type":"session_meta","payload":{"id":"parent","cwd":root.path()}});
+            let started =
+                json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"parent"}});
+            std::fs::write(&path, format!("{meta}\n{started}\n")).unwrap();
+            fx.ready(session);
+        } else {
+            open(&path, "parent");
+        }
+        match case {
+            OwnerCase::Nonowner => {
+                shared.tmux_watchers.restore_owner_channel_for_tmux_session(
+                    session,
+                    ChannelId::new(channel.get() + 10),
+                );
+                shared
+                    .tmux_watchers
+                    .restore_owner_channel_for_tmux_session("untyped-owner", channel);
+                write_binding_event(&provider, channel, session, &path, 1);
+            }
+            OwnerCase::Mirror => {
+                crate::services::tui_prompt_dedupe::register_tmux_channel(session, channel.get());
+                assert_eq!(
+                    crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(session),
+                    Some(channel.get())
+                );
+                assert_eq!(
+                    shared.tmux_watchers.owner_channel_for_tmux_session(session),
+                    None
+                );
+                write_binding_event(&provider, channel, session, &path, 1);
+            }
+            OwnerCase::ForeignProvider => {
+                bind_owner_only(&shared, &ProviderKind::Codex, channel, session, &path, 1)
+            }
+            _ => bind_owner_only(&shared, &provider, channel, session, &path, 1),
+        }
+        if matches!(case, OwnerCase::Multiple) {
+            let idle = root.path().join("idle.jsonl");
+            std::fs::write(
+                &idle,
+                format!("{}\n", json!({"type":"system","subtype":"turn_duration"})),
+            )
+            .unwrap();
+            bind_owner_only(&shared, &provider, channel, "owner-only-b", &idle, 2);
+        }
+        if matches!(case, OwnerCase::Slash) {
+            // Old rows omitted the optional nonce; retain the existing reader's defaults.
+            let mut row: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(binding_log(channel)).unwrap()).unwrap();
+            row.as_object_mut().unwrap().remove("execution_nonce");
+            std::fs::write(binding_log(channel), format!("{row}\n")).unwrap();
+        }
+        if matches!(case, OwnerCase::InvalidBinding) {
+            let good = std::fs::read(binding_log(channel)).unwrap();
+            let row: p5::BindingEvent = serde_json::from_slice(&good).unwrap();
+            let mut pending = row.clone();
+            pending.seq = 2;
+            pending.new = p5::BindingTarget::Pending {
+                payload_session_id: "pending".into(),
+                payload_transcript_path: None,
+            };
+            let mut rejected = row;
+            rejected.new = p5::BindingTarget::Rejected {
+                payload_session_id: "rejected".into(),
+                payload_transcript_path: None,
+                reason: "unproven".into(),
+            };
+            for bytes in [
+                format!("{}\n", serde_json::to_string(&rejected).unwrap()),
+                format!(
+                    "{}{}\n",
+                    String::from_utf8_lossy(&good),
+                    serde_json::to_string(&pending).unwrap()
+                ),
+                "corrupt\n".into(),
+            ] {
+                std::fs::write(binding_log(channel), bytes).unwrap();
+                let reply = run_slash_stop(&shared, &provider, channel).await;
+                assert_eq!(reply.text(), HOST_REFUSED_STOP_RESPONSE);
+                reply.finish(&shared, &provider, channel).await;
+                assert!(fx.take_calls().is_empty());
+            }
+            return;
+        }
+        let generation_owner = bound_token(&provider, session);
+        let generation = generation_owner.claude_interrupt_generation();
+        let expected = match case {
+            OwnerCase::Multiple | OwnerCase::ForeignProvider => HOST_REFUSED_STOP_RESPONSE,
+            OwnerCase::Nonowner | OwnerCase::Mirror => NO_ACTIVE_TURN_RESPONSE,
+            _ => STOPPING_RESPONSE,
         };
-        assert!(Probe::current(&ticket), "judging withdraws nothing");
-        open(&path, "replacement");
-        assert!(!stop.interrupt("!stop").await.sent_keys);
+        if matches!(case, OwnerCase::CodexText) {
+            let mock = discord_mock::DiscordMockState::new();
+            let (proxy, gateway, server) = discord_mock::start(mock.clone()).await;
+            let ctx = discord_mock::serenity_context(proxy, gateway).await;
+            shared.settings.write().await.owner_user_id = Some(7);
+            let mut voice_config = crate::voice::VoiceConfig::default();
+            voice_config.keep_recordings = true;
+            voice_config.audio.recordings_dir = root.path().join("recordings");
+            let data = Data {
+                shared: shared.clone(),
+                token: "test-token".into(),
+                provider: provider.clone(),
+                voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+                voice_config,
+                ingress_shadow: None,
+            };
+            command(&ctx, &data, channel).await;
+            assert!(mock.unhandled.lock().unwrap().is_empty());
+            server.abort();
+        } else {
+            let reply = run_slash_stop(&shared, &provider, channel).await;
+            assert_eq!(reply.text(), expected);
+            assert!(
+                fx.take_calls().is_empty(),
+                "slash acknowledgement precedes provider I/O"
+            );
+            if matches!(case, OwnerCase::OwnerChanged) {
+                shared
+                    .tmux_watchers
+                    .clear_restored_owner_for_tmux_session(session);
+                shared.tmux_watchers.restore_owner_channel_for_tmux_session(
+                    session,
+                    ChannelId::new(channel.get() + 10),
+                );
+            }
+            if matches!(case, OwnerCase::SourceChanged) {
+                let replacement = root.path().join("replacement.jsonl");
+                open(&replacement, "parent");
+                write_binding_event(&provider, channel, session, &replacement, 2);
+            }
+            reply.finish(&shared, &provider, channel).await;
+        }
+        let calls = fx.take_calls();
+        if matches!(case, OwnerCase::Slash | OwnerCase::CodexText) {
+            let writes = escapes(&calls);
+            assert_eq!(writes.len(), 1, "unique owner-only parent: {calls:?}");
+            assert!(writes[0].contains(session) && writes[0].contains("Escape"));
+        } else {
+            assert!(
+                calls.is_empty(),
+                "refusal or changed authority must perform no provider I/O: {calls:?}"
+            );
+        }
+        assert_eq!(generation_owner.claude_interrupt_generation(), generation);
+        assert!(!generation_owner.cancelled.load(Ordering::Acquire));
         assert!(
-            Probe::current(&ticket),
-            "a failed recheck withdraws nothing"
+            shared.tmux_relay_coords.is_empty(),
+            "owner-only stop cannot allocate a delivery lease"
         );
-        let CommandStop::Session(stop) = SessionStop::judge(&shared, &provider, channel).await
-        else {
-            panic!("the replacement parent must be judged");
-        };
-        assert!(stop.interrupt("!stop").await.sent_keys);
-        assert!(!Probe::current(&ticket), "the delivered interrupt withdrew");
-        let _ = fx.take_calls();
+        assert!(shared.mailbox_peek(channel).is_none());
+        assert!(crate::services::discord::tmux::recent_turn_stop_for_channel(channel).is_none());
+        assert!(
+            crate::services::discord::inflight::load_inflight_state_read_only(
+                &provider,
+                channel.get()
+            )
+            .is_none()
+        );
+        assert!(shared.tmux_watchers.channel_binding(&channel).is_none());
     });
+}
+
+#[test]
+fn n2a_slash_stop_interrupts_unique_owner_only_claude_parent_without_watcher() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_slash_stop_interrupts_unique_owner_only_claude_parent_without_watcher"
+        ),
+        OwnerCase::Slash,
+    );
+}
+
+#[test]
+fn n2a_text_stop_interrupts_unique_owner_only_codex_parent_without_watcher() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_text_stop_interrupts_unique_owner_only_codex_parent_without_watcher"
+        ),
+        OwnerCase::CodexText,
+    );
+}
+
+#[test]
+fn n2a_multiple_typed_owner_sessions_refuse_before_open_state() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_multiple_typed_owner_sessions_refuse_before_open_state"
+        ),
+        OwnerCase::Multiple,
+    );
+}
+
+#[test]
+fn n2a_foreign_provider_binding_is_host_refused_without_io() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_foreign_provider_binding_is_host_refused_without_io"
+        ),
+        OwnerCase::ForeignProvider,
+    );
+}
+
+#[test]
+fn n2a_nonowner_typed_session_is_not_a_candidate() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_nonowner_typed_session_is_not_a_candidate"
+        ),
+        OwnerCase::Nonowner,
+    );
+}
+
+#[test]
+fn n2a_ttl_mirror_only_session_is_not_a_candidate() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_ttl_mirror_only_session_is_not_a_candidate"
+        ),
+        OwnerCase::Mirror,
+    );
+}
+
+#[test]
+fn n2a_owner_change_after_judgment_prevents_slash_finish_interrupt() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_owner_change_after_judgment_prevents_slash_finish_interrupt"
+        ),
+        OwnerCase::OwnerChanged,
+    );
+}
+
+#[test]
+fn n2a_source_rotation_after_judgment_prevents_slash_finish_interrupt() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_source_rotation_after_judgment_prevents_slash_finish_interrupt"
+        ),
+        OwnerCase::SourceChanged,
+    );
+}
+
+#[test]
+fn n2a_owner_only_pending_or_corrupt_binding_refuses_without_io() {
+    owner_stop_case(
+        concat!(
+            module_path!(),
+            "::n2a_owner_only_pending_or_corrupt_binding_refuses_without_io"
+        ),
+        OwnerCase::InvalidBinding,
+    );
+}
+
+pub(super) fn mutate_initial_owners(
+    channel: ChannelId,
+    owners: Vec<AuthoritativeSessionBinding>,
+) -> Vec<AuthoritativeSessionBinding> {
+    if !owners.is_empty()
+        || !crate::services::discord::tmux_watcher_registry::owner_stop_mutant("2a-mirror-fallback")
+    {
+        return owners;
+    }
+    crate::services::tui_o::writer::binding::BindingLog
+        .binding_events_since(channel.get(), 0)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|event| {
+            crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(&event.tmux_session)
+                == Some(channel.get())
+        })
+        .map(|event| AuthoritativeSessionBinding {
+            owner_channel_id: channel,
+            tmux_session_name: event.tmux_session,
+        })
+        .collect()
+}
+
+type TypedEvents = Vec<crate::services::tui_o::writer::binding::BindingEvent>;
+
+pub(super) fn mutate_events(
+    channel: ChannelId,
+    events: Result<TypedEvents, String>,
+) -> Result<TypedEvents, String> {
+    if crate::services::discord::tmux_watcher_registry::owner_stop_mutant("2a-provider-check-off") {
+        crate::services::tui_o::writer::binding::BindingLog.binding_events_since(channel.get(), 0)
+    } else {
+        events
+    }
+}
+
+pub(super) fn mutate_bound_owners(
+    channel: ChannelId,
+    events: &TypedEvents,
+    owners: Vec<AuthoritativeSessionBinding>,
+) -> Vec<AuthoritativeSessionBinding> {
+    if crate::services::discord::tmux_watcher_registry::owner_stop_mutant("2a-owner-check-off") {
+        events
+            .iter()
+            .map(|event| AuthoritativeSessionBinding {
+                owner_channel_id: channel,
+                tmux_session_name: event.tmux_session.clone(),
+            })
+            .collect()
+    } else {
+        owners
+    }
+}
+
+pub(super) fn mutate_candidates(candidates: &mut Vec<(String, SourceBinding)>) {
+    use crate::services::discord::tmux_watcher_registry::owner_stop_mutant;
+    if owner_stop_mutant("2a-open-disambiguates") {
+        candidates.retain(|(_, binding)| {
+            InputFacts::open(binding.clone())
+                .and_then(|mut facts| facts.poll(crate::services::tui_o::shadow::MAX_READ_BYTES))
+                .is_ok_and(|fact| matches!(fact.state, TurnState::Open { .. }))
+        });
+    }
+    if owner_stop_mutant("2a-first-candidate-wins") {
+        candidates.truncate(1);
+    }
 }

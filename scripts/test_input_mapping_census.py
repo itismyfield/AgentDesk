@@ -71,13 +71,12 @@ def retain_arguments(source):
 
 
 TOKEN = re.compile(r"->|::|[A-Za-z_]\w*|\S")
-# Both impls are exact; the input adapter remains unreachable from production boot.
+# The live presence impl is exact; dormant input adapters and starts stay absent.
 ALLOWED_PORTS = {
     (D + "turn_presence/activity.rs", "impl Ports for LivePorts"): 1,
-    (D + "input_runtime/runtime/ports.rs", "impl Ports for RuntimePorts"): 1,
 }
 RUNTIME_PATH = D + "input_runtime/runtime.rs"
-ALLOWED_STARTS = {RUNTIME_PATH: 1}
+ALLOWED_STARTS = {}
 
 
 def skip_generics(tokens, index):
@@ -267,7 +266,7 @@ RELEASES = {
     },
     "kick_thread_parents_after_turn_release": {
         "turn_finalizer/finalize.rs": 1,
-        "tmux_watcher/completion_producer.rs": 1,
+        "turn_finalizer/cleanup/terminal_release.rs": 1,
         "health/recovery.rs": 2,
         "turn_finalizer/guarded_finish_residue.rs": 1,
         "turn_finalizer/cleanup.rs": 1,
@@ -330,11 +329,33 @@ class Census(unittest.TestCase):
             self.assertNotIn("redirected_permit=None", compact[start:inserts[index]])
             self.assertNotIn("drop(redirected_permit", compact[start:inserts[index]])
         root = re.sub(r"\s+", "", self.sources[D + "router/message_handler/intake_turn.rs"])
-        admit = root.index("effect::admit(&deps.shared.provider,request.channel_id.get())")
-        run = root.index("effect::run(permit,", admit)
+        helper = re.sub(r"\s+", "", self.sources[D + "router/intake_gate/ledger.rs"])
+        helper_start = helper.index("asyncfnlegacy_effect(")
+        helper_end = helper.index("pub(incrate::services::discord)asyncfntry_text_reply(", helper_start)
+        helper = helper[helper_start:helper_end]
+        policy = "legacy_allowed(deps.shared,deps.http,&deps.shared.provider,channel).await?;"
+        fence_admit = "runtime::fence::effect::admit(&deps.shared.provider,channel.get())"
+        self.assertEqual(helper.count(policy), 1)
+        self.assertEqual(helper.count(fence_admit), 1)
+        self.assertEqual(helper.count("letpermit="), 1)
+        self.assertIn(
+            ")->Result<Option<runtime::fence::Permit>,Error>{letpermit=" + fence_admit + ".map_err(",
+            helper,
+        )
+        self.assertIn(")?;" + policy + "Ok(permit)}", helper)
+        self.assertIn("usesuper::super::intake_gate::ledgeraslive;", root)
+        caller = "letpermit=live::legacy_effect(deps,request.channel_id).await?;"
+        self.assertEqual(root.count(caller), 1)
+        admit = root.index(caller)
+        run_call = "effect::run(permit,"
+        self.assertEqual(root.count(run_call), 1)
+        run = root.index(run_call, admit)
         body = root.index("handle_text_message_admitted", run)
         redirect = root.index("adk_thread::redirect_dispatch(", body)
         self.assertLess(admit, run)
+        self.assertEqual(root[admit:run].count("letpermit="), 1)
+        self.assertNotIn("drop(permit", root[admit:run])
+        self.assertIn("ifpermit.is_none()&&effect::current().is_none(){", root[admit:run])
         self.assertLess(body, redirect)
         self.assertIn("letIntakeRequest{intake_outbox_id,channel_id,", root[body:redirect])
         self.assertIn("letoriginal_channel_id=channel_id;", root[body:redirect])
@@ -358,7 +379,7 @@ class Census(unittest.TestCase):
             self.assertEqual(len(re.findall(r"\bmapping\s*::\s*inspect\s*\(", source)), 0, path)
         self.assertEqual(dict(impls), ALLOWED_PORTS)
         self.assertEqual(dict(starts), ALLOWED_STARTS)
-        self.assertEqual(runtime_constructor_starts(self.sources[RUNTIME_PATH]), [1])
+        self.assertEqual(runtime_constructor_starts(self.sources[RUNTIME_PATH]), [])
         # The probe's only map read is one iter() inside Probe::check, over each handed-over runtime.
         probe = re.sub(r"\s+", "", self.sources[D + "input_runtime/mapping.rs"])
         self.assertEqual(Counter(expressions(probe)), {"iter": 1})
@@ -405,9 +426,9 @@ class Census(unittest.TestCase):
         runtime_ports_path = D + "input_runtime/runtime/ports.rs"
         allowed = "impl Ports for LivePorts {}"
         runtime_ports = "impl Ports for RuntimePorts {}"
-        runtime = "impl Runtime { fn new() { Supervisor::start(reserved, config, ports); } }"
+        runtime = "fn registry() {}"
         base = {helper_path: self.sources[helper_path], private_ports_path: allowed,
-                runtime_ports_path: runtime_ports, RUNTIME_PATH: runtime}
+                runtime_ports_path: "", RUNTIME_PATH: runtime}
         guard.sources = dict(base)
         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
         fixtures = [
@@ -437,19 +458,25 @@ class Census(unittest.TestCase):
                     guard.sources = dict(base, **{path: extra})
                     with self.assertRaises(AssertionError):
                         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
-        # Zero, duplicate, or moved copies of either exact impl fail.
-        for path, header in [(private_ports_path, allowed), (runtime_ports_path, runtime_ports)]:
+        # Zero, duplicate, or moved copies of the live impl fail.
+        for path, header in [(private_ports_path, allowed)]:
             for sources in [{path: "fn none() {}"}, {path: header + "\n" + header},
                             {path: "fn none() {}", "src/other_module.rs": header}]:
                 with self.subTest(sources=sources):
                     guard.sources = dict(base, **sources)
                     with self.assertRaises(AssertionError):
                         guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
+        for path in [runtime_ports_path, "src/other_module.rs"]:
+            for source in [runtime_ports, runtime_ports + "\n" + runtime_ports]:
+                with self.subTest(path=path, source=source):
+                    guard.sources = dict(base, **{path: source})
+                    with self.assertRaises(AssertionError):
+                        guard.test_guard_helper_is_read_only_and_input_runtime_has_no_port_installation()
         for sources in [
             {RUNTIME_PATH: "impl Runtime { fn new() {} }"},
             {RUNTIME_PATH: runtime + " fn duplicate() { Supervisor::start(); }"},
             {RUNTIME_PATH: "impl Runtime { fn new() {} fn run() { Supervisor::start(); } }"},
-            {RUNTIME_PATH: "mod nested { " + runtime + " }"},
+            {RUNTIME_PATH: "mod nested { impl Runtime { fn new() { Supervisor::start(reserved, config, ports); } } }"},
             {RUNTIME_PATH: "impl Runtime { fn new() {} }", "src/other_module.rs": runtime},
         ]:
             with self.subTest(starts=sources):
@@ -465,8 +492,8 @@ class Census(unittest.TestCase):
         base = {
             D + "input_runtime/mapping.rs": self.sources[D + "input_runtime/mapping.rs"],
             D + "turn_presence/activity.rs": "impl Ports for LivePorts {}",
-            D + "input_runtime/runtime/ports.rs": "impl Ports for RuntimePorts {}",
-            RUNTIME_PATH: "impl Runtime { fn new() { Supervisor::start(reserved, config, ports); } }",
+            D + "input_runtime/runtime/ports.rs": "",
+            RUNTIME_PATH: "fn registry() {}",
         }
         fixtures = [
             "fn activate() { Runtime::new(reserved, config); }",

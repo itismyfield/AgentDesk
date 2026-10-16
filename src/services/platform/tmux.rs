@@ -8,7 +8,6 @@ use crate::services::process::{configure_child_process_group, wait_with_output_t
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
-use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// Format session name as an exact-match target (prefix with `=`, suffix with
@@ -18,10 +17,8 @@ use std::time::{Duration, Instant};
 /// `display-message` require a target that resolves to a pane. Without the
 /// trailing colon, `tmux send-keys -t =SESSION C-c` errors with "can't find
 /// pane" and `display-message -t =SESSION '#{pane_pid}'` returns empty —
-/// which made user-initiated turn-stop (⏳ reaction, !stop, /stop, watchdog)
-/// silently fail to abort the running provider. `=SESSION:` reads as "exact
-/// session named SESSION, default window/pane" and works for every tmux
-/// command we use.
+/// so an exact session target also needs its default window/pane.
+/// `=SESSION:` provides both for every tmux command used here.
 fn exact_target(session_name: &str) -> String {
     format!("={session_name}:")
 }
@@ -79,6 +76,9 @@ fn wait_for_tmux_output(
 }
 
 mod availability;
+pub(crate) mod health_probe;
+#[cfg(unix)]
+pub(crate) mod session_inventory;
 mod sized;
 
 pub use availability::{
@@ -932,7 +932,15 @@ pub enum PaneLiveness {
     ProbeError,
 }
 
-const PANE_LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+impl From<bool> for PaneLiveness {
+    fn from(alive: bool) -> Self {
+        if alive {
+            Self::Live
+        } else {
+            Self::DeadOrAbsent
+        }
+    }
+}
 
 mod liveness;
 

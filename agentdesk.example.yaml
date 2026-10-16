@@ -285,6 +285,22 @@ agents:
     keywords: ["e2e", "claude", "tui"]
     department: devsecops
 
+  # claude-tui's tmux worker; adk-claude-tui-e2e above serves claude-herdr once
+  # its channel is mapped under session_hosts.herdr.
+  - id: adk-claude-tui-2-e2e
+    name: "ADK Claude tui (tmux) E2E"
+    name_ko: "ADK Claude tui (tmux) E2E"
+    provider: claude
+    channels:
+      claude:
+        id: "PLACEHOLDER_ADK_CLAUDE_TUI_2_E2E"
+        name: "adk-claude-tui-2-e2e"
+        workspace: "~/.adk/release/workspaces/adk-claude-tui-2-e2e"
+        prompt_file: "~/.adk/release/config/agents/adk-claude-tui-2-e2e.prompt.md"
+        runtime: tui
+    keywords: ["e2e", "claude", "tui"]
+    department: devsecops
+
   - id: adk-codex-pipe-e2e
     name: "ADK Codex pipe E2E"
     name_ko: "ADK Codex pipe E2E"

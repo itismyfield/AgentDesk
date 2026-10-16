@@ -1,19 +1,30 @@
 //! Pinned source policy separates legacy use from unavailable verified evidence.
 
+#[cfg(test)]
 use super::codex_verified::DeliveryPermission;
 use super::*;
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext, SpawnNonceMarker};
 
+pub(super) struct PinnedIncarnation(BindingContext);
+
+impl PinnedIncarnation {
+    pub(super) fn into_context(self) -> BindingContext {
+        self.0
+    }
+}
+
 pub(super) enum SourcePolicyState {
     Legacy,
-    VerifiedCurrent(BindingContext),
+    VerifiedCurrent(PinnedIncarnation),
     VerifiedUnavailable,
 }
 
 pub(super) fn disposition(authority: &TmuxSourceAuthority<'_>) -> SourcePolicyState {
     match codex_verified::current_context(authority) {
-        Ok(Some(context)) => return SourcePolicyState::VerifiedCurrent(context),
+        Ok(Some(context)) => {
+            return SourcePolicyState::VerifiedCurrent(PinnedIncarnation(context));
+        }
         Err(_) => return SourcePolicyState::VerifiedUnavailable,
         Ok(None) => {}
     }
@@ -80,7 +91,7 @@ pub(crate) fn codex_verified_source_allowed_under_source_authority(
     let context = match disposition(authority) {
         SourcePolicyState::Legacy => return true,
         SourcePolicyState::VerifiedUnavailable => return false,
-        SourcePolicyState::VerifiedCurrent(context) => context,
+        SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
     };
     let Ok(fold) = binding_events::codex::read_ownership(&context) else {
         return false;
@@ -114,7 +125,7 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, |authority| match disposition(authority) {
         SourcePolicyState::Legacy => false,
         SourcePolicyState::VerifiedUnavailable => true,
-        SourcePolicyState::VerifiedCurrent(context) => {
+        SourcePolicyState::VerifiedCurrent(_) => {
             let binding = with_runtime_binding_state_under_source_authority(authority, |state| {
                 state
                     .runtime_by_tmux
@@ -122,7 +133,6 @@ pub(crate) fn codex_verified_input_blocked(tmux: &str) -> bool {
                     .map(|entry| entry.value.clone())
             });
             !binding.is_some_and(|binding| codex_verified::consumer_allowed(authority, &binding))
-                || codex_verified::permission(&context) != DeliveryPermission::Allowed
         }
     })
 }
@@ -150,9 +160,6 @@ pub(crate) fn codex_verified_hold_reason(tmux: &str) -> &'static str {
             .is_ok_and(|fold| fold.verified.is_some() && fold.pending.is_empty())
         {
             return "verified_unavailable";
-        }
-        if codex_verified::permission(&context) != DeliveryPermission::Allowed {
-            return "permission_unknown";
         }
         let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         if !state.runtime_by_tmux.contains_key(tmux) {
@@ -183,7 +190,7 @@ pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent)
         let context = match disposition(authority) {
             SourcePolicyState::Legacy => return true,
             SourcePolicyState::VerifiedUnavailable => return false,
-            SourcePolicyState::VerifiedCurrent(context) => context,
+            SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
         };
         if event.execution_nonce.as_deref() != Some(&context.execution_nonce)
             || event.channel_id != context.channel_id.unwrap_or(0)
@@ -200,7 +207,7 @@ pub(crate) fn codex_verified_event_allowed(event: &binding_events::BindingEvent)
         {
             return false;
         }
-        owned_source_allowed(authority, source, |proof, source| proof == source)
+        true
     })
 }
 
@@ -271,18 +278,21 @@ fn owned_source_allowed(
     let context = match disposition(authority) {
         SourcePolicyState::Legacy => return true,
         SourcePolicyState::VerifiedUnavailable => return false,
-        SourcePolicyState::VerifiedCurrent(context) => context,
+        SourcePolicyState::VerifiedCurrent(pin) => pin.into_context(),
     };
     let Ok(fold) = binding_events::codex::read_ownership(&context) else {
         return false;
     };
-    fold.verified
-        .as_ref()
-        .is_some_and(|proof| proves(&proof.source, source))
-        && codex_verified_source_allowed_under_source_authority(
-            authority,
-            &source.path.display().to_string(),
-            Some(&source.session_id),
+    fold.verified.is_some()
+        && !fold.conflicted
+        && fold.pending.is_empty()
+        && binding_events::binding_events_since(context.channel_id.unwrap_or(0), 0).is_ok_and(
+            |events| {
+                events.iter().any(|event| {
+                    binding_events::codex::proof_at_seq(&context, event.seq)
+                        .is_ok_and(|proof| proof.is_some_and(|proof| proves(&proof.source, source)))
+                })
+            },
         )
 }
 

@@ -9,7 +9,9 @@ use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use super::admission::{ApprovedRejected, OriginalGate, PriorBudget};
-use super::admission_tests::{BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar, switch};
+use super::admission_tests::{
+    BOT, CHANNEL, admit_on, next_grant, send_uncertain, sidecar, switch, switch_for,
+};
 use super::dispatch::{Admission, DispatchEnd, DispatchPermit, GuardReason, RepostWriter, start};
 use super::identity::{PieceKey, marker};
 use super::io::probe::evidence::{EvidenceScope, NotFoundEvidence, RunScope};
@@ -336,7 +338,7 @@ async fn f5_default_off_tick_executes_zero_pg_statements() {
     let mut writer = TestWriter::new();
     let expected = [
         (OriginalGate::Admitted, TurnStep::Stopped),
-        (OriginalGate::Send, TurnStep::Legacy),
+        (OriginalGate::SendLocal, TurnStep::Legacy),
         (OriginalGate::Unknown, TurnStep::Wait),
     ];
     for (membership, step) in expected {
@@ -699,7 +701,11 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
 
     // T19: an approval no longer current, or the switch off, allocates nothing.
     let mut on = runner(&pool, true, &run);
-    let stale = on.try_next_dispatch(&mut writer, OriginalGate::Send, resume(&Approves(false)));
+    let stale = on.try_next_dispatch(
+        &mut writer,
+        OriginalGate::SendLocal,
+        resume(&Approves(false)),
+    );
     assert_eq!(turn_step(&stale.await.unwrap()), TurnStep::Stopped);
     let mut off = runner(&pool, false, &run);
     let parked =
@@ -708,7 +714,11 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
     assert!(load(&pool, &approved.key).await.unwrap().is_none());
 
     // T18: the 403 original, the approved retry goes uncertain, Auto takes the last slot.
-    let admission = on.try_next_dispatch(&mut writer, OriginalGate::Send, resume(&Approves(true)));
+    let admission = on.try_next_dispatch(
+        &mut writer,
+        OriginalGate::SendLocal,
+        resume(&Approves(true)),
+    );
     let Admission::Granted { permit, lease } = admission.await.unwrap() else {
         panic!("the approved retry");
     };
@@ -720,7 +730,11 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         .await
         .unwrap();
     // A duplicate of the same approval finds the budget, not a new one.
-    let again = on.try_next_dispatch(&mut writer, OriginalGate::Send, resume(&Approves(true)));
+    let again = on.try_next_dispatch(
+        &mut writer,
+        OriginalGate::SendLocal,
+        resume(&Approves(true)),
+    );
     let Admission::Granted { permit, lease } = again.await.unwrap() else {
         panic!("slot 2");
     };
@@ -870,10 +884,15 @@ async fn auto_missing_row_is_observe_only_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let run = super::io::probe::tests::run("run-1");
-    let mut runner = runner(&pool, true, &run);
     let mut writer = TestWriter::new();
     let gone = absent_evidence(super::io::probe::tests::scope(&[0]), run.clone());
     let key = gone.scope().key.clone();
+    let mut runner = Runner::new(
+        switch_for(true, key.unit().channel_id),
+        pool.clone(),
+        BOT,
+        run.clone(),
+    );
     assert!(load(&pool, &key).await.unwrap().is_none());
     let intent = DispatchIntent::Auto(Box::new(gone));
     let admission = runner.try_next_dispatch(&mut writer, OriginalGate::Admitted, intent);

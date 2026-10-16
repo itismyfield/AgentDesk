@@ -1,7 +1,8 @@
 use super::switch_tests::{link, spool};
 use super::*;
+use crate::services::tui_o::store::StoreError;
 use crate::services::tui_o::store::rotation::{Boundary, ResolveFrom, Rotation};
-use crate::services::tui_o::store::spool::source_key;
+use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 
 fn line(value: serde_json::Value) -> Vec<u8> {
     let mut line = serde_json::to_vec(&value).unwrap();
@@ -27,7 +28,7 @@ fn blocked(uuid: &str) -> Vec<u8> {
     line(
         serde_json::json!({"type": "assistant", "uuid": uuid, "apiBlockIndex": 0,
         "timestamp": Utc::now().to_rfc3339(), "message": {"id": uuid,
-        "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}),
+        "content": [{"type": "text", "text": "a"}, {"type": "image"}]}}),
     )
 }
 
@@ -145,6 +146,55 @@ async fn a_fork_is_owed_from_its_first_new_row_whatever_its_timestamps_say() {
     }
 }
 
+/// Reopens the disk spool before trying GC, so a cached Pending cannot hide lost segments.
+fn pending_gc_frames(harness: &Harness, source: &SourceId, tag: &str) -> Vec<SpoolFrame> {
+    let mut store = harness.channel();
+    let segments = store.retained_segments(source);
+    assert!(
+        segments >= 2,
+        "{tag} segments must rotate before GC: {segments}"
+    );
+    let rotation = store.rotation().unwrap();
+    assert!(
+        matches!(
+            rotation.link(source).unwrap().boundary,
+            Boundary::Pending { .. }
+        ),
+        "{tag} Pending must survive reopen"
+    );
+    assert_eq!(store.ledger().violation(), None, "{tag} valid ledger");
+    assert_eq!(
+        store.cursor(source).unwrap().captured_through,
+        std::fs::metadata(&source.path).unwrap().len(),
+        "{tag} all rows captured"
+    );
+    let mut frames = Vec::new();
+    store
+        .for_each_frame(source, |frame| frames.push(frame))
+        .unwrap();
+    assert!(!frames.is_empty(), "{tag} Pending has spooled rows");
+    let gc = store.gc_oldest_segment(source);
+    assert!(
+        matches!(&gc, Err(StoreError::Rejected(detail)) if detail == "boundary of the source is not decided"),
+        "{tag} Pending must reject GC: {gc:?}"
+    );
+    assert!(
+        store.ledger().gc_segments(source).is_empty(),
+        "{tag} no GC logged"
+    );
+    assert_eq!(
+        store.retained_segments(source),
+        segments,
+        "{tag} segments kept"
+    );
+    let mut after = Vec::new();
+    store
+        .for_each_frame(source, |frame| after.push(frame))
+        .unwrap();
+    assert_eq!(after, frames, "{tag} every Pending frame kept");
+    frames
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolved() {
     let now = Utc::now();
@@ -175,7 +225,9 @@ async fn a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolve
     ];
     for (tag, parent, forked) in cases {
         let (harness, a_path, a, bindings) = started(&parent);
-        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        let mut writer = harness.writer();
+        writer.store().set_segment_max_for_tests(1);
+        let (stop, task) = spawn_with(writer, ShadowProvider::Claude, bindings.clone());
         let (b_path, b) = transcript(&a_path, "b.jsonl", "s2", &forked);
         bindings.commit(fork(2, &a, &b));
         polls(3).await;
@@ -183,14 +235,16 @@ async fn a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolve
             append(&b_path, &row_at("n1", "late new", now));
             polls(3).await;
         }
+        append(&b_path, &row_at("gc-rotation", "held after rotation", now));
+        polls(3).await;
         let pending = WriterAlarm::BoundaryPending { source: b.clone() };
         assert!(harness.port.posts().is_empty(), "{tag} posts");
         assert_eq!(harness.alarms.taken(), [pending.clone()], "{tag} alarm");
-        let held = matches!(boundary(&harness, &b), Boundary::Pending { .. });
-        assert!(held, "{tag} pending");
-        assert!(harness.channel().ledger().gc_segments(&b).is_empty());
         halt(stop, task).await;
-        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
+        let before = pending_gc_frames(&harness, &b, tag);
+        let mut writer = harness.writer();
+        writer.store().set_segment_max_for_tests(1);
+        let (stop, task) = spawn_with(writer, ShadowProvider::Claude, bindings);
         polls(3).await;
         assert!(
             harness.port.posts().is_empty(),
@@ -201,7 +255,24 @@ async fn a_fork_that_cannot_be_matched_to_its_parent_posts_nothing_until_resolve
             [pending],
             "{tag} alarm after a restart"
         );
+        assert_eq!(
+            pending_gc_frames(&harness, &b, tag),
+            before,
+            "{tag} frames after restart"
+        );
+        append(&b_path, &row_at("gc-followup", "held after restart", now));
+        polls(3).await;
         halt(stop, task).await;
+        let after = pending_gc_frames(&harness, &b, tag);
+        assert!(after.len() > before.len(), "{tag} followup row spooled");
+        assert!(
+            after.starts_with(&before),
+            "{tag} old Pending frames after followup"
+        );
+        assert!(
+            harness.port.posts().is_empty(),
+            "{tag} posts after followup"
+        );
     }
 }
 
@@ -384,7 +455,10 @@ async fn a_retired_fork_left_undecided_at_its_end_is_held_for_the_operator() {
         "{tag} resolved posts"
     );
     assert_eq!(boundary(harness, b), Boundary::Owed { from: end });
-    let grew = WriterAlarm::RetiredSourceGrew { source: b.clone() };
+    let grew = WriterAlarm::RetiredSourceGrew {
+        source: b.clone(),
+        cleanup_history: None,
+    };
     assert_eq!(harness.alarms.taken(), [grew]);
     halt(stop, task).await;
 }

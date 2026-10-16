@@ -1,12 +1,71 @@
+use super::busy_followup_retry_store::{RetryClass, auto_pick, input_class};
 use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
+use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
 pub(super) mod kickoff;
 
 #[cfg(test)]
-mod input_effect_tests;
+pub(in crate::services::discord) mod input_effect_tests;
 
 type DispatchLeaseHandle = Arc<crate::services::turn_orchestrator::DispatchLease>;
+
+/// A confirmed active queued execution releases queue custody UI without restarting its turn view.
+pub(super) async fn settle_executed_queued_intake(
+    shared: &Arc<SharedData>,
+    http: &Arc<serenity::http::Http>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    intervention: &Intervention,
+    source: &'static str,
+) {
+    for owner in intervention.source_message_queued_generations() {
+        for emoji in queue_reactions::QUEUE_PENDING_REACTION_EMOJIS {
+            queue_marker::note_removed_queued_generation(
+                shared,
+                http,
+                channel_id,
+                owner.message_id,
+                emoji,
+                owner.queued_generation,
+                source,
+            )
+            .await;
+        }
+    }
+    if let Some(card) = shared
+        .remove_queued_placeholder(channel_id, intervention.message_id)
+        .await
+        && let QueuedCardDisposition::Released(teardown) = queued_card_gate::release_or_rekey(
+            shared,
+            channel_id,
+            card,
+            &intervention.source_message_ids,
+        )
+        .await
+    {
+        let _ = queued_card_gate::teardown_delete(http, shared, teardown).await;
+    }
+    let drained = gateway::drain_merged_queued_placeholders(
+        shared,
+        channel_id,
+        intervention.message_id,
+        &intervention.source_message_ids,
+    )
+    .await;
+    for teardown in drained {
+        let card = teardown.card();
+        let result = queued_card_gate::teardown_delete(http, shared, teardown).await;
+        crate::services::observability::emit_relay_delete_result(
+            provider.as_str(),
+            channel_id.get(),
+            card.get(),
+            source,
+            "delete_nonterminal",
+            &result,
+        );
+    }
+}
 
 pub(super) fn persistence_context(
     shared: &SharedData,
@@ -51,23 +110,17 @@ pub(in crate::services::discord) struct MailboxEnqueueOutcome {
 pub(super) enum AutomaticQueueProgression {
     Empty,
     BlockedByCappedRetries,
+    /// A retry record that cannot be read: its input is neither run nor passed over.
+    BlockedByUnreadableRetryState,
     Eligible(MessageId),
 }
 
-fn busy_retry_is_capped(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    intervention: &Intervention,
-) -> bool {
-    super::busy_followup_retry_store::state_is_capped(
-        super::busy_followup_retry_store::resolve_identity(
-            provider,
-            channel_id.get(),
-            intervention.message_id.get(),
-            &intervention.source_message_ids,
-        )
-        .state,
-    )
+fn progression_of(class: RetryClass, message_id: MessageId) -> AutomaticQueueProgression {
+    match class {
+        RetryClass::Ready => AutomaticQueueProgression::Eligible(message_id),
+        RetryClass::Parked => AutomaticQueueProgression::BlockedByCappedRetries,
+        RetryClass::Unavailable(_) => AutomaticQueueProgression::BlockedByUnreadableRetryState,
+    }
 }
 
 pub(super) fn automatic_progression(
@@ -82,11 +135,23 @@ pub(super) fn automatic_progression(
     ) {
         return AutomaticQueueProgression::Empty;
     }
-    if let Some(intervention) = snapshot.intervention_queue.iter().find(|intervention| {
-        intervention.mode == InterventionMode::Soft
-            && !busy_retry_is_capped(provider, channel_id, intervention)
-    }) {
-        return AutomaticQueueProgression::Eligible(intervention.message_id);
+    let soft: Vec<&Intervention> = snapshot
+        .intervention_queue
+        .iter()
+        .filter(|intervention| intervention.mode == InterventionMode::Soft)
+        .collect();
+    let classes: Vec<RetryClass> = soft
+        .iter()
+        .map(|intervention| input_class(provider, channel_id, intervention))
+        .collect();
+    if let Some(index) = auto_pick(&classes) {
+        return AutomaticQueueProgression::Eligible(soft[index].message_id);
+    }
+    if classes
+        .iter()
+        .any(|class| matches!(class, RetryClass::Unavailable(_)))
+    {
+        return AutomaticQueueProgression::BlockedByUnreadableRetryState;
     }
     if let Some((marker, _)) =
         crate::services::turn_orchestrator::load_channel_pending_dispatch_marker(
@@ -95,11 +160,8 @@ pub(super) fn automatic_progression(
             channel_id,
         )
     {
-        return if busy_retry_is_capped(provider, channel_id, &marker) {
-            AutomaticQueueProgression::BlockedByCappedRetries
-        } else {
-            AutomaticQueueProgression::Eligible(marker.message_id)
-        };
+        let class = input_class(provider, channel_id, &marker);
+        return progression_of(class, marker.message_id);
     }
     if snapshot.intervention_queue.is_empty() {
         AutomaticQueueProgression::Empty
@@ -108,16 +170,18 @@ pub(super) fn automatic_progression(
     }
 }
 
+/// Whether a just-taken input stopped being runnable between selection and take.
 pub(super) fn intervention_became_capped(
     provider: &ProviderKind,
     channel_id: ChannelId,
     intervention: &Intervention,
 ) -> bool {
-    busy_retry_is_capped(provider, channel_id, intervention)
+    input_class(provider, channel_id, intervention) != RetryClass::Ready
 }
 
 #[derive(Debug, Default)]
 pub(super) struct MailboxTakeNextSoftOutcome {
+    pub(super) selection_stale: bool,
     pub(super) intervention: Option<Intervention>,
     pub(super) dispatch_lease: Option<DispatchLeaseHandle>,
     pub(super) has_more: bool,
@@ -133,6 +197,7 @@ impl MailboxTakeNextSoftOutcome {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn mailbox_take_next_soft_intervention(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -143,7 +208,13 @@ pub(super) async fn mailbox_take_next_soft_intervention(
     };
     input_runtime::fence::effect::scope(
         permit,
-        mailbox_take_soft_intervention(shared, provider, channel_id, None),
+        mailbox_take_soft_intervention(
+            shared,
+            provider,
+            channel_id,
+            None,
+            TakeHeadCondition::Unchecked,
+        ),
     )
     .await
 }
@@ -190,31 +261,60 @@ async fn mailbox_take_admitted_automatic_intervention(
         }
     }
     let mut excluded_stale_primary_message_ids = std::collections::HashSet::new();
+    let mut previous_observed_head = None;
     loop {
         let mut snapshot = super::mailbox_snapshot(shared, channel_id).await;
+        let observed_head = snapshot.intervention_queue.first().map(QueueIdentity::of);
+        if previous_observed_head.as_ref() != Some(&observed_head) {
+            excluded_stale_primary_message_ids.clear();
+        }
+        previous_observed_head = Some(observed_head.clone());
+        let condition = TakeHeadCondition::Observed(observed_head);
         snapshot.intervention_queue.retain(|intervention| {
             !excluded_stale_primary_message_ids.contains(&intervention.message_id)
         });
         let (selected_message_id, result) =
             match automatic_progression(shared, provider, channel_id, &snapshot) {
-                AutomaticQueueProgression::Eligible(message_id) => (
-                    Some(message_id),
-                    mailbox_take_soft_intervention(shared, provider, channel_id, Some(message_id))
+                AutomaticQueueProgression::Eligible(message_id) => {
+                    #[cfg(test)]
+                    input_effect_tests::before_take(channel_id).await;
+                    (
+                        Some(message_id),
+                        mailbox_take_soft_intervention(
+                            shared,
+                            provider,
+                            channel_id,
+                            Some(message_id),
+                            condition,
+                        )
                         .await,
-                ),
+                    )
+                }
                 AutomaticQueueProgression::Empty => (
                     None,
-                    mailbox_take_soft_intervention(shared, provider, channel_id, None).await,
+                    mailbox_take_soft_intervention(shared, provider, channel_id, None, condition)
+                        .await,
                 ),
-                AutomaticQueueProgression::BlockedByCappedRetries => {
+                AutomaticQueueProgression::BlockedByCappedRetries
+                | AutomaticQueueProgression::BlockedByUnreadableRetryState => {
                     tracing::info!(
                         provider = provider.as_str(),
                         channel_id = channel_id.get(),
-                        "AUTOMATIC-QUEUE-GUARD: preserving capped busy-retry entries"
+                        "AUTOMATIC-QUEUE-GUARD: preserving capped or unreadable busy-retry entries"
                     );
                     return MailboxTakeNextSoftOutcome::default();
                 }
             };
+        if result.selection_stale {
+            super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                shared,
+                provider,
+                channel_id,
+                "automatic queue selection stale",
+            )
+            .await;
+            return result;
+        }
         let Some(intervention) = result.intervention.as_ref() else {
             if result.persistence_error.is_none()
                 && result.has_more
@@ -261,6 +361,7 @@ async fn mailbox_take_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
     primary_message_id: Option<MessageId>,
+    head_condition: TakeHeadCondition,
 ) -> MailboxTakeNextSoftOutcome {
     loop {
         // A closed actor's refusal spends no catch-up retry.
@@ -269,11 +370,19 @@ async fn mailbox_take_soft_intervention(
             .take_soft_matching_or_refused(
                 super::queue_persistence_context(shared, provider, channel_id),
                 primary_message_id,
+                head_condition.clone(),
             )
             .await
         else {
             return MailboxTakeNextSoftOutcome::default();
         };
+        if result.selection_stale {
+            return MailboxTakeNextSoftOutcome {
+                selection_stale: true,
+                has_more: result.has_more,
+                ..Default::default()
+            };
+        }
         let queue_len_after = result.queue_len_after;
         super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
         if let Some(error) = result.persistence_error {
@@ -284,6 +393,7 @@ async fn mailbox_take_soft_intervention(
                 "mailbox dequeue failed durable pending-queue persistence"
             );
             return MailboxTakeNextSoftOutcome {
+                selection_stale: false,
                 intervention: None,
                 dispatch_lease: None,
                 has_more: result.has_more,
@@ -298,6 +408,7 @@ async fn mailbox_take_soft_intervention(
         );
         let Some(intervention) = result.intervention else {
             return MailboxTakeNextSoftOutcome {
+                selection_stale: false,
                 intervention: None,
                 dispatch_lease: None,
                 has_more: result.has_more,
@@ -333,6 +444,7 @@ async fn mailbox_take_soft_intervention(
             drop(result.dispatch_lease);
             if primary_message_id.is_some() {
                 return MailboxTakeNextSoftOutcome {
+                    selection_stale: false,
                     intervention: None,
                     dispatch_lease: None,
                     has_more: result.has_more,
@@ -343,6 +455,7 @@ async fn mailbox_take_soft_intervention(
         }
 
         return MailboxTakeNextSoftOutcome {
+            selection_stale: false,
             intervention: Some(intervention),
             dispatch_lease: result.dispatch_lease,
             has_more: result.has_more,

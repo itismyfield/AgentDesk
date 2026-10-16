@@ -1,9 +1,9 @@
 #[path = "tui_followup/codex_observation.rs"]
 mod codex_observation;
 #[cfg(unix)]
-pub(super) use codex_observation::{
-    observe_codex_tui_rollout_state_for_cwd, observe_codex_tui_rollout_state_for_cwd_with_sessions,
-};
+pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
+#[cfg(all(test, unix))]
+pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
 
 use super::*;
 
@@ -663,7 +663,7 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
 /// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
 /// can defer the promotion BEFORE any user-visible teardown (turn-view
 /// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or with no
+/// claim). Off Herdr channels, a host-kept session (Herdr, unknown or conflicting host, or with no
 /// name or entry and no legacy row) also defers. Everything else — no tmux pane, remote profile,
 /// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
 /// dispatch path, whose existing post-claim busy branch owns the defer UX
@@ -686,6 +686,10 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
         .expect("hosted tui promote busy hook lock")
     {
         return busy;
+    }
+    // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
+    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+        return false;
     }
 
     let (tmux_session_name, remote_profile_named, current_path, session_id) = {
@@ -722,11 +726,6 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
     #[cfg(test)]
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
-        return false;
-    }
-    // The host guard keeps a retired Herdr row off tmux; on a Herdr channel its turn relaunches.
-    let retired = super::super::super::host_defer_gate::configured_herdr_retired;
-    if retired(shared, provider, channel_id.get(), &tmux_session_name).await {
         return false;
     }
     let host = super::super::super::host_defer_gate::channel_session_deferred;
@@ -774,27 +773,12 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     blocked
 }
 
-/// With no session name, the registered fallback name still lets a retired Herdr row promote;
-/// anything else keeps the nameless host check.
+/// With no session name, the nameless host check decides.
 async fn nameless_promote_blocked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    let fallback = crate::services::discord::adk_session::registered_channel_fallback_name;
-    let retired = super::super::super::host_defer_gate::configured_herdr_retired;
-    if provider.uses_managed_tmux_backend()
-        && let Some(name) = fallback(channel_id, provider)
-        && retired(
-            shared,
-            provider,
-            channel_id.get(),
-            &provider.build_tmux_session_name(&name),
-        )
-        .await
-    {
-        return false;
-    }
     let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
     nameless(shared, provider, channel_id.get()).await
 }
@@ -822,18 +806,10 @@ pub(in crate::services::discord) async fn defer_promoted_dispatch_if_hosted_tui_
     if !hosted_tui_promote_readiness_blocked(shared, provider, channel_id).await {
         return false;
     }
-    // #4888: once the aggregate busy-retry budget is spent, stop arming the
-    // fail-open backstop that keeps re-driving the same busy pane. The entry is
-    // still restored at the queue front below — only the automatic re-drive
-    // stops, and the watcher-idle re-drain still delivers it on real TUI idle.
-    let retry_identity = super::super::super::busy_followup_retry_store::resolve_identity(
-        provider,
-        channel_id.get(),
-        intervention.message_id.get(),
-        &intervention.source_message_ids,
-    );
-    let busy_retry_capped =
-        super::super::super::busy_followup_retry_store::state_is_capped(retry_identity.state);
+    // A parked input still goes back to the queue front, but no backstop re-drives it;
+    // automatic progression passes over it from then on.
+    use super::super::super::busy_followup_retry_store::{RetryClass, input_class};
+    let busy_retry_capped = input_class(provider, channel_id, intervention) == RetryClass::Parked;
     let restored = super::super::super::mailbox_restore_dequeued_head(
         shared,
         provider,

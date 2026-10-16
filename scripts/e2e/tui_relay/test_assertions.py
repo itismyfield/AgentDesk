@@ -1148,7 +1148,11 @@ class RunAssertionDispatch(unittest.TestCase):
             "status_panel_after_body": {"body_marker": "[BODY]"},
         }
         empty = _window(_relay_msg(1, "body [BODY]"))
-        self.run_assertion(spec, window=empty)
+        outcome = self.run_assertion(spec, window=empty, enabled_features=frozenset())
+        self.assertEqual(outcome["status"], "skipped")
+        self.assertIsNone(outcome["passed"])
+        with self.assertRaisesRegex(driver.HarnessEvidenceError, "feature evidence unavailable"):
+            self.run_assertion(spec, window=empty)
         with self.assertRaises(assertions.AssertionError):
             self.run_assertion(
                 spec,
@@ -1404,12 +1408,12 @@ class ScenarioFilterFailClosed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = root / "agentdesk.yaml"
-            agents = (("claude-pipe", "claude", "111"), ("claude-tui", "claude", "222"),
-                      ("codex-pipe", "codex", "444"),
-                      ("codex-tui", "codex", "555"))
+            agents = (("adk-claude-pipe-e2e", "claude", "111"), ("adk-claude-tui-2-e2e", "claude", "222"),
+                      ("adk-codex-pipe-e2e", "codex", "444"),
+                      ("adk-codex-tui-e2e", "codex", "555"))
             config.write_text("agents:\n" + "".join(
-                f"  - {{id: adk-{cell}-e2e, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
-                for cell, provider, channel in agents
+                f"  - {{id: {agent}, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
+                for agent, provider, channel in agents
             ), encoding="utf-8")
             output = root / "matrix"
             proc = subprocess.run(
@@ -1432,7 +1436,8 @@ class ScenarioFilterFailClosed(unittest.TestCase):
             self.assertFalse(row["ok"])
             self.assertTrue(row["execution_ok"])
             self.assertEqual(row["evidence_status"], "partial")
-            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run"), 0))
+            self.assertEqual(row["totals"], dict.fromkeys(("pass", "fail", "skipped", "not_applicable", "known_gap", "unexpected_pass", "dry_run",
+                                                        "executed", "dormant", "unevaluable", "skipped_assertions"), 0))
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
                          [("E-17", "pass", False)])
@@ -1670,11 +1675,11 @@ class E35CurrentRunContract(unittest.TestCase):
         self.assertEqual(scenario, original)
 
 
-class RetiredCellAdmission(unittest.TestCase):
-    def test_direct_cli_rejects_retired_cell_before_side_effects(self):
+class UnknownCellAdmission(unittest.TestCase):
+    def test_direct_cli_rejects_unknown_cell_before_side_effects(self):
         stderr = io.StringIO()
         with (
-            patch.object(sys, "argv", ["driver", "--cell", "claude-e", "--channel-id", "333"]),
+            patch.object(sys, "argv", ["driver", "--cell", "obsolete-cell", "--channel-id", "333"]),
             patch.object(driver, "load_scenarios") as scenarios,
             patch("pathlib.Path.mkdir") as mkdir,
             patch("pathlib.Path.write_text") as report,
@@ -1687,12 +1692,12 @@ class RetiredCellAdmission(unittest.TestCase):
             with self.assertRaises(SystemExit) as error:
                 driver.main()
         self.assertEqual(error.exception.code, 2)
-        self.assertIn("invalid choice: 'claude-e'", stderr.getvalue())
+        self.assertIn("invalid choice: 'obsolete-cell'", stderr.getvalue())
         for side_effect in (scenarios, mkdir, report, client, child, acquire, run):
             side_effect.assert_not_called()
 
-    def test_matrix_cli_rejects_retired_cell_before_side_effects(self):
-        for cells in ("claude-e", "claude-tui,claude-e"):
+    def test_matrix_cli_rejects_unknown_cell_before_side_effects(self):
+        for cells in ("obsolete-cell", "claude-tui,obsolete-cell"):
             with (
                 self.subTest(cells=cells),
                 patch.object(sys, "argv", ["matrix", "--cells", cells, "--scenarios",
@@ -1706,7 +1711,7 @@ class RetiredCellAdmission(unittest.TestCase):
                 patch.object(matrix.subprocess, "run") as child,
                 patch.object(matrix, "run_cell") as run,
             ):
-                with self.assertRaisesRegex(ValueError, "claude-e"):
+                with self.assertRaisesRegex(ValueError, "obsolete-cell"):
                     matrix.main()
             for side_effect in (config, cross, restart, mkdir, report, client, child, run):
                 side_effect.assert_not_called()
@@ -1851,31 +1856,39 @@ class RequiredCompletionWait(unittest.TestCase):
         self.assertEqual(len(requests), 5)
         self.assertNotIn("completion_rechecks", record)
 
-    def test_panel_move_within_follow_window_passes_and_later_move_fails(self):
-        for move_at, passed in ((30, True), (36, False)):
-            with self.subTest(move_at=move_at):
-                record, error, _, _ = self._run(move_at=move_at)
-                self.assertEqual(error is None, passed, str(error))
-                trace = record["completion_rechecks"][0]
-                self.assertEqual(trace["deadline_at"], 100 + driver.COMPLETION_MOVE_WAIT_S)
-                self.assertEqual(trace["outcome"], "PASS" if passed else "EXHAUSTED")
-                if not passed:
-                    self.assertIn("completion chrome appeared before body", str(error))
-                    self.assertEqual(trace["elapsed_s"], driver.COMPLETION_MOVE_WAIT_S)
+    def test_completion_above_body_never_seen_running_fails_without_waiting_for_a_move(self):
+        record, error, requests, sleeps = self._run(move_at=30)
+        self.assertIn("not seen edited in place", str(error))
+        self.assertNotIn("completion_rechecks", record)
+        self.assertEqual((len(requests), sleeps), (4, [1.0]))
 
-    def test_pre_body_completion_fails_at_move_bound_and_missing_body_without_wait(self):
-        for arrival in (0, 4.649):
-            with self.subTest(arrival=arrival):
-                record, error, requests, _ = self._run(arrival=arrival, before=True)
-                self.assertIn("completion chrome appeared before body", str(error))
-                self.assertEqual(record["completion_rechecks"][0],
-                                 {"refetches": 16, "deadline_at": 135, "elapsed_s": 35, "outcome": "EXHAUSTED"})
-                self.assertEqual(len(requests), 20)
+    def test_pre_body_completion_passes_only_edited_in_place_and_missing_body_without_wait(self):
+        record, error, requests, _ = self._run(arrival=0, before=True)
+        self.assertIn("not seen edited in place", str(error))
+        self.assertNotIn("completion_rechecks", record)
+        self.assertEqual(len(requests), 4)
+        record, error, requests, _ = self._run(arrival=4.649, before=True)
+        self.assertIsNone(error, str(error))
+        self.assertEqual(record["completion_rechecks"][0],
+                         {"refetches": 2, "deadline_at": 110, "elapsed_s": 5, "outcome": "PASS"})
         callback = MagicMock()
         with self.assertRaisesRegex(assertions.AssertionError, "body marker.*not found"):
             driver.run_assertion({"completion_chrome_after_body": {"body_marker": "missing", "required": True}},
                                  window=assertions.Window("100"), record={}, pending_refetch=callback)
         callback.assert_not_called()
+
+    def test_panel_completed_in_place_refuses_a_second_or_deleted_panel(self):
+        spec = {"completion_chrome_after_body": {"body_marker": self.MARKER, "required": True}}
+        running = _raw_bot_msg(202, "-# 🔧 마지막 도구 (아직 없음)", "2026-01-01T00:00:00Z")
+        body = _raw_bot_msg(201, self.MARKER, "2026-01-01T00:00:01Z")
+        done = dict(running, content="-# ✅ 완료")
+        driver.run_assertion(spec, window=_window(running, body, done), record={})
+        second = _window(running, body, done, _raw_bot_msg(203, "-# ✅ 완료", "2026-01-01T00:00:02Z"))
+        deleted = _window(_raw_bot_msg(199, "Processing...", "2026-01-01T00:00:00Z"), running, body, done)
+        deleted.deleted_ids.add("199")
+        for window in (second, deleted):
+            with self.assertRaisesRegex(assertions.AssertionError, "posted again or deleted"):
+                driver.run_assertion(spec, window=window, record={})
 
     def test_recheck_invalidates_prior_count_and_body_guards(self):
         for mutation, owner, reason in (("raw_count", "raw_message_count_between_markers", "raw message count 38 outside"),
@@ -1974,13 +1987,13 @@ if __name__ == "__main__":
 
 class HerdrHealthAssertions(unittest.TestCase):
     def fixture(self):
-        return {'herdr': {'admission': 'open', 'restart_required': False,
+        return {'status': 'healthy', 'fully_recovered': True, 'degraded_reasons': [], 'herdr': {'admission': 'open', 'restart_required': False,
                 'configured_channels': ['41'], 'endpoints': {'test': {'local': True}},
                 'input_holds': 0, 'reconnect': {'channels': 1, 'published': 1,
                 'withheld': 0, 'unknown': 0, 'pending': 0}}}
 
     def row(self):
-        return {'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
+        return {'other_input_holds': [], 'executions': [{'channel': '41', 'provider': 'claude', 'state': 'bound',
                  'pane': 'provider_running', 'launch_evidence': 'recorded', 'nonce': 'one', 'input_hold': None}]}
 
     def test_ready_and_clean_and_published(self):
@@ -2038,12 +2051,12 @@ class HerdrHealthAssertions(unittest.TestCase):
 
     def test_observe_uses_only_health_and_readonly_status(self):
         from tui_relay import herdr
-        args = Namespace(base_url='http://unused.test', channel_id='41', cell='claude-herdr',
+        args = Namespace(base_url='http://127.0.0.1:8797', channel_id='41', cell='claude-herdr',
                          herdr_endpoint='test', herdr_status_bin='/test/agentdesk')
         with patch.object(driver, '_read_api_json', return_value=(200, self.fixture())) as health, \
              patch.object(herdr.subprocess, 'run', return_value=Namespace(stdout=json.dumps(self.row()))) as status:
-            result = herdr.observe(driver, args, clean=True, reconnected=True)
-        health.assert_called_once_with(args.base_url, '/api/health', timeout=5)
+            result = herdr.observe(driver, args, reconnected=True)
+        health.assert_called_once_with(args.base_url, '/api/health/detail', timeout=5)
         status.assert_called_once_with(['/test/agentdesk', 'herdr', 'status'], capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual(result['row']['nonce'], 'one')
 

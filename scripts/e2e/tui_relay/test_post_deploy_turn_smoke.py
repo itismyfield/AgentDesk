@@ -7,6 +7,9 @@ report row plus a recorded-shape dcserver log feed the production judge.
 
 from __future__ import annotations
 
+import copy
+import json
+import tempfile
 import itertools
 import sys
 import unittest
@@ -42,10 +45,12 @@ class LiveShapedDiscord:
         self.after_clear = after_clear
         self.ids = itertools.count(1_000)
         self.messages: list[dict] = []
+        self.channel_id = None
 
     def _post(self, content: str, *, author: str) -> dict:
         message = {
             "id": str(next(self.ids)),
+            "channel_id": self.channel_id,
             "content": content,
             "type": 0,
             "author": {"id": author, "bot": True},
@@ -53,7 +58,8 @@ class LiveShapedDiscord:
         self.messages.append(message)
         return message
 
-    def send_control(self, channel_id, content):  # noqa: ARG002
+    def send_control(self, channel_id, content):
+        self.channel_id = str(channel_id)
         return self._post(content, author=assertions.OUR_BOT_ID)
 
     def send(self, channel_id, content):  # noqa: ARG002
@@ -75,7 +81,7 @@ class LiveShapedDiscord:
         floor = int(after_id or 0)
         return [dict(m) for m in self.messages if int(m["id"]) > floor][:limit]
 
-    def wait_for_message(self, channel_id, *, predicate, after_id, timeout_s, debug_label):  # noqa: ARG002
+    def wait_for_message(self, channel_id, *, predicate, after_id, timeout_s, debug_label=None):  # noqa: ARG002
         observed = self.fetch_messages(channel_id, after_id=after_id)
         return next((m for m in observed if predicate(m)), None), observed
 
@@ -213,6 +219,287 @@ class TurnSmokeFromCollectedEvidence(unittest.TestCase):
         passed, detail = verdict(unobserved, "E-51", "codex-tui", "turns-clean.dcserver.log")
         self.assertFalse(passed)
         self.assertIn("AFTER_CLEAR delivery count unobserved", detail)
+
+
+class HerdrTurnSmoke(unittest.TestCase):
+    def evidence(self):
+        return {"surface": "GET /api/health/detail", "status_surface": "agentdesk herdr status",
+                "validated": True, "current_input_holds": 0, "herdr": {"input_holds": 0},
+                "row": dict(channel="41", provider="claude", state="bound", nonce="same",
+                            pane="provider_running", launch_evidence="recorded", input_hold=None)}
+
+    def collect(self, after_clear="deliver"):
+        scenario = next(s for s in driver.load_scenarios(SCENARIOS, cell="claude-herdr") if s["id"] == "E-50")
+        args = Namespace(cell="claude-herdr", channel_id="41", base_url="http://127.0.0.1:8797",
+                         dry_run=False, hard_reset_session_each=False, reset_before_each=False,
+                         allow_destructive=False, final_refetches=1)
+        with patch.object(driver.herdr, "observe", return_value=self.evidence()), patch.object(driver.herdr.time, "sleep"):
+            return driver.run_scenario(scenario, args=args, client=LiveShapedDiscord(after_clear=after_clear), run_id=RUN_ID)
+
+    def judge(self, result):
+        return turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "cell": "claude-herdr", "scenarios": [result]},
+                                scenario_id="E-50", markers=turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID),
+                                log_counts=None, driver_rc=0)
+
+    def test_herdr_preflight_never_reads_legacy_queue_or_tmux(self):
+        with patch.object(driver, "_read_health_detail", side_effect=AssertionError("legacy detail")), \
+             patch.object(driver, "_runtime_queue_violations", side_effect=AssertionError("legacy queue")), \
+             patch.object(driver, "cell_session_name", side_effect=AssertionError("tmux")), \
+             patch.object(driver.herdr, "observe", return_value=self.evidence()) as observe:
+            self.assertEqual(turn_smoke.preflight_busy_reasons(base_url="http://127.0.0.1:8797", cell="claude-herdr",
+                             channel_id="41", herdr_endpoint="test", herdr_status_bin="/test/agentdesk"), [])
+        args = observe.call_args.args[1]
+        self.assertEqual((args.herdr_endpoint, args.herdr_status_bin), ("test", "/test/agentdesk"))
+        self.assertTrue(observe.call_args.kwargs["cold"])
+
+    def test_herdr_delivery_counts_and_missing_observations_fail_closed(self):
+        for behavior, expected in (("deliver", True), ("withhold", False), ("duplicate", False)):
+            result = self.collect(behavior)
+            passed, detail = self.judge(result)
+            self.assertEqual(passed, expected, detail)
+        result = self.collect()
+        result.pop("herdr_observations")
+        self.assertFalse(self.judge(result)[0])
+        for label in ("T1", "T2", "AFTER_CLEAR"):
+            for hits in (0, 2, -1, True):
+                result = self.collect()
+                result["marker_counts"][f"[E2E:E50:{RUN_ID}:{label}]"] = hits
+                self.assertFalse(self.judge(result)[0])
+
+    def test_herdr_judge_requires_two_complete_observations_and_valid_final_row(self):
+        evidence = self.evidence()
+        cases = [("one", lambda obs: obs[:1], "observations missing"),
+                 ("final row", lambda obs: [*obs[:-1], {**evidence, "row": {**evidence["row"], "provider": "codex"}}],
+                  "not a verified running execution")]
+        for key, value in (("surface", "GET /api/health"), ("validated", False), ("status_surface", "tmux"),
+                           ("current_input_holds", True), ("current_input_holds", 1)):
+            cases.append((key, lambda obs, k=key, v=value: [{**obs[0], k: v}, *obs[1:]], "evidence incomplete"))
+        for name, change, reason in cases:
+            with self.subTest(name):
+                result = self.collect()
+                result["herdr_observations"] = change(result["herdr_observations"])
+                passed, detail = self.judge(result)
+                self.assertFalse(passed)
+                self.assertRegex(detail, f"Herdr observation unavailable: [^;]*{reason}")
+
+    def test_herdr_judge_requires_t1_t2_after_clear_label_set(self):
+        markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        passed, detail = turn_smoke.judge(report={"run_id": RUN_ID, "channel_id": "41", "scenarios": [self.collect()]},
+                                          scenario_id="E-50", markers=markers[:2], log_counts=None, driver_rc=0,
+                                          cell="claude-herdr")
+        self.assertFalse(passed)
+        self.assertIn("requires T1, T2 and AFTER_CLEAR", detail)
+
+    def test_herdr_judge_cli_ignores_tmux_log_surface(self):
+        report = {"run_id": RUN_ID, "scenarios": [self.collect()]}
+        with patch.object(turn_smoke, "_load_report", return_value=report), \
+             patch.object(driver, "cell_session_name", side_effect=ValueError("no tmux")), \
+             patch.object(turn_smoke, "open", side_effect=AssertionError("legacy log"), create=True):
+            self.assertEqual(turn_smoke.main(["judge", "--report", "/unused", "--scenarios", str(SCENARIOS),
+                             "--scenario", "E-50", "--cell", "claude-herdr", "--channel-id", "41",
+                             "--log-excerpt", "/unused", "--driver-rc", "0"]), 0)
+
+
+class ConfiguredHerdrClassification(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = Path(self.tmp.name) / "fixture.yaml"
+        self.config.write_text("agents:\n  - id: adk-claude-tui-2-e2e\n    channels: {claude: {id: '222'}}\nsession_hosts:\n  herdr:\n    endpoints: {local: {}}\n    channels: {222: local}\n")
+        self.markers = turn_smoke.expected_markers(SCENARIOS, "E-50", RUN_ID)
+        self.logs = {"cell_lines": 1, **dict.fromkeys(turn_smoke.LOG_COUNTERS, 0)}
+
+    def row(self, scenario="E-1"):
+        refusal = "세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)"
+        row = {"id": scenario, "run_id": RUN_ID, "cell": "claude-tui", "channel_id": "222",
+                "status": "fail", "reason": "RuntimeError: turn/start HTTP 422: " + json.dumps(
+                    {"status": "invalid_target", "error": "herdr turn refused: executor_not_wired"}),
+                **({"reason": "assertion: text !clear refused by the server: " + refusal,
+                    "clear_refusal": {"stage": "clear_ack", "after_id": "100", "reply": {
+                        "id": "101", "channel_id": "222", "author": {"bot": True}, "content": refusal}},
+                    "marker_counts": {m: (0 if m.endswith(":AFTER_CLEAR]") else 1) for m in self.markers}}
+                   if scenario == "E-50" else {})}
+        row["assertions"] = []
+        row["failure_attribution"] = {"source": "exception" if scenario == "E-1" else "assertion",
+                                    "raw_reason": row["reason"].removeprefix("assertion: ")}
+        return row
+
+    def classify(self, row, **overrides):
+        report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row],
+                  "coverage_class_violations": []}
+        args = dict(report=report, scenario_id=row["id"], cell="claude-tui", channel_id="222",
+                    run_id=RUN_ID, config_path=self.config, driver_rc=1, markers=self.markers,
+                    log_counts=self.logs)
+        args.update(overrides)
+        return turn_smoke.classify(**args)["classification"]
+
+    def test_exact_e1_only(self):
+        row = self.row()
+        self.assertEqual(self.classify(row), "KNOWN_GAP")
+        for reason in (row["reason"].replace("422", "409"), row["reason"].replace("422", "503"),
+                       row["reason"].replace("executor_not_wired", "executor_not_wired extra"),
+                       row["reason"].replace("invalid_target", "busy"), "RuntimeError: turn/start HTTP 422: broken"):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.classify({**row, "reason": reason, "failure_attribution": {
+                    **row["failure_attribution"], "raw_reason": reason}}), "FAIL")
+        self.assertEqual(self.classify({**row, "teardown_error": "failed"}), "FAIL")
+        self.assertEqual(self.classify(row, driver_rc=0), "FAIL")
+
+    def test_config_and_run_binding_fail_closed(self):
+        row = self.row()
+        for key in ("cell", "channel_id", "run_id"):
+            self.assertEqual(self.classify({**row, key: "other"}), "FAIL")
+        self.assertEqual(self.classify(row, report=None), "FAIL")
+        self.assertEqual(self.classify(row, report={"cell": "claude-tui", "channel_id": "222",
+                        "run_id": RUN_ID, "scenarios": [row, row]}), "FAIL")
+        self.config.write_text(self.config.read_text().replace("channels: {222: local}", "channels: {333: local}"))
+        self.assertEqual(self.classify(row), "FAIL")
+        self.config.write_text("[")
+        self.assertEqual(self.classify(row), "FAIL")
+        self.config.unlink()
+        self.assertEqual(self.classify(row), "FAIL")
+
+    def test_e50_exact_refusal_and_boundaries(self):
+        row = self.row("E-50")
+        self.assertEqual(self.classify(row), "KNOWN_GAP")
+        for number in ("1", "99999999999999999999"):
+            changed = copy.deepcopy(row)
+            changed["reason"] = changed["reason"].replace("(59)", f"({number})")
+            changed["clear_refusal"]["reply"]["content"] = changed["clear_refusal"]["reply"]["content"].replace("(59)", f"({number})")
+            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
+            self.assertEqual(self.classify(changed), "KNOWN_GAP")
+        for replacement in ("rotation_unread", "turn_in_progress", "rotation_unsettled(0)",
+                            "rotation_unsettled(-1)", "rotation_unsettled(1) extra"):
+            changed = copy.deepcopy(row)
+            for target in (changed, changed["clear_refusal"]["reply"]):
+                key = "reason" if target is changed else "content"
+                target[key] = target[key].replace("rotation_unsettled(59)", replacement)
+            changed["failure_attribution"]["raw_reason"] = changed["reason"].removeprefix("assertion: ")
+            self.assertEqual(self.classify(changed), "FAIL")
+        for key, value in (("id", "99"), ("id", "100"), ("channel_id", "333"), ("author", {"bot": False}),
+                           ("content", "herdr clear refused: rotation_unsettled(59)")):
+            changed = copy.deepcopy(row)
+            changed["clear_refusal"]["reply"][key] = value
+            self.assertEqual(self.classify(changed), "FAIL")
+        changed = copy.deepcopy(row)
+        changed["clear_refusal"]["after_id"] = ""
+        self.assertEqual(self.classify(changed), "FAIL")
+        for marker in self.markers:
+            for hits in (0, 2):
+                if marker.endswith(":AFTER_CLEAR]") and hits == 0:
+                    continue
+                self.assertEqual(self.classify({**row, "marker_counts": {**row["marker_counts"], marker: hits}}), "FAIL")
+        self.assertEqual(self.classify(row, log_counts=None), "FAIL")
+        self.assertEqual(self.classify(row, log_counts={**self.logs, "warm_followup_kill": 1}), "FAIL")
+        self.assertEqual(self.classify({**row, "wait_timeouts": [{}]}), "FAIL")
+
+    def test_full_judge_required_for_unexpected_pass(self):
+        row = {**self.row("E-50"), "status": "pass", "reason": None,
+               "marker_counts": dict.fromkeys(self.markers, 1)}
+        row.pop("clear_refusal")
+        self.assertEqual(self.classify(row, driver_rc=0), "UNEXPECTED_PASS")
+        self.assertEqual(self.classify(row, driver_rc=0, log_counts=None), "FAIL")
+        self.config.write_text(self.config.read_text().replace("channels: {222: local}", "channels: {333: local}"))
+        self.assertEqual(self.classify(row, driver_rc=0), "PASS")
+
+    def test_driver_collects_current_clear_refusal(self):
+        original = LiveShapedDiscord.send
+        def refusing(client, channel, content):
+            if not content.startswith("!clear"):
+                return original(client, channel, content)
+            sent = client._post(content, author=assertions.OUR_BOT_ID)
+            client._post("세션을 초기화하지 못했어요: herdr clear refused: rotation_unsettled(59)", author=PROVIDER_BOT)
+            return sent
+        with patch.object(LiveShapedDiscord, "send", refusing):
+            result = run_live_shaped("E-50", "claude-tui")
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["clear_refusal"]["stage"], "clear_ack")
+        self.assertNotIn("wait_timeouts", result)
+        channel = CHANNELS["claude-tui"]
+        self.config.write_text(self.config.read_text().replace("222", channel))
+        self.assertEqual(self.classify(result, channel_id=channel, report={"run_id": RUN_ID,
+                         "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}), "KNOWN_GAP")
+        for variant in ("old", "foreign", "human", "unknown_boundary"):
+            def bad_reply(client, channel, content):
+                sent = refusing(client, channel, content)
+                if content.startswith("!clear"):
+                    reply = client.messages[-1]
+                    if variant == "old":
+                        reply["id"] = sent["id"]
+                    elif variant == "foreign":
+                        reply["channel_id"] = "other"
+                    elif variant == "human":
+                        reply["author"]["bot"] = False
+                    else:
+                        return {}
+                return sent
+            with self.subTest(variant=variant), patch.object(LiveShapedDiscord, "send", bad_reply):
+                rejected = run_live_shaped("E-50", "claude-tui")
+                self.assertEqual(rejected["status"], "fail")
+                self.assertNotIn("clear_refusal", rejected)
+
+    def test_e1_driver_failure_is_classified_without_changing_report(self):
+        reason = "turn/start HTTP 422: " + json.dumps({"status": "invalid_target",
+                  "error": "herdr turn refused: executor_not_wired"})
+        with patch.object(LiveShapedDiscord, "send_prompt", create=True, side_effect=RuntimeError(reason)):
+            result = run_live_shaped("E-1", "claude-tui")
+        self.assertEqual(result["failure_attribution"]["source"], "exception")
+        before = copy.deepcopy(result)
+        channel = CHANNELS["claude-tui"]
+        self.config.write_text(self.config.read_text().replace("222", channel))
+        report = {"run_id": RUN_ID, "cell": "claude-tui", "channel_id": channel, "scenarios": [result], "coverage_class_violations": []}
+        self.assertEqual(self.classify(result, channel_id=channel, report=report), "KNOWN_GAP")
+        self.assertEqual(result, before)
+        for evidence in ({"teardown_error": "failed"}, {"assertions": [{"passed": False}]},
+                         {"failure_attribution": {"source": "harness", "raw_reason": result["reason"]}}):
+            changed = {**result, **evidence}
+            self.assertEqual(self.classify(changed, channel_id=channel,
+                             report={**report, "scenarios": [changed]}), "FAIL")
+
+    def test_missing_reply_channel_is_not_inferred(self):
+        row = self.row("E-50")
+        self.assertEqual(self.classify(row), "KNOWN_GAP")
+        for value in (None, "", "333"):
+            changed = copy.deepcopy(row)
+            changed["clear_refusal"]["reply"]["channel_id"] = value
+            self.assertEqual(self.classify(changed), "FAIL")
+        del row["clear_refusal"]["reply"]["channel_id"]
+        self.assertEqual(self.classify(row), "FAIL")
+
+    def test_missing_failure_attribution_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            self.assertEqual(self.classify(row), "KNOWN_GAP")
+            for value in (None, [], "", {}, {"source": "harness", "raw_reason": row["failure_attribution"]["raw_reason"]},
+                          {**row["failure_attribution"], "raw_reason": "other"}):
+                with self.subTest(scenario=scenario, attribution=value):
+                    self.assertEqual(self.classify({**row, "failure_attribution": value}), "FAIL")
+            del row["failure_attribution"]
+            with self.subTest(scenario=scenario, missing="failure_attribution"):
+                self.assertEqual(self.classify(row), "FAIL")
+
+    def test_missing_coverage_class_violations_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            report = {"cell": "claude-tui", "channel_id": "222", "run_id": RUN_ID, "scenarios": [row]}
+            self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": []}), "KNOWN_GAP")
+            for value in (None, {}, "", 0, False, ["regression"]):
+                with self.subTest(scenario=scenario, violations=value):
+                    self.assertEqual(self.classify(row, report={**report, "coverage_class_violations": value}), "FAIL")
+            with self.subTest(scenario=scenario, missing="coverage_class_violations"):
+                self.assertEqual(self.classify(row, report=report), "FAIL")
+
+    def test_missing_assertions_fails_closed(self):
+        for scenario in ("E-1", "E-50"):
+            row = self.row(scenario)
+            self.assertEqual(self.classify(row), "KNOWN_GAP")
+            changed = copy.deepcopy(row)
+            del changed["assertions"]
+            with self.subTest(scenario=scenario, missing="assertions"):
+                self.assertEqual(self.classify(changed), "FAIL")
+            for value in (None, {}, "", 0):
+                with self.subTest(scenario=scenario, assertions=value):
+                    self.assertEqual(self.classify({**row, "assertions": value}), "FAIL")
 
 
 if __name__ == "__main__":

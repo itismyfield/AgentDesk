@@ -31,6 +31,7 @@ fn crashed_mid_post(harness: &Harness) {
     let mut channel = harness.channel();
     let anchor_id = channel.ledger().anchor();
     let prepared = LedgerEntry::Prepared {
+        local_retry: None,
         serial: 0,
         unit_key: unit("c0"),
         piece_index: 0,
@@ -62,7 +63,7 @@ fn spawn_owing(
         owing,
     );
     let config = WriterConfig { enabled: true };
-    let task = spawn_projecting(&config, writer, provider, bindings, watches);
+    let task = spawn_projecting(&config, None, writer, provider, bindings, watches);
     (stop, task.expect("enabled"), owed, demand)
 }
 
@@ -224,4 +225,35 @@ async fn a_post_counts_as_running_from_its_start_until_its_request_is_gone() {
     release.send(()).unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(posts_in_flight(CHANNEL), Some(0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_retry_pending_budget_is_owed_even_with_no_ordinary_work_or_open_prepared() {
+    use crate::services::tui_o::store::ledger::LocalRetryMark;
+    let (harness, _, _) = switched_over(b"");
+    let _hosts = herdr_configured();
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    let store = writer.store();
+    store
+        .append_ledger(LedgerEntry::Prepared {
+            serial: 0,
+            unit_key: unit("root"),
+            piece_index: 0,
+            payload: "durable".into(),
+            anchor_id: 100,
+            epoch: 1,
+            local_retry: Some(LocalRetryMark::Budget),
+        })
+        .unwrap();
+    store
+        .append_ledger(LedgerEntry::NotFound { serial: 0 })
+        .unwrap();
+    let bindings = startup_log(&mut writer);
+    let (stop, task, owed, demand) = spawn_owing(writer, bindings, ShadowProvider::Claude);
+    let _wanting = demand.want();
+    polls(3).await;
+    assert_eq!(*owed.borrow(), Some(owes(1, 0, 0, 0)));
+    assert!(harness.port.posts().is_empty());
+    halt(stop, task).await;
 }

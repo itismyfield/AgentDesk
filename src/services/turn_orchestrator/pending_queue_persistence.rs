@@ -426,6 +426,20 @@ pub(super) fn pending_queue_item_from_intervention(
     }
 }
 
+/// Lets a metadata-free test write replace only a missing file or a legacy array.
+#[cfg(test)]
+fn refuse_metadata_loss(path: &Path) -> Result<(), String> {
+    match fs::read_to_string(path) {
+        Ok(content) if !matches!(parse_snapshot(&content), Ok((_, None))) => {
+            Err(format!("refusing to overwrite {}", path.display()))
+        }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("read {}: {error}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
 #[cfg(test)]
@@ -437,6 +451,10 @@ pub(crate) fn save_channel_queue(
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
     crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
+        // This writer carries no metadata, so it must not replace or remove a V1 snapshot.
+        if let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) {
+            refuse_metadata_loss(&path)?;
+        }
         save_channel_queue_locked(
             provider,
             token_hash,
@@ -876,6 +894,7 @@ pub(crate) fn load_pending_queues(
     HashMap<ChannelId, ChannelId>,
 ) {
     let loaded = load_pending_queues_checked(provider, token_hash);
+    queued_recovery::report_scan_errors(provider, &loaded.scan_errors);
     if !loaded.quarantined.is_empty() {
         tracing::warn!(
             provider = provider.as_str(),
@@ -894,6 +913,7 @@ pub(crate) struct PendingQueueRecovery {
     pub(crate) queues: HashMap<ChannelId, Vec<Intervention>>,
     pub(crate) overrides: HashMap<ChannelId, ChannelId>,
     pub(crate) quarantined: Vec<(ChannelId, String)>,
+    pub(crate) scan_errors: Vec<String>,
 }
 
 pub(crate) fn load_pending_dispatch_markers(
@@ -1029,7 +1049,7 @@ pub(super) mod save_fault {
             .push(channel_id);
     }
 
-    pub(super) fn take(channel_id: ChannelId) -> bool {
+    pub(in crate::services::turn_orchestrator) fn take(channel_id: ChannelId) -> bool {
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         let index = armed.iter().position(|armed| *armed == channel_id);
         index.map(|index| armed.swap_remove(index)).is_some()

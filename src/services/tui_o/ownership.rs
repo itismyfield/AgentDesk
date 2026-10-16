@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, TryLockError, TryLockResult};
 
 use tokio::sync::watch;
 
@@ -56,6 +56,17 @@ impl OwnershipGate {
 
     pub fn current(&self) -> GatewayOwnership {
         self.locked().ownership
+    }
+
+    /// [`Self::current`] without waiting: a held lock is `WouldBlock`, a poisoned one `Poisoned`.
+    pub fn try_current(&self) -> TryLockResult<GatewayOwnership> {
+        match self.state.try_lock() {
+            Ok(state) => Ok(state.ownership),
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+            Err(TryLockError::Poisoned(state)) => Err(TryLockError::Poisoned(PoisonError::new(
+                state.into_inner().ownership,
+            ))),
+        }
     }
 
     #[cfg(test)]
@@ -114,6 +125,20 @@ impl OwnershipGate {
     /// HTTP client without awaiting, so a transition never waits on a response.
     pub fn admit<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
         let state = self.locked();
+        match state.ownership {
+            GatewayOwnership::Owned { epoch } => Some(hand_off(epoch)),
+            GatewayOwnership::Unknown | GatewayOwnership::Lost => None,
+        }
+    }
+
+    /// Rejects contention instead of waiting while the caller holds another admission fence.
+    #[cfg(all(test, unix))]
+    pub(crate) fn try_admit<T>(&self, hand_off: impl FnOnce(u64) -> T) -> Option<T> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
         match state.ownership {
             GatewayOwnership::Owned { epoch } => Some(hand_off(epoch)),
             GatewayOwnership::Unknown | GatewayOwnership::Lost => None,

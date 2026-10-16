@@ -59,14 +59,8 @@ mod claude_original_tests;
 use absence_state::{WatcherAbsenceKey, WatcherAbsenceState, respawn_backoff_secs};
 mod idle_relay_absence;
 mod live_bridge_guard;
-#[cfg(unix)]
-mod o_only_retry;
 pub(super) use live_bridge_guard::complete_force_clean_watcher_recovery;
 pub(in crate::services::discord) use live_bridge_guard::retry_pending_watcher_respawn;
-#[cfg(unix)]
-pub(in crate::services::discord) use o_only_retry::{
-    record_retired_o_install_outcome, retired_o_install_due,
-};
 
 use idle_relay_absence::observe_routable_unwatched_tui_sessions;
 
@@ -970,6 +964,7 @@ mod tests {
         mailbox_active: Option<u64>,
     ) -> WatcherStateSnapshot {
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: false,
             tmux_session: tmux_session.map(str::to_string),
@@ -1154,7 +1149,6 @@ mod tests {
         let _env = EnvRootGuard(std::env::var_os("AGENTDESK_ROOT_DIR"));
         let tmp = tempfile::tempdir().expect("temp runtime root");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", tmp.path()) };
-
         let provider = ProviderKind::Codex;
         let channel = ChannelId::new(4_140_002);
         let tmux_session = "AgentDesk-codex-stale-generation-floor";
@@ -2567,34 +2561,6 @@ mod tests {
 #[cfg(test)]
 static RESPAWN_TEST_COUNTS: LazyLock<dashmap::DashMap<u64, [usize; 2]>> =
     LazyLock::new(dashmap::DashMap::new);
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) fn n4d2_absence(
-    provider: &ProviderKind,
-    channel: ChannelId,
-) -> Option<(i64, u32, i64, Option<discord::tmux::OOnlyInstallReason>)> {
-    WATCHER_ABSENCE
-        .get(&WatcherAbsenceKey::new(provider, channel))
-        .map(|state| {
-            (
-                state.first_seen_unix_secs,
-                state.failed_attempts,
-                state.next_attempt_unix_secs,
-                state.o_install_reason,
-            )
-        })
-}
-
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) fn n4d2_arm_absence(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    now: i64,
-) {
-    WATCHER_ABSENCE
-        .entry(WatcherAbsenceKey::new(provider, channel))
-        .or_insert_with(|| WatcherAbsenceState::newly_absent(now));
-}
 
 #[cfg(test)]
 pub(in crate::services::discord) fn seed_live_bridge_respawn_test(channel: ChannelId) {

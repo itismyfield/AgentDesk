@@ -1,9 +1,9 @@
 use super::codex_adoption_runtime::boot::{BootRole, record_role};
 use super::*;
+#[cfg(test)]
+use crate::services::cluster::channel_home_boot::restore_mutant;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
-#[cfg(test)]
-pub mod boot_retirement;
 #[cfg(test)]
 mod channel_homes_tests;
 mod deferred_restart;
@@ -45,12 +45,15 @@ mod spawns;
 mod startup_doctor;
 mod voice;
 
-use self::framework_setup::{run_bot_build_slash_commands, run_bot_framework_setup};
+pub(in crate::services::discord) use self::framework_setup::run_bot_build_slash_commands;
+use self::framework_setup::run_bot_framework_setup;
 use self::gateway_handback_breaker::GatewayHandbackBreaker;
 use self::gateway_lease::{
     GatewayLeaseOutcome, run_bot_acquire_gateway_lease, run_bot_spawn_gateway_lease_keepalive,
 };
 use self::gateway_lease_recovery::spawn_standby_gateway_retry;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use self::gateway_runtime::run_bot_framework_options;
 use self::gateway_runtime::run_bot_start_gateway_runtime;
 use self::intake::run_bot_maybe_spawn_intake_worker;
 #[allow(unused_imports)]
@@ -439,7 +442,16 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Registered before the writer host reads the registry for each channel's gate.
     start_channel_homes(&shared, &provider, HomeRole::Gateway, &homes).await;
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
-    crate::services::tui_o::shadow_host::spawn_if_enabled(boot_config.tui_o.as_ref());
+    if boot_config
+        .tui_o
+        .as_ref()
+        .is_some_and(|config| config.shadow.enabled)
+    {
+        static SHADOW_REMOVAL_WARNING: std::sync::Once = std::sync::Once::new();
+        SHADOW_REMOVAL_WARNING.call_once(|| {
+            tracing::warn!("shadow observer was removed; setting ignored");
+        });
+    }
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
 
@@ -474,19 +486,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // and run_bot calls them in the same order with the same threaded state.
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
 
-/// Register a standby provider runtime and settle its reconcile obligation.
-///
-/// The standby branch returns before `recovery_flush` is spawned, so nothing on
-/// this path ever reached `mark_reconcile_complete`: the provider stayed
-/// `reconcile_in_progress` for the life of the process and kept blocking deploys
-/// to a standby-only node (#5449). A standby runtime still executes complete
-/// turns through the intake worker, which is the same shape as the utility-bot
-/// branch of `recovery_flush` — it marks the reconcile done precisely because it
-/// skipped recovery.
-///
-/// This does not leak an unreconciled runtime into a gateway: standby promotion
-/// runs through `attempt_clean_standby_promotion`, which issues a fenced
-/// restart, so the promoted process starts over with `reconcile_done == false`.
+/// Registers a standby and settles the reconcile it skips, so deploys are not held; promotion is a
+/// fenced restart. Its delegated homes restore per channel and never read this as restored.
 async fn register_standby_and_settle_reconcile(
     health_registry: &Arc<health::HealthRegistry>,
     provider: &ProviderKind,
@@ -507,7 +508,7 @@ enum HomeRole {
 }
 
 /// The flag a delegated drain reads as "persisted turns restored": `reconcile_done` where recovery
-/// ran first (gateway, REST worker); a standby or utility gateway sets it unrestored, so never.
+/// ran first (gateway, REST worker), never on a utility gateway; a standby restores per channel.
 async fn turns_restored(shared: &SharedData, role: HomeRole) -> Arc<std::sync::atomic::AtomicBool> {
     let restores = match role {
         HomeRole::Gateway => shared.settings.read().await.agent.is_none(),
@@ -590,10 +591,9 @@ async fn start_channel_homes(
     }
     let restored = turns_restored(shared, role).await;
     let candidates = || {
-        let selected = crate::services::tui_o::channel_policy::boot();
-        let here = |channel: &u64| herdr_runs_here(*channel);
-        let selected = selected.map(|boot| boot.selected().iter().copied().filter(here));
-        selected.map(Iterator::collect).unwrap_or_default()
+        let mut selected = selected_herdr_channels(provider);
+        selected.retain(|channel| herdr_runs_here(*channel));
+        selected.into_iter().collect()
     };
     channel_home_boot::start(switch, || {
         let pool = shared.pg_pool.clone()?;
@@ -601,6 +601,12 @@ async fn start_channel_homes(
         let rows = channel_home_boot::listed(&pool);
         let port = |channel: u64| {
             let reset = legacy_reset(shared, provider, channel);
+            if role == HomeRole::Standby {
+                let (restored, persisted, run) =
+                    queued_recovery::standby_restore(shared, provider, channel);
+                let port = BootPort::reading_persisted(channel, restored, persisted, reset);
+                return port.restoring(provider.as_str(), run);
+            }
             BootPort::reading(channel, Arc::clone(&restored), reset)
         };
         Some(Boot {
@@ -610,6 +616,7 @@ async fn start_channel_homes(
             rows,
             candidates: candidates(),
             port,
+            writers: (role == HomeRole::Gateway).then(|| o_writer_host::home_writers(provider)),
         })
     })
     .await
@@ -658,6 +665,11 @@ fn legacy_reset(
             }
         })
     })
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn c2b_standby_health_fixture_for_test() {
+    bootstrap_tests::standby_registration_settles_the_reconcile_obligation();
 }
 
 #[cfg(test)]
@@ -1075,7 +1087,7 @@ agents:
     /// before `recovery_flush` was spawned and nothing ever called
     /// `mark_reconcile_complete`, so the reason was permanent for the process.
     #[tokio::test]
-    async fn standby_registration_settles_the_reconcile_obligation() {
+    pub(super) async fn standby_registration_settles_the_reconcile_obligation() {
         let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let registry = Arc::new(health::HealthRegistry::new());
         let shared = crate::services::discord::make_shared_data_for_tests();

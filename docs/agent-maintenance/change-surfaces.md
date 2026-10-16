@@ -302,15 +302,15 @@ time for diagnostics; neither is a stored approval value.
   requires it to equal `ci-pr.yml` exactly. Every member must exist and omit
   `continue-on-error`, and any edge that expands the closure is a
   review-triggering gate failure.
-
   <!-- required-publisher-wiring -->
   | job | needs | job-level `if` |
   |---|---|---|
   | `changes` | none | none |
+  | `lib_test_prepare` | none | none |
   | `relay-authority-contract` | `relay_authority_targets`, `relay_authority_mutations` | `${{ !cancelled() }}` |
   | `relay_authority_mutations` | none | none |
-  | `relay_authority_targets` | none | none |
-  | `scripts` | `changes` | none |
+  | `relay_authority_targets` | `lib_test_prepare` | `${{ !cancelled() }}` |
+  | `scripts` | `changes`, `lib_test_prepare` | `${{ !cancelled() }}` |
   | `scripts_contracts` | `changes` | none |
   | `scripts_guards` | `changes` | none |
   | `scripts_required_context` | `changes`, `scripts`, `scripts_guards`, `scripts_contracts` | `${{ !cancelled() }}` |
@@ -1018,8 +1018,8 @@ time for diagnostics; neither is a stored approval value.
     `finish_restored_watcher_active_turn(.., normal_completion=true, ..)` with the
     pinned current-turn id; PausedLive (no terminator — paused at selector /
     permission prompt / subagent running / long silent tool) → DEFER, never
-    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend/
-    ClaudeEAdapter) → KEEP the legacy `mailbox_finalize_owed` flag path VERBATIM.
+    finalize; Unknown (non-JSONL runtime: LegacyTmuxWrapper/ProcessBackend) → KEEP
+    the legacy `mailbox_finalize_owed` flag path VERBATIM.
     The DEFER decision now keys on the STRUCTURAL TERMINATOR (not on response
     emptiness), which is the fix for the contradiction that killed the first A2
     attempt (deferring `delegated && empty` made the empty-but-done completion's
@@ -1510,7 +1510,8 @@ time for diagnostics; neither is a stored approval value.
     production modules are below 1000 prod lines and the registry entry was
     removed under the ghost-registration rule.)
   - `src/services/discord/idle_recap/scrollback.rs` (#3479 scrollback: the tmux
-    `capture-pane` tail capture, the `claude-e` transcript-tail fallback
+    `capture-pane` tail capture, the Claude transcript-tail fallback when tmux
+    is unavailable
     (`capture_transcript_scrollback` + the unit-testable `extract_transcript_tail_text`
     / `parse_transcript_line_text` workers), and the Haiku `compose_with_haiku`
     call plus #4079's user-perspective suggested-reply prompt contract (its
@@ -2678,3 +2679,85 @@ reintroducing bespoke clamp expressions.
 `src/services/discord/tmux_watcher/cancel_handoff.rs` owns process-local source/parser/render custody for cooperative replacement, not a journal, receipt writer or detached drain. `src/services/discord/tmux_watcher.rs` has acquisition/adoption/checkpoint wiring at its existing poll/collector/terminal boundaries; `src/services/discord/tmux_watcher/turn_stream_collector.rs` rehydrates the native decoder and enters the existing terminal receipt/lease path.
 
 Root growth is an explicit reviewable cap admission linked to the existing #4712 split issue, not a waiver for future growth. Splitting must retain all downstream identity, epoch/reset, stop/pause, ACK and receipt guards.
+
+<!-- BEGIN GENERATED: GIANT PATHS -->
+Measured giant paths (planning metadata remains manual):
+
+- `src/cli/client.rs`
+- `src/cli/dcserver.rs`
+- `src/cli/direct.rs`
+- `src/cli/doctor/orchestrator.rs`
+- `src/cli/init.rs`
+- `src/cli/migrate/apply.rs`
+- `src/cli/migrate/plan.rs`
+- `src/cli/migrate/source.rs`
+- `src/cli/provider_cli/mod.rs`
+- `src/config.rs`
+- `src/db/auto_queue/entries.rs`
+- `src/db/auto_queue/phase_gates.rs`
+- `src/db/dispatched_sessions.rs`
+- `src/db/dispatches/mod.rs`
+- `src/db/postgres.rs`
+- `src/dispatch/dispatch_context.rs`
+- `src/dispatch/dispatch_create.rs`
+- `src/dispatch/dispatch_status.rs`
+- `src/engine/loader.rs`
+- `src/engine/mod.rs`
+- `src/engine/ops/db_ops.rs`
+- `src/github/sync.rs`
+- `src/pipeline.rs`
+- `src/receipt.rs`
+- `src/reconcile.rs`
+- `src/server/mod.rs`
+- `src/server/routes/agents.rs`
+- `src/server/routes/agents_crud.rs`
+- `src/server/routes/agents_setup.rs`
+- `src/server/routes/escalation.rs`
+- `src/server/routes/health_api.rs`
+- `src/server/routes/kanban.rs`
+- `src/server/routes/meetings.rs`
+- `src/server/routes/resume.rs`
+- `src/services/auto_queue.rs`
+- `src/services/auto_queue/activate_command.rs`
+- `src/services/auto_queue/cleanup_tasks.rs`
+- `src/services/claude.rs`
+- `src/services/claude_tui/input.rs`
+- `src/services/codex.rs`
+- `src/services/codex_tmux_wrapper.rs`
+- `src/services/codex_tui/input.rs`
+- `src/services/codex_tui/rollout_tail.rs`
+- `src/services/discord/catch_up.rs`
+- `src/services/discord/commands/text_commands.rs`
+- `src/services/discord/health/recovery.rs`
+- `src/services/discord/health/snapshot.rs`
+- `src/services/discord/mod.rs`
+- `src/services/discord/outbound/delivery_record.rs`
+- `src/services/discord/recovery_engine/restore_inflight.rs`
+- `src/services/discord/router/intake_gate.rs`
+- `src/services/discord/router/message_handler/headless_turn.rs`
+- `src/services/discord/router/message_handler/intake_turn.rs`
+- `src/services/discord/session_relay_sink.rs`
+- `src/services/discord/standby_relay.rs`
+- `src/services/discord/tmux.rs`
+- `src/services/discord/tmux_watcher.rs`
+- `src/services/discord/tmux_watcher/turn_stream_collector.rs`
+- `src/services/discord/tui_prompt_relay/synthetic_start.rs`
+- `src/services/discord/turn_bridge/stream_tick.rs`
+- `src/services/discord_config_audit.rs`
+- `src/services/dispatched_sessions.rs`
+- `src/services/dispatches/discord_delivery/orchestration.rs`
+- `src/services/dispatches/outbox_route.rs`
+- `src/services/gemini.rs`
+- `src/services/memory/memento.rs`
+- `src/services/onboarding/mod.rs`
+- `src/services/opencode.rs`
+- `src/services/platform/binary_resolver.rs`
+- `src/services/provider.rs`
+- `src/services/qwen.rs`
+- `src/services/routines/agent_executor.rs`
+- `src/services/routines/discord_log.rs`
+- `src/services/routines/store.rs`
+- `src/services/settings.rs`
+- `src/services/tmux_common.rs`
+- `src/services/turn_orchestrator.rs`
+<!-- END GENERATED: GIANT PATHS -->

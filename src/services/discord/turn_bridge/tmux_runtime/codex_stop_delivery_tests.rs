@@ -61,8 +61,9 @@ struct Case {
 }
 impl Case {
     async fn new(pool: &sqlx::PgPool, root: &Path, provider: ProviderKind, n: u64) -> Self {
-        let shared =
+        let mut shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        Arc::get_mut(&mut shared).expect("unshared case").provider = provider.clone();
         let channel = ChannelId::new(5_340_103_000 + n);
         let logical = format!("AgentDesk-{}-p10-stop-{n}", provider.as_str());
         let nonce = format!("{n:032x}");
@@ -909,6 +910,9 @@ fn capture_stop_events() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::Defau
             event: &tracing::Event<'_>,
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
+            if mutant("collector_drops_stop_events") {
+                return;
+            }
             struct Fields(Vec<String>);
             impl tracing::field::Visit for Fields {
                 fn record_debug(
@@ -999,10 +1003,47 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
             case.channel.get(),
         );
         let bytes = std::fs::read(&row_path).unwrap();
+        // A queued input behind the active turn, enqueued as intake does; no stop may touch it.
+        let queued = MessageId::new(case.channel.get() + 9);
+        let generation = crate::services::discord::runtime_store::process_generation();
+        let intervention = crate::services::discord::Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: queued,
+            queued_generation: generation,
+            source_message_ids: vec![queued],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: "queued behind the stop".into(),
+            mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        };
+        let enqueue = crate::services::discord::mailbox_enqueue_intervention(
+            &case.shared,
+            &case.provider,
+            case.channel,
+            intervention,
+        );
+        assert!(runtime.block_on(enqueue).enqueued);
         let before = runtime.block_on(crate::services::discord::mailbox_snapshot(
             &case.shared,
             case.channel,
         ));
+        let pending = &before.intervention_queue;
+        assert_eq!(pending.len(), 1, "the stops face a non-empty queue");
+        assert_eq!(
+            (
+                pending[0].source_message_ids.as_slice(),
+                pending[0].text.as_str()
+            ),
+            (&[queued][..], "queued behind the stop")
+        );
+        assert_eq!(pending[0].queued_generation, generation);
         let (logs, _capture) = capture_stop_events();
         let base = runtime.block_on(begin_command_stop(
             &case.shared,
@@ -1067,6 +1108,7 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
             case.record.owner.logical_key
         );
         HERDR_SETTLEMENT_OVERRIDE.set(true);
+        logs.lock().unwrap().clear();
         let reply = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
         assert_eq!(
             reply.text(),
@@ -1074,6 +1116,22 @@ fn act7_slash_stop_effect_keeps_host_owned_and_dormant_matches_base() {
         );
         runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
         assert_eq!(case.escapes(), 1);
+        // The collector the dormant comparison relies on records the active stop's result.
+        let channel = format!("channel_id={}", case.channel.get());
+        let logged = logs.lock().unwrap().clone();
+        let results = logged.iter().filter(|event| {
+            // Each event is its sorted field list, Debug-quoted.
+            [
+                r#"event=\"herdr_stop_result\""#,
+                channel.as_str(),
+                r#"intent=\"recorded\""#,
+                r#"delivery=\"sent\""#,
+                "terminal_confirmed=false",
+            ]
+            .iter()
+            .all(|field| event.contains(field))
+        });
+        assert!(results.count() >= 1, "{logged:?}");
         assert!(Arc::ptr_eq(
             &current_token(case, runtime).unwrap(),
             &case.token
@@ -1269,32 +1327,5 @@ fn act7_each_stop_reason_preserves_delivery_and_settlement_axes() {
 #[path = "codex_stop_delivery_home_stop_tests.rs"]
 mod home_stop;
 
-#[test]
-fn b2b1_only_an_escape_that_leaves_withdraws_the_herdr_turn_approval() {
-    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
-    with_cases(|case, fx, runtime| {
-        let probe = Probe::install(&case.shared);
-        let ticket = probe.arm(case.channel.get());
-        case.screen(false);
-        assert_eq!(
-            runtime.block_on(case.delivery("/stop")),
-            HerdrDelivery::NotSent(HerdrNotSent::Idle)
-        );
-        assert!(
-            Probe::current(&ticket),
-            "an intent that sent nothing withdraws nothing"
-        );
-        case.screen(true);
-        let pool = case.shared.pg_pool.as_ref().unwrap();
-        assert_eq!(
-            runtime.block_on(interrupt_herdr(pool, &case.token, &case.provider)),
-            HerdrDelivery::Sent
-        );
-        assert_eq!(case.escapes(), 1);
-        assert!(
-            !Probe::current(&ticket),
-            "the Escape withdrew the turn's approval"
-        );
-        assert!(fx.take_calls().is_empty());
-    });
-}
+#[path = "codex_stop_delivery_cut_tests.rs"]
+pub(super) mod cut;

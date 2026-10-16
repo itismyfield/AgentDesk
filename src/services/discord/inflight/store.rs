@@ -142,6 +142,8 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 /// network-filesystem behavior and non-cooperating writers are outside the
 /// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    #[cfg(test)]
+    boot_observation::attempt(path, boot_observation::Attempt::Lock);
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
         .map_err(|failure| format!("input fence: {failure:?}"))?
     {
@@ -162,8 +164,33 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
 
 // Contention is retryable; scheduler callers must not wait for another open handle.
 pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
+    try_lock_inflight_state_path_typed(path).map_err(TryLockRefusal::detail)
+}
+
+/// Why a non-blocking acquire took no lock: another open handle holds it, an input fence now
+/// protects the row, or anything else.
+pub(crate) enum TryLockRefusal {
+    Contended,
+    Fenced,
+    Failed(String),
+}
+
+impl TryLockRefusal {
+    fn detail(self) -> String {
+        match self {
+            Self::Contended => fs::TryLockError::WouldBlock.to_string(),
+            Self::Fenced => "input fence: Busy".to_owned(),
+            Self::Failed(detail) => detail,
+        }
+    }
+}
+
+/// `try_lock_inflight_state_path` with contention told apart from IO, without parsing its text.
+pub(crate) fn try_lock_inflight_state_path_typed(
+    path: &Path,
+) -> Result<InflightStateFileLock, TryLockRefusal> {
     if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| format!("input fence: {failure:?}"))?
+        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
     {
         return Ok(InflightStateFileLock {
             file: None,
@@ -171,8 +198,12 @@ pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateF
             state_path: path.to_owned(),
         });
     }
-    let file = open_inflight_lock_file(path)?;
-    file.try_lock().map_err(|e| e.to_string())?;
+    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return Err(TryLockRefusal::Contended),
+        Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
+    }
     Ok(InflightStateFileLock {
         file: Some(file),
         _population: None,
@@ -180,28 +211,31 @@ pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateF
     })
 }
 
-pub(in crate::services::discord) struct BorrowedInflightRow<'a> {
-    path: PathBuf,
-    _guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-}
-impl<'a> BorrowedInflightRow<'a> {
-    pub(in crate::services::discord) fn new(
-        guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-        root: &Path,
-        provider: &ProviderKind,
-        channel: u64,
-    ) -> std::io::Result<Self> {
-        guard.borrowed(root, provider, channel, || Ok(()))?;
-        Ok(Self {
-            path: root
-                .join("discord_inflight")
-                .join(provider.as_str())
-                .join(format!("{channel}.json")),
-            _guard: guard,
-        })
+/// The typed try-lock of a step that found no input fence: a gate found now, before or after the
+/// sidecar lock, is `Fenced`, never a wait in the protected writer.
+pub(crate) fn try_lock_unfenced_inflight_state_path(
+    path: &Path,
+) -> Result<InflightStateFileLock, TryLockRefusal> {
+    let fenced = || {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse().ok())
+            .and_then(crate::services::discord::input_runtime::fence::channel_gate)
+            .is_some()
+    };
+    if fenced() {
+        return Err(TryLockRefusal::Fenced);
     }
-    pub(super) fn state_path(&self) -> &Path {
-        &self.path
+    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
+    match file.try_lock() {
+        Ok(()) if fenced() => Err(TryLockRefusal::Fenced),
+        Ok(()) => Ok(InflightStateFileLock {
+            file: Some(file),
+            _population: None,
+            state_path: path.to_path_buf(),
+        }),
+        Err(fs::TryLockError::WouldBlock) => Err(TryLockRefusal::Contended),
+        Err(error) => Err(TryLockRefusal::Failed(error.to_string())),
     }
 }
 
@@ -219,8 +253,109 @@ fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {
 }
 
 #[cfg(test)]
-mod population_tests {
+pub(super) mod population_tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Counts {
+        pub(crate) preparations: usize,
+        pub(crate) reservations: usize,
+        pub(crate) sources: BTreeMap<PathBuf, [usize; 3]>,
+    }
+
+    pub(crate) enum Attempt {
+        Lock,
+        Read,
+        Unlink,
+    }
+
+    struct Observation {
+        counts: Mutex<Counts>,
+        latch: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    fn registry() -> &'static Mutex<BTreeMap<PathBuf, Arc<Observation>>> {
+        static ROOTS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Observation>>>> = OnceLock::new();
+        ROOTS.get_or_init(Mutex::default)
+    }
+
+    // Root-keyed process state follows custody/reaper work onto blocking threads.
+    pub(crate) struct Probe {
+        root: PathBuf,
+        observation: Arc<Observation>,
+    }
+
+    impl Probe {
+        pub(crate) fn new(root: PathBuf, latch: oneshot::Receiver<()>) -> Self {
+            let observation = Arc::new(Observation {
+                counts: Mutex::new(Counts::default()),
+                latch: Mutex::new(Some(latch)),
+            });
+            assert!(
+                registry()
+                    .lock()
+                    .unwrap()
+                    .insert(root.clone(), observation.clone())
+                    .is_none()
+            );
+            Self { root, observation }
+        }
+
+        pub(crate) fn counts(&self) -> Counts {
+            self.observation.counts.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            registry().lock().unwrap().remove(&self.root);
+        }
+    }
+
+    fn at(path: &Path) -> Option<Arc<Observation>> {
+        registry()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(root, _)| path.starts_with(root))
+            .map(|(_, observation)| observation.clone())
+    }
+
+    pub(crate) fn attempt(path: &Path, attempt: Attempt) {
+        if let Some(observation) = at(path) {
+            let index = match attempt {
+                Attempt::Lock => 0,
+                Attempt::Read => 1,
+                Attempt::Unlink => 2,
+            };
+            observation
+                .counts
+                .lock()
+                .unwrap()
+                .sources
+                .entry(path.to_owned())
+                .or_default()[index] += 1;
+        }
+    }
+
+    pub(crate) fn preparing() -> Option<oneshot::Receiver<()>> {
+        let observation = at(&crate::services::discord::runtime_store::runtime_root()?)?;
+        observation.counts.lock().unwrap().preparations += 1;
+        observation.latch.lock().unwrap().take()
+    }
+
+    pub(crate) fn reserved() {
+        if let Some(observation) =
+            crate::services::discord::runtime_store::runtime_root().and_then(|root| at(&root))
+        {
+            observation.counts.lock().unwrap().reservations += 1;
+        }
+    }
+
     #[test]
     fn b2_off_lock_error_detail_and_representative_writer_results_are_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -538,16 +673,30 @@ pub(super) fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnSt
 /// of a proven-dead orphan (#3982) preserves the old, already-stale timestamp so
 /// downstream ownerless-stale filters drop the row immediately on the next read
 /// instead of after another 300 s window.
+/// `coordinate_change` grants only the replay RMW namespace changes and a source rebase;
+/// general writers preserve the durable coordinate group and same-source monotonic checks.
 fn persist_under_lock_inner(
     root: &Path,
     path: &Path,
     state: &InflightTurnState,
     caller: &'static str,
     bump_updated_at: bool,
+    coordinate_change: Option<bool>,
 ) -> Result<Option<InflightTurnState>, String> {
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
-    if !validate_inflight_state_for_save(root, path, &updated, caller) {
+    if coordinate_change.is_none() && !durable_coordinate_group_kept(path, &updated, caller)? {
+        return Ok(None);
+    }
+    let valid = if coordinate_change == Some(true) {
+        updated.response_sent_offset <= updated.full_response.len()
+            && updated
+                .full_response
+                .is_char_boundary(updated.response_sent_offset)
+    } else {
+        validate_inflight_state_for_save(root, path, &updated, caller)
+    };
+    if !valid {
         return Ok(None);
     }
     if bump_updated_at {
@@ -561,6 +710,38 @@ fn persist_under_lock_inner(
     Ok(Some(updated))
 }
 
+/// Whether a general write leaves the durable coordinate group as it is: it may not add, drop
+/// or resurrect the install marker or a `p5925_coordinate:` hold. Unreadable rows fail closed.
+fn durable_coordinate_group_kept(
+    path: &Path,
+    candidate: &InflightTurnState,
+    caller: &'static str,
+) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("read durable coordinate group: {error}")),
+    };
+    // A row naming neither key carries no group, so the common case skips the parse.
+    let durable_may_carry = content.contains("legacy_replay_coordinate")
+        || content.contains(super::model::COORDINATE_HOLD_PREFIX);
+    let kept = if durable_may_carry {
+        parse_inflight_state_content(&content)
+            .map_err(|error| format!("parse durable coordinate group: {error}"))?
+            .coordinate_group_eq(candidate)
+    } else {
+        !candidate.has_coordinate_group()
+    };
+    if !kept {
+        tracing::warn!(
+            channel_id = candidate.channel_id,
+            caller,
+            "general inflight write refused because it would change the coordinate replay group"
+        );
+    }
+    Ok(kept)
+}
+
 /// Shared lock-held persist tail: validate, stamp `updated_at`, atomic-write.
 /// Caller must already hold `lock_inflight_state_path`.
 pub(super) fn persist_under_lock(
@@ -569,7 +750,20 @@ pub(super) fn persist_under_lock(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, true).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, true, None).map(|_| ())
+}
+
+/// The coordinate replay RMW's lock-held write: the only path that may change the coordinate
+/// group. The caller has verified the exact episode and snapshot under the same lock.
+#[cfg(test)]
+pub(super) fn persist_coordinate_change_under_lock(
+    root: &Path,
+    path: &Path,
+    state: &InflightTurnState,
+    caller: &'static str,
+    source_rebase: bool,
+) -> Result<Option<InflightTurnState>, String> {
+    persist_under_lock_inner(root, path, state, caller, true, Some(source_rebase))
 }
 
 /// Persists while returning the exact stamped row written under the lock.
@@ -581,7 +775,7 @@ pub(super) fn persist_under_lock_with_snapshot(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<Option<InflightTurnState>, String> {
-    persist_under_lock_inner(root, path, state, caller, true)
+    persist_under_lock_inner(root, path, state, caller, true, None)
 }
 
 /// Complete a successful restart readoption while the caller owns the canonical
@@ -613,7 +807,7 @@ pub(super) fn persist_under_lock_preserving_updated_at(
     state: &InflightTurnState,
     caller: &'static str,
 ) -> Result<(), String> {
-    persist_under_lock_inner(root, path, state, caller, false).map(|_| ())
+    persist_under_lock_inner(root, path, state, caller, false, None).map(|_| ())
 }
 
 #[cfg(test)]
@@ -650,9 +844,12 @@ mod relay_state_contract_refs {
             let _ = &s.last_watcher_relayed_offset;
         };
         let _ = super::super::model::InflightTurnState::effective_relay_owner_kind;
-        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity as _;
-        use super::super::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root as _;
-        use super::super::save_store::save_inflight_state as _;
-        use super::validate_inflight_state_for_save as _;
+        let _ = super::super::clear_store::refresh_inflight_last_offset_if_matches_identity;
+        let _ = super::super::clear_store::refresh_inflight_last_offset_if_matches_identity_in_root;
+        let _ = super::super::save_store::save_inflight_state;
+        let _ = super::validate_inflight_state_for_save;
     }
 }
+
+#[cfg(test)]
+pub(super) use population_tests as boot_observation;

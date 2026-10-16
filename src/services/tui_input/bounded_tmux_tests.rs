@@ -4,8 +4,10 @@ use super::bounded_tmux::{
     BoundedTmuxError, run_bounded_tmux, run_with_budget, spawn_bounded, spawn_with_budget,
 };
 use std::fs;
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 struct Fixture {
@@ -27,6 +29,19 @@ impl Fixture {
 
     fn command(&self, body: &str) -> Command {
         let mut command = Command::new("/bin/sh");
+        let spawned_pid = fs::File::create(self.path("spawned-pid")).unwrap();
+        // Record the owned PID before exec so early timeouts still prove reaping.
+        unsafe {
+            command.pre_exec(move || {
+                let pid = libc::getpid().to_ne_bytes();
+                if libc::write(spawned_pid.as_raw_fd(), pid.as_ptr().cast(), pid.len())
+                    != pid.len() as isize
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         command
             .args([
                 "-c",
@@ -34,7 +49,8 @@ impl Fixture {
                 "bounded-tmux-test",
             ])
             .arg(self.path("pids"))
-            .arg(self.path("effect"));
+            .arg(self.path("effect"))
+            .arg(self.path("ready"));
         command
     }
 
@@ -49,13 +65,36 @@ impl Fixture {
     }
 
     fn pid(&self) -> libc::pid_t {
-        fs::read_to_string(self.path("pids"))
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap()
+        libc::pid_t::from_ne_bytes(
+            fs::read(self.path("spawned-pid"))
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn descendant_command(&self, ending: &str) -> Command {
+        self.command(&format!(
+            "/bin/sh -c 'printf \"%s\\n\" \"$$\" >> \"$1\"; \
+             printf ready > \"$3\"; sleep 0.3; printf late > \"$2\"' \
+             bounded-tmux-descendant \"$1\" \"$2\" \"$3\" & {ending}"
+        ))
+    }
+
+    fn assert_timeout(&self, result: Result<Output, BoundedTmuxError>) {
+        let error = result.unwrap_err();
+        assert!(error.may_have_effect());
+        assert!(
+            matches!(
+                error,
+                BoundedTmuxError::Timeout {
+                    killed: true,
+                    reaped: true
+                }
+            ),
+            "{error:?}"
+        );
+        self.assert_reaped();
     }
 
     fn assert_reaped(&self) {
@@ -69,16 +108,13 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let Ok(text) = fs::read_to_string(self.path("pids")) else {
+        let Ok(bytes) = fs::read(self.path("spawned-pid")) else {
             return;
         };
-        let Some(pid) = text
-            .lines()
-            .next()
-            .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-        else {
+        let Ok(bytes) = bytes.try_into() else {
             return;
         };
+        let pid = libc::pid_t::from_ne_bytes(bytes);
         let mut status = 0;
         if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == 0 {
             // Failed mutants may leave only this fixture's owned process group alive.
@@ -264,61 +300,88 @@ async fn bounded_tmux_preserves_output_exit_status_and_closes_stdin() {
 #[tokio::test]
 async fn bounded_tmux_timeout_kills_descendants_before_reaping_live_or_exited_leader() {
     for ending in ["wait", "exit 0"] {
-        let fixture = Fixture::new();
-        let mut command = fixture.command(&format!(
-            "(sleep 0.3; printf late > \"$2\") & printf '%s\\n' \"$!\" >> \"$1\"; {ending}"
-        ));
-        let started = Instant::now();
-        let result = run_with_budget(&mut command, Duration::from_millis(75)).await;
-        let elapsed = started.elapsed();
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(result.as_ref().unwrap_err().may_have_effect());
-        assert!(
-            matches!(
-                result,
-                Err(BoundedTmuxError::Timeout {
-                    killed: true,
-                    reaped: true
-                })
-            ),
-            "{ending}: {result:?}"
-        );
-        assert!(elapsed < Duration::from_millis(2250), "{elapsed:?}");
-        assert!(
-            !fixture.path("effect").exists(),
-            "{ending}: descendant escaped"
-        );
-        assert_eq!(
-            fs::read_to_string(fixture.path("pids"))
-                .unwrap()
-                .lines()
-                .count(),
-            2
-        );
-        fixture.assert_reaped();
+        let mut observed_ready = false;
+        for attempt in 1..=20 {
+            let fixture = Fixture::new();
+            let mut command = fixture.descendant_command(ending);
+            let started = Instant::now();
+            let result = run_with_budget(&mut command, Duration::from_millis(75)).await;
+            let elapsed = started.elapsed();
+            let ready = fixture.path("ready").exists();
+            fixture.assert_timeout(result);
+            assert!(
+                elapsed < Duration::from_millis(2250),
+                "{ending}: {elapsed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert!(
+                !fixture.path("effect").exists(),
+                "{ending}: descendant escaped"
+            );
+            if !ready {
+                // Startup can consume the budget; prove cleanup and require a ready retry.
+                eprintln!("{ending}: timeout before descendant readiness, attempt {attempt}");
+                continue;
+            }
+            assert_eq!(
+                fs::read_to_string(fixture.path("pids"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+            eprintln!("{ending}: ready descendant killed and leader reaped, attempt {attempt}");
+            observed_ready = true;
+            break;
+        }
+        assert!(observed_ready, "{ending}: no ready descendant exercised");
     }
 }
 
 #[tokio::test]
 async fn bounded_tmux_caller_cancellation_preserves_deadline_cleanup() {
-    let fixture = Fixture::new();
-    let mut command = fixture
-        .command("(sleep 0.3; printf late > \"$2\") & printf '%s\\n' \"$!\" >> \"$1\"; wait");
-    let caller =
-        tokio::spawn(async move { run_with_budget(&mut command, Duration::from_millis(75)).await });
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while fs::read_to_string(fixture.path("pids"))
-        .map(|text| text.lines().count() < 2)
-        .unwrap_or(true)
-    {
-        assert!(Instant::now() < deadline, "controlled child did not start");
-        tokio::time::sleep(Duration::from_millis(1)).await;
+    for attempt in 1..=20 {
+        let fixture = Fixture::new();
+        let mut command = fixture.descendant_command("wait");
+        let caller =
+            tokio::spawn(
+                async move { run_with_budget(&mut command, Duration::from_millis(75)).await },
+            );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !fixture.path("ready").exists() && !caller.is_finished() {
+            assert!(Instant::now() < deadline, "controlled child did not start");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let ready = fixture.path("ready").exists();
+        if ready {
+            assert_eq!(
+                fs::read_to_string(fixture.path("pids"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+            caller.abort();
+        }
+        let cancelled = match caller.await {
+            Ok(result) => {
+                fixture.assert_timeout(result);
+                false
+            }
+            Err(error) => {
+                assert!(ready && error.is_cancelled(), "{error:?}");
+                true
+            }
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!fixture.path("effect").exists());
+        fixture.assert_reaped();
+        if cancelled {
+            return;
+        }
+        eprintln!("timeout before caller cancellation, attempt {attempt}");
     }
-    caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert!(!fixture.path("effect").exists());
-    fixture.assert_reaped();
+    panic!("no ready descendant exercised caller cancellation");
 }
 
 #[tokio::test]

@@ -5,17 +5,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use crate::services::discord::SharedData;
-use crate::services::tui_o::ownership::OwnershipGate;
+use crate::services::provider::ProviderKind;
 
 /// What an installed presence runtime lets an entry point revoke; it holds no Busy or turn facts.
 pub(in crate::services::discord) trait Fence: Send + Sync {
     /// Revokes the channel's existing registration without creating or reviving one.
     fn withdraw(&self, channel: u64, retire: bool, cause: &'static str);
-    /// Revokes only approvals resting on this Gateway witness; Home-owned ones stay.
-    fn withdraw_gateway(&self, gate: &Arc<OwnershipGate>, cause: &'static str);
-    fn suspend(&self);
-    /// Reopens with fresh registrations only; no earlier approval or deadline comes back.
-    fn resume(&self);
+    /// The channel's current registration generation; adoption leaves it, a reset replaces it.
+    fn generation(&self, channel: u64) -> Option<Arc<()>>;
+    /// Revokes the channel's registration only while it is still `generation`.
+    fn withdraw_generation(&self, channel: u64, generation: &Arc<()>, cause: &'static str);
 }
 
 type Installed = (Weak<SharedData>, Weak<dyn Fence>);
@@ -42,56 +41,43 @@ fn owned_by(shared: &SharedData) -> impl Iterator<Item = Arc<dyn Fence>> + '_ {
         .map(|(_, fence)| fence)
 }
 
-/// A real change to the channel's turn: its earlier approvals may not start another typing.
-pub(in crate::services::discord) fn withdraw(channel: u64, cause: &'static str) {
-    for (_, fence) in installed() {
-        fence.withdraw(channel, false, cause);
-    }
+/// Runtimes whose owner passes `owns`; for sinks that hold no `SharedData` of their own.
+fn owned_where(owns: impl Fn(&SharedData) -> bool) -> impl Iterator<Item = Arc<dyn Fence>> {
+    installed()
+        .into_iter()
+        .filter(move |(owner, _)| owner.upgrade().is_some_and(|owner| owns(&owner)))
+        .map(|(_, fence)| fence)
 }
 
-/// Only for a channel whose session was actually removed; its registration is pruned.
-pub(in crate::services::discord) fn retire(channel: u64) {
-    for (_, fence) in installed() {
-        fence.withdraw(channel, true, "session_removed");
-    }
+/// A real change to the channel's turn: its earlier approvals in `shared`'s runtime may not start
+/// another typing.
+pub(in crate::services::discord) fn withdraw(
+    shared: &SharedData,
+    channel: u64,
+    cause: &'static str,
+) {
+    owned_by(shared).for_each(|fence| fence.withdraw(channel, false, cause));
 }
 
-/// The channel whose live watcher holds `session` now; the name itself is never parsed.
-pub(in crate::services::discord) fn withdraw_session(session: &str, cause: &'static str) {
-    for (shared, fence) in installed() {
-        let Some(shared) = shared.upgrade() else {
-            continue;
-        };
-        let watchers = &shared.tmux_watchers;
-        let owner = watchers.owner_channel_for_tmux_session(session);
-        let live = owner.filter(|channel| {
-            let binding = watchers.channel_binding(channel);
-            binding.is_some_and(|binding| binding.tmux_session_name == session)
-        });
-        if let Some(channel) = live {
-            fence.withdraw(channel.get(), false, cause);
+/// The registrations a holder saw when it started; a later reset or retire is not its to undo.
+pub(crate) struct Lease {
+    channel: u64,
+    held: Vec<(Weak<dyn Fence>, Arc<()>)>,
+}
+
+impl Lease {
+    pub(crate) fn take(provider: &ProviderKind, channel: u64) -> Self {
+        let held = owned_where(|shared| shared.provider == *provider)
+            .filter_map(|fence| Some((Arc::downgrade(&fence), fence.generation(channel)?)))
+            .collect();
+        Self { channel, held }
+    }
+
+    pub(crate) fn withdraw(&self, cause: &'static str) {
+        for (fence, generation) in &self.held {
+            if let Some(fence) = fence.upgrade() {
+                fence.withdraw_generation(self.channel, generation, cause);
+            }
         }
     }
 }
-
-pub(in crate::services::discord) fn withdraw_gateway(
-    gate: &Arc<OwnershipGate>,
-    cause: &'static str,
-) {
-    for (_, fence) in installed() {
-        fence.withdraw_gateway(gate, cause);
-    }
-}
-
-pub(in crate::services::discord) fn suspend(shared: &SharedData) {
-    owned_by(shared).for_each(|fence| fence.suspend());
-}
-
-/// Only where the existing restart decision rolls the fence back.
-pub(in crate::services::discord) fn resume_fresh(shared: &SharedData) {
-    owned_by(shared).for_each(|fence| fence.resume());
-}
-
-#[cfg(all(test, unix))]
-#[path = "entrypoints_tests.rs"]
-pub(in crate::services::discord) mod tests;

@@ -273,7 +273,7 @@ async fn the_restart_scan_settles_a_marked_receipt_before_the_marker_hold() {
 /// sent, acked or cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn a_destination_restart_does_not_own_keeps_the_receipt() {
-    let cases: [(&str, Edit); 3] = [
+    let cases: [(&str, Edit); 4] = [
         ("O owns the body", |row| {
             row["runtime_kind"] = serde_json::to_value(RuntimeHandoffKind::ClaudeTui).unwrap()
         }),
@@ -281,6 +281,10 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             row["restart_mode"] = serde_json::to_value(InflightRestartMode::DrainRestart).unwrap()
         }),
         ("no message", |row| row["current_msg_id"] = 0.into()),
+        ("delivered without its message", |row| {
+            row["current_msg_id"] = 0.into();
+            row["herdr_before_start_stop"] = receipt("delivered");
+        }),
     ];
     for (case, edit) in cases {
         let fixture = Fixture::new("kept", false);
@@ -298,8 +302,17 @@ async fn a_destination_restart_does_not_own_keeps_the_receipt() {
             matches!(outcome, BeforeStartRestartReport::Retained(_)),
             "{case}"
         );
+        if case.contains("message") {
+            let held = BeforeStartRestartReport::Retained("no message to show the stop on");
+            assert_eq!(outcome, held, "{case}: held before any later step");
+        }
         assert_eq!(fixture.bytes(), before, "{case}");
         assert!(discord.calls().is_empty(), "{case}: {:?}", discord.calls());
+        if case == "delivered without its message" {
+            let cleared = row.clear_before_start_receipt(CURRENT);
+            assert_ne!(cleared, inflight::GuardedClearOutcome::Cleared, "{case}");
+            assert_eq!(fixture.bytes(), before, "{case}: the clear refused it");
+        }
     }
     let fixture = Fixture::new("busy", false);
     let row = fixture.persist(&fixture.row);
@@ -509,4 +522,82 @@ async fn s3act_b3b_all_receipt_precedes_replay_debt_pg() {
     );
     assert!(fixture.durable().unwrap().terminal_delivery_completed());
     pool.close().await;
+}
+
+/// The scan's first receipt check holds a row that replay, a native terminal or a rebind also
+/// claims, unchanged and silent; settlement on covers only conflicts the row itself records.
+#[tokio::test(flavor = "current_thread")]
+async fn s3act_b3b_receipt_replay_conflict_is_held_pg() {
+    for (on, case) in [
+        (false, "replay"),
+        (false, "native"),
+        (false, "rebind"),
+        (true, "native"),
+        (true, "rebind"),
+    ] {
+        let mut fixture = Fixture::new("b3b3-conflict", case == "native");
+        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(pool.clone());
+        let mut debt = None;
+        match case {
+            "replay" => {
+                fixture.row.full_response = "saved receipt debt".into();
+                debt = Some(withheld(&pool, &fixture.row).await);
+                fixture.row.replay_receipt_id = debt;
+            }
+            "native" => fixture.row.tui_terminal_kind = Some(NativeTerminalKind::Aborted),
+            _ => fixture.row.rebind_origin = true,
+        }
+        let mut row = serde_json::to_value(&fixture.row).unwrap();
+        std::fs::create_dir_all(fixture.path().parent().unwrap()).unwrap();
+        std::fs::write(fixture.path(), serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+        let before = fixture.bytes();
+        HERDR_SETTLEMENT_OVERRIDE.set(on);
+        test_hooks::early_holds();
+        let discord = fixture.restore().await;
+        let holds = test_hooks::early_holds();
+        HERDR_SETTLEMENT_OVERRIDE.set(true);
+        assert!(
+            holds >= 1,
+            "{case} on={on}: the first receipt check held the row"
+        );
+        assert_eq!(fixture.bytes(), before, "{case} on={on}");
+        assert!(discord.calls().is_empty(), "{case} on={on}");
+        assert!(
+            super::mailbox_snapshot(&fixture.shared, ChannelId::new(CHANNEL))
+                .await
+                .cancel_token
+                .is_none()
+        );
+        if let Some(id) = debt {
+            let canonical: (String, serde_json::Value) = sqlx::query_as(
+                "SELECT replay_disposition,replay_preserved FROM intake_outbox WHERE id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let body = serde_json::json!({"body":"saved receipt debt"});
+            assert_eq!(canonical, ("withheld".into(), body));
+            row.as_object_mut()
+                .unwrap()
+                .remove("herdr_before_start_stop");
+            std::fs::write(fixture.path(), serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+            let discord = fixture.restore().await;
+            assert!(
+                !discord.calls().is_empty(),
+                "receipt-free replay debt really reaches Discord"
+            );
+            assert!(fixture.durable().unwrap().terminal_delivery_completed());
+        }
+        pool.close().await;
+    }
+}
+
+async fn withheld(pool: &sqlx::PgPool, row: &inflight::InflightTurnState) -> i64 {
+    sqlx::query_scalar("INSERT INTO intake_outbox (target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,request_owner_id,user_text,turn_kind,agent_id,provider,status,replay_only,replay_disposition,replay_source_message_ids,replay_episode_nonce,replay_hold_reason,replay_preserved) VALUES ('worker','leader',$1,$2,'7',$3,'standard','agent','claude','unknown',TRUE,'withheld',$4,$5,'activity observed',$6) RETURNING id")
+        .bind(CHANNEL.to_string()).bind(row.user_msg_id.to_string()).bind(&row.user_text)
+        .bind(vec![row.user_msg_id.to_string()]).bind(&row.turn_nonce)
+        .bind(serde_json::json!({"body":row.full_response})).fetch_one(pool).await.unwrap()
 }

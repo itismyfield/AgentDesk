@@ -274,18 +274,23 @@ pub(super) async fn run_stream_loop(
                             cancel_requested(Some(cancel_token.as_ref())),
                         )
                     {
-                        // The dropped frame's bookkeeping (full_response
-                        // resolution, transcript Result/Error,
-                        // placeholder close, transport_error edge)
-                        // is intentionally skipped: the cancel path
-                        // is the authoritative finalizer for the
-                        // turn outcome and runs its own placeholder
-                        // teardown.
+                        // The cancel path finalizes the turn and tears down its placeholder,
+                        // so the dropped frame must skip terminal bookkeeping.
                         finalize_cancel_inner!();
                         break 'outer;
                     }
+                    let admitted_terminal = inflight_state
+                        .admit_tui_terminal_frame(
+                            &mut persisted_inflight_baseline,
+                            &stream_tick_expected_identity,
+                            gateway.can_deliver_directly(),
+                            (shared_owned.as_ref(), &cancel_token),
+                            &full_response,
+                            msg,
+                        )
+                        .await;
                     #[rustfmt::skip]
-                    let (msg, admission, was_codex_terminal, herdr_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_deliver_directly(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await {
+                    let (msg, admission, was_codex_terminal, herdr_terminal) = match admitted_terminal {
                         Ok(admitted) => admitted,
                         Err(_) => { loop_outcome = StreamLoopOutcome::AuthorityLost; break 'outer; }
                     };

@@ -28,7 +28,7 @@ fn protected(gate: &Gate) -> (Mode, u64, bool) {
 }
 
 fn producer(channel: u64, pending: &[u64]) -> AdmissionOrder {
-    let mut order = AdmissionOrder::new(CLAUDE, channel, 7, 0);
+    let mut order = AdmissionOrder::new(CLAUDE, channel, 7, 0).unwrap();
     order.pending(pending);
     order
 }
@@ -282,6 +282,24 @@ fn g1b_generation_exhaustion_matrix_gate_freeze() {
         .unwrap()
         .block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
+            let last_valid = Gate::protect(CLAUDE, 6_326_835).unwrap();
+            let _last_health = test_health::Clear::new(&last_valid);
+            last_valid.state.lock().unwrap().epoch = u64::MAX - 2;
+            let last_close = Arc::new(last_valid.close().unwrap());
+            let transition = shared
+                .freeze_legacy_queue(
+                    last_close.clone(),
+                    crate::services::turn_orchestrator::QueuePersistenceContext::new(
+                        &CLAUDE, "session", None,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(protected(&last_valid), (Mode::Frozen, u64::MAX - 1, true));
+            assert_eq!(last_close.check_freeze(), Err(Failure::Busy));
+            assert!(!last_valid.state.lock().unwrap().exhausted);
+            last_close.open_ledger().unwrap();
+            drop(transition);
             let gate = Gate::protect(CLAUDE, channel).unwrap();
             let _health = test_health::Clear::new(&gate);
             gate.state.lock().unwrap().epoch = u64::MAX - 1;
@@ -300,7 +318,7 @@ fn g1b_generation_exhaustion_matrix_gate_freeze() {
                 "the queue freeze persisted nothing"
             );
             assert_eq!(protected(&gate), (Mode::Closing, u64::MAX - 1, true));
-            assert_eq!(closing.begin_handback(), Err(Failure::Mode(Mode::Closing)));
+            assert_eq!(closing.begin_handback(), Err(Failure::GenerationExhausted));
             // The latch outlives the refusal: no later path opens the Gate to a new permit.
             assert_eq!(
                 closing.abort_close(false),
@@ -376,4 +394,180 @@ fn g1b_restore_right_after_release_retires_the_proof() {
     assert!(ordering::handback_fetch_ticket(&CLAUDE, channel).is_err());
     assert_eq!(entry_state(channel), before);
     assert!(order_barrier(&CLAUDE, channel));
+}
+
+#[test]
+fn g1b_invalid_freeze_precheck_never_exhausts() {
+    for (index, invalid) in ["mode", "epoch", "protection", "effects"]
+        .into_iter()
+        .enumerate()
+    {
+        let gate = Gate::protect(CLAUDE, 6_326_830 + index as u64).unwrap();
+        let _health = test_health::Clear::new(&gate);
+        let closing = gate.close().unwrap();
+        closing.epoch.store(u64::MAX - 1, Ordering::Release);
+        {
+            let mut state = gate.state.lock().unwrap();
+            state.epoch = u64::MAX - 1;
+            match invalid {
+                "mode" => state.mode = Mode::Frozen,
+                "epoch" => closing.epoch.store(u64::MAX - 2, Ordering::Release),
+                "protection" => gate.protected.store(false, Ordering::Release),
+                _ => state.effects = 1,
+            }
+        }
+        let before = protected(&gate);
+        assert_eq!(closing.check_freeze(), Err(Failure::Busy), "{invalid}");
+        assert!(!gate.state.lock().unwrap().exhausted, "{invalid}");
+        assert_eq!(protected(&gate), before, "{invalid}");
+    }
+}
+
+#[test]
+fn g1b_exhausted_mode_shift_refuses_authority() {
+    let gate = Gate::protect(CLAUDE, 6_326_834).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let closing = gate.close().unwrap();
+    {
+        let mut state = gate.state.lock().unwrap();
+        state.mode = Mode::Frozen;
+        state.exhausted = true;
+    }
+    assert_eq!(closing.open_ledger(), Err(Failure::GenerationExhausted));
+    assert_eq!(closing.begin_handback(), Err(Failure::GenerationExhausted));
+    assert_eq!(closing.hold(), Err(Failure::GenerationExhausted));
+    assert_eq!(gate.mode(), Mode::Frozen);
+}
+
+#[test]
+fn g1b_close_held_ack_is_current_and_serialized() {
+    for (index, mode) in [Mode::Frozen, Mode::LedgerOpen, Mode::Held]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = 6_326_800 + index as u64;
+        let gate = Gate::protect(CLAUDE, channel).unwrap();
+        let _health = test_health::Clear::new(&gate);
+        let closing = gate.close().unwrap();
+        gate.state.lock().unwrap().mode = mode;
+        closing.ensure_held_current(&CLAUDE, channel).unwrap();
+        assert_eq!(gate.mode(), Mode::Held);
+        closing.ensure_held_current(&CLAUDE, channel).unwrap();
+        assert_eq!(
+            closing.with_held_current(&CLAUDE, channel, || {
+                assert!(gate.state.try_lock().is_err(), "ACK must hold Gate.state");
+                "ack"
+            }),
+            Ok("ack")
+        );
+        assert!(gate.protected.load(Ordering::Acquire));
+        assert_eq!(
+            closing.release_protection_after_handback().err(),
+            Some(Failure::Busy)
+        );
+    }
+}
+
+#[test]
+fn g1b_close_rejects_every_invalid_current_gate() {
+    for (index, invalid) in [
+        "provider",
+        "channel",
+        "epoch",
+        "protection",
+        "effects",
+        "mode",
+        "exhausted",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = 6_326_810 + index as u64;
+        let gate = Gate::protect(CLAUDE, channel).unwrap();
+        let _health = test_health::Clear::new(&gate);
+        let closing = gate.close().unwrap();
+        gate.state.lock().unwrap().mode = Mode::Held;
+        let mut provider = CLAUDE;
+        let mut named_channel = channel;
+        let expected = {
+            let mut state = gate.state.lock().unwrap();
+            match invalid {
+                "provider" => {
+                    provider = ProviderKind::Codex;
+                    Failure::StalePermit
+                }
+                "channel" => {
+                    named_channel += 1;
+                    Failure::StalePermit
+                }
+                "epoch" => {
+                    state.epoch += 1;
+                    Failure::StalePermit
+                }
+                "protection" => {
+                    gate.protected.store(false, Ordering::Release);
+                    Failure::StalePermit
+                }
+                "effects" => {
+                    state.effects = 1;
+                    Failure::Busy
+                }
+                "mode" => {
+                    state.mode = Mode::Handback;
+                    Failure::Mode(Mode::Handback)
+                }
+                _ => {
+                    state.exhausted = true;
+                    Failure::GenerationExhausted
+                }
+            }
+        };
+        let before = protected(&gate);
+        assert_eq!(
+            closing.ensure_held_current(&provider, named_channel),
+            Err(expected),
+            "{invalid}"
+        );
+        let calls = Cell::new(0);
+        assert_eq!(
+            closing.with_held_current(&provider, named_channel, || calls.set(calls.get() + 1)),
+            Err(expected),
+            "{invalid}"
+        );
+        assert_eq!(calls.get(), 0, "{invalid}");
+        assert_eq!(protected(&gate), before, "{invalid}");
+    }
+}
+
+#[test]
+fn g1b_close_final_ack_rechecks_after_handback_restore() {
+    let channel = 6_326_820;
+    let gate = Gate::protect(CLAUDE, channel).unwrap();
+    let _health = test_health::Clear::new(&gate);
+    let closing = gate.close().unwrap();
+    gate.state.lock().unwrap().mode = Mode::Frozen;
+    closing.ensure_held_current(&CLAUDE, channel).unwrap();
+    closing.begin_handback().unwrap();
+    let calls = Cell::new(0);
+    assert_eq!(
+        closing.with_held_current(&CLAUDE, channel, || calls.set(calls.get() + 1)),
+        Err(Failure::Mode(Mode::Handback))
+    );
+    closing
+        .release_after_handback_with_pending(&producer(channel, &[]).pending_snapshot())
+        .unwrap();
+    gate.restore_protection().unwrap();
+    let current = gate.close().unwrap();
+    gate.state.lock().unwrap().mode = Mode::Frozen;
+    current.ensure_held_current(&CLAUDE, channel).unwrap();
+    assert_eq!(
+        closing.ensure_held_current(&CLAUDE, channel),
+        Err(Failure::StalePermit)
+    );
+    assert_eq!(
+        closing.with_held_current(&CLAUDE, channel, || calls.set(calls.get() + 1)),
+        Err(Failure::StalePermit)
+    );
+    assert_eq!(calls.get(), 0);
+    assert_eq!(gate.mode(), Mode::Held);
 }

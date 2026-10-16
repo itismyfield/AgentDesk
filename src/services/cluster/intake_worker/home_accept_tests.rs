@@ -71,6 +71,7 @@ async fn a_home_moved_after_the_last_check_refuses_the_accept_and_keeps_the_row_
         attachment_refs: serde_json::json!([]),
         channel_id: channel.clone(),
         user_msg_id: "1".into(),
+        replay_source_message_ids: None,
         request_owner_id: "100".into(),
         request_owner_name: None,
         user_text: "hello".into(),

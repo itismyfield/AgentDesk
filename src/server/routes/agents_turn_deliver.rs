@@ -12,8 +12,10 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::agents_turn_target::{AgentTurnTarget, resolve_agent_turn_target};
 use crate::services::discord::health::{
-    HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+    HealthRegistry, HumanInputDelivery, HumanInputError, HumanInputRequest, deliver_human_input,
+    deliver_with_reply, preflight_human_input,
 };
+use crate::services::imsg_reply;
 
 const MAX_ORIGIN_ID_LEN: usize = 256;
 const MAX_SOURCE_LEN: usize = 64;
@@ -33,6 +35,51 @@ struct DeliverTurnInputBody {
 }
 
 type RouteResponse = (StatusCode, Json<Value>);
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(super) struct DeliveryProbe {
+    pub calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub entered: Option<std::sync::Arc<tokio::sync::Notify>>,
+    pub release: Option<std::sync::Arc<tokio::sync::Notify>>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static ADMISSION_ENABLED_FOR_TEST: bool;
+    pub(super) static DELIVERY_PROBE_FOR_TEST: DeliveryProbe;
+}
+
+fn admission_enabled() -> bool {
+    #[cfg(test)]
+    if let Ok(enabled) = ADMISSION_ENABLED_FOR_TEST.try_with(|enabled| *enabled) {
+        return enabled;
+    }
+    imsg_reply::is_enabled()
+}
+
+async fn observed_delivery(
+    registry: &HealthRegistry,
+    request: HumanInputRequest,
+    reply: Option<imsg_reply::ReplyObligation>,
+) -> Result<HumanInputDelivery, HumanInputError> {
+    #[cfg(test)]
+    if let Ok(probe) = DELIVERY_PROBE_FOR_TEST.try_with(Clone::clone) {
+        probe
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(entered) = probe.entered {
+            entered.notify_one();
+        }
+        if let Some(release) = probe.release {
+            release.notified().await;
+        }
+    }
+    match reply {
+        Some(reply) => deliver_with_reply(registry, request, reply).await,
+        None => deliver_human_input(registry, request).await,
+    }
+}
 
 fn failure(status: StatusCode, error: &str) -> RouteResponse {
     (status, Json(json!({"ok": false, "error": error})))
@@ -77,7 +124,15 @@ pub async fn deliver_turn_input(
     if source.len() > MAX_SOURCE_LEN {
         return bad_request("source_too_long");
     }
-    let origin_id = non_empty(body.origin_id);
+    let obligations_enabled = imsg_reply::enabled_for_source(admission_enabled(), &source);
+    let origin_id = if obligations_enabled {
+        body.origin_id.filter(|origin| !origin.trim().is_empty())
+    } else {
+        non_empty(body.origin_id)
+    };
+    if obligations_enabled && origin_id.is_none() {
+        return bad_request("origin_id_required");
+    }
     if origin_id
         .as_ref()
         .is_some_and(|origin| origin.len() > MAX_ORIGIN_ID_LEN)
@@ -124,7 +179,35 @@ pub async fn deliver_turn_input(
         }})),
         channel_name_hint,
     };
-    delivery_response(channel_id, deliver_human_input(registry, request).await)
+    if let (true, Some(origin_id)) = (obligations_enabled, origin_id.as_deref()) {
+        let input = imsg_reply::AdmissionInput {
+            origin_id,
+            agent_id: &id,
+            channel_id,
+            author_id,
+            source: &source,
+            text,
+        };
+        let provider = request.provider.clone();
+        let reply = imsg_reply::ReplyObligation::new(pool.clone(), origin_id);
+        imsg_reply::deliver_once(
+            pool,
+            &input,
+            || {
+                preflight_human_input(
+                    registry,
+                    poise::serenity_prelude::ChannelId::new(channel_id),
+                    &provider,
+                    author_id,
+                )
+            },
+            || observed_delivery(registry, request, Some(reply)),
+            |result| delivery_response(channel_id, result),
+        )
+        .await
+    } else {
+        delivery_response(channel_id, observed_delivery(registry, request, None).await)
+    }
 }
 
 fn delivery_response(

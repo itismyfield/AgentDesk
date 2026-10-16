@@ -150,9 +150,20 @@ pub(super) fn producer_error(
     error: String,
 ) -> Option<StreamMessage> {
     match submission.map(ManagedSubmission::classify_failure) {
+        Some(SubmissionFailure::GuardedStopped(run)) => {
+            tracing::warn!(channel_id, ?run, "guarded Claude submission remains held");
+            return None;
+        }
+        Some(SubmissionFailure::GuardedRunning) => return None,
         Some(SubmissionFailure::PreSubmitPersistenceRefused(refused)) => {
             tracing::warn!(channel_id, %refused, "provider held the prompt before submit");
             return None;
+        }
+        Some(SubmissionFailure::IdleStashObserved) => {
+            tracing::warn!(
+                channel_id,
+                "provider failed after an observed idle-stash delivery"
+            );
         }
         Some(SubmissionFailure::SubmissionIndeterminate) => {
             tracing::warn!(channel_id, "provider failed after the submission fence");
@@ -226,32 +237,45 @@ pub(super) fn execute(
         ..turn
     };
     match turn.provider.legacy_streaming_dispatch_kind() {
-        LegacyDispatchKind::Claude => claude_tui::submission_fence::with_scope(
-            turn.submission.map(ManagedSubmission::fence),
+        LegacyDispatchKind::Claude => claude_tui::guarded_outcome::with_owner(
+            turn.submission.map(ManagedSubmission::observer),
             || {
-                #[cfg(test)]
-                if let Some(result) = claude_legacy_probe(turn.channel_id) {
-                    return result;
-                }
-                claude::execute_command_streaming(
-                    turn.prompt,
-                    turn.session_id,
-                    turn.working_dir,
-                    sender,
-                    turn.system_prompt,
-                    Some(turn.allowed_tools),
-                    Some(turn.cancel),
-                    turn.remote_profile,
-                    turn.tmux_session_name,
-                    turn.teardown,
-                    Some(turn.channel_id),
-                    Some(turn.provider.clone()),
-                    turn.model,
-                    turn.native_fast_mode,
-                    turn.compact_percent,
-                    turn.compact_lower_bound_tokens,
-                    turn.cache_ttl_minutes,
-                    turn.dispatch_type,
+                claude_tui::submission_fence::with_scope(
+                    turn.submission.map(ManagedSubmission::fence),
+                    || {
+                        claude_tui::submit_canary::with_channel(turn.channel_id, || {
+                            #[cfg(all(test, unix))]
+                            submission_tests::observe_owner(
+                                turn.channel_id,
+                                turn.submission,
+                                turn.prompt,
+                            );
+                            #[cfg(test)]
+                            if let Some(result) = claude_legacy_probe(turn.channel_id) {
+                                return result;
+                            }
+                            claude::execute_command_streaming(
+                                turn.prompt,
+                                turn.session_id,
+                                turn.working_dir,
+                                sender,
+                                turn.system_prompt,
+                                Some(turn.allowed_tools),
+                                Some(turn.cancel),
+                                turn.remote_profile,
+                                turn.tmux_session_name,
+                                turn.teardown,
+                                Some(turn.channel_id),
+                                Some(turn.provider.clone()),
+                                turn.model,
+                                turn.native_fast_mode,
+                                turn.compact_percent,
+                                turn.compact_lower_bound_tokens,
+                                turn.cache_ttl_minutes,
+                                turn.dispatch_type,
+                            )
+                        })
+                    },
                 )
             },
         ),
@@ -631,6 +655,13 @@ mod codex_herdr_tests;
 #[cfg(test)]
 #[path = "provider_dispatch_submission_tests.rs"]
 mod submission_tests;
+
+#[cfg(all(test, unix))]
+#[path = "provider_dispatch_idle_stash_tests.rs"]
+mod idle_stash_tests;
+
+#[cfg(test)]
+pub(super) mod producer_error_test_support;
 
 #[cfg(test)]
 mod tests {

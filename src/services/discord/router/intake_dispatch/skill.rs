@@ -19,6 +19,13 @@ pub(crate) async fn dispatch_skill_intake(
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     admitted_local: Option<LocalAdmissionPermit>,
 ) -> Result<(), super::super::super::Error> {
+    super::super::intake_gate::ledger::legacy_allowed(
+        deps.shared,
+        deps.http,
+        &provider,
+        channel_id,
+    )
+    .await?;
     let submission = IntakeSubmission {
         provider,
         request: super::super::message_handler::IntakeRequest {
@@ -48,7 +55,9 @@ pub(crate) async fn dispatch_skill_intake(
         voice_announcement: None,
     };
     if let Some(permit) = admitted_local {
-        finish_admitted_local(deps, permit, submission).await
+        finish_admitted_local(deps, permit, submission)
+            .await
+            .map(|_| ())
     } else {
         dispatch_text_intake(deps, submission).await
     }

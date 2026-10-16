@@ -4,6 +4,10 @@ This runbook covers the first O writer canary: one new channel moved to the O wr
 [`tui_o.writer.channels`](tui-o-writer-channels.md). It applies to a build whose `O_TUI_WRITER`
 switch is `true`, as this build is. With an empty list every channel stays on Legacy.
 
+The first run uses Claude's completed warm-up and historical adoption path. Writer activation
+and turn-mode confirmation are separate gates. Code coordinates below refer to
+`945aac2668ce010b92053fdb39f541ae51629e20`; recheck them for the deployed build.
+
 Managed drain and handback to Legacy are not implemented. The canary is one way: a canary channel
 is never removed from the list and never added again. The next canary uses a different new channel.
 
@@ -12,7 +16,7 @@ is never removed from the list and never added again. The next canary uses a dif
 Use a Discord channel created for the canary. On the gateway node all of these must hold, or the
 channel is not adopted:
 
-- The channel is registered in `agents[].channels` with a Claude or Codex TUI runtime.
+- The first canary channel is registered in `agents[].channels` with a Claude TUI runtime.
 - The gateway node is the O home: without clustering every node is; with clustering both
   `cluster.instance_id` and `cluster.gateway_preferred_instance_id` are set and equal on it. A
   clustered node with a non-empty list and either id unset refuses to boot.
@@ -26,9 +30,12 @@ channel is not adopted:
   record naming it (`<runtime_root>/discord_terminal_delivery_custody`). A custody record that does
   not parse also blocks adoption.
 - The channel's binding log (`<runtime_root>/binding_events/<channel>.log`) binds at least one
-  transcript and no bind is pending. A Codex channel's transcripts must all still be empty (0 bytes,
-  same file). A Claude channel's may hold output under the checks of §3.1.
+  transcript and no bind is pending. The Claude transcript may hold output under the checks of §3.1.
 - `<runtime_root>/o_store/<channel>` does not exist.
+
+Codex writer activation requires an already bound, unchanged 0-byte source. Its native
+reader requires real session metadata. Do not create or truncate a transcript to manufacture
+that state; use Claude's verified warm-up path for the first canary.
 
 The TUI writes its transcript and the binding log binds it only at the first prompt, so a Claude
 canary starts with a warm-up turn:
@@ -40,8 +47,11 @@ canary starts with a warm-up turn:
 3. Apply (§2) and confirm (§3). The `init` must list the transcript with `delivery_start` at its
    length at the restart.
 
-Legacy's cursor lives only in memory (`tui_prompt_dedupe` state). At boot the rehydrate pass sets
-it from the launch script to the transcript's length, and O starts there.
+Legacy's cursor lives only in memory (`tui_prompt_dedupe` state). At boot the rehydrate pass uses
+the launch script's transcript length. Confirm the actual cursor, EOF, closed native turn and
+authoritative delivery frontier; a restart alone does not establish these facts
+(`src/services/discord/tui_prompt_relay/launch_script.rs:104–120`,
+`src/services/tui_o/writer/adoption.rs:1–270`).
 
 Only the canary must stay quiet from step 2 to the confirmation; other channels may keep working
 through the restart. A message to the canary in that window lets its placement or first Legacy
@@ -51,6 +61,10 @@ body take the channel for that process: it stays on Legacy until the next restar
 
 1. Add the channel ID to `tui_o.writer.channels` in `agentdesk.yaml` on every node. All nodes must
    carry the same list. Saving the file only marks the change as restart-required.
+   Separately select this channel in `tui_o.turn.channels`, keeping `tui_o.turn.all_owned: false`
+   for the single-channel run. Its default is an empty list with `all_owned: false`, so writer
+   selection alone does not confirm turn mode. Verify the effective boot selection on every producer
+   (`src/services/tui_o/turn_mode.rs:8–80`).
 2. Restart the gateway node through the managed restart path. The new list applies at boot only.
 3. Restart any standby or runner node the same way, so no node keeps the old list.
 
@@ -82,6 +96,11 @@ A startup refused with `o_store: channel <id> is not registered` or `is not TUI`
 channel lost its TUI binding. Restore the binding; do not delete the store to get past it.
 
 ## 3. Confirm activation
+
+These checks establish writer activation. Turn mode also requires effective turn selection
+and successful retirement of the channel's synthetic population. A failed or partial
+retirement leaves Legacy turn mode active. Check the ordinary retirement logs and the
+channel's `turn_presence` status; an `init` alone does not confirm turn mode.
 
 - The release log has `[tui_o] writer host created the channel's init` for the channel, once.
 - `<runtime_root>/o_store/o_era` exists (first canary only) and
@@ -132,13 +151,15 @@ channel stays on Legacy for that process with `adoption held: <reason>`:
   `last-prompt`, `ai-title`, `mode`, `permission-mode`, `atis-latch`, `cost-state`,
   `file-history-snapshot` and `hook_success` attachments. The first prompt or other record there
   starts the abandoned range; it no longer holds the channel.
-- Earlier transcripts the log bound total at most 64 files and 128 MiB (`past sources exceed
-  budget`).
+- Earlier transcripts are pinned newest first within a 64-source scan and cumulative 128 MiB
+  budget. Missing past sources are skipped and the byte budget stops further pinning; exceeding
+  it does not reject the whole adoption. Inspect the actual pinned set rather than assuming it
+  covers all history (P27/P28: `src/services/tui_o/writer/adoption.rs:592–620`).
 - Nothing moved before the `init`: the log, the transcripts' length and mtime, and no Legacy
   response tail runs for the session.
 
-An open last turn does not end the adoption, unless the channel also has sessions on another node
-or a node override (those release it first). The channel stays on Legacy, logged as
+An open last turn, delivery debt, lagging cursor, custody or other transient Legacy state can defer
+adoption; sessions on another node or a node override release it first. The channel stays on Legacy, logged as
 `adoption waits for Legacy`, and its writer host looks again every 5 seconds without a restart. It
 reads the transcript again only once the reason it waited on may have cleared: the transcript
 changed, Legacy's cursor reached its end, the frontier moved or the binding log moved. It adopts
@@ -147,29 +168,38 @@ once all of these hold, logged as `deferred adoption committed`:
 - The transcript has not changed for 10 seconds.
 - Legacy holds no inflight row, custody, pending start, response tail, mailbox turn, queued
   intervention or pending dispatch for the channel, and is not emitting a terminal delivery.
-- Every check above passes, and in addition nothing past Legacy's frontier is left undelivered:
-  a deferred adoption abandons nothing. While a record is past the frontier it keeps waiting.
+- Every check above passes, and in the normal clean branch nothing past Legacy's frontier is left
+  undelivered. This branch abandons nothing; the stall-EOF branch below is a separate outcome.
 
 A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
-(sessions on another node, a node override, a non-authoritative delivery record, the budget) or if
+(sessions on another node, a node override or a non-authoritative delivery record) or if
 the binding log bound another transcript while it waited (`was bound while the adoption
-waited`), since Legacy may still owe output it read from that one. A channel whose debt never clears stays on Legacy
-until the next restart, which adopts it as above.
+waited`), since Legacy may still owe output it read from that one.
+
+Deferred adoption does not promise an unlimited wait. After 40 minutes without delivery progress
+(soft stall), or the 80-minute frontier-progress cap (hard stall), the guarded non-late path may
+handoff at EOF. The log is `Legacy delivered nothing through the stall; O starts at the source's
+end`. Preserve the stall kind, source, frontier and abandoned ranges. Do not approve that sample
+as a clean comparison baseline until the historical debt/abandon evidence is established; elapsed time or
+`deferred adoption committed` alone is insufficient (P31:
+`src/services/tui_o/writer/deferred.rs:19–28,325–428`).
 
 Before editing the list, run both cross-node checks below by hand and keep their output in the lane
 log. If either fails, stop the expansion; neither may be skipped.
 
 1. Panes (F4): on every node, list the tmux sessions and the Legacy binding for each channel being
    added. A pane for it on any node other than the O home stops the expansion.
-2. Selection (F5): diff `tui_o.writer.channels`, `tui_o.writer.all_tui`, the TUI bindings in
-   `agents[].channels`, `cluster.gateway_preferred_instance_id` and `cluster.instance_id` across
-   the nodes. Refuse the deploy if any node's list drops a channel
+2. Selection (F5): compare writer and turn selections, the TUI bindings in `agents[].channels`
+   and `cluster.gateway_preferred_instance_id` across the nodes. Check each node's distinct local
+   `cluster.instance_id` and the home relationship; local IDs need not be identical. Refuse the deploy if any node's list drops a channel
    another node selects. After the restart, every channel with `<runtime_root>/o_store/<channel>/init`
    on the O home must still be in its selection: the home has no `tui_o:selection_missing` reason.
 
 Confirm as in §3. The channel's `init` lists its current transcript with `delivery_start` at
-Legacy's cursor, which is that transcript's length when it was adopted, and each earlier transcript
-at its length. Replace these manual checks with the automated check once it lands.
+Legacy's cursor, which is that transcript's length when it was adopted, and each pinned earlier
+transcript at its length. Unpinned history is not covered by these entries: a later bind to an
+unpinned source holds it Pending (`src/services/tui_o/writer/past_bind.rs:9–40`). Replace these
+manual checks with the automated check once it lands.
 
 ## 4. Emergency stop
 
@@ -188,16 +218,20 @@ POST starts; in-flight results are settled from the O ledger on the next start.
 
 ## 5. Observe
 
-Watch the canary for 50 turns with an oracle independent of the writer:
+The N1 turn canary was dropped and its manifest, producer and 50-turn oracle tooling removed.
+Post marked prompts in the canary channel from your own Discord account, for example
+`Reply with exactly [E2E:CANARY:<RUN_ID>:1]`, one or more turns each with its own marker. The
+comparison counts your Discord message as the input; prompts sent through `/turn/start` (as the
+E2E driver's `send_prompt` does) leave no Discord input and read as `lost`. Do not use the E2E
+driver here: its default run includes E-50 (`!clear`) and its reset cancels the turn and clears the
+queue. Then compare that run's markers in the native transcript and Discord read-only:
 
-- Silent missing: every assistant text unit in the transcript appears in the channel, or its
-  withheld state is visible as an alarm.
-- Unapproved duplicates: no unit is posted twice without an ambiguity alarm.
-- Legacy body effect: Legacy posts no body text in the canary channel (count 0).
+```sh
+python3 -m scripts.e2e.tui_relay.source_compare --channel-id <CHANNEL_ID> --run-id <RUN_ID>
+```
 
-When all three hold across the 50 turns, move to the expansion step without further waiting.
-
-Other channels stay on Legacy throughout. Check that their delivery is unchanged.
+Require exit 0. Evidence without markers exits 2; a `missing_relay`, `lost` or `duplicated`
+verdict exits 1 (`scripts/e2e/tui_relay/source_compare.py:152–171,315–358`).
 
 ## 6. Forbidden during the canary
 
@@ -249,6 +283,21 @@ the original piece once, then the output that followed. Run these on the O home,
   script refuses a source or a rollback target that does not record `o_ledger_operator_resume` as
   `true`. Fix forward instead, and never delete approval lines from the ledger to get past it.
 
+Enable re-post for a canary with both `tui_o.repost.enabled: true` and an explicit
+`tui_o.repost.channels: [<CHANNEL_ID>]` allowlist. An empty or missing `channels` list denies
+all re-post work; other hosted channels continue normal fresh original delivery. Validated reloads
+apply to the next grant and wire attempt, including a 429 retry, while an HTTP request whose first
+poll already left may finish.
+
+An enabled re-post turn reports retained uncertain backlog with
+`[tui_o] re-post backlog retained`: `channel`, `count`, and `pieces` contain the serial, unit key,
+piece index and reason, without the payload. The sidecar marks each serial before the log is
+emitted; repeated turns, sidecar reopening and later activations do not repeat that report.
+These pieces do not enter the shared re-post budget and are not automatically re-posted.
+`[tui_o] re-post backlog report failed` blocks that re-post turn until the sidecar can be reopened
+and the report recorded. A missing log line is not proof of an empty backlog: a serial may already
+be marked reported, or the reporting step may have failed.
+
 ## 8. Roll back after re-post activation
 
 An older binary that cannot read the `not_sent` ledger tag stops the channel writer with ledger
@@ -289,3 +338,46 @@ Follow these steps in order before selecting that older binary:
 
 This is a manual rollback procedure. A re-post rollback preflight in `scripts/deploy-release.sh`
 is follow-up work and is not implemented here.
+
+## 9. Resolve an unseen resume boundary
+
+An in-session resume can bind a transcript the O writer has never seen. If that source has no
+stored cursor or rotation link and no verified parent, its boundary is `Pending { candidates: [0] }`
+and the writer raises `BoundaryPending`. The candidate `0` is not an approved delivery start.
+While Pending, the source spools both history and new output but posts neither; its spool is
+ineligible for GC. The alarm appears in `/api/health` as `tui_o:boundary_pending:<channel>` and
+raises health to at least degraded. It reports withheld output, not proof of loss or duplication.
+
+Run the following procedure on the O home:
+
+1. Identify the channel and resumed source from the `BoundaryPending` alarm. Inspect the transcript
+   and establish the first record that should be delivered after resume. Keep its exact byte start
+   or unique record UUID, excluding the historical prefix while retaining all new owed output.
+2. Record that start using the source's spool key or transcript path:
+
+   ```sh
+   agentdesk o boundary resolve --channel <CHANNEL_ID> --source '<KEY_OR_PATH>' --from '<BYTE_OFFSET_OR_UUID>' --operator '<NAME>'
+   ```
+
+   `--operator` defaults to `operator`. A `--from` that parses as an unsigned integer is a byte
+   offset; otherwise it is a UUID. The source selector must match exactly one stored source,
+   whose boundary must be Pending and whose file identity must still match. A numeric `--from`
+   validates a line-start byte offset, not the existence of a complete record: newline-aligned
+   EOF, offset 0 in an empty file, and the start of an incomplete trailing line can pass. UUID
+   lookup requires exactly one matching complete JSON line. An already recorded resolution is
+   refused with an instruction to restart the writer (`src/cli/o.rs:48–83`,
+   `src/services/tui_o/store/rotation.rs:220–285`).
+   Neither check proves the resume boundary; leave the source Pending unless the first owed
+   position can be established.
+3. Wait for the command to succeed, then use the managed restart path. The command only appends
+   and fsyncs `BoundaryResolved`; it sends no output and applies at the next writer start. That
+   start changes Pending to `Owed { from }` and replays the retained spool. Confirm that the
+   historical range `[0, from)` is not posted and the owed output at or after `from` is delivered.
+
+Automatic resume byte boundaries and automatic re-evaluation of existing resume Pending states
+are not provided. Hook publication time, elapsed time and current EOF do not prove the resume
+position. Reopening automatic boundary work requires a provider signal proving the exact resume
+byte position or a separately verified boundary contract.
+
+See the [TUI O resume contract](relay-state-contract.md#appendix-tui-o-unseen-resume-boundary)
+for current-main code coordinates, acceptance-test assertions and the health follow-up.

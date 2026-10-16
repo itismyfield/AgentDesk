@@ -2,16 +2,15 @@ use super::*;
 mod backstop;
 pub(in crate::services) use backstop::BackstopSlot;
 pub(in crate::services::discord) use backstop::spawn_turn_completion_idle_queue_listener;
-#[cfg(test)]
-use backstop::{
-    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY,
-    deferred_idle_queue_initial_presleep, emit_idle_queue_backstop_warn,
-    idle_queue_backstop_backlog_units,
-};
 pub(super) use backstop::{
-    arm_event_backstop_after_no_start_if_queue_nonempty,
+    DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY, arm_event_backstop_after_no_start_if_queue_nonempty,
     arm_slow_idle_queue_backstop_if_queue_nonempty, schedule_deferred_idle_queue_kickoff,
     schedule_deferred_idle_queue_kickoff_immediate,
+};
+#[cfg(test)]
+use backstop::{
+    DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY, deferred_idle_queue_initial_presleep,
+    emit_idle_queue_backstop_warn, idle_queue_backstop_backlog_units,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use backstop::{
@@ -22,8 +21,11 @@ pub(in crate::services::discord) use backstop::{
 #[path = "queue_io/cancel_reclaim_support_test.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
+pub(in crate::services::discord) mod auto_queue_eligibility;
+pub(in crate::services::discord) mod queued_head_inject;
 mod transport;
 mod turn_admission;
+use queue_dispatch::kickoff::{KickoffLane, kickoff_queue_channel};
 use transport::QueueTransport;
 pub(super) use turn_admission::{
     INPUT_PENDING_NOTICE, input_refusal_notice, mailbox_enqueue_observed_intervention,
@@ -187,6 +189,13 @@ pub(super) fn schedule_race_loss_requeue_post_enqueue_idle_recheck(
                 queue_len = snapshot.intervention_queue.len(),
                 "Deferred drain: race-loss requeue post-enqueue recheck found no idle kickable backlog"
             );
+            // The paste takes the transition itself, so the one held here is released first.
+            drop(transition_guard);
+            let reason = "race_loss_requeue_queued_head";
+            auto_queue_eligibility::run_queued_lane(
+                &shared, &provider, channel_id, &snapshot, reason,
+            )
+            .await;
             return;
         }
 
@@ -251,6 +260,13 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
                 "post_enqueue_idle_snapshot",
             )
             .await;
+        } else {
+            // A real turn holds the channel: only the busy-TUI paste may still run.
+            let reason = "post_enqueue_queued_head";
+            auto_queue_eligibility::run_queued_lane(
+                &shared, &provider, channel_id, &snapshot, reason,
+            )
+            .await;
         }
     });
 }
@@ -260,6 +276,29 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
     provider: &ProviderKind,
     channel_id: ChannelId,
     reason: &'static str,
+) -> IdleQueueKickoffChannelOutcome {
+    kick_queue_channel_if_context_available(shared, provider, channel_id, reason, KickoffLane::Idle)
+        .await
+}
+
+/// The queued-only lane's kick: it may paste the first ready input into a busy TUI and nothing
+/// else, so it never reports a started turn.
+pub(super) async fn kick_queued_only_channel_if_context_available(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+) {
+    let lane = KickoffLane::QueuedOnly(reason);
+    kick_queue_channel_if_context_available(shared, provider, channel_id, reason, lane).await;
+}
+
+async fn kick_queue_channel_if_context_available(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    reason: &'static str,
+    lane: KickoffLane,
 ) -> IdleQueueKickoffChannelOutcome {
     #[cfg(test)]
     if let Some(outcome) =
@@ -284,16 +323,21 @@ pub(super) async fn kick_idle_queue_channel_if_context_available(
         "  [{ts}] 🚀 Deferred drain: one-shot kick for channel {} ({reason})",
         channel_id
     );
+    let deps = transport.intake_deps(shared);
+    let kickoff = async {
+        match lane {
+            KickoffLane::Idle => {
+                super::kickoff_idle_queue_channel(&deps, provider, channel_id).await
+            }
+            lane => kickoff_queue_channel(&deps, provider, channel_id, lane).await,
+        }
+    };
     #[cfg(test)]
     {
-        queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
-            reason,
-            super::kickoff_idle_queue_channel(&transport.intake_deps(shared), provider, channel_id),
-        )
-        .await
+        queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(reason, kickoff).await
     }
     #[cfg(not(test))]
-    super::kickoff_idle_queue_channel(&transport.intake_deps(shared), provider, channel_id).await
+    kickoff.await
 }
 
 #[cfg(test)]

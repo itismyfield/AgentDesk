@@ -24,6 +24,7 @@ mod headless_turn;
 pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
+pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
 // task. Unix-gated because its transcript coordinate is the `(dev, ino)`
@@ -60,6 +61,8 @@ mod session_enrichment;
 mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
+pub(in crate::services::discord) mod tail_evidence;
+pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
 // Dormant until the input supervisor publishes views for channels it retires.
@@ -68,15 +71,9 @@ pub(in crate::services::discord) mod transcript_turn;
 mod turn_deliver;
 mod unpaired_active_token;
 pub(in crate::services::discord) mod watcher_respawn;
-pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) use watcher_respawn::{
-    lock_watcher_absence_for_test, n4d2_absence, n4d2_arm_absence, retry_pending_watcher_respawn,
-};
-#[cfg(unix)]
-pub(in crate::services::discord) use watcher_respawn::{
-    record_retired_o_install_outcome, retired_o_install_due,
-};
+pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
+pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 
 // `HeadlessAgentTurnReservation` has no external referent today (callers
 // destructure the reserve/start tuple); kept re-exported for the reserve→start
@@ -118,9 +115,11 @@ pub use turn_deliver::{
     external_turn_hold_for_start,
 };
 pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
+pub(crate) use turn_deliver::{deliver_with_reply, preflight_human_input};
 #[cfg(test)]
 pub(crate) use turn_deliver::{
     inflight_rows_for_tests, register_bot_auth_for_tests, seed_external_turn_row_for_tests,
+    set_human_input_auth_for_tests,
 };
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
@@ -458,6 +457,7 @@ impl HealthRegistry {
                 .all(|entry| entry.role == ProviderRuntimeRole::Standby)
     }
 
+    #[cfg(test)]
     pub(in crate::services::discord) async fn provider_entries_guard(
         &self,
     ) -> tokio::sync::MutexGuard<'_, Vec<ProviderEntry>> {

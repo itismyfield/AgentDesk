@@ -73,12 +73,6 @@ pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry
 pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
-#[cfg(test)]
-pub(in crate::services::discord) use watcher_lifecycle::n4d2_pause_install_after_host;
-pub use watcher_lifecycle::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
-pub use watcher_lifecycle::{RetiredOWatcherRestore, restore_retired_o_watchers};
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;
@@ -1280,39 +1274,8 @@ fn advance_watcher_confirmed_end_inner(
         tmux_session_name,
     } = target;
     let relay_coord = shared.tmux_relay_coord(channel_id);
-    let mut cur = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
-    let mut won_advance = false;
-    while cur < committed_end_offset {
-        match relay_coord.confirmed_end_offset.compare_exchange(
-            cur,
-            committed_end_offset,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                won_advance = true;
-                break;
-            }
-            Err(observed) => cur = observed,
-        }
-    }
-    // Pair the pre-CAS mtime with the offset only on a real advance. If
-    // the loop exits because the stored watermark is already at/past
-    // `committed_end_offset` (the stale-high watermark from an older
-    // session — exactly the regression case this PR is trying to
-    // recover from), refreshing the mtime would associate the OLD offset
-    // with the NEW wrapper and break the next regression check
-    // (PR #1271 round 3).
-    if won_advance && let Some(mtime) = mtime_at_attempt {
-        relay_coord
-            .confirmed_end_generation_mtime_ns
-            .store(mtime, std::sync::atomic::Ordering::Release);
-    }
-    let confirmed_end = relay_coord
-        .confirmed_end_offset
-        .load(std::sync::atomic::Ordering::Acquire);
+    let confirmed_end =
+        relay_coord.advance_untyped_frontier(committed_end_offset, mtime_at_attempt);
     let confirmed_reached_current = confirmed_end >= committed_end_offset;
     record_watcher_invariant(
         confirmed_reached_current,
