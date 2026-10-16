@@ -32,7 +32,7 @@ mod first_init;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
-use recover::{Recovered, recover};
+use recover::{Recovered, recover, recover_boot};
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
     type Port: DiscordPort;
@@ -602,7 +602,10 @@ async fn host_channel<I: HostIo>(
 ) {
     let alarms = io.alarms();
     let mut bindings = None;
-    let store = match recover(&runtime_root, channel, None) {
+    let Some(recovered) = recover_boot(&runtime_root, channel, &stopping).await else {
+        return;
+    };
+    let store = match recovered {
         Ok(Recovered::Store(_)) if !candidate.confirm_store() => {
             return hold(
                 &alarms,
