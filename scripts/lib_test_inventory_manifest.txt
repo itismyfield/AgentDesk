@@ -6011,6 +6011,7 @@ services::discord::prompt_builder::section_dedupe::tests::large_section_still_re
 services::discord::prompt_builder::section_dedupe::tests::would_be_duplicate_does_not_mutate
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_claude_system_prompt_on_launch_and_resume
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
+services::discord::queue_dispatch::input_effect_tests::automatic_dequeue_restores_a_head_capped_after_selection_and_takes_the_tail
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
 services::discord::queue_io::cancel_backstop_tests::backstop_refuses_an_already_retired_channel
 services::discord::queue_io::cancel_backstop_tests::cancelled_anchor_is_rechecked_on_later_slow_backstop_cycle
