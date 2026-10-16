@@ -214,6 +214,7 @@ src/services/discord/terminal_ui_obligation/input_fence_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
 src/services/discord/tmux_watcher/inherited_fixture_tests.rs
+src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs
 src/services/discord/tmux_watcher/path_b_record_tests.rs
 src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/retired_host_tick_tests.rs
@@ -540,6 +541,7 @@ services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::input_fence_tests
 services::discord::terminal_ui_obligation::tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
+services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
@@ -1598,10 +1600,8 @@ services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_ro
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
+services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
+services::discord::inflight::removal::custody_notice_tests::pending_notify_readdresses_when_custody_copy_identifies_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
@@ -1906,6 +1906,7 @@ services::discord::terminal_ui_obligation::input_fence_tests::sweep_with_no_inpu
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
+services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg

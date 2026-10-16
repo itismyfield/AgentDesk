@@ -321,6 +321,7 @@ pub(super) fn link(
         source: source.clone(),
         seq,
         parent: parent.cloned(),
+        hot_candidate: None,
         committed_at: Utc::now(),
         boundary,
     }
