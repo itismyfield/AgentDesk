@@ -30,7 +30,6 @@ async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_
             .has(CHANNEL, &WriterAlarm::Blocked { status: 403 })
     );
     let old = handles.pop().unwrap();
-    let generation = old.generation();
     old.stop_and_join().await.unwrap();
     assert!(!ready.is_hosted(CHANNEL) && !ready.accepts(CHANNEL));
     let mut unapproved = managed(&harness, &io, &ready);
@@ -54,6 +53,13 @@ async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_
         .open(&ledger)
         .unwrap();
     held.try_lock().unwrap();
+    let era = harness.store.read_era().unwrap().unwrap();
+    let locked_recovery = harness.store.open_channel(&era, CHANNEL).err().unwrap();
+    assert_eq!(
+        locked_recovery.io,
+        Some(std::io::ErrorKind::WouldBlock),
+        "the held ledger lock makes recovery transiently fail"
+    );
     let mut locked = managed(&harness, &io, &ready);
     assert_eq!(
         locked.len(),
@@ -61,17 +67,22 @@ async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_
         "a host really attempts recovery under the CLI lock"
     );
     polls(3).await;
-    assert!(io.alarms.0.lock().unwrap().iter().any(|(_, alarm)|
-        matches!(alarm, WriterAlarm::Halted { detail } if detail.contains("WouldBlock"))));
+    assert!(ready.is_hosted(CHANNEL));
+    assert!(
+        io.alarms.halted().is_empty(),
+        "a passing boot lock must not hold the writer"
+    );
     assert_eq!(std::fs::read(&ledger).unwrap(), before);
     assert_eq!(harness.port.posts(), ["original bytes"]);
     assert!(!ready.accepts(CHANNEL));
-    locked.pop().unwrap().stop_and_join().await.unwrap();
     drop(held);
-    let mut approved = managed(&harness, &io, &ready);
-    assert_eq!(approved.len(), 1);
-    assert_ne!(approved[0].generation(), generation);
+    tokio::time::advance(crate::services::tui_o::writer::resume::FIRST_WAIT).await;
     polls(3).await;
+    polls(3).await;
+    assert!(
+        ready.is_hosted(CHANNEL),
+        "the locked host resumes after unlock"
+    );
     assert_eq!(harness.port.posts(), ["original bytes", "original bytes"]);
     let channel = harness.channel();
     assert_eq!(
@@ -94,7 +105,7 @@ async fn operator_resume_managed_restart_joins_old_generation_and_runs_approved_
         harness.port.posts(),
         ["original bytes", "original bytes", "later"]
     );
-    approved.pop().unwrap().stop_and_join().await.unwrap();
+    locked.pop().unwrap().stop_and_join().await.unwrap();
     assert!(!ready.accepts(CHANNEL));
 }
 

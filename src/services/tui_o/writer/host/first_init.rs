@@ -21,7 +21,7 @@ use crate::services::tui_o::writer::codex_adoption::scan::{Scanned, scan};
 use crate::services::tui_o::writer::codex_adoption::{Parse, Suffix};
 use crate::services::tui_o::writer::{deferred, late_adopt, renumbered};
 
-use super::recover::{Recovered, recover};
+use super::recover::{Recovered, recover_boot};
 
 /// Bytes a channel's metadata prefixes may hold; the read runs under the adoption lock.
 const METADATA_BUDGET: u64 = 1 << 20;
@@ -140,7 +140,7 @@ pub(super) async fn start<I: HostIo>(
             return None;
         }
     }
-    match recover(runtime_root, channel, None) {
+    match recover_boot(runtime_root, channel, stopping).await? {
         Ok(Recovered::Store(store)) => {
             io.adopted(channel, provider);
             let bindings = log;
