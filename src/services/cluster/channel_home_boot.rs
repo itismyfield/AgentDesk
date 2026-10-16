@@ -18,7 +18,7 @@ pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
 pub(crate) use super::channel_home_port::PersistedInput;
-use super::home_supervisor::{HomeBundle, Phase, Settled, StopReason, Supervisor};
+use super::home_supervisor::{HomeBundle, HomeLifecycle, Phase, Settled, StopReason, Supervisor};
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
@@ -156,8 +156,8 @@ impl HomeBundle for WriterBundle {
 /// Starts a channel's writer under the gateway's authority; `None` when none is hosted.
 pub(crate) type StartWriter = Arc<dyn Fn(u64) -> Option<ManagedWriterHandle> + Send + Sync>;
 
-/// A gateway runtime's writers, one per channel under one supervisor: a home's watch ends the
-/// channel's writer before the row returns and starts the gateway's one only after it.
+/// A provider runtime's writers, one per channel under one supervisor: a gateway home's watch ends
+/// the channel's writer before the row returns and starts the gateway's one only after it.
 pub(crate) struct ChannelWriters {
     supervisor: Arc<Supervisor<WriterBundle>>,
     gateway: Arc<OwnershipGate>,
@@ -165,6 +165,10 @@ pub(crate) struct ChannelWriters {
     start: OnceLock<Option<StartWriter>>,
     /// The channels the boot's rows name another node for; `None` until read, so nothing starts.
     foreign: Mutex<Option<BTreeSet<u64>>>,
+    /// The watches this runtime's boot started, ended by identity; held through a whole shutdown.
+    watches: tokio::sync::Mutex<Vec<(String, tokio::task::Id)>>,
+    /// Off the gateway the boot starts the writers and no watch stops or restarts them.
+    delegated: bool,
 }
 
 impl ChannelWriters {
@@ -177,7 +181,15 @@ impl ChannelWriters {
             readiness,
             start,
             foreign: Mutex::default(),
+            watches: tokio::sync::Mutex::default(),
+            delegated: false,
         }
+    }
+
+    /// A standby's or REST worker's writers, which only its shutdown ends.
+    pub(crate) fn delegated(mut self) -> Self {
+        self.delegated = true;
+        self
     }
 
     fn read_boot(&self, foreign: Option<BTreeSet<u64>>) {
@@ -281,6 +293,40 @@ pub(crate) fn writer_mutant(name: &str) -> bool {
     std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some(name)
 }
 
+/// Test-only mutants of a runtime's shutdown of its homes.
+#[cfg(test)]
+pub(crate) fn s3c_mutant(name: &str) -> bool {
+    std::env::var("ADK_S3C_MUTANT").ok().as_deref() == Some(name)
+}
+
+/// Intake is fenced by the restart's own admission fence, so pausing it here does nothing.
+impl HomeLifecycle for ChannelWriters {
+    fn pause_intake(&self, _: &str) {}
+
+    fn resume_intake(&self, _: &str) {}
+
+    /// Ends this runtime's own watches first, so none starts a writer again, then every writer
+    /// generation it supervises; a second caller waits for the first to finish.
+    fn stop_and_join(
+        &self,
+        reason: StopReason,
+    ) -> Pin<Box<dyn Future<Output = Settled> + Send + '_>> {
+        Box::pin(async move {
+            let mut watches = self.watches.lock().await;
+            while let Some((channel, id)) = watches.last().cloned() {
+                end_watch(&channel, Some(id)).await;
+                watches.pop();
+            }
+            let settled = self.supervisor.stop_all(reason).await;
+            #[cfg(test)]
+            if s3c_mutant("writer_stuck_as_joined") {
+                return Settled::Joined;
+            }
+            settled
+        })
+    }
+}
+
 impl BootPort {
     /// The channel's reads against this process's writer, with `restored` as its runtime sets it.
     pub(crate) fn reading(channel: u64, restored: Arc<AtomicBool>, reset: LegacyReset) -> Self {
@@ -339,7 +385,8 @@ pub(crate) struct Boot<P> {
     /// endpoint): watched for a row naming this node, and held `Lost` when the rows cannot be read.
     pub(crate) candidates: Vec<u64>,
     pub(crate) port: P,
-    /// The gateway runtime's writers a reclaimed channel returns to; none on other roles.
+    /// The runtime's writers, whose shutdown ends these watches; a gateway's also take a reclaimed
+    /// channel back, a delegated runtime's are never stopped or started by a watch.
     pub(crate) writers: Option<Arc<ChannelWriters>>,
 }
 
@@ -409,9 +456,16 @@ where
             local: boot.local.clone(),
             mounted: home,
             candidate: boot.candidates.contains(&id),
-            writers: boot.writers.clone(),
+            writers: boot.writers.clone().filter(|writers| !writers.delegated),
         };
         let watch = tokio::spawn(watch(seen, (boot.port)(id), Arc::clone(&lease)));
+        if let Some(writers) = &boot.writers {
+            writers
+                .watches
+                .lock()
+                .await
+                .push((channel.clone(), watch.id()));
+        }
         live(|live| live.insert(channel, Watched { watch, lease }));
     }
     started
@@ -667,7 +721,19 @@ fn live<R>(use_live: impl FnOnce(&mut Live) -> R) -> R {
 /// Ends a channel's watch and lease and waits for both, so nothing of an earlier start renews or
 /// drains once this returns.
 pub(crate) async fn stop(channel: &str) {
-    let Some(watched) = live(|live| live.remove(channel)) else {
+    end_watch(channel, None).await;
+}
+
+/// [`stop`], with `only` while that watch is still the registered one: a later start's survives.
+async fn end_watch(channel: &str, only: Option<tokio::task::Id>) {
+    #[cfg(test)]
+    let only = only.filter(|_| !s3c_mutant("old_cleanup_stops_replacement"));
+    let ours = |watched: &Watched| only.is_none_or(|id| watched.watch.id() == id);
+    let watched = live(|live| match live.get(channel) {
+        Some(watched) if ours(watched) => live.remove(channel),
+        _ => None,
+    });
+    let Some(watched) = watched else {
         return;
     };
     end(watched.watch).await;

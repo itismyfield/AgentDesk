@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use crate::services::cluster::channel_home::FORCE_AFTER;
@@ -220,9 +220,9 @@ pub(crate) async fn read_home(
     pool: &PgPool,
     channel_id: &str,
 ) -> Result<Option<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM o_channel_homes WHERE channel_id = $1"
-    ))
+    )))
     .bind(channel_id)
     .fetch_optional(pool)
     .await?;
@@ -259,13 +259,13 @@ pub(crate) async fn delegate(
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
     let provider =
         HomeProvider::parse(provider).ok_or_else(|| HomeError::UnknownProvider(provider.into()))?;
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
          SELECT $1, $2, 'releasing', $3, $4, nextval('o_channel_home_epochs'), NOW()
           WHERE NOT EXISTS (SELECT 1 FROM o_channel_homes WHERE channel_id = $1)
          ON CONFLICT (channel_id) DO NOTHING
          RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(provider.as_str())
     .bind(gateway)
@@ -285,13 +285,13 @@ async fn leave(
     holder: &str,
     epoch: i64,
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE o_channel_homes
             SET state = $5, holder = NULL, epoch = nextval('o_channel_home_epochs'),
                 updated_at = NOW()
           WHERE channel_id = $1 AND state = $2 AND holder = $3 AND epoch = $4
           RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(from.as_str())
     .bind(holder)
@@ -329,12 +329,12 @@ pub(crate) async fn adopt(
     target: &str,
     epoch: i64,
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE o_channel_homes
             SET state = 'worker', holder = $2, target = NULL, renewed_at = NOW(), updated_at = NOW()
           WHERE channel_id = $1 AND state = 'released' AND target = $2 AND epoch = $3
           RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(target)
     .bind(epoch)
@@ -350,12 +350,12 @@ pub(crate) async fn begin_reclaim(
     epoch: i64,
     gateway: &str,
 ) -> Result<HomeWrite<ChannelHome>, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE o_channel_homes
             SET state = 'reclaiming', target = $3, updated_at = NOW()
           WHERE channel_id = $1 AND state = 'worker' AND epoch = $2
           RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(epoch)
     .bind(gateway)
@@ -395,12 +395,12 @@ pub(crate) async fn renew(
     holder: &str,
     epoch: i64,
 ) -> Result<HomeWrite<HeldHome>, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE o_channel_homes SET renewed_at = NOW()
           WHERE channel_id = $1 AND holder = $2 AND epoch = $3
             AND state IN ('releasing', 'worker', 'reclaiming')
           RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(holder)
     .bind(epoch)
@@ -426,14 +426,14 @@ pub(crate) async fn force_orphan(
     window: ForceWindow,
     detail: &str,
 ) -> Result<ForceOutcome, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE o_channel_homes
             SET state = 'orphaned', holder = NULL, epoch = nextval('o_channel_home_epochs'),
                 updated_at = NOW(), detail = $4
           WHERE channel_id = $1 AND epoch = $2 AND holder IS NOT NULL
             AND NOW() - renewed_at > make_interval(secs => $3)
           RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(channel_id)
     .bind(epoch)
     .bind(window.0.as_secs_f64())
@@ -456,9 +456,9 @@ pub(crate) async fn force_orphan(
 
 /// Every home row, by channel.
 pub(crate) async fn list_homes(pool: &PgPool) -> Result<Vec<ChannelHome>, HomeError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM o_channel_homes ORDER BY channel_id"
-    ))
+    )))
     .fetch_all(pool)
     .await?;
     rows.iter().map(decode).collect()
@@ -481,13 +481,13 @@ pub(crate) async fn open_intake_by_epoch(
     channel_id: &str,
     epoch: i64,
 ) -> Result<OpenIntake, HomeError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT COUNT(*) FILTER (WHERE home_epoch = $2) AS current,
                 COUNT(*) FILTER (WHERE home_epoch <> $2) AS other_epoch,
                 COUNT(*) FILTER (WHERE home_epoch IS NULL) AS unrouted
            FROM intake_outbox
           WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
-    ))
+    )))
     .bind(channel_id)
     .bind(epoch)
     .fetch_one(pool)

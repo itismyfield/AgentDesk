@@ -1,7 +1,7 @@
 //! The injection order reservation at the actor API: what it withholds, how it settles, and how
 //! it ends when its owner or its result goes missing.
 use super::*;
-use crate::services::discord::input_runtime::fence::{Failure, Gate, Mode};
+use crate::services::discord::input_runtime::fence::Gate;
 use crate::services::turn_orchestrator::test_support::{
     fail_queue_saves, injection_abandons, queue_save_faults,
 };
@@ -40,10 +40,7 @@ async fn reserved(
     message_id: Option<MessageId>,
     claim: ExpectedClaim,
 ) -> InjectionTicket {
-    match handle
-        .reserve_injection(message_id, claim, context(), None)
-        .await
-    {
+    match handle.reserve_injection(message_id, claim, context()).await {
         ReserveOutcome::Reserved(ticket) => ticket,
         other => panic!("reservation refused: {other:?}"),
     }
@@ -72,7 +69,7 @@ async fn hand_back(
 ) -> SettleOutcome {
     let settlement = InjectionSettlement::HandBack(Box::new(item(id)));
     handle
-        .settle_injected_input(ticket, settlement, context(), None)
+        .settle_injected_input(ticket, settlement, context())
         .await
 }
 
@@ -227,7 +224,7 @@ async fn a_reservation_checks_the_queue_and_dispatch_marker_a_fresh_actor_has_no
             _ => {}
         }
         let fresh = ChannelMailboxRegistry::default().handle(channel);
-        let outcome = match fresh.reserve_injection(None, None, context(), None).await {
+        let outcome = match fresh.reserve_injection(None, None, context()).await {
             ReserveOutcome::Reserved(_) => "Reserved".to_string(),
             refused => format!("{refused:?}"),
         };
@@ -290,7 +287,7 @@ async fn the_handback_makes_four_attempts_then_abandons_the_reservation() {
         assert!(handle.enqueue(item(1), context()).await.enqueued);
         fail_queue_saves(channel, faults);
         let started = tokio::time::Instant::now();
-        let handed = handle.hand_back_injected_input(ticket, item(2), context(), None);
+        let handed = handle.hand_back_injected_input(ticket, item(2), context());
         let result = handed.await.map(|events| events.len());
         let elapsed = started.elapsed().as_millis();
         let left = queue_save_faults(channel, true);
@@ -323,7 +320,7 @@ fn fixture(
     };
     let task = tokio::spawn(async move {
         let mut received = 0;
-        while let Some((msg, _)) = receiver.recv().await {
+        while let Some(msg) = receiver.recv().await {
             received += 1;
             let (
                 Some(actor),
@@ -339,7 +336,7 @@ fn fixture(
                 continue;
             };
             let landed = actor
-                .settle_injected_input(ticket, settlement, persistence, None)
+                .settle_injected_input(ticket, settlement, persistence)
                 .await;
             assert!(matches!(landed, SettleOutcome::Committed { .. }));
             drop(reply);
@@ -362,7 +359,7 @@ async fn a_sent_handback_without_an_answer_is_unknown_and_never_resent() {
         assert!(actor.enqueue(item(1), context()).await.enqueued);
         let forward = (case == "answer_lost").then(|| actor.clone());
         let (relay, task) = fixture(forward);
-        let handed = relay.hand_back_injected_input(ticket, item(2), context(), None);
+        let handed = relay.hand_back_injected_input(ticket, item(2), context());
         let result = handed.await.map(|events| events.len());
         drop(relay);
         let sends = task.await.expect("fixture");
@@ -382,45 +379,6 @@ async fn a_sent_handback_without_an_answer_is_unknown_and_never_resent() {
     );
 }
 
-/// The handback of an injection admitted before the gate closed lands under its owner's permit
-/// while Closing, when no new input is admitted; the drain completes once that permit returns.
-#[tokio::test(flavor = "current_thread")]
-async fn a_handback_lands_under_its_owner_permit_while_the_gate_closes() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let channel = ChannelId::new(6_845_181);
-    let gate = Gate::protect(ProviderKind::Claude, channel.get()).expect("gate");
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-    let handle = ChannelMailboxRegistry::default().handle(channel);
-    let permit = gate.admit().expect("legacy open admits the owner");
-    let reserve = handle.reserve_injection(None, None, context(), Some(permit.clone()));
-    let ReserveOutcome::Reserved(ticket) = reserve.await else {
-        panic!("reservation under the owner permit");
-    };
-    fail_queue_saves(channel, 1);
-    let settle = |ticket| {
-        let settlement = InjectionSettlement::HandBack(Box::new(item(2)));
-        handle.settle_injected_input(ticket, settlement, context(), Some(permit.clone()))
-    };
-    let SettleOutcome::NotCommitted { ticket, .. } = settle(ticket).await else {
-        panic!("the first write must not land");
-    };
-    let closing = gate.close().expect("closing");
-    let admitted = gate.admit().map(|_| ());
-    let refusal = handle.enqueue(item(3), context()).await.refusal_reason;
-    assert_eq!(admitted, Err(Failure::Mode(Mode::Closing)));
-    assert_eq!(
-        refusal,
-        Some(EnqueueRefusalReason::InputModeFenced(Mode::Closing))
-    );
-    let SettleOutcome::Committed { .. } = settle(ticket).await else {
-        panic!("the same ticket lands under the owner permit");
-    };
-    assert_eq!(queued(&handle).await, [2]);
-    drop(permit);
-    let drained = tokio::time::timeout(Duration::from_secs(5), closing.drain());
-    drained.await.expect("the owner permit was the last effect");
-}
-
 /// A purge-closed actor refuses a reservation, returns a settle's ticket uncommitted, and lets
 /// an abandon through.
 #[tokio::test]
@@ -429,14 +387,14 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
     let registry = ChannelMailboxRegistry::default();
     let handle = registry.handle(channel);
     let removed = registry.remove_idle_entry(channel).await;
-    let reserve = handle.reserve_injection(None, None, context(), None).await;
+    let reserve = handle.reserve_injection(None, None, context()).await;
     let ticket = InjectionTicket {
         lease: Arc::new(InjectionLease),
         message: None,
     };
     let settle = InjectionSettlement::Delivered(InjectionOutcome::Observed);
     let settled = match handle
-        .settle_injected_input(ticket, settle, context(), None)
+        .settle_injected_input(ticket, settle, context())
         .await
     {
         SettleOutcome::NotCommitted { error, .. } => error,
@@ -447,13 +405,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
         message: None,
     };
     let abandoned = handle
-        .request(|reply| {
-            ChannelMailboxMsg::Injection(InjectionMsg::Abandon {
-                input_permit: None,
-                ticket,
-                reply,
-            })
-        })
+        .request(|reply| ChannelMailboxMsg::Injection(InjectionMsg::Abandon { ticket, reply }))
         .await;
     let observed = format!("{removed:?} {reserve:?} {settled} {abandoned:?}");
     assert_eq!(observed, "Removed Unavailable actor_closed Ok(())");
@@ -463,7 +415,7 @@ async fn a_closed_actor_refuses_reserve_and_settle_and_passes_abandon() {
 async fn injected(handle: &ChannelMailboxHandle, message: u64, outcome: InjectionOutcome) {
     let ticket = reserved(handle, Some(MessageId::new(message)), None).await;
     let settle = InjectionSettlement::Delivered(outcome);
-    let settled = handle.settle_injected_input(ticket, settle, context(), None);
+    let settled = handle.settle_injected_input(ticket, settle, context());
     assert!(matches!(settled.await, SettleOutcome::Committed { .. }));
 }
 
@@ -595,7 +547,7 @@ async fn a_reservation_for_a_held_or_injected_message_is_owned_or_consumed() {
             }
             _ => injected(&handle, message.get(), InjectionOutcome::Observed).await,
         }
-        let reserve = handle.reserve_injection(Some(message), claim, context(), None);
+        let reserve = handle.reserve_injection(Some(message), claim, context());
         observed.push(format!("{case}: {:?}", reserve.await));
     }
     assert_eq!(
@@ -761,7 +713,7 @@ async fn a_cancel_that_removed_the_file_but_failed_its_fsync_still_holds_the_res
     let (provider, hash) = (ProviderKind::Claude, "inject-order-test");
     let disk = load_channel_pending_queue(&provider, hash, channel).0.len();
     let marker = super::super::load_channel_pending_dispatch_marker(&provider, hash, channel);
-    let reserve = handle.reserve_injection(None, None, context(), None).await;
+    let reserve = handle.reserve_injection(None, None, context()).await;
     let observed = format!(
         "removed={} error={} memory={:?} disk={disk} marker={} reserve={reserve:?}",
         cancelled.removed.is_some(),

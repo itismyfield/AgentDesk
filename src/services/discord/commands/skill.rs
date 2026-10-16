@@ -111,7 +111,7 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
 async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
-) -> Vec<serenity::AutocompleteChoice> {
+) -> serenity::CreateAutocompleteResponse {
     let builtins = [
         ("health", "Show runtime health summary"),
         ("status", "Show this channel session status"),
@@ -141,7 +141,7 @@ async fn autocomplete_skill<'a>(
         }
     }
 
-    choices
+    serenity::CreateAutocompleteResponse::new().set_choices(choices)
 }
 
 async fn run_skill_slash_command(

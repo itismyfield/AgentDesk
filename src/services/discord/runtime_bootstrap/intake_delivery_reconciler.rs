@@ -122,6 +122,7 @@ mod postgres_tests {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::intake_outbox_delivery_proof::list_stale_dispatched;
     use chrono::Duration;
+    use sqlx::AssertSqlSafe;
     use tokio::time::{Duration as TokioDuration, timeout};
 
     type Audit = (String, Option<DateTime<Utc>>, String, DateTime<Utc>);
@@ -349,43 +350,45 @@ mod postgres_tests {
         let hostile = seed_outbox(&pool, "proof-hostile", old).await;
         seed_delivered(&pool, hostile, Uuid::from_u128(6)).await;
         let hostile_schema = format!("proof_attacker_{}", Uuid::new_v4().simple());
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(AssertSqlSafe(format!(
             "CREATE SCHEMA {hostile_schema};
              CREATE TABLE {hostile_schema}.intake_outbox
                (LIKE public.intake_outbox INCLUDING ALL);
              CREATE TABLE {hostile_schema}.delivery_journal_events
                (LIKE public.delivery_journal_events INCLUDING ALL)"
-        ))
+        )))
         .execute(&pool)
         .await
         .expect("create hostile decoys");
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO {hostile_schema}.intake_outbox(
                id,target_instance_id,forwarded_by_instance_id,channel_id,user_msg_id,
                request_owner_id,user_text,turn_kind,agent_id,status,claim_owner,dispatched_at)
              VALUES($1,'worker','leader','decoy','decoy','user','hello','standard','agent',
                     'done','dispatch-worker',$2)"
-        ))
+        )))
         .bind(hostile)
         .bind(old)
         .execute(&pool)
         .await
         .expect("seed hostile decoy");
         let mut transaction = pool.begin().await.expect("begin hostile transaction");
-        sqlx::query(&format!("SET LOCAL search_path={hostile_schema},public"))
-            .execute(&mut *transaction)
-            .await
-            .expect("set hostile search path");
+        sqlx::query(AssertSqlSafe(format!(
+            "SET LOCAL search_path={hostile_schema},public"
+        )))
+        .execute(&mut *transaction)
+        .await
+        .expect("set hostile search path");
         assert_eq!(
             reconcile_in_tx(&mut transaction, hostile, cutoff, cutoff)
                 .await
                 .unwrap(),
             ReconcileOutcome::Done
         );
-        let statuses: (String, String) = sqlx::query_as(&format!(
+        let statuses: (String, String) = sqlx::query_as(AssertSqlSafe(format!(
             "SELECT (SELECT status FROM public.intake_outbox WHERE id=$1),
                     (SELECT status FROM {hostile_schema}.intake_outbox WHERE id=$1)"
-        ))
+        )))
         .bind(hostile)
         .fetch_one(&mut *transaction)
         .await
@@ -395,10 +398,12 @@ mod postgres_tests {
             .rollback()
             .await
             .expect("rollback hostile transaction");
-        sqlx::query(&format!("DROP SCHEMA {hostile_schema} CASCADE"))
-            .execute(&pool)
-            .await
-            .expect("remove hostile decoys");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP SCHEMA {hostile_schema} CASCADE"
+        )))
+        .execute(&pool)
+        .await
+        .expect("remove hostile decoys");
 
         pool.close().await;
         database.drop().await;

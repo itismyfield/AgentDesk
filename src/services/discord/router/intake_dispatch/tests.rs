@@ -464,7 +464,7 @@ async fn mark_open_routes_done(pool: &sqlx::PgPool, channel_id: ChannelId) {
          WHERE channel_id = $1 AND status IN ({})",
         crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(channel_id.get().to_string())
         .execute(pool)
         .await

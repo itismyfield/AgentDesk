@@ -165,10 +165,11 @@ async fn d4act3_channel_turn_reports_old_backlog_once_across_reopen_and_reload_p
         "original ledger is preserved"
     );
     for table in ["o_piece_delivery", "o_piece_attempts", "o_piece_receipts"] {
-        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(count, 0, "old backlog never enters {table}");
     }
     assert_eq!(

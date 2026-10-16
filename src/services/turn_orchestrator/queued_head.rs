@@ -541,14 +541,6 @@ mod claim {
     }
 
     impl HeadMsg {
-        pub(in crate::services::turn_orchestrator) fn persistence(
-            &self,
-        ) -> &QueuePersistenceContext {
-            match self {
-                Self::Claim { persistence, .. } | Self::Settle { persistence, .. } => persistence,
-            }
-        }
-
         pub(in crate::services::turn_orchestrator) fn refuse(self, error: String) {
             match self {
                 Self::Claim { reply, .. } => {

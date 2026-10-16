@@ -18,7 +18,6 @@ pub(crate) enum MailboxRefusal {
     Closed,
     /// The actor task is gone.
     Unreachable,
-    InputFenced(crate::services::discord::input_runtime::fence::Failure),
 }
 
 /// Reply of a verdict arm: `send` is its answer; only the closed gate refuses.
@@ -27,13 +26,6 @@ pub(super) struct VerdictReply<T>(oneshot::Sender<Result<T, MailboxRefusal>>);
 impl<T> VerdictReply<T> {
     pub(super) fn send(self, value: T) -> Result<(), Result<T, MailboxRefusal>> {
         self.0.send(Ok(value))
-    }
-
-    pub(super) fn input_refuse(
-        self,
-        failure: crate::services::discord::input_runtime::fence::Failure,
-    ) {
-        let _ = self.0.send(Err(MailboxRefusal::InputFenced(failure)));
     }
 
     /// The closed gate's answer; returns `arm` for its log line.

@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::input_runtime::fence::{self, Gate};
 use crate::services::turn_orchestrator::test_support::lock_test_env;
 
 const TOKEN: &str = "queued-head-s2a";
@@ -437,43 +436,6 @@ fn s2a_save_failure_after_clear_still_signals_the_released_turn() {
         tokio::time::timeout(Duration::from_millis(25), signal.wait())
             .await
             .expect("the released turn must wake its deferred monitor even after save failure");
-    });
-}
-
-#[test]
-fn s2a_closing_keeps_the_owner_permit_for_head_settlement() {
-    let _root = root();
-    run(async {
-        let channel = ChannelId::new(6_813_241);
-        let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let handle = ChannelMailboxRegistry::default().handle(channel);
-        let head = human(241, 7, "H");
-        let closing = fence::effect::scope(Some(gate.admit().unwrap()), async {
-            assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
-            let ticket = reserve(&handle, &head).await;
-            let ticket = may_have_sent(&handle, ticket).await;
-            let closing = gate.close().unwrap();
-            assert!(matches!(
-                handle
-                    .settle_queued_head(ticket, HeadOutcome::Injected, ctx())
-                    .await,
-                HeadSettle::Committed(None)
-            ));
-            closing
-        })
-        .await;
-        closing.drain().await;
-        let before = bytes(channel);
-        assert!(matches!(
-            handle
-                .claim_queued_head(QueueIdentity::of(&head), ctx())
-                .await,
-            QueuedHeadClaim::PersistenceFailed(_)
-        ));
-        assert_eq!(bytes(channel), before);
-        assert!(queue(&handle).await.is_empty());
-        assert_eq!(disk(channel)["terminal_identities"][0]["primary"], 241);
     });
 }
 

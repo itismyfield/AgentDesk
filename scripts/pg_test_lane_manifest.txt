@@ -198,6 +198,7 @@ src/services/discord/router/message_handler/watchdog_host_tests.rs
 src/services/discord/runtime_bootstrap/channel_homes_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
+src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
@@ -212,6 +213,7 @@ src/services/discord/terminal_ui_obligation.rs
 src/services/discord/terminal_ui_obligation/input_fence_tests.rs
 src/services/discord/tmux_reaper/host_guard_tests.rs
 src/services/discord/tmux_watcher/herdr_entry_host_tests.rs
+src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs
 src/services/discord/tmux_watcher/path_b_record_tests.rs
 src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs
 src/services/discord/tmux_watcher/streaming_baseline_tests.rs
@@ -530,6 +532,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -537,6 +540,7 @@ services::discord::terminal_delivery_custody::pg_tests
 services::discord::terminal_ui_obligation::input_fence_tests
 services::discord::terminal_ui_obligation::tests
 services::discord::tmux::tmux_watcher::path_b_record::tests
+services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
@@ -1600,10 +1604,8 @@ services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_ro
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
+services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
+services::discord::inflight::removal::custody_notice_tests::pending_notify_readdresses_when_custody_copy_identifies_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
@@ -1639,7 +1641,6 @@ services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickof
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg
-services::discord::queue_io::queued_head_inject::tests::s2b_closing_waits_for_the_queued_owner_and_its_inherited_permit_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_may_have_sent_save_failure_keeps_unknown_before_any_executor_call_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg
@@ -1824,6 +1825,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_ex
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::missing_existing_persisted_artifact_returns_false_and_reopens_every_runtime_fence_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::promotion_cancel_keeps_the_writer_incarnation_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
@@ -1849,6 +1851,8 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_ho
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_session_reactivated_during_probe_pg
@@ -1905,6 +1909,7 @@ services::discord::terminal_ui_obligation::input_fence_tests::sweep_with_no_inpu
 services::discord::terminal_ui_obligation::tests::a_card_with_no_channel_context_is_dropped_only_for_a_legacy_row_pg
 services::discord::terminal_ui_obligation::tests::a_stale_status_card_is_dropped_only_for_what_the_host_guard_admits_pg
 services::discord::tmux::tmux_watcher::path_b_record::tests::a_pinned_record_never_borrows_a_later_thread_dispatch_pg
+services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests::the_missing_inflight_fallback_keeps_a_herdr_session_the_pane_reads_dead_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_configured_channel_keeps_its_session_through_the_watcher_abort_exits_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::a_herdr_sessions_row_keeps_every_watcher_exit_off_tmux_pg
@@ -1969,6 +1974,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_aborted_intake_leaves_the_owner_to_record_the_injection_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::postgres_runtime_helpers_keep_bootstrap_futures_off_the_test_stack
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::startup_recovery_and_a_restart_drain_keep_text_from_the_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_parent_arrival_after_the_thread_took_the_message_does_not_paste_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg
