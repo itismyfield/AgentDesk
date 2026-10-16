@@ -3,18 +3,14 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
 use super::super::bounded_tmux::{BoundedTmuxError, run_with_budget};
 use super::gate::{PaneVerdict, judge_pane, own_draft};
-use crate::services::discord::input_runtime::offer::Offer;
-use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::ShadowProvider;
 
-mod ownership;
 #[cfg(test)]
-mod ownership_tests;
+mod submit_tests;
 
 /// Larger prompts are refused before any tmux call.
 pub const MAX_PROMPT_BYTES: usize = 64 * 1024;
@@ -66,8 +62,6 @@ pub struct TmuxPane {
     busy: bool,
     #[cfg(test)]
     test_nonce: Option<String>,
-    ownership: Option<Arc<OwnershipGate>>,
-    offer: Option<Offer>,
 }
 
 impl TmuxPane {
@@ -85,29 +79,12 @@ impl TmuxPane {
             busy: false,
             #[cfg(test)]
             test_nonce: None,
-            ownership: None,
-            offer: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn attest_test_nonce(&mut self, nonce: &str) {
         self.test_nonce = Some(nonce.into());
-    }
-
-    /// Input supervisors opt into ownership at the native spawn boundary.
-    pub(crate) fn with_ownership(mut self, ownership: Arc<OwnershipGate>) -> Self {
-        self.ownership = Some(ownership);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_offer(
-        mut self,
-        offer: crate::services::discord::input_runtime::offer::Offer,
-    ) -> Self {
-        self.offer = Some(offer);
-        self
     }
 
     fn command(&self, args: &[&str]) -> std::io::Result<Command> {
@@ -130,23 +107,7 @@ impl TmuxPane {
                         .enable_all()
                         .build()
                         .map_err(BoundedTmuxError::Spawn)?
-                        .block_on(async {
-                            if let Some(offer) = &self.offer {
-                                let effect = args.first().copied();
-                                if matches!(effect, Some("paste-buffer" | "send-keys")) {
-                                    let pending = ownership::spawn(
-                                        offer,
-                                        self.provider,
-                                        &tokio::runtime::Handle::current(),
-                                        &mut command,
-                                        self.budget,
-                                        effect == Some("send-keys"),
-                                    )?;
-                                    return pending.wait().await;
-                                }
-                            }
-                            run_with_budget(&mut command, self.budget).await
-                        })
+                        .block_on(run_with_budget(&mut command, self.budget))
                 })
                 .join()
                 .unwrap_or_else(|_| {
@@ -173,13 +134,6 @@ impl TmuxPane {
         }
         if text.trim().is_empty() {
             return SendOutcome::Refused("empty prompt".into());
-        }
-        // One fresh epoch covers paste and Enter for this submission.
-        if let Some(gate) = self.ownership.clone() {
-            let Some(offer) = Offer::begin(self.provider, gate) else {
-                return SendOutcome::NotSent("input offer ownership unavailable".into());
-            };
-            self.offer = Some(offer);
         }
         // Bounded tmux closes stdin, so load-buffer reads the prompt from a file.
         let mut file = match tempfile::NamedTempFile::new() {
@@ -375,12 +329,6 @@ impl Pane for TmuxPane {
         let provider = self.provider;
         let callback = || {
             let capture = self.capture();
-            #[cfg(test)]
-            if self.offer.is_some()
-                && let Err(error) = &capture
-            {
-                eprintln!("offer fixture composer capture failed: {error}");
-            }
             self.pre_empty =
                 capture.is_ok_and(|c| ready(provider, &c, self.busy) == PaneVerdict::Ready);
             let result = operation(self);

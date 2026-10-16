@@ -5116,7 +5116,6 @@ services::discord::input_runtime::supervisor::receipt::tests::g1a_receipt_uses_t
 services::discord::input_runtime::supervisor::receipt::tests::g1a_receipt_write_or_sync_failure_has_no_ack_and_retry_uses_replay_evidence
 services::discord::input_runtime::supervisor::receipt::tests::g1a_torn_retry_accepts_only_after_reopen_and_reopen_sync_failure_has_no_ack
 services::discord::input_runtime::supervisor::runtime::dormant_tests::b_runtime_adapter_has_zero_production_starts
-services::discord::input_runtime::supervisor::runtime::drive::tests::b_runtime_drive_actual_pane_keeps_wal_attempt_and_epoch_at_both_spawns
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_failed_notice_remains_pending_http
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_category_parent_does_not_retry_non_thread_reaction
 services::discord::input_runtime::supervisor::runtime::notice::tests::b_notice_network_failure_is_not_delivery
@@ -12193,15 +12192,7 @@ services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_off_ke
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_real_tmux_plan_transport_and_capture_draft_without_spy
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_utf16_800_801_includes_emoji_and_hangul
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_whitespace_is_exact_and_unknown_wraps_hold
-services::tui_input::actor::pane::ownership_tests::an_offer_for_another_provider_cannot_spawn_paste_or_enter
-services::tui_input::actor::pane::ownership_tests::b_runtime_pane_legacy_has_no_ownership_requirement
-services::tui_input::actor::pane::ownership_tests::b_runtime_pane_offer_epoch_at_both_spawns
-services::tui_input::actor::pane::ownership_tests::b_runtime_pane_reacquisition_uses_a_fresh_offer_per_submission
-services::tui_input::actor::pane::ownership_tests::b_runtime_pane_unknown_and_lost_do_not_begin_submission
-services::tui_input::actor::pane::ownership_tests::ownership_changes_after_paste_preserve_draft_and_veto_enter
-services::tui_input::actor::pane::ownership_tests::ownership_changes_between_offer_and_paste_prevent_actual_spawn
-services::tui_input::actor::pane::ownership_tests::reacquisition_requires_a_new_offer_before_submission
-services::tui_input::actor::pane::ownership_tests::unknown_and_lost_never_create_an_offer_or_touch_tmux
+services::tui_input::actor::pane::submit_tests::an_ungated_submit_loads_pastes_and_enters_once
 services::tui_input::actor::resume::tests::active_guard_rejects_missing_active_and_invalid_current_checks
 services::tui_input::actor::resume::tests::any_generation_delivery_or_tool_consumption_prevents_reoffer
 services::tui_input::actor::resume::tests::durable_next_generation_prevents_same_episode_replay

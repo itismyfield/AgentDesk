@@ -2,7 +2,6 @@ use super::notice::DiscordNotice;
 use crate::services::discord::input_runtime::supervisor::drive::{DrivePorts, ViewKey};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_input::actor::pane::TmuxPane;
-use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::ShadowProvider;
 use poise::serenity_prelude::Http;
 use std::sync::Arc;
@@ -10,7 +9,6 @@ use std::sync::Arc;
 pub(crate) struct RuntimeDrive {
     provider: ProviderKind,
     session: String,
-    ownership: Arc<OwnershipGate>,
     notice: DiscordNotice,
 }
 
@@ -20,12 +18,10 @@ impl RuntimeDrive {
         session: String,
         http: Arc<Http>,
         channel: u64,
-        ownership: Arc<OwnershipGate>,
     ) -> Self {
         Self {
             provider,
             session,
-            ownership,
             notice: DiscordNotice::new(http, channel),
         }
     }
@@ -52,17 +48,10 @@ impl DrivePorts for RuntimeDrive {
         {
             return None;
         }
-        Some(
-            TmuxPane::for_provider(&key.tmux_session, provider)
-                .with_ownership(self.ownership.clone()),
-        )
+        Some(TmuxPane::for_provider(&key.tmux_session, provider))
     }
 
     fn reactions(&self) -> &Self::Reactions {
         &self.notice
     }
 }
-
-#[cfg(test)]
-#[path = "drive_tests.rs"]
-mod tests;
