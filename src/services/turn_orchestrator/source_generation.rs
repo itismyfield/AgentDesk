@@ -8,6 +8,8 @@ pub(crate) struct SourceMessageQueuedGeneration {
     /// Positive, per-source proof that this queued payload came from a
     /// genuine user instruction. Unmarked sources retain drop-on-exit.
     pub(crate) preserve_on_cancel: bool,
+    /// The route a lost claim resolved; travels with the source through merges and restores.
+    pub(crate) route: Option<super::QueuedRoute>,
 }
 
 impl SourceMessageQueuedGeneration {
@@ -20,6 +22,7 @@ impl SourceMessageQueuedGeneration {
                 .ok()
                 .and_then(|since| u64::try_from(since.as_micros()).ok()),
             preserve_on_cancel: false,
+            route: None,
         }
     }
 
@@ -29,4 +32,23 @@ impl SourceMessageQueuedGeneration {
             ..Self::new(message_id, queued_generation)
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The persisted form of a source record.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PendingQueueSourceGeneration {
+    pub(crate) message_id: u64,
+    pub(crate) queued_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) enqueued_at_epoch_us: Option<u64>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_false")]
+    pub(crate) preserve_on_cancel: bool,
+    /// Files written before routes were kept read as `None`, and that item resolves again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) route: Option<super::QueuedRoute>,
 }

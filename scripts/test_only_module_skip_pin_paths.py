@@ -3,6 +3,10 @@
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/router/message_handler/intake_turn/route_claim_tests.rs",
+        "src/services/discord/router/message_handler/intake_turn/route_queue_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_reconcile_tests.rs",
+        "src/services/discord/turn_bridge/before_start_stop_tail_tests.rs",
         "src/services/discord/outbound/local_retry_io_tests.rs",
         "src/services/discord/router/message_handler/s1_entry_tests.rs",
         "src/services/discord/turn_presence/activity/tail_switch_tests.rs",

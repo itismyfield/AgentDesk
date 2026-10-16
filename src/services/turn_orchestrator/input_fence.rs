@@ -228,6 +228,7 @@ pub(super) fn enter(
             _permit: None,
         });
     };
+    // A tail claim only compares the commit's stamp and takes that episode's own state; no input.
     if matches!(
         msg,
         M::Snapshot { .. }
@@ -237,6 +238,7 @@ pub(super) fn enter(
             | M::CancelToken { .. }
             | M::FreezeInput { .. }
             | M::CommitCapturedReadyDelivery { .. }
+            | M::ClaimPolicyTail(_)
     ) {
         return Ok(StepGuard {
             _population: None,
@@ -421,7 +423,8 @@ pub(super) fn refuse(state: &ChannelMailboxState, msg: ChannelMailboxMsg, failur
         | M::ActiveTurnKind { .. }
         | M::CancelToken { .. }
         | M::FreezeInput { .. }
-        | M::CommitCapturedReadyDelivery { .. } => {
+        | M::CommitCapturedReadyDelivery { .. }
+        | M::ClaimPolicyTail(_) => {
             unreachable!("read/barrier arms are not refused by enter")
         }
     }
