@@ -3,7 +3,6 @@
 pub mod binding_reader;
 pub mod capture;
 
-// Derive-side modules (identity, seal, unit_plan) are declared below.
 pub mod identity;
 pub mod seal;
 pub mod unit_plan;
