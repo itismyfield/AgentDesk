@@ -602,8 +602,9 @@ mod tests {
     async fn a_refused_queued_redirect_returns_its_uploads_and_clear_flag() {
         let _root = crate::config::TestRuntimeRootGuard::new();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let original = ChannelId::new(6_325_512);
-        let reused = ChannelId::new(6_325_513);
+        // Fence gates stay registered for the whole process, so no other test may use these.
+        let original = ChannelId::new(7_024_101);
+        let reused = ChannelId::new(7_024_102);
         // Without a database the configured thread's row is unreadable, so Herdr refuses it.
         let hosts = [(reused.get(), "mac-mini")];
         let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &hosts);
