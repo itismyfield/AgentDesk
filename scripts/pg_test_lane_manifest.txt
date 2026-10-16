@@ -535,7 +535,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::runtime_bootstrap::o_writer_host::activation_tests
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
-services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+services::discord::runtime_bootstrap::orphan_recovery::tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
@@ -1859,7 +1859,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act2_ga
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act_host_stop_during_pending_finish_prevents_retry_pg
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_host_has_zero_pg_statements_with_on_positive_control_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
-services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
