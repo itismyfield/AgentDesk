@@ -1,6 +1,5 @@
-//! A user clear ends the session it resets: a tmux session is killed with its process, a Herdr
-//! channel's provider CLI is closed through the terminate service, and the stored provider
-//! session is forgotten, so the next input launches fresh.
+//! A user clear ends the session it resets (tmux and its process, or a Herdr provider CLI) and
+//! forgets the stored provider session, so the next input launches fresh.
 #![cfg(unix)]
 
 use std::sync::Arc;
