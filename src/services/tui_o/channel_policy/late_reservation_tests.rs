@@ -41,8 +41,8 @@ fn production_seed_reserves_before_any_host_placement_or_body() {
         );
         assert_eq!(candidate.peek(), Adoption::Deferred);
         let codex = boot.candidate(42).or(boot.standby(42)).unwrap();
-        assert!(!codex.late_adopt_origin());
-        assert_eq!(codex.peek(), Adoption::Pending);
+        assert!(codex.late_adopt_origin(), "Codex reserves as Claude does");
+        assert_eq!(codex.peek(), Adoption::Deferred);
         assert_eq!(
             boot.candidate(43).or(boot.standby(43)).unwrap().peek(),
             Adoption::Held

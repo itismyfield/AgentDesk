@@ -67,7 +67,7 @@ pub(super) async fn first<I: HostIo>(
                 return First::Wait(Refused::retry(owed.to_string()));
             }
             return match io.local_custody(channel, provider) {
-                Ok(Custody::Row | Custody::Active) => {
+                Ok(Custody::Row | Custody::PendingStart | Custody::Active) => {
                     First::Wait(Refused::retry("Legacy retains delivery custody"))
                 }
                 // A failed read refuses under the adoption lock.
@@ -512,7 +512,7 @@ async fn commit<I: HostIo>(
         };
         let local = || {
             let custody = io.local_custody(channel, provider)?;
-            Ok((end.is_none() && custody == Custody::Active)
+            Ok((end.is_none() && custody.active())
                 || relay_blocks(end.map(|(_, kind)| kind), io.relaying(channel)))
         };
         let result = waiting
@@ -616,10 +616,10 @@ async fn relaxed<I: HostIo>(
     if current.is_some_and(|(_, tmux)| waiting.legacy.tail_running(tmux)) {
         markers.push("tail");
     }
-    if matches!(
-        io.local_custody(channel, waiting.provider),
-        Ok(Custody::Active)
-    ) {
+    if io
+        .local_custody(channel, waiting.provider)
+        .is_ok_and(Custody::active)
+    {
         markers.push("custody");
     }
     if io.legacy_busy(channel).await {

@@ -1470,6 +1470,7 @@ src/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
@@ -1601,6 +1602,8 @@ src/
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
+│   │   │   ├── o_writer_host_custody_tests.rs
+│   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
@@ -1832,6 +1835,9 @@ src/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── turn_retirement/
+│   │   │   │   ├── codex.rs
+│   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── retirement_recheck_tests.rs
@@ -1939,6 +1945,7 @@ src/
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
+│   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
@@ -2118,6 +2125,7 @@ src/
 │   │   │   ├── cleanup.rs
 │   │   │   ├── completion_admission.rs
 │   │   │   ├── completion_admission_actor.rs
+│   │   │   ├── completion_admission_codex_tests.rs
 │   │   │   ├── completion_signal.rs
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── episode.rs
@@ -2812,6 +2820,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
+│   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -2820,6 +2829,11 @@ src/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── late_adopt/
+│   │   │   │   ├── codex/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   └── codex.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── owe.rs
@@ -2854,6 +2868,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_first_init_tests.rs
 │   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs
