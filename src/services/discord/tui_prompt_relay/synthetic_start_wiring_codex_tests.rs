@@ -56,7 +56,7 @@ async fn observed(
     };
     let decision = relay_observed_prompt_injected_prompt_decision(&prompt.prompt);
     assert!(decision.starts_external_turn_lifecycle());
-    let mut lease = ExternalInputRelayLease {
+    let lease = ExternalInputRelayLease {
         channel_id: Some(CHANNEL),
         turn_id: Some(format!("external:codex:{CHANNEL}:{tmux}:test")),
         session_key: Some(format!("session:{tmux}")),
