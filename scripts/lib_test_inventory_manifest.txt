@@ -5288,7 +5288,6 @@ services::discord::mailbox_finish::closed_actor_tests::refused_wrapper_request_r
 services::discord::mailbox_finish::closed_actor_tests::restitution_preserves_typed_refusals_and_legacy_results
 services::discord::mailbox_finish::closed_actor_tests::unreadable_disk_queue_stops_whole_queue_writes
 services::discord::mailbox_finish::closed_actor_tests::whole_queue_writes_keep_a_disk_only_queue
-services::discord::mailbox_finish::input_fence_contract_tests::input_fence_restitution_is_observable_failure
 services::discord::mailbox_finish::relay_state_contract_refs::contract_symbols_exist
 services::discord::mailbox_probe::mailbox_unreachable_tests::unreachable_actor_is_idle_to_wrapper_but_never_ends_the_turn_wait
 services::discord::mailbox_probe::mailbox_unreachable_tests::watcher_direct_idle_commit_blocks_on_turn_quietly_and_on_unreachable_loudly
@@ -6095,7 +6094,6 @@ services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickof
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg
-services::discord::queue_io::queued_head_inject::tests::s2b_closing_waits_for_the_queued_owner_and_its_inherited_permit_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_may_have_sent_save_failure_keeps_unknown_before_any_executor_call_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg
@@ -6930,7 +6928,6 @@ services::discord::router::message_handler::intake_turn::race_loss::mailbox_reac
 services::discord::router::message_handler::intake_turn::race_loss::mailbox_reaction_tests::standalone_without_start_attempt_adds_mailbox_once
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::busy_transition_is_durable_before_the_guard_is_released
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt
-services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::c1_fenced_race_loss_preserves_dispatch_reservation_and_surfaces_failure
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::persistence_failure_rolls_back_queue_and_clears_dispatch_reservation
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_still_takes_the_immediate_idle_recheck_5170
 services::discord::router::message_handler::intake_turn::race_loss::race_loss_requeue_tests::race_loss_requeue_suppresses_post_enqueue_idle_kick_while_holder_active
@@ -6968,7 +6965,6 @@ services::discord::router::message_handler::intake_turn::turn_start_dispatch_gua
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
 services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_intake_holds_provider_and_bridge_through_cleanup
 services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_redirect_admits_protected_destination_from_off_root
-services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_role_override_onto_a_foreign_gate_is_refused_at_root
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment
@@ -7122,7 +7118,6 @@ services::discord::router::message_handler::session_strategy_lifecycle_tests::ve
 services::discord::router::message_handler::session_strategy_lifecycle_tests::verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_restores_dequeued_head_without_reversing_fifo_4795
 services::discord::router::message_handler::tui_followup::busy_retry_fifo_tests::busy_retry_treats_pending_or_active_source_as_already_processing_4797
-services::discord::router::message_handler::tui_followup::input_fence_contract_tests::input_fence_notice_is_pending_not_duplicate_or_success
 services::discord::router::message_handler::turn_lifecycle::tests::text_intake_turn_start_waits_behind_queued_inbound
 services::discord::router::message_handler::typing_indicator::tests::broadcast_failure_stops_refresh_loop
 services::discord::router::message_handler::typing_indicator::tests::max_lifetime_stops_typing_without_terminal_signal
@@ -9467,7 +9462,6 @@ services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_clear_
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_delivered_reentry_skips_the_notice_but_not_the_message_check
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_duplicate_exact_commit
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_duplicate_retained_row_repair
-services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_input_fence_typed_refusals
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_lock_busy_snapshot_remains_responsive
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_notice_or_durable_ack_failure_retains
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_off_and_legacy
@@ -9479,15 +9473,7 @@ services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_send_f
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_strict_boundaries
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_successor_or_actor_mismatch
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_unsupported_receipt_is_refused_before_the_notice
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_admission_and_ack_carry_the_permit_into_closing
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_names_one_row
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_authority_spans_the_commit
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_late_protection_is_typed_busy
 services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_probes_and_counts_per_request
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_bridge_end_to_end
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_protected_open_commit
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_sidecar_contention_refuses_without_waiting
-services::discord::turn_bridge::before_start_stop::tests::policy::protected::p10_fin_s2_worker_settlement_switch_restored
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_displaced_witness_reconciles_without_tail
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_normal_terminal_first_reconciles_receipt_only
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_purged_actor_reconciles_only_with_ledger_and_fence
@@ -9666,7 +9652,6 @@ services::discord::turn_bridge::followup_requeue::tests::a_held_input_capped_whi
 services::discord::turn_bridge::followup_requeue::tests::a_requeue_charges_its_attempt_cost_and_nothing_for_the_wait
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker
 services::discord::turn_bridge::followup_requeue::tests::an_unrecorded_failure_keeps_the_inflight_turn_instead_of_requeueing
-services::discord::turn_bridge::followup_requeue::tests::c1b_timeout_consumer_uses_preclose_bridge_effect_for_binding_and_all_sources
 services::discord::turn_bridge::followup_requeue::tests::non_watcher_strict_plan_waits_for_capped_retry_veto_after_projection_4893
 services::discord::turn_bridge::followup_requeue::tests::persistence_failure_is_not_reported_as_requeued
 services::discord::turn_bridge::followup_requeue::tests::person_draft_tests::a_queued_follow_up_waits_behind_a_person_draft_and_is_sent_once_after_it
@@ -13832,7 +13817,6 @@ services::turn_orchestrator::injected_inputs::tests::a_cancel_that_removed_the_f
 services::turn_orchestrator::injected_inputs::tests::a_closed_actor_refuses_reserve_and_settle_and_passes_abandon
 services::turn_orchestrator::injected_inputs::tests::a_fresh_actor_reads_any_provider_terminal_and_a_known_one_only_its_own
 services::turn_orchestrator::injected_inputs::tests::a_fresh_actor_refuses_a_message_claimed_for_injection_elsewhere
-services::turn_orchestrator::injected_inputs::tests::a_handback_lands_under_its_owner_permit_while_the_gate_closes
 services::turn_orchestrator::injected_inputs::tests::a_live_injection_refuses_its_message_until_its_lease_dies
 services::turn_orchestrator::injected_inputs::tests::a_reservation_checks_the_queue_and_dispatch_marker_a_fresh_actor_has_not_loaded
 services::turn_orchestrator::injected_inputs::tests::a_reservation_for_a_held_or_injected_message_is_owned_or_consumed
@@ -13846,18 +13830,10 @@ services::turn_orchestrator::injected_inputs::tests::an_unwritten_handback_keeps
 services::turn_orchestrator::injected_inputs::tests::close_if_idle_refuses_a_live_reservation_and_admits_an_orphaned_one
 services::turn_orchestrator::injected_inputs::tests::take_next_and_behind_queue_claims_wait_on_a_reservation_after_its_turn_ended
 services::turn_orchestrator::injected_inputs::tests::the_handback_makes_four_attempts_then_abandons_the_reservation
-services::turn_orchestrator::input_fence::tests::actual_actor_barrier_preserves_queue_and_refuses_enqueue_kickoff_finish_and_take
 services::turn_orchestrator::input_fence::tests::b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation
-services::turn_orchestrator::input_fence::tests::b2_late_protection_between_actor_selection_and_enter_has_no_scheduler_io
-services::turn_orchestrator::input_fence::tests::c1_cancelled_mailbox_release_does_not_end_residual_bridge_effect
-services::turn_orchestrator::input_fence::tests::c1_closed_retry_preserves_admission_when_closing_lands_between_actors
-services::turn_orchestrator::input_fence::tests::c1_inherited_effect_restores_and_finishes_durably_during_closing
 services::turn_orchestrator::input_fence::tests::c2_restart_drain_leaves_a_held_channel_alone_and_still_persists_legacy
-services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer_and_preserves_latest_disk_population
+services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer
 services::turn_orchestrator::input_fence::tests::freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation
-services::turn_orchestrator::input_fence::tests::off_path_has_no_sidecar_and_registry_does_not_remint_on_fence
-services::turn_orchestrator::input_fence::tests::ownership_transferred_consumers_surface_fence_as_failure
-services::turn_orchestrator::input_fence::tests::preclose_permit_enqueues_and_durable_requeues_while_new_work_is_refused
 services::turn_orchestrator::lease_release::lease_release_identity_tests::a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::clear_arm_release_names_the_channel_and_the_message_provider
 services::turn_orchestrator::lease_release::lease_release_identity_tests::finish_cancelled_turn_release_without_persistence_names_the_provider_unmeasured
@@ -13934,7 +13910,6 @@ services::turn_orchestrator::queued_head::s2a_tests::s2a_adopted_actor_rechecks_
 services::turn_orchestrator::queued_head::s2a_tests::s2a_boot_loader_counts_quarantined_channels_even_without_restorable_items
 services::turn_orchestrator::queued_head::s2a_tests::s2a_changed_metadata_is_checked_before_a_dispatch_marker_is_written
 services::turn_orchestrator::queued_head::s2a_tests::s2a_changed_metadata_refuses_a_queue_write_and_a_clear_replaces_it
-services::turn_orchestrator::queued_head::s2a_tests::s2a_closing_keeps_the_owner_permit_for_head_settlement
 services::turn_orchestrator::queued_head::s2a_tests::s2a_downgrade_refuses_a_resolved_snapshot_with_a_dispatch_marker
 services::turn_orchestrator::queued_head::s2a_tests::s2a_force_purge_refusal_does_not_finalize_a_cancelled_holder
 services::turn_orchestrator::queued_head::s2a_tests::s2a_generation_replacement_before_and_after_claim_cannot_change_its_owner
