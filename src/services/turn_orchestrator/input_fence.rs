@@ -1,4 +1,4 @@
-//! Actor-side freeze barrier for protected channels and the policy close's step authority.
+//! Actor-side freeze barrier for protected channels.
 use super::*;
 use crate::services::discord::input_runtime::fence::{self, Closing, Failure};
 use std::io;
@@ -114,29 +114,6 @@ pub(super) fn freeze(
 /// Protected and not LegacyOpen: restart drains and markers leave the channel as it is.
 pub(crate) fn held(provider: &ProviderKind, channel: u64) -> bool {
     fence::lookup(provider, channel).is_some_and(|gate| gate.mode() != fence::Mode::LegacyOpen)
-}
-/// The policy close's step authority. The mailbox step holds no population scope, so the close
-/// takes its legacy non-blocking receipt clear.
-pub(super) struct StepGuard {
-    _population: Option<fence::PopulationScope>,
-}
-impl StepGuard {
-    pub(super) fn unscoped() -> Self {
-        Self { _population: None }
-    }
-    /// The policy close's write authority, bound to this guard's own population scope.
-    pub(super) fn policy_authority(&self) -> policy_close::PolicyAuthority<'_> {
-        policy_close::PolicyAuthority::from_step(self)
-    }
-    pub(super) fn population(&self) -> Option<&fence::PopulationScope> {
-        self._population.as_ref()
-    }
-    #[cfg(test)]
-    pub(super) fn for_test(population: Option<fence::PopulationScope>) -> Self {
-        Self {
-            _population: population,
-        }
-    }
 }
 #[cfg(test)]
 #[path = "input_fence_tests.rs"]

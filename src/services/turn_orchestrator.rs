@@ -2514,8 +2514,7 @@ fn input_mailbox_step(
             }
         }
         msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
-            let step = input_fence::StepGuard::unscoped();
-            policy_close::answer(&mut state, channel_id, msg, (&step, own_recovery_done));
+            policy_close::answer(&mut state, channel_id, msg, own_recovery_done);
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();
