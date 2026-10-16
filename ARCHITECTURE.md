@@ -1596,6 +1596,7 @@ src/
 │   │   │   ├── gateway_lease_recovery_tests.rs
 │   │   │   ├── gateway_lease_tests.rs
 │   │   │   ├── gateway_runtime.rs
+│   │   │   ├── home_lifecycle_tests.rs
 │   │   │   ├── intake.rs
 │   │   │   ├── intake_delivery_capability.rs
 │   │   │   ├── intake_delivery_reconciler.rs
