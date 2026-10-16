@@ -493,7 +493,12 @@ mod tests {
         // is now the only TUI-direct bridge entry, and it still pins the
         // captured synthetic mailbox actor.
         assert_eq!(tui_direct.matches(&pinned).count(), 1);
-        assert!(intake.contains("cancel_token.clone(),\n            request_owner"));
+        assert!(
+            intake
+                .split_whitespace()
+                .collect::<String>()
+                .contains("cancel_token.clone(),request_owner")
+        );
         // The headless start bridges the token its shared claim helper registered with the mailbox.
         let headless_claim = include_str!("../../router/turn_start.rs");
         assert!(headless.contains(
