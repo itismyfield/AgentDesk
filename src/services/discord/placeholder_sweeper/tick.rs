@@ -136,8 +136,7 @@ mod tests {
         self, AbandonEpisodeIdentity, AbandonRecord,
     };
     use crate::services::discord::health::legacy_supervision::test_support::{
-        Answer, MockDiscord, age_file, message_json, seed_backfill_row,
-        tree_fingerprint,
+        Answer, MockDiscord, age_file, message_json, seed_backfill_row, tree_fingerprint,
     };
     use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
     use crate::services::discord::{SharedData, runtime_store, status_panel_orphan_store};
@@ -398,7 +397,11 @@ mod tests {
         let queued = abandon_request_store::load_pending(&PROVIDER, &shared.token_hash);
         assert_eq!(queued.len(), 1, "{queued:?}");
         assert_eq!(
-            (queued[0].0, queued[0].1.msg_id, queued[0].1.episode.user_msg_id),
+            (
+                queued[0].0,
+                queued[0].1.msg_id,
+                queued[0].1.episode.user_msg_id
+            ),
             (channel, msg, 78),
             "the replacement survives untouched"
         );

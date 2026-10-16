@@ -279,4 +279,3 @@ pub(in crate::services::discord) fn assert_zero_loaders(observed: &Guard) {
         assert_eq!(s.event_count("terminal_preflight_entries"), 0, "{s:?}");
     }
 }
-
