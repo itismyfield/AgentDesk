@@ -104,9 +104,8 @@ async fn holder_with_baseline(env: &Env) -> (Booted, i64) {
     node.until_posts(&["base"]).await;
     (node, epoch)
 }
-
-/// After the gateway's reclaim: intake closes at the same epoch, the router holds new intake and
-/// the drain waits on `blocker` for two rounds without leaving.
+/// After the reclaim, intake stays closed and the drain waits on `blocker` for two rounds.
+/// Observe completed rounds because health clears its blocker while the next round awaits I/O.
 async fn drains_without_leaving(env: &Env, node: &Booted, epoch: i64, blockers: &[&str]) {
     wait_signal(&env.dir, "reclaim_begun", WITHIN).await;
     until("intake closes at the same epoch", WITHIN, || {
@@ -125,6 +124,7 @@ async fn drains_without_leaving(env: &Env, node: &Booted, epoch: i64, blockers: 
     };
     until("the drain waits on the responsibility", WITHIN, blocked).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("blocker", WITHIN, || node.drain_blocker().is_some()).await;
     assert!(blocked(), "{:?}", node.drain_blocker());
     assert_eq!(node.state().await, Some(HomeState::Reclaiming));
 }
@@ -279,7 +279,6 @@ fn second_writer(
     let writer = ChannelWriter::new(channel, gate, discord, Lease::default(), alarms);
     (store, writer)
 }
-
 // Independent guard evidence: a second writer of the holder's channel posts; not single-actor E2E.
 pub(super) async fn running_post_node(env: &Env) {
     let (node, epoch) = holder_with_baseline(env).await;
@@ -321,6 +320,7 @@ pub(super) async fn running_post_node(env: &Env) {
     })
     .await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("blocker", WITHIN, || node.drain_blocker().is_some()).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     assert_eq!(
         node.state().await,
@@ -466,7 +466,6 @@ pub(super) async fn prepared_node(env: &Env) {
     assert_eq!(node.discord().seen(), Vec::<Seen>::new());
     node.stop().await;
 }
-
 /// The restarted holder on the seed's root: through two drain rounds after the reclaim, its open
 /// Prepared alone keeps the row Reclaiming, before any row derives its unit again.
 async fn holds_on_prepared(env: &Env, discord: Discord) -> Booted {
@@ -484,6 +483,7 @@ async fn holds_on_prepared(env: &Env, discord: Discord) -> Booted {
     let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
     until("the drain runs a round", WITHIN, ran).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("a completed drain round", WITHIN, ran).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     let owed = node.owed().await;
     assert_eq!(
@@ -694,7 +694,6 @@ async fn th7_codex_unsealed_alone_blocks_reclaim_pg() {
     assert_eq!(piece.outcome, Some(PieceOutcome::Posted(accepted)));
     scene.drop_db().await;
 }
-
 pub(super) async fn unsealed_node(env: &Env) {
     let epoch = epoch_of(env);
     let node = Booted::boot_as(env, ShadowProvider::Codex).await;
@@ -713,6 +712,7 @@ pub(super) async fn unsealed_node(env: &Env) {
     let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
     until("the drain runs a round", WITHIN, ran).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("a completed drain round", WITHIN, ran).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     let owed = node.owed().await;
     assert_eq!(
@@ -782,7 +782,6 @@ async fn th7_pending_bind_alone_blocks_reclaim_pg() {
     assert_eq!(piece.outcome, Some(PieceOutcome::Posted(accepted)));
     scene.drop_db().await;
 }
-
 pub(super) async fn binding_node(env: &Env) {
     let (node, epoch) = holder_with_baseline(env).await;
     let clear = || async { node.owed().await == Some(Owed::default()) };
@@ -828,6 +827,7 @@ pub(super) async fn binding_node(env: &Env) {
     let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
     until("the drain runs a round", WITHIN, ran).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("a completed drain round", WITHIN, ran).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     let owed = node.owed().await;
     assert_eq!(
@@ -920,7 +920,6 @@ async fn th7_waiting_boundary_alone_blocks_reclaim_pg() {
     assert!(row.epoch >= epoch);
     scene.drop_db().await;
 }
-
 pub(super) async fn waiting_boundary_node(env: &Env) {
     let (node, epoch) = holder_with_baseline(env).await;
     let clear = || async { node.owed().await == Some(Owed::default()) };
@@ -957,6 +956,7 @@ pub(super) async fn waiting_boundary_node(env: &Env) {
     let ran = || node.drain_blocker().is_some() || gate.final_closed(epoch);
     until("the drain runs a round", WITHIN, ran).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("a completed drain round", WITHIN, ran).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     let owed = node.owed().await;
     assert_eq!(
@@ -1099,7 +1099,6 @@ async fn th7_unreadable_post_count_blocks_leave_pg() {
     let (scene, _) = reclaim_while("th7_posts_unreadable", Duration::from_secs(180)).await;
     scene.drop_db().await;
 }
-
 pub(super) async fn posts_unreadable_node(env: &Env) {
     let epoch = epoch_of(env);
     // Only the drain reads this port, so the count is unknown from boot without holding delivery.
@@ -1127,6 +1126,7 @@ pub(super) async fn posts_unreadable_node(env: &Env) {
     })
     .await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("blocker", WITHIN, || node.drain_blocker().is_some()).await;
     let (blocker, running) = (node.drain_blocker(), deliver::posts_in_flight(C));
     assert_eq!(
         node.state().await,
@@ -1199,7 +1199,6 @@ async fn th7_releasing_tail_posts_before_release_pg() {
 
 /// What the release's first reset call refuses with.
 const RELEASE_REFUSAL: &str = "the gateway session is still attached";
-
 pub(super) async fn release_node(env: &Env) {
     let (epoch, dir, tag) = (epoch_of(env), env.dir.as_path(), env.spawn.as_str());
     let (entered, go) = (
@@ -1244,6 +1243,7 @@ pub(super) async fn release_node(env: &Env) {
     let owed = || node.drain_blocker().as_deref() == Some("owed");
     until("the drain waits on the tail", WITHIN, owed).await;
     tokio::time::sleep(TWO_ROUNDS).await;
+    until("blocker", WITHIN, || node.drain_blocker().is_some()).await;
     assert_eq!(node.drain_blocker().as_deref(), Some("owed"));
     assert_eq!(reset_calls(dir, tag), 0, "a reset while the tail was owed");
     assert_eq!(node.state().await, Some(HomeState::Releasing));

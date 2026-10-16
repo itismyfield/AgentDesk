@@ -445,7 +445,7 @@ async fn load_alias_for_update(
 
 async fn load_one_for_update(
     tx: &mut Transaction<'_, Postgres>,
-    query: &str,
+    query: &'static str,
     session_key: &str,
 ) -> Result<Option<SessionEvidence>, HookSessionUpsertError> {
     sqlx::query(query)
