@@ -160,7 +160,11 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
+#[cfg(unix)]
+mod claude_source;
 mod headless;
+#[cfg(unix)]
+mod source_tick;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
 mod session_rotation_settle;
 #[cfg(all(unix, test))]
@@ -181,14 +185,8 @@ pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel
 #[cfg(unix)]
 use self::claude_idle_runtime::{
     DEAD_ORPHANED_PANE_PROBE_DELAY, DEAD_ORPHANED_PANE_PROBE_SAMPLES,
-    advance_claude_tmux_runtime_binding_offset, claude_continuation_binding_supersedes_launch,
-    claude_tui_rehydrate_start_offset, claude_tui_runtime_binding_matches_launch,
-    resolve_idle_relay_transcript, resolve_rehydrated_tmux_channel_id,
-    resolved_claude_idle_relay_transcript_path, spawn_claude_idle_transcript_relay,
-};
-#[cfg(unix)]
-pub(in crate::services::discord) use self::claude_idle_runtime::{
-    claude_tui_launch_context, other_session_claimed_transcripts,
+    advance_claude_tmux_runtime_binding_offset, claude_tui_rehydrate_start_offset,
+    resolve_rehydrated_tmux_channel_id, spawn_claude_idle_transcript_relay,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_runtime::{
@@ -203,6 +201,15 @@ use self::claude_idle_tail::{
     maybe_spawn_claude_idle_response_tail, spawn_claude_idle_response_tail_once,
 };
 #[cfg(unix)]
+use self::claude_source::{
+    claude_continuation_binding_supersedes_launch, claude_tui_runtime_binding_matches_launch,
+    resolve_idle_relay_transcript, resolved_claude_idle_relay_transcript_path,
+};
+#[cfg(unix)]
+pub(in crate::services::discord) use self::claude_source::{
+    claude_tui_launch_context, other_session_claimed_transcripts,
+};
+#[cfg(unix)]
 use self::session_rotation_settle::settle_claude_session_rotations;
 
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
@@ -210,11 +217,6 @@ const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
-/// #2843: when the background idle relay loop discovers that a session's
-/// transcript path changed, scan this many bytes back from EOF (not from EOF
-/// itself) so a prompt already written to the freshly-resolved transcript is
-/// still observed and its response relayed.
-const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
@@ -674,7 +676,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
         );
     }
-
     // #3041 P1-4 codex: SUCCESS PATH reached — the card/anchor (or system-continuation
     // note) was posted and the bridge legitimately retains the in-flight turn. DISARM
     // the early-return guard so the lease PERSISTS for this turn (otherwise the
@@ -682,7 +683,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // bridge-tail block's own `TuiDirectExternalInputLeaseGuard` (bridge-owner leases)
     // or simply left set (Unassigned / session-bound-owned leases the sink delivers).
     observed_lease_early_return_guard.disarm();
-
     #[cfg(unix)]
     {
         // #3154 P1-3: when the synthetic turn-start was deferred, the detached
