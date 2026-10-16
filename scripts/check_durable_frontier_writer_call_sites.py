@@ -117,14 +117,14 @@ cannot make a file invisible. That is strictly more than the model gate: it has
 no anchor to escape and no boolean to saturate.
 
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
-inventory resolver classifies as test-only are skipped whole. Every such path
-must pass the single lexical pin in `scripts/test_only_module_skip_pin.py`;
-`src/` file/directory symlinks are rejected and the skipped census must equal
-the pin count. The symlink check is lexical rather than atomic against a
-post-enumeration replacement; CI assumes a static checkout while the gate
-runs. In remaining files, only cfg expressions proven by the lexical boolean
-classifier to require `test` are stripped; `cfg(any(test, X))` is intentionally
-scanned as production.
+inventory resolver classifies as test-only are skipped whole. Basenames follow
+the name rule and reject production module mounts; resolver paths match the
+pin in `scripts/test_only_module_skip_pin.py`; `src/` symlinks are rejected.
+The skipped census equals basename count plus resolver pin count. Symlink checks
+are lexical rather than atomic against post-enumeration replacements; CI assumes
+a static checkout. In remaining files, only cfg expressions proven by the lexical
+boolean classifier to require `test` are stripped; `cfg(any(test, X))` is
+intentionally scanned as production.
 
 RESOLVER NON-GUARANTEES. The reused resolver is intentionally unchanged and
 does not guarantee at least seven measured forms: `#[path]` separated from
@@ -483,7 +483,7 @@ CLOSURE_START_RE = re.compile(r"(?:[=([{,;]|=>|\b(?:move|async|return))\s*$")
 
 
 def is_test_file(name: str) -> bool:
-    return name == "tests.rs" or name.endswith("_tests.rs")
+    return _SKIP_PIN.is_basename_test_file(name)
 
 
 def production_lines(path: Path):
@@ -851,7 +851,7 @@ LIMITS = (
     "classifier treats cfg(test)/test-required all(...) as test-only and "
     "cfg(any(test, X))/cfg(not(test)) as production without compiler target "
     "evaluation; non-.rs regular files fail closed before classification; whole-file "
-    "skips use one lexical pin, reject src symlinks, and check "
+    "skips use the basename rule plus resolver pin, reject production basename module mounts and src symlinks, and check "
     "the skipped census; symlink rejection is non-atomic outside a static CI "
     "checkout; the scan root is `src/`; call sites in files reached by "
     "`#[path]`/`include!` targets resolving outside `src/` are not seen; "
