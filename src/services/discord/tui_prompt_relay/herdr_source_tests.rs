@@ -810,10 +810,9 @@ fn the_restart_pass_leaves_an_execution_this_process_launched_pg() {
             let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);
             // The listing a launch in this process leaves on the pane.
             admit_herdr_execution(&logical, &nonce);
-            let _ = reconnect_restarted_herdr_panes(
+            reconnect_restarted_herdr_panes(
                 Some(&pool),
                 &crate::services::provider::ProviderKind::Claude,
-                None,
             );
             reconnect_counts()
         })

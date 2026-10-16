@@ -882,9 +882,6 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
-│   │   ├── codex_adoption_runtime/
-│   │   │   ├── boot.rs
-│   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_end_tests.rs
@@ -2231,7 +2228,6 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
-│   │   ├── codex_adoption_runtime.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs

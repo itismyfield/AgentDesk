@@ -2,8 +2,6 @@
 //! write and a refused one writes nothing; a restart restores only the source its log names.
 
 use super::*;
-use crate::services::discord::codex_adoption_runtime::ObservationRuntimeId;
-use crate::services::discord::codex_adoption_runtime::boot::DiscoveryPass;
 use crate::services::discord::recovery_engine::herdr_reader::{
     ATTACHES, ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
@@ -46,22 +44,14 @@ fn restart_and_reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCoun
     reconnect(fx, provider)
 }
 
+/// One restart pass on this node's endpoint.
 fn reconnect(fx: &Fixture, provider: &ProviderKind) -> ReconnectCounts {
-    let _ = observed_pass(fx, provider, None);
-    reconnect_counts()
-}
-
-/// One restart pass on this node's endpoint as `observer`'s runtime reads it.
-fn observed_pass(
-    fx: &Fixture,
-    provider: &ProviderKind,
-    observer: Option<ObservationRuntimeId>,
-) -> DiscoveryPass {
     let _runtime = fx.rt.enter();
     let _registry = fx.rig.registry_on_this_thread();
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[]);
     fx.rig.show_panes(&[PANE]);
-    reconnect_restarted_herdr_panes(Some(&fx.pool), provider, observer)
+    reconnect_restarted_herdr_panes(Some(&fx.pool), provider);
+    reconnect_counts()
 }
 
 fn counts(published: usize, withheld: usize) -> ReconnectCounts {
@@ -517,14 +507,6 @@ fn a_composer_that_never_turns_ready_stops_the_cold_start_at_its_deadline_pg() {
     assert_eq!(fx.row(), Some(HostedState::Pending));
 }
 
-/// Whether each Codex row the pass read was bound for its observer.
-fn bound(pass: DiscoveryPass) -> Vec<bool> {
-    pass.expect("rows read")
-        .iter()
-        .map(|row| row.bound)
-        .collect()
-}
-
 /// A launched Codex pane after a restart forgot its source, with this thread's attach count reset.
 fn restarted(tag: &str) -> Fixture {
     let fx = Fixture::admitted(tag);
@@ -540,57 +522,14 @@ fn attaches() -> usize {
     ATTACHES.with(std::cell::Cell::get)
 }
 
-// A bound source is evidence only for the observation runtime whose pass saw it bound: runtime B
-// never reuses A's Published(true), and the epoch check adds no reconnect or health change.
+// A settled reconnect is kept across later passes: the pane is attached once, and the pass
+// counts stay those of the settled result.
 #[test]
-fn a_bound_herdr_source_is_evidence_only_for_the_runtime_that_saw_it_pg() {
+fn a_settled_herdr_reconnect_is_not_attached_again_pg() {
     let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
-    let fx = restarted("epoch-a-b");
-    let (a, b) = (
-        ObservationRuntimeId::for_tests(u64::MAX - 1),
-        ObservationRuntimeId::for_tests(u64::MAX - 2),
-    );
-    assert_eq!(
-        bound(observed_pass(&fx, &ProviderKind::Codex, Some(a))),
-        [true]
-    );
-    assert_eq!(attaches(), 1);
-    // The same runtime keeps its own settled evidence without reading the pane again.
-    assert_eq!(
-        bound(observed_pass(&fx, &ProviderKind::Codex, Some(a))),
-        [true]
-    );
-    assert_eq!(attaches(), 1);
-    // T3b: B never binds the same session and nonce, now or on later passes, and no reconnect
-    // runs for it; the pass counts stay those of the settled result.
-    for _ in 0..2 {
-        assert_eq!(
-            bound(observed_pass(&fx, &ProviderKind::Codex, Some(b))),
-            [false]
-        );
+    let fx = restarted("settled");
+    for _ in 0..3 {
+        assert_eq!(reconnect(&fx, &ProviderKind::Codex), counts(1, 0));
     }
-    assert_eq!(attaches(), 1);
-    assert_eq!(reconnect_counts(), counts(1, 0));
-    assert_eq!(
-        bound(observed_pass(&fx, &ProviderKind::Codex, None)),
-        [false]
-    );
-}
-
-// A source bound in a flag-off pass carries no runtime, so no later runtime reads it as its own.
-#[test]
-fn a_flag_off_bound_herdr_source_is_no_runtime_evidence_pg() {
-    let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
-    let fx = restarted("epoch-off");
-    assert_eq!(
-        bound(observed_pass(&fx, &ProviderKind::Codex, None)),
-        [false]
-    );
-    assert_eq!(reconnect_counts(), counts(1, 0));
-    let b = ObservationRuntimeId::for_tests(u64::MAX - 3);
-    assert_eq!(
-        bound(observed_pass(&fx, &ProviderKind::Codex, Some(b))),
-        [false]
-    );
     assert_eq!(attaches(), 1);
 }
