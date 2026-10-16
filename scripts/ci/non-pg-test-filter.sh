@@ -92,9 +92,10 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::machine_resources::store::tests
   --skip services::discord::admin_host_guard::tests
   --skip services::discord::commands::cancel_backstop_tests
+  --skip services::discord::commands::control::clear_end_tests
+  --skip services::discord::commands::control::clear_entry_tests
   --skip services::discord::commands::control::clear_persist_failure_tests
   --skip services::discord::commands::control::home_fence::tests
-  --skip services::discord::commands::control::native::herdr_tests
   --skip services::discord::commands::control::native::tests
   --skip services::discord::commands::restart::host_guard_tests
   --skip services::discord::commands::text_commands::clear_refusal_reply_tests
@@ -419,9 +420,8 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::intake_worker::home_route_tests::s3_real::harness::two_processes_append_whole_steps_to_one_lifecycle
   services::cluster::intake_worker::home_route_tests::s3_real::s3_node_child
   services::cluster::machine_resources::store::tests::recorder_queue_is_bounded_without_waiting_for_the_database
-  services::discord::commands::control::clear_persist_failure_tests::clear_callers_propagate_a_failed_clear_before_their_success_effect
-  services::discord::commands::control::clear_persist_failure_tests::failed_clear_holds_the_transition_through_the_stop_and_one_restored_turn_runs
-  services::discord::commands::control::clear_persist_failure_tests::failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session
+  services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_queue_write_fails_twice_still_resets_the_session_and_warns
+  services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
   services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
   services::discord::commands::control::home_fence::tests::d2b_clear_and_reset_keep_admission_across_effect_await
@@ -576,6 +576,8 @@ NON_PG_FILTER_REPLAY=(
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_superscript_reserved_basenames
   services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_rejects_windows_forbidden_characters
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+  services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
+  services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint
   services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
   services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
   services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success

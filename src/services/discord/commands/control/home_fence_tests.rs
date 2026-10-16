@@ -59,7 +59,7 @@ fn a_delegated_channel_clear_is_refused_unless_its_home_is_held_with_intake_open
             let notify = SoftClearNotifyMode::Suppress;
             clear_channel_session_state(&http, &shared, &provider, channel_id, source, notify)
         };
-        let refused = |result: anyhow::Result<()>| {
+        let refused = |result: anyhow::Result<_>| {
             let error = result.expect_err("refused");
             *error
                 .downcast_ref::<CommandRefused>()

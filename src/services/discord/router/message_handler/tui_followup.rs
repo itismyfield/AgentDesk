@@ -29,10 +29,9 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
         ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
         Some(E::SourceIdAlreadyQueued) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE,
         Some(E::LastItemDedup) => CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE,
-        Some(E::ActorUnreachable | E::MailboxClosed | E::LockTimeout | E::InputPersistence) => {
+        Some(E::ActorUnreachable | E::MailboxClosed) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
         }
-        Some(E::InputModeFenced(_)) => crate::services::discord::queue_io::INPUT_PENDING_NOTICE,
         None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
     }
 }
@@ -1174,26 +1173,4 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
         notice,
     )
     .await;
-}
-
-#[cfg(test)]
-mod input_fence_contract_tests {
-    #[test]
-    fn input_fence_notice_is_pending_not_duplicate_or_success() {
-        use crate::services::discord::input_runtime::fence::Mode;
-        use crate::services::turn_orchestrator::EnqueueRefusalReason;
-        let notice = super::claude_tui_busy_followup_refusal_notice(Some(
-            EnqueueRefusalReason::InputModeFenced(Mode::Closing),
-        ));
-        assert!(notice.contains("보류됨"));
-        for reason in [
-            EnqueueRefusalReason::LockTimeout,
-            EnqueueRefusalReason::InputPersistence,
-        ] {
-            assert_eq!(
-                super::claude_tui_busy_followup_refusal_notice(Some(reason)),
-                super::CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
-            );
-        }
-    }
 }

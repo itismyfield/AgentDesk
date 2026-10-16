@@ -21,15 +21,6 @@ pub(super) fn armed() -> Seen {
     seen
 }
 
-/// The threads the request's mailbox step ran its stages on, without the finalizer's own seam.
-pub(super) fn step_threads(probe: &Probe) -> Vec<std::thread::ThreadId> {
-    let stages = probe.stages().into_iter();
-    let threads = stages
-        .zip(probe.threads())
-        .filter(|(stage, _)| *stage != Stage::BeforeFinalize);
-    threads.map(|(_, thread)| thread).collect()
-}
-
 /// Makes the request's own step panic once at `at`.
 pub(super) fn panic_once_at(probe: &Probe, at: Stage) {
     let fired = std::sync::atomic::AtomicBool::new(false);
@@ -1030,74 +1021,6 @@ async fn p10_fin_ordinary_identity_clear_preserves_receipt() {
         PolicyCloseOutcome::Settled
     ));
     assert!(close.bytes().is_none(), "the policy step clears it");
-}
-
-/// The input fence refuses the close by type before any clear: closing gate, foreign permit, broken
-/// population. On an open protected gate the blocking worker clears under its own scope.
-#[tokio::test(flavor = "current_thread")]
-async fn p10_fin_input_fence_typed_refusals() {
-    use crate::services::discord::input_runtime::fence::{self, Failure, Gate, Mode};
-    for (n, case) in ["closing", "stale permit", "persistence", "open gate"]
-        .into_iter()
-        .enumerate()
-    {
-        let close = Close::open(5_340_990 + n as u64, |_| {}).await;
-        let queued = close.other_turn_and_queue().await;
-        let acked = close.acked().await;
-        let intent = close.intent(acked);
-        let provider = close.shared.provider.clone();
-        let gate = Gate::protect(provider.clone(), close.row.channel_id).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let mut permit = None;
-        let _closing = match case {
-            "closing" => Some(gate.close().unwrap()),
-            "stale permit" => {
-                let other = Gate::protect(provider.clone(), 5_340_994 + n as u64).unwrap();
-                permit = Some(other.admit().unwrap());
-                None
-            }
-            "persistence" => {
-                let lock = close.path().with_extension("json.lock");
-                std::fs::remove_file(&lock).unwrap();
-                std::fs::create_dir_all(&lock).unwrap();
-                None
-            }
-            _ => None,
-        };
-        let bytes = close.bytes();
-        let probe = intent.request.trace.probe();
-        let (fin, shared) = (close.fin.clone(), close.shared.clone());
-        let work = async move { fin.submit_policy_close(intent, shared).await };
-        let outcome = fence::effect::run(permit, work).await;
-        let expected = match case {
-            "closing" => Some(Failure::Mode(Mode::Closing)),
-            "stale permit" => Some(Failure::StalePermit),
-            "persistence" => Some(Failure::Persistence),
-            _ => None,
-        };
-        match (expected, &outcome) {
-            (Some(failure), PolicyCloseOutcome::Retained(PolicyRetain::InputFence(seen))) => {
-                assert_eq!(*seen, failure, "{case}")
-            }
-            (None, PolicyCloseOutcome::Settled) => {
-                let threads = step_threads(&probe);
-                assert!(!threads.is_empty(), "the step ran");
-                let here = std::thread::current().id();
-                assert!(threads.iter().all(|t| *t != here), "on a blocking worker");
-                assert_released(&close, &queued, case).await;
-                continue;
-            }
-            _ => panic!("{case}: {outcome:?}"),
-        }
-        assert!(
-            probe.stages().is_empty(),
-            "{case}: the fence refused before the step"
-        );
-        assert!(close.actor_holds().await, "{case}");
-        assert_eq!(close.bytes(), bytes, "{case}");
-        assert_eq!(close.active(), 2, "{case}");
-        assert_eq!(close.queued().await, queued, "{case}");
-    }
 }
 
 /// Each exact-episode axis alone (cutoff, nonce, token, interrupt, message, process, receipt and

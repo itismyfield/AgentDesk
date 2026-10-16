@@ -362,7 +362,7 @@ async fn t19a_capacity_keeps_origin_and_deferred_budget_between_real_consumes() 
         "capacity inherits all S fields"
     );
     let cleared = discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
-    assert!(cleared.persistence_error.is_none());
+    assert_eq!(cleared.persistence, Default::default());
     assert_eq!(
         cleared
             .discarded_message_ids
@@ -666,7 +666,7 @@ async fn assert_consumed_lower_checkpoint_progress(open_barrier: bool) {
     assert_eq!(clock.samples(), 1, "capacity inherits the original arm");
 
     let cleared = discord::mailbox_clear_channel(&fx.shared, &fx.provider, channel_id).await;
-    assert!(cleared.persistence_error.is_none());
+    assert_eq!(cleared.persistence, Default::default());
     assert_eq!(
         cleared
             .discarded_message_ids

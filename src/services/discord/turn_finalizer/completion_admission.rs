@@ -59,7 +59,8 @@ impl CompletionAdmission {
         self.terminal_disposition_allows_queue = allow_queue;
     }
 
-    pub(super) fn claim_queue_eligible(&mut self) -> bool {
+    /// Whether the next claim would publish; it changes nothing.
+    pub(super) fn claimable(&self) -> bool {
         let barrier_satisfied = self.mailbox_released
             && match self.plan {
                 CompletionAdmissionPlan::Immediate => true,
@@ -74,7 +75,11 @@ impl CompletionAdmission {
                 }
             };
         let authorized_release = self.mailbox_released && self.operator_released;
-        if !(barrier_satisfied || authorized_release) || self.queue_eligible_published {
+        (barrier_satisfied || authorized_release) && !self.queue_eligible_published
+    }
+
+    pub(super) fn claim_queue_eligible(&mut self) -> bool {
+        if !self.claimable() {
             return false;
         }
         self.queue_eligible_published = true;
@@ -83,6 +88,10 @@ impl CompletionAdmission {
 }
 
 pub(super) fn publish_claimed_queue_eligible(shared: &SharedData, entry: &mut LedgerEntry) -> bool {
+    // A refused Codex turn confirmation leaves the claim for the reconcile tick to retry.
+    if entry.completion_admission.claimable() && !codex_turn_confirmed(entry) {
+        return false;
+    }
     if !entry.completion_admission.claim_queue_eligible() {
         return false;
     }
@@ -115,6 +124,34 @@ pub(super) fn publish_claimed_queue_eligible(shared: &SharedData, entry: &mut Le
         });
     }
     true
+}
+
+/// Whether a selected Codex channel O took over may wake its queue: turn mode is confirmed now or
+/// was never awaited. A first confirmation registers the channel's turn presence.
+fn codex_turn_confirmed(entry: &LedgerEntry) -> bool {
+    use super::super::tui_direct_pending_start::turn_retirement::codex;
+    let channel = entry.turn_key.channel_id.get();
+    if entry.provider != ProviderKind::Codex {
+        return true;
+    }
+    let Some(turn) = crate::services::tui_o::cutover::codex_turn_awaited(channel) else {
+        return true;
+    };
+    match codex::confirm_current(channel, &turn) {
+        codex::Confirmation::Confirmed => {
+            super::super::turn_presence::supervisor::register(&ProviderKind::Codex, &[channel]);
+            true
+        }
+        codex::Confirmation::Unselected => true,
+        codex::Confirmation::Retry(detail) => {
+            tracing::info!(
+                channel,
+                detail,
+                "[tui_o] Codex turn mode waits; the queue stays held"
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,3 +268,7 @@ mod tests {
         assert!(admission.claim_queue_eligible());
     }
 }
+
+#[cfg(test)]
+#[path = "completion_admission_codex_tests.rs"]
+mod codex_tests;
