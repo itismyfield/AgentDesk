@@ -36,7 +36,7 @@ NON_PG_SELECTION_END = "# END generated non-PG lane selection"
 # Kept because removing one could newly run a PG test whose module the manifest
 # does not name. The module skips below are what make the set honest.
 NON_PG_NAME_SKIPS = ("_pg", "pg_", "postgres")
-PG_SHARD_COUNT = 2
+PG_SHARD_COUNT = 4
 PG_SHARD_JOBS = (".github/workflows/ci-main.yml:postgres", ".github/workflows/ci-pr.yml:test_fast")
 PG_SHARD_RECIPE = "test-postgres-shard"
 PG_INCLUDE_DERIVATION = tuple('''\
