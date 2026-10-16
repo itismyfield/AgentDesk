@@ -484,6 +484,7 @@ mod tests {
 
     /// A queued input refused by its reused Herdr thread hands every taken upload to its queue
     /// owner once; the session gets back only its clear flag and keeps an upload that came later.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_refused_queued_redirect_returns_its_uploads_and_clear_flag() {
         let _root = crate::config::TestRuntimeRootGuard::new();
