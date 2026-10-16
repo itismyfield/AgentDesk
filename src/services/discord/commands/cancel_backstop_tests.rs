@@ -168,20 +168,17 @@ pub(super) async fn invoke_real_slash_action(
     let invocation_data: tokio::sync::Mutex<Box<dyn Any + Send + Sync>> =
         tokio::sync::Mutex::new(Box::new(()));
     let app = poise::ApplicationContext {
-        serenity_context: ctx,
         interaction: &interaction,
         interaction_type: poise::CommandInteractionType::Command,
         args: &[],
         has_sent_initial_response: &has_sent_initial_response,
         framework: poise::FrameworkContext {
-            bot_id: ctx.cache.current_user().id,
+            serenity_context: ctx,
             options: &options,
             user_data: data,
             shard_manager: &manager,
         },
-        parent_commands: &[],
-        command: &command,
-        data,
+        command_tree: &[&command],
         invocation_data: &invocation_data,
         __non_exhaustive: (),
     };

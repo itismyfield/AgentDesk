@@ -150,10 +150,17 @@ pub(in crate::services::discord) fn run_bot_framework_options(
                 Ok(allowed)
             })
         }),
-        event_handler: |ctx, event, _framework, data| {
+        event_handler: |framework, event| {
             // handle_event's only production caller, so every gateway event is observed before any branch.
-            super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
-            Box::pin(handle_event(ctx, event, data))
+            super::super::ingress_shadow::observe(
+                framework.user_data.ingress_shadow.as_ref(),
+                event,
+            );
+            Box::pin(handle_event(
+                framework.serenity_context,
+                event,
+                framework.user_data,
+            ))
         },
         ..Default::default()
     }

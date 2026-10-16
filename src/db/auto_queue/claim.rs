@@ -133,7 +133,7 @@ pub async fn rebind_slot_for_group_agent_pg(
            AND (assigned_run_id IS NULL OR assigned_run_id = $1)
            AND {live_run_guard}"
     );
-    let slot_updated = sqlx::query(&rebind_query)
+    let slot_updated = sqlx::query(sqlx::AssertSqlSafe(rebind_query))
     .bind(run_id)
     .bind(thread_group)
     .bind(agent_id)
@@ -245,15 +245,15 @@ async fn bind_slot_index_for_group_entries_pg(
     Ok(result.rows_affected())
 }
 
-fn active_dispatch_slot_guard_sql(agent_expr: &str, slot_expr: &str) -> String {
+fn active_dispatch_slot_guard_sql(agent_expr: &'static str, slot_expr: &'static str) -> String {
     active_dispatch_on_slot_predicate(agent_expr, slot_expr, DispatchSlotPolarity::NotExists, None)
 }
 
-fn active_dispatch_slot_exists_sql(agent_expr: &str, slot_expr: &str) -> String {
+fn active_dispatch_slot_exists_sql(agent_expr: &'static str, slot_expr: &'static str) -> String {
     active_dispatch_on_slot_predicate(agent_expr, slot_expr, DispatchSlotPolarity::Exists, None)
 }
 
-fn live_run_allocation_guard_sql(run_expr: &str) -> String {
+fn live_run_allocation_guard_sql(run_expr: &'static str) -> String {
     let live_statuses = live_run_statuses_sql();
     format!(
         "EXISTS (
@@ -281,7 +281,7 @@ async fn first_free_slot_blocked_by_active_dispatch_pg(
          LIMIT 1"
     );
 
-    sqlx::query_scalar::<_, i64>(&query)
+    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query))
         .bind(agent_id)
         .fetch_optional(pool)
         .await
@@ -355,7 +355,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                AND {existing_run_guard}
              LIMIT 1",
         );
-        let existing = sqlx::query_scalar::<_, i64>(&existing_query)
+        let existing = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(existing_query))
         .bind(agent_id)
         .bind(run_id)
         .bind(thread_group)
@@ -414,7 +414,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
              ORDER BY s.slot_index ASC
              LIMIT 1"
         );
-        let reusable_slot = sqlx::query(&reusable_slot_query)
+        let reusable_slot = sqlx::query(sqlx::AssertSqlSafe(reusable_slot_query))
             .bind(agent_id)
             .bind(run_id)
             .bind(thread_group)
@@ -462,7 +462,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                    )
                    AND {rebound_slot_guard}"
             );
-            let rebound = sqlx::query(&rebound_query)
+            let rebound = sqlx::query(sqlx::AssertSqlSafe(rebound_query))
             .bind(thread_group)
             .bind(agent_id)
             .bind(slot_index)
@@ -562,7 +562,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
              ORDER BY slot_index ASC
              LIMIT 1"
         );
-        let free_slot = sqlx::query_scalar::<_, i64>(&free_slot_query)
+        let free_slot = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(free_slot_query))
         .bind(agent_id)
         .bind(run_id)
         .fetch_optional(pool)
@@ -609,7 +609,7 @@ async fn allocate_slot_for_group_agent_pg_inner(
                AND {claim_run_guard}
                AND {claim_slot_guard}"
         );
-        let claimed = sqlx::query(&claim_query)
+        let claimed = sqlx::query(sqlx::AssertSqlSafe(claim_query))
         .bind(run_id)
         .bind(thread_group)
         .bind(agent_id)

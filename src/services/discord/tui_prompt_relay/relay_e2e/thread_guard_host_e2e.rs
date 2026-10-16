@@ -11,7 +11,7 @@ use super::{CHANNEL_ID, ProviderStub, RelayE2eHarness};
 use crate::services::discord::admin_host_guard::tests::{Host, ModeTmux, Tmux};
 use crate::services::discord::host_defer_gate::tests::{Case, postgres};
 use crate::services::discord::host_teardown_gate::test_support::{Stored, channel_key};
-use crate::services::discord::{ProviderKind, inflight, mailbox_snapshot, router};
+use crate::services::discord::{ProviderKind, inflight, mailbox_snapshot};
 use crate::services::provider::CancelToken;
 use crate::services::provider::cancel_token_cleanup::authority::TmuxBinding;
 
@@ -120,7 +120,7 @@ async fn intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg() {
         let event = serenity::FullEvent::Message {
             new_message: bot_message(CHANNEL_ID + 7),
         };
-        router::handle_event(&harness.ctx, &event, &harness.data)
+        super::boxed_intake(&harness.ctx, &event, &harness.data)
             .await
             .expect("intake");
 

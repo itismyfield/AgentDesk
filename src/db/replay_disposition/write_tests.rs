@@ -2,7 +2,7 @@ use super::receipt::Disposition;
 use super::write::{self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt, WriteError};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::replay_policy::live::{Activity, RawObservation, Seen, TerminalKind};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 const TARGET: &str = r#"["provider_start","claude","chan"]"#;
 
@@ -305,7 +305,13 @@ async fn database_refuses_inexact_attempt_transitions_pg() {
     ];
     for (set, row) in refusals {
         let sql = format!("UPDATE intake_outbox {set} WHERE id = $1");
-        fenced(sqlx::query(&sql).bind(row).execute(&pool).await, &sql);
+        fenced(
+            sqlx::query(AssertSqlSafe(sql.as_str()))
+                .bind(row)
+                .execute(&pool)
+                .await,
+            &sql,
+        );
     }
     sqlx::query("UPDATE intake_outbox SET replay_disposition = 'classified_normal' WHERE id = $1")
         .bind(id)

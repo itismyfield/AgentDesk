@@ -216,7 +216,7 @@ async fn exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521() {
         );
     }
     let failed_child = children[0];
-    sqlx::query(&format!("CREATE FUNCTION fail_child_close() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = {failed_child} AND NEW.closed_at IS NOT NULL THEN RAISE EXCEPTION 'fixture child close unavailable'; END IF; RETURN NEW; END $$"))
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE FUNCTION fail_child_close() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = {failed_child} AND NEW.closed_at IS NOT NULL THEN RAISE EXCEPTION 'fixture child close unavailable'; END IF; RETURN NEW; END $$")))
         .execute(&pool).await.unwrap();
     sqlx::query("CREATE TRIGGER fail_child_close BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION fail_child_close()")
         .execute(&pool).await.unwrap();

@@ -1607,7 +1607,7 @@ async fn drop_test_database_with_options(
     for attempt in 1..=3 {
         match run_test_postgres_sqlx_op(
             &format!("{label} drop postgres test db {database_name}"),
-            sqlx::query(&drop_sql).execute(&admin_pool),
+            sqlx::query(sqlx::AssertSqlSafe(drop_sql.as_str())).execute(&admin_pool),
         )
         .await
         {
@@ -2053,7 +2053,7 @@ mod tests {
             .iter()
             .find(|migration| migration.version == 100)
             .expect("deploy-gate constraint migration"); // agentdesk-audit: allow-unwrap — embedded migration 0100 is required by this test
-        pool.execute(migration.sql.as_ref())
+        pool.execute(sqlx::AssertSqlSafe(migration.sql.as_ref()))
             .await
             .map(|_| ())
             .map_err(|error| format!("apply deploy-gate constraint migration: {error}"))
@@ -2624,7 +2624,7 @@ mod tests {
             let sql = format!(
                 "SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]'::jsonb) FROM {table} t"
             );
-            let rows = sqlx::query_scalar(&sql)
+            let rows = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
                 .fetch_one(pool)
                 .await
                 .expect("snapshot shared configuration");

@@ -361,9 +361,9 @@ mod dispatch_terminal_sync_pg_tests {
 
     async fn install_active_dispatch_after_slot_update_trigger(
         pool: &PgPool,
-        function_name: &str,
-        trigger_name: &str,
-        dispatch_id: &str,
+        function_name: &'static str,
+        trigger_name: &'static str,
+        dispatch_id: &'static str,
     ) {
         let function_sql = format!(
             "CREATE OR REPLACE FUNCTION {function_name}()
@@ -386,7 +386,7 @@ mod dispatch_terminal_sync_pg_tests {
              END;
              $$ LANGUAGE plpgsql"
         );
-        sqlx::query(&function_sql)
+        sqlx::query(sqlx::AssertSqlSafe(function_sql))
             .execute(pool)
             .await
             .expect("create active dispatch trigger function");
@@ -396,7 +396,7 @@ mod dispatch_terminal_sync_pg_tests {
              AFTER UPDATE ON auto_queue_slots
              FOR EACH ROW EXECUTE FUNCTION {function_name}()"
         );
-        sqlx::query(&trigger_sql)
+        sqlx::query(sqlx::AssertSqlSafe(trigger_sql))
             .execute(pool)
             .await
             .expect("create active dispatch trigger");

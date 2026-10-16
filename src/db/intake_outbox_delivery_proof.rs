@@ -6,7 +6,7 @@
 
 use super::intake_outbox_status::IntakeOutboxStatus;
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 
 /// The terminal-delivery or sweep source authorizing an intake row transition.
 ///
@@ -215,7 +215,7 @@ async fn lock_and_classify_durable_inflight(
            JOIN public.sessions s ON {session_scope}
           WHERE io.id = $1"
     );
-    sqlx::query_scalar(&statement)
+    sqlx::query_scalar(AssertSqlSafe(statement))
         .bind(outbox_id)
         .bind(heartbeat_fresh)
         .bind(absence_cutoff)

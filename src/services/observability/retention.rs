@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use super::worker::storage_handles;
 use super::{
@@ -60,7 +60,11 @@ async fn prune_table_by_created_at(pool: &PgPool, table: &'static str, days: i64
     // `table` is sourced from a `&'static str` whitelist — never user input.
     let sql =
         format!("DELETE FROM {table} WHERE created_at < NOW() - ($1::bigint || ' days')::interval");
-    match sqlx::query(&sql).bind(days).execute(pool).await {
+    match sqlx::query(AssertSqlSafe(sql))
+        .bind(days)
+        .execute(pool)
+        .await
+    {
         Ok(result) => {
             let affected = result.rows_affected();
             if affected > 0 {
@@ -81,7 +85,11 @@ async fn prune_table_by_snapshot_at(pool: &PgPool, table: &'static str, days: i6
     let sql = format!(
         "DELETE FROM {table} WHERE snapshot_at < NOW() - ($1::bigint || ' days')::interval"
     );
-    match sqlx::query(&sql).bind(days).execute(pool).await {
+    match sqlx::query(AssertSqlSafe(sql))
+        .bind(days)
+        .execute(pool)
+        .await
+    {
         Ok(result) => {
             let affected = result.rows_affected();
             if affected > 0 {
