@@ -38,46 +38,39 @@ fn spawn_retry(
     exact: Option<crate::services::discord::replay_policy::ExactRetry>,
 ) {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
-    let permit = super::super::input_runtime::fence::effect::current();
-    super::super::task_supervisor::spawn_observed(
-        "retry_with_history_dispatch",
-        super::super::input_runtime::fence::effect::detached(permit.clone(), async move {
-            match exact {
-                None => {
-                    gateway
-                        .schedule_retry_with_history_with_completion(
-                            channel_id,
-                            user_msg_id,
-                            &retry_text,
-                            completion_tx,
-                        )
-                        .await
-                }
-                Some(retry) => {
-                    let receipt = retry.permit.receipt_id();
-                    let handoff = gateway
-                        .schedule_exact_retry_with_history(channel_id, retry)
-                        .await;
-                    if handoff == crate::services::discord::replay_policy::ExactHandoff::Refused {
-                        tracing::warn!(
-                            channel_id = channel_id.get(),
-                            receipt,
-                            "exact retry was not started; the request stays held"
-                        );
-                    }
-                    let _ = completion_tx.send(());
-                }
+    super::super::task_supervisor::spawn_observed("retry_with_history_dispatch", async move {
+        match exact {
+            None => {
+                gateway
+                    .schedule_retry_with_history_with_completion(
+                        channel_id,
+                        user_msg_id,
+                        &retry_text,
+                        completion_tx,
+                    )
+                    .await
             }
-        }),
-    );
-    super::super::task_supervisor::spawn_observed(
-        "retry_with_history_release",
-        super::super::input_runtime::fence::effect::detached(permit, async move {
-            // Completion or the safety timeout releases the existing retry reservation.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
-            release_retry_pending(channel_id);
-        }),
-    );
+            Some(retry) => {
+                let receipt = retry.permit.receipt_id();
+                let handoff = gateway
+                    .schedule_exact_retry_with_history(channel_id, retry)
+                    .await;
+                if handoff == crate::services::discord::replay_policy::ExactHandoff::Refused {
+                    tracing::warn!(
+                        channel_id = channel_id.get(),
+                        receipt,
+                        "exact retry was not started; the request stays held"
+                    );
+                }
+                let _ = completion_tx.send(());
+            }
+        }
+    });
+    super::super::task_supervisor::spawn_observed("retry_with_history_release", async move {
+        // Completion or the safety timeout releases the existing retry reservation.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), completion_rx).await;
+        release_retry_pending(channel_id);
+    });
 }
 
 /// One stale-resume retry point of a turn and the request it would rerun.
