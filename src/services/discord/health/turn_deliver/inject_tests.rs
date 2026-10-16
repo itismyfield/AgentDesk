@@ -867,30 +867,6 @@ async fn a_paste_its_rows_cannot_prove_is_handed_back_unpasted_pg() {
     assert_eq!(observed, expected);
 }
 
-/// A channel whose input moved to the input runtime keeps its pane untouched.
-#[tokio::test(flavor = "current_thread")]
-async fn a_channel_closed_to_legacy_input_takes_no_paste() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let ch = 6_245_801;
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let pane = InjectPane::new(ch, "all");
-    let fence = crate::services::discord::input_runtime::fence::Gate::protect;
-    let gate = fence(ProviderKind::Claude, ch).expect("gate");
-    let _closing = gate.close().expect("closing");
-    let request = HumanInputRequest {
-        channel_id: ChannelId::new(ch),
-        provider: ProviderKind::Claude,
-        text: "status?".to_string(),
-        author_id: 200,
-        source: "imessage".to_string(),
-        metadata: None,
-        channel_name_hint: None,
-    };
-    let outcome = inject::attempt(&shared, &request, inject::Origin::External).await;
-    let refused = inject::InjectAttempt::NotSent("input_runtime_owned");
-    assert_eq!((outcome, pane.tmux_calls()), (refused, 0));
-}
-
 /// A row stamped with another runtime stops the attempt before the session-transition guard
 /// or any pane I/O: a held transition does not turn it into `transition_busy`.
 #[tokio::test(flavor = "current_thread")]

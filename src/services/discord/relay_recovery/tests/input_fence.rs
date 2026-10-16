@@ -178,16 +178,14 @@ impl super::super::auto_heal_apply::ReservedEpisodeApplyBoundary for GapApplyBou
     }
 }
 
-/// An admitted automatic reattach on a protected open channel completes its pinned rebind; a gate
-/// closed after the reservation waits for the apply, whose return releases the drain.
+/// An automatic reattach that passed its reservation completes its pinned rebind.
 #[cfg(unix)]
 #[tokio::test]
-async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases_the_drain() {
+async fn reserved_relay_reattach_completes_its_pinned_rebind() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::inflight;
     use crate::services::session_host::test_support::InjectedLivenessGuard;
     use crate::services::session_host::{HostLiveness, HostSessionRef};
-    use futures::FutureExt;
     use std::os::unix::fs::PermissionsExt;
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
@@ -240,10 +238,11 @@ async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases
     orphan.set_relay_owner_kind(inflight::RelayOwnerKind::Watcher);
     assert!(inflight::save_inflight_state_if_absent(&orphan).unwrap());
     let state = inflight::load_inflight_state_read_only(&provider, channel).unwrap();
-    let row = input_runtime::fence::population_root()
-        .unwrap()
-        .join("discord_inflight/claude")
-        .join(format!("{channel}.json"));
+    let row = inflight::inflight_state_path(
+        &inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel,
+    );
     let before = std::fs::read(&row).unwrap();
     let _live = InjectedLivenessGuard::set(HostSessionRef::tmux(&tmux), HostLiveness::Live);
     let mut health = snapshot();
@@ -260,8 +259,6 @@ async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases
     decision.affected.channel_id = channel;
     decision.affected.finalizer_turn_id = Some(state.effective_finalizer_turn_id());
     decision.affected.tmux_session = Some(tmux.clone());
-    let gate = Gate::protect(provider.clone(), channel).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
     let (reached, resume) = (
         Arc::new(tokio::sync::Notify::new()),
         Arc::new(tokio::sync::Notify::new()),
@@ -283,11 +280,6 @@ async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases
         _ = &mut apply => panic!("the apply must reserve before it rebinds"),
         _ = reached.notified() => {}
     }
-    let closing = gate.close().unwrap();
-    assert!(
-        closing.drain().now_or_never().is_none(),
-        "the reserved apply holds the drain"
-    );
     resume.notify_one();
     let response = apply.await;
 
@@ -305,15 +297,5 @@ async fn c2b_admitted_relay_reattach_rebinds_through_a_closing_gate_and_releases
         std::fs::read(&row).unwrap(),
         before,
         "the rebind rewrote its row"
-    );
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={channel}"))),
-        "the admitted apply saw a refused writer"
-    );
-    assert!(
-        closing.drain().now_or_never().is_some(),
-        "returning releases the drain"
     );
 }

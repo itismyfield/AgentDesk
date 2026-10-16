@@ -1,11 +1,10 @@
-//! A pending-start worker admitted on a protected open channel completes its real claim: the
-//! claimed row is written and returning releases the input drain.
+//! A pending-start worker completes its real claim: the claimed row is written and the
+//! durable record is consumed.
 use super::*;
-use crate::services::discord::input_runtime::{self, fence::Gate};
 use crate::services::discord::{inflight, tui_direct_pending_start};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn c2b_admitted_pending_start_worker_writes_its_claimed_row_and_releases_the_drain() {
+async fn pending_start_worker_writes_its_claimed_row_and_consumes_the_record() {
     let root = tempfile::tempdir().expect("isolated runtime root");
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let shared = super::super::super::make_shared_data_for_tests();
@@ -45,8 +44,6 @@ async fn c2b_admitted_pending_start_worker_writes_its_claimed_row_and_releases_t
         native_turn_id: None,
     };
     tui_direct_pending_start::persist(&record).expect("persist record");
-    let gate = Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
 
     tui_direct_pending_start::spawn_worker(
         shared.clone(),
@@ -64,19 +61,10 @@ async fn c2b_admitted_pending_start_worker_writes_its_claimed_row_and_releases_t
     }
 
     let row = inflight::load_inflight_state(&ProviderKind::Claude, channel.get())
-        .expect("the admitted claim wrote its row");
+        .expect("the claim wrote its row");
     assert_eq!(row.tmux_session_name.as_deref(), Some(tmux));
     assert!(
         !tui_direct_pending_start::pending_synthetic_start_present("claude", channel.get()),
         "the claimed record is consumed"
     );
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={}", channel.get()))),
-        "the admitted claim saw a refused writer"
-    );
-    let closing = gate.close().unwrap();
-    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), closing.drain()).await;
-    assert!(drained.is_ok(), "the finished worker released the drain");
 }

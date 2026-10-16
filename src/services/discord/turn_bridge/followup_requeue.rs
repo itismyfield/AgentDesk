@@ -328,11 +328,8 @@ pub(in crate::services::discord) async fn rewatch_legacy_draft_holds(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    let mut live_queue_ids =
+    let live_queue_ids =
         super::super::runtime_bootstrap::collect_live_queue_message_ids(shared).await;
-    live_queue_ids.retain(|channel, _| {
-        super::super::input_runtime::fence::lookup(provider, channel.get()).is_none()
-    });
     rewatch_matching_draft_holds(shared, provider, &live_queue_ids, true);
 }
 
