@@ -13,9 +13,9 @@ use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::discord::{DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot};
 
 const SESSION: &str = "AgentDesk-claude-adk-cc";
-const FRAME_START: u64 = 1_534_426;
+pub(super) const FRAME_START: u64 = 1_534_426;
 const TURN_START: u64 = 1_534_500;
-const FRAME_END: u64 = 1_650_085;
+pub(super) const FRAME_END: u64 = 1_650_085;
 const WATCHER_NONCE: &str = "nonce-bound-while-consuming-this-turn";
 
 fn row(turn_nonce: Option<&str>, owner: RelayOwnerKind) -> InflightTurnState {
@@ -499,9 +499,9 @@ fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
 // #5941: the durable record at the #5175 loss seam, and the observability that
 // stops "there is no record" from reading as "there is no problem".
 
-const LOST_BODY: &str = "the assistant answer the sink declined and the watcher could not send";
+pub(super) const LOST_BODY: &str = "the assistant answer the sink declined and the watcher could not send";
 const LOST_CHANNEL: u64 = 1_479_671_298_497_183_835;
-const SENT_PREFIX: usize = 4_096;
+pub(super) const SENT_PREFIX: usize = 4_096;
 const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
 
 /// The incident shape: a soft terminal, `TurnStartOutsideFrame` (the denial the
@@ -1013,7 +1013,7 @@ fn admitted_losses(channel: u64) -> u64 {
 /// delivered-content fingerprint for `LOST_BODY` first, and is the ONLY input that
 /// differs between the two callers below — so the delta between them isolates the
 /// duplicate-guard conjunct from every other one.
-async fn admitted_losses_over_one_plan_pass(
+pub(super) async fn admitted_losses_over_one_plan_pass(
     channel_id: u64,
     already_on_channel: bool,
     pg_pool: Option<sqlx::PgPool>,
@@ -1123,10 +1123,6 @@ async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_59
         "a body the duplicate guard found already on the channel is not a loss and must not page"
     );
 }
-
-// Reads back the dead-letter row the plan writes, so it needs PostgreSQL.
-#[path = "lost_body_record_pg_tests.rs"]
-mod lost_body_record_pg_tests;
 
 // Main-behaviour baselines for a dropped terminal body under a later commit.
 #[path = "owed_range_baseline_tests.rs"]

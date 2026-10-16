@@ -1,5 +1,8 @@
 //! The dead-letter row a plan-driven loss writes, read back from PostgreSQL.
 
+use super::soft_terminal_direct_send_authority_tests::{
+    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_over_one_plan_pass,
+};
 use super::*;
 
 /// A channel of its own for the process-global admission counter.
