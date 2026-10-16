@@ -110,6 +110,21 @@ async fn invoke_real_stop_action(
     author: serenity::UserId,
 ) {
     let command = super::control::cmd_stop();
+    assert!(
+        invoke_real_slash_action(ctx, data, channel, author, command, "stop").await,
+        "the actual stop action must acknowledge the invocation"
+    );
+}
+
+/// Runs `command`'s production slash action for one interaction; whether it answered it.
+pub(super) async fn invoke_real_slash_action(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel: serenity::ChannelId,
+    author: serenity::UserId,
+    command: poise::Command<Data, Error>,
+    name: &str,
+) -> bool {
     let options = poise::FrameworkOptions::<Data, Error>::default();
     let (manager, _) =
         serenity::gateway::ShardManager::new(serenity::gateway::ShardManagerOptions {
@@ -133,7 +148,7 @@ async fn invoke_real_stop_action(
     let interaction: serenity::CommandInteraction = serde_json::from_value(json!({
         "id": "60163003",
         "application_id": ctx.cache.current_user().id.get().to_string(),
-        "data": {"id": "60163004", "name": "stop", "type": 1, "resolved": {}, "options": []},
+        "data": {"id": "60163004", "name": name, "type": 1, "resolved": {}, "options": []},
         "guild_id": null,
         "channel": null,
         "channel_id": channel.get().to_string(),
@@ -171,15 +186,12 @@ async fn invoke_real_stop_action(
         __non_exhaustive: (),
     };
     assert!(
-        command.slash_action.expect("production stop slash action")(app)
+        command.slash_action.expect("production slash action")(app)
             .await
             .is_ok(),
-        "actual cmd_stop body must finish successfully"
+        "the actual {name} body must finish successfully"
     );
-    assert!(
-        has_sent_initial_response.load(Ordering::SeqCst),
-        "the actual stop action must acknowledge the invocation"
-    );
+    has_sent_initial_response.load(Ordering::SeqCst)
 }
 
 fn missing_tmux(root: &tempfile::TempDir) -> crate::config::TestEnvVarGuard {

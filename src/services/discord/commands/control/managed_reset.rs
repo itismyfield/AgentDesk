@@ -11,16 +11,6 @@ pub(in crate::services::discord) async fn verified_codex_reset_refusal(
     verified_codex_reset_refusal_for_target(shared, provider, channel_id, None).await
 }
 
-pub(super) async fn refusal_for_session_key(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    key: Option<&str>,
-) -> Option<&'static str> {
-    let tmux = key.and_then(super::super::super::session_identity::tmux_name_from_session_key);
-    verified_codex_reset_refusal_for_target(shared, provider, channel_id, tmux.as_deref()).await
-}
-
 pub(in crate::services::discord) async fn verified_codex_reset_refusal_for_target(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -68,6 +58,12 @@ pub(in crate::services::discord) fn reset_managed_process_session(session_name: 
     if crate::services::tui_prompt_dedupe::codex_verified_requires_proof(session_name) {
         return false;
     }
+    end_managed_process_session(session_name)
+}
+
+/// Kills the session's process tree and tmux session and removes its launch files; a verified
+/// Codex incarnation's spawn nonce goes with them, so its pin does not hold the next launch.
+pub(super) fn end_managed_process_session(session_name: &str) -> bool {
     let mut reset = false;
     let lingering_pid =
         crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);

@@ -220,16 +220,6 @@ where
 
     let current =
         clear_target.channel_matches && clear_target.provider_matches && clear_target.recap_current;
-    // Judged on the card's own session before its pointer is consumed or the card deleted.
-    let key = Some(clear_target.session_key.as_str());
-    let refusal = super::admin_host_guard::managed_reset_refusal;
-    if current && let Some(reason) = refusal(shared, provider, channel, true, false, key).await {
-        tracing::warn!(message_id, %reason, "idle_recap clear: host unsupported");
-        return Ok(Some(format!(
-            "세션 정리 거절: 이 세션의 호스트에서는 세션 정리를 지원하지 않습니다. ({reason})"
-        )));
-    }
-
     acknowledge().await;
 
     if !current {
@@ -1434,11 +1424,11 @@ mod host_guard_tests {
         Stored, channel_key, shared_on,
     };
 
-    // A clear click on a session the host guard keeps answers with the refusal and keeps the
-    // card, its pointer, the session and its process; a legacy row clears as in main.
+    // A clear click runs the user clear whatever the session's stored host: the card and its
+    // pointer go, the provider session is forgotten and its process ends, as with `/clear`.
     #[tokio::test]
-    async fn recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg() {
-        let test = "services::discord::idle_recap_interaction::host_guard_tests::recap_clear_keeps_the_card_and_its_pointer_on_a_refused_host_pg";
+    async fn recap_clear_resets_the_session_whatever_its_stored_host_pg() {
+        let test = "services::discord::idle_recap_interaction::host_guard_tests::recap_clear_resets_the_session_whatever_its_stored_host_pg";
         if !api_child(test) {
             return;
         }
@@ -1501,73 +1491,22 @@ mod host_guard_tests {
             .expect("pointer");
             let calls = api.take();
             let acks = acks.load(Ordering::SeqCst);
-            if case == Case::Stored(Stored::Legacy) {
-                assert_eq!((&reply, acks, pointer), (&None, 1, None), "{calls:?}");
-                let card = message_id.to_string();
-                // The card delete starts with main's probe of the recorded message.
-                let probed = calls
-                    .iter()
-                    .any(|c| c.starts_with("GET") && c.contains(&card));
-                assert!(probed, "main deletes the card: {calls:?}");
-                let session_cleared = calls.iter().any(|c| c.contains("clear-session-id"));
-                assert!(session_cleared, "main clears the session: {calls:?}");
-                assert!(!alive.load(Ordering::SeqCst), "main kills");
-                continue;
-            }
-            let refused = reply
-                .as_deref()
-                .is_some_and(|r| r.contains("세션 정리 거절"));
-            assert!(refused, "{case:?}: {reply:?}");
-            let kept = (acks, pointer);
-            assert_eq!(kept, (0, Some(message_id as i64)), "{case:?}: pointer kept");
             assert_eq!(
-                calls,
-                Vec::<String>::new(),
-                "{case:?}: no Discord or API call"
+                (&reply, acks, pointer),
+                (&None, 1, None),
+                "{case:?}: {calls:?}"
             );
-            assert!(alive.load(Ordering::SeqCst), "{case:?}: process kept");
+            let card = message_id.to_string();
+            // The card delete starts with main's probe of the recorded message.
+            let probed = calls
+                .iter()
+                .any(|c| c.starts_with("GET") && c.contains(&card));
+            assert!(probed, "{case:?}: the card is deleted: {calls:?}");
             let core = shared.core.lock().await;
-            assert!(core.sessions[&channel].session_id.is_some(), "{case:?}");
+            assert_eq!(core.sessions[&channel].session_id, None, "{case:?}");
             drop(core);
-            assert_eq!(tmux.take_calls(), Vec::<String>::new(), "{case:?}: no tmux");
-            crate::services::session_backend::remove_process_session(&name);
+            assert!(!alive.load(Ordering::SeqCst), "{case:?}: the process ends");
         }
-
-        // A card whose own session is hosted is refused even when the channel's current
-        // session, under another name with no row, would clear as in main.
-        let channel = serenity::ChannelId::new(1_479_671_302_387_068_100);
-        let (card_name, current) = ("AgentDesk-claude-p4c2-recap-card", "p4c2-recap-current");
-        let key = channel_key(&shared, card_name);
-        let stored = Case::Stored(Stored::Hosted);
-        stored.seed(&pool, &key, card_name, channel.get() + 1).await;
-        map_channel(&shared, channel, current).await;
-        let message_id = 1_479_671_302_387_069_100_u64;
-        let card = "UPDATE sessions SET idle_recap_message_id = $2, idle_recap_channel_id = $3,
-                    idle_recap_posted_at = NOW() + INTERVAL '1 minute' WHERE session_key = $1";
-        let card = sqlx::query(card).bind(&key).bind(message_id as i64);
-        card.bind(channel.get() as i64)
-            .execute(&pool)
-            .await
-            .expect("card");
-        let current = process(&provider.build_tmux_session_name(current), 66_100);
-        let click = clear_recap_card(
-            &api.http,
-            &shared,
-            &provider,
-            channel,
-            message_id,
-            || async {},
-        );
-        let reply = click.await.expect("clear click");
-        assert!(
-            reply.is_some_and(|r| r.contains("세션 정리 거절")),
-            "the card's own key decides"
-        );
-        assert!(
-            current.load(Ordering::SeqCst),
-            "the channel's process is kept"
-        );
-        assert_eq!(api.take(), Vec::<String>::new(), "no Discord or API call");
         db.drop().await;
     }
 
