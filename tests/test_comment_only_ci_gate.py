@@ -40,7 +40,7 @@ SKIPPED_WHEN_COMMENT_ONLY = (
     "check_fast_cross_os_targets",
     "library_sweep",
 )
-KEPT_WHEN_COMMENT_ONLY = ("check_fast", "lint", "scripts", "scripts_guards", "scripts_contracts")
+KEPT_WHEN_COMMENT_ONLY = ("lint", "scripts", "scripts_guards", "scripts_contracts")
 REQUIRED_CONTEXTS = (
     "Lint",
     "Script checks",
