@@ -700,9 +700,8 @@ mod writer_return {
         panic!("the return never waited on the row lock");
     }
 
-    /// A return whose CAS goes stale, the reclaimed row removed and the channel delegated again
-    /// while it waited, removes nothing, starts no gateway writer and leaves the new delegation to
-    /// drain to its target.
+    /// A return whose CAS goes stale (row removed and delegated again while it waited) removes
+    /// nothing and starts no gateway writer; the new delegation drains to its target.
     #[tokio::test]
     async fn a_stale_return_keeps_the_new_delegation_and_starts_no_writer_pg() {
         let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
