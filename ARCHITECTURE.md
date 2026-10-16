@@ -735,7 +735,6 @@ src/
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
 │   │   │   ├── home_route_tests.rs
-│   │   │   ├── input_effect_tests.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_fence_pg_tests.rs
 │   │   │   ├── replay_hold_tests.rs
@@ -1522,6 +1521,8 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_tests.rs
+│   │   │   │   │   ├── route_claim_tests.rs
+│   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
@@ -2047,6 +2048,8 @@ src/
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
+│   │   │   ├── before_start_stop_reconcile_tests.rs
+│   │   │   ├── before_start_stop_tail_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2118,6 +2121,7 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
 │   │   │   └── watcher_backstop.rs
@@ -3020,6 +3024,7 @@ src/
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── policy_close.rs
+│   │   ├── policy_tail.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
