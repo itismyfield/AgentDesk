@@ -136,13 +136,11 @@ pub(super) enum FinalizeMsg {
         event: TerminalEvent,
         ctx: FinalizeContext,
         evidence: TerminalEvidence,
-        input_permit: Option<super::super::input_runtime::fence::Permit>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
     PolicyClose {
         intent: Box<super::episode::PolicyCloseIntent>,
-        input_permit: Option<super::super::input_runtime::fence::Permit>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<PolicyCloseOutcome>,
     },

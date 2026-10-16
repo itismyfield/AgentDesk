@@ -1,8 +1,5 @@
 use super::*;
-use crate::services::discord::input_runtime::fence::Failure;
-use crate::services::turn_orchestrator::policy_close::{
-    PolicyAuthority, PolicyClear, PolicyReceipt,
-};
+use crate::services::turn_orchestrator::policy_close::{PolicyClear, PolicyReceipt};
 
 #[path = "operator_disposition.rs"]
 mod operator_disposition;
@@ -425,36 +422,25 @@ impl PolicyReceipt for AckedPolicyReceipt {
     }
 
     /// Never waits on the row lock: the mailbox step calling it must keep serving its queue. A
-    /// protected step clears under its own held scope, which must name exactly this row.
-    fn try_clear(&self, authority: &PolicyAuthority<'_>) -> PolicyClear {
+    /// fenced channel's row is someone else's to write, so it reads as busy.
+    fn try_clear(&self) -> PolicyClear {
         let acked = &self.acked;
         let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
             return PolicyClear::Io;
         };
         let path = inflight_state_path(&root, &provider, acked.channel_id);
-        let clear = || {
-            acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
-                crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-                    && acked.before_start_policy_receipt_clearable(fresh, self.generation)
-            })
-        };
-        let outcome = if authority.is_protected() {
-            let Some(population) = root.parent() else {
-                return PolicyClear::InputFence(Failure::Persistence);
-            };
-            match authority.borrowed(population, &provider, acked.channel_id, || Ok(clear())) {
-                Ok(outcome) => outcome,
-                Err(_) => return PolicyClear::InputFence(Failure::StalePermit),
+        use super::super::store::{TryLockRefusal, try_lock_unfenced_inflight_state_path};
+        let _lock = match try_lock_unfenced_inflight_state_path(&path) {
+            Ok(lock) => lock,
+            Err(TryLockRefusal::Contended | TryLockRefusal::Fenced) => {
+                return PolicyClear::LockBusy;
             }
-        } else {
-            use super::super::store::{TryLockRefusal, try_lock_unfenced_inflight_state_path};
-            match try_lock_unfenced_inflight_state_path(&path) {
-                Ok(_lock) => clear(),
-                Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
-                Err(TryLockRefusal::Fenced) => return PolicyClear::InputFence(Failure::Busy),
-                Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
-            }
+            Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
         };
+        let outcome = acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
+            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                && acked.before_start_policy_receipt_clearable(fresh, self.generation)
+        });
         match outcome {
             GuardedClearOutcome::Cleared => PolicyClear::Cleared,
             GuardedClearOutcome::Missing => PolicyClear::Missing,
