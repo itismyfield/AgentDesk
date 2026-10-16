@@ -35,6 +35,14 @@ fn opening() -> Vec<u8> {
     .concat()
 }
 
+/// The prompt's own `user_message` mirror, which leaves the rollout before any output.
+fn mirror() -> Vec<u8> {
+    codex_line(
+        serde_json::json!({"type": "event_msg", "timestamp": Utc::now().to_rfc3339(),
+        "payload": {"type": "user_message", "message": "hi"}}),
+    )
+}
+
 /// A fresh rollout through its first prompt, before any output.
 fn prompted(session: &str) -> Vec<u8> {
     [metadata(session), opening()].concat()
@@ -132,6 +140,60 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
     restart_posts_nothing(&harness, tasks, &source).await;
 }
 
+/// A rollout bound with only its metadata stays Legacy's and keeps intake open; once its first prompt
+/// lands the same rollout commits, and its answer is posted once by O.
+#[tokio::test(start_paused = true)]
+async fn a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands() {
+    const CODEX: u64 = 61_817;
+    let Takeover {
+        harness,
+        io,
+        tasks: _tasks,
+        _reserved,
+    } = hosted_over_old(CODEX).await;
+    let (path, source) = rollout(&harness, "rollout-new.jsonl", &metadata("s-codex"));
+    bind_late(CODEX, &path);
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Deferred,
+        "no prompt, no takeover"
+    );
+    assert!(!harness.store.has_channel_dir(CODEX));
+    // Not `legacy_sends`: that reserving read is itself a Legacy send and skips the rollout.
+    assert!(
+        crate::services::tui_o::cutover::codex_turn_awaited(CODEX).is_none(),
+        "Discord input still runs on Legacy"
+    );
+
+    append(&path, &opening());
+    // Growth of the same rollout is judged again on the takeover's retry wake.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    polls(3).await;
+    assert_eq!(
+        adoption(CODEX),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert_eq!(init_sources(&harness, CODEX), [(source, 0)]);
+    assert!(crate::services::tui_o::cutover::codex_turn_awaited(CODEX).is_some());
+    let end = codex_line(
+        serde_json::json!({"type": "event_msg", "timestamp": Utc::now().to_rfc3339(),
+        "payload": {"type": "task_complete", "turn_id": "t1"}}),
+    );
+    append(&path, &[answer("msg_1", "the answer"), end].concat());
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["the answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["the answer"]);
+}
+
 /// A Legacy body sent after the baseline, finished or not, skips the rollout bound next without
 /// taking a new baseline on it; the rollout bound after that commits.
 #[tokio::test(start_paused = true)]
@@ -173,35 +235,30 @@ async fn a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
 }
 
 /// Under the adoption lock, a Legacy send finished since the fence or an output appended since the
-/// judgement leaves no init for that rollout; a first prompt appended since is judged again at once.
+/// judgement leaves no init for that rollout; a prompt mirror appended since is judged again at once.
 #[tokio::test(start_paused = true)]
 async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence() {
-    for (channel, race) in [(61_814_u64, "send"), (61_815, "output"), (61_816, "prompt")] {
+    for (channel, race) in [(61_814_u64, "send"), (61_815, "output"), (61_816, "mirror")] {
         let Takeover {
             harness,
             io,
             tasks: _tasks,
             _reserved,
         } = hosted_over_old(channel).await;
-        let first = if race == "prompt" {
-            metadata("s-codex")
-        } else {
-            prompted("s-codex")
-        };
-        let (path, source) = rollout(&harness, "rollout-raced.jsonl", &first);
+        let (path, source) = rollout(&harness, "rollout-raced.jsonl", &prompted("s-codex"));
         let appended = path.clone();
         // The hosted activation runs on this test's thread, which holds the forced snapshot.
         test_hook::set(channel, Step::BeforeLock, move || {
             match race {
                 "send" => assert!(legacy_sends(channel)),
                 "output" => append(&appended, &answer("msg_1", "raced")),
-                _ => append(&appended, &opening()),
+                _ => append(&appended, &mirror()),
             }
             Ok(())
         });
         bind_late(channel, &path);
         polls(3).await;
-        if race == "prompt" {
+        if race == "mirror" {
             assert_eq!(
                 adoption(channel),
                 Adoption::Committed,

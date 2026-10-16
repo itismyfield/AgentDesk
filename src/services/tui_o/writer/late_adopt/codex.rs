@@ -139,6 +139,10 @@ impl<I: HostIo> Takeover<'_, I> {
             return Err(Taken::Retry("no rollout bound since the baseline".into()));
         };
         match prefix::judge(&bound.0) {
+            // Turn mode is confirmed after the taken turn, so a rollout with no prompt is not taken yet.
+            Verdict::Eligible(prefix) if prefix.prompt_end.is_none() => Err(Taken::Retry(
+                "the takeover rollout has no first user prompt yet".into(),
+            )),
             Verdict::Eligible(prefix) => self.commit(at, &bound, &prefix).await,
             Verdict::Wait(detail) => Err(Taken::Retry(detail)),
             Verdict::Refuse(detail) => Err(Taken::Skip(detail)),
