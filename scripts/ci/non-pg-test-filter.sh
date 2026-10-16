@@ -236,6 +236,7 @@ NON_PG_SKIP_ARGS=(
   --skip voice::turn_link::tests
 )
 NON_PG_FILTER_REPLAY=(
+  cli::channel_home::tests::abort_release_runs_from_the_cli_and_says_why_it_refused_pg
   cli::dcserver_pg_bootstrap::tests::a_schema_ahead_failure_stops_at_once_only_while_the_hold_is_on
   cli::dcserver_pg_bootstrap::tests::backoff_delay_follows_exponential_schedule
   cli::dcserver_pg_bootstrap::tests::backoff_delay_saturates_at_cap
@@ -279,6 +280,11 @@ NON_PG_FILTER_REPLAY=(
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_malformed_json
   db::dispatches::metadata::tests::parse_pg_dispatch_context_rejects_non_object_context
   db::intake_outbox_delivery_proof::tests::stale_reader_projects_exactly_id
+  db::o_channel_homes::tests::a_finished_release_and_an_abort_racing_on_one_releasing_row_never_both_win_pg
+  db::o_channel_homes::tests::abort_release_refuses_while_any_intake_is_open_pg
+  db::o_channel_homes::tests::abort_release_removes_only_a_released_row_at_its_exact_epoch_from_the_gateway_pg
+  db::o_channel_homes::tests::abort_release_takes_a_releasing_row_only_from_its_holder_pg
+  db::o_channel_homes::tests::an_abort_and_an_adopt_racing_on_one_released_row_never_both_win_pg
   db::postgres::test_db_reclaim::tests::reclaim_audit_log_appends_stay_whole_across_processes
   db::postgres::test_db_reclaim::tests::reclaim_audit_log_closes_a_torn_tail
   db::postgres::test_db_reclaim::tests::reclaim_classify_owner_identity
@@ -393,6 +399,7 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+  services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg
   services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
   services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
   services::cluster::channel_home_boot::tests::writer_return::unreadable_boot_rows_start_no_first_writer
