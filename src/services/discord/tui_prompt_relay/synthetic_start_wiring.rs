@@ -250,24 +250,19 @@ pub(super) fn failed_synthetic_placeholder_cleanup_target(
     anchor_is_owned_placeholder.then_some(anchor_message_id)
 }
 
-/// For Codex, whether turn mode is confirmed under the start lock a confirmation takes; the lock is
-/// taken for a claim, or for a persist once a confirmation can land, and kept in `guard`.
+/// For Codex, whether turn mode is confirmed, read under the start lock a confirmation takes; the
+/// lock stays in `guard` through the persist or the claim that follows.
 async fn codex_confirmed(
     lock: &Arc<tokio::sync::Mutex<()>>,
     guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     provider: &ProviderKind,
     channel: u64,
-    claim: bool,
 ) -> bool {
-    use crate::services::tui_o::{cutover::codex_turn_awaited, turn_mode::transcript_turns};
     if *provider != ProviderKind::Codex {
         return false;
     }
-    if !(claim || codex_turn_awaited(channel).is_some() || transcript_turns(channel)) {
-        return false;
-    }
     *guard = Some(Arc::clone(lock).lock_owned().await);
-    transcript_turns(channel)
+    crate::services::tui_o::turn_mode::transcript_turns(channel)
 }
 
 /// Turn mode was confirmed while this observation waited: no Legacy turn starts for it, so its
@@ -538,7 +533,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
         let defer =
             super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view);
         let mut confirming = None;
-        if codex_confirmed(&lock, &mut confirming, &provider, channel_id.get(), !defer).await {
+        if codex_confirmed(&lock, &mut confirming, &provider, channel_id.get()).await {
             let (anchor, owned) = (anchor_message_id, anchor_is_owned_placeholder);
             release_confirmed_observation(shared, &provider, channel_id, prompt, anchor, owned)
                 .await;

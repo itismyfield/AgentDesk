@@ -143,3 +143,37 @@ async fn a_codex_observation_begun_before_the_takeover_persists_no_start_after_c
     assert!(wiring.await, "the observer stands down without a tail");
     assert_no_legacy_start();
 }
+
+/// An observation of a channel not yet awaited still persists only under the start lock: while a
+/// confirmation holds it the takeover commits and turn mode is confirmed, so it stands down.
+#[tokio::test(flavor = "current_thread")]
+async fn a_codex_observation_not_yet_awaited_waits_on_the_start_lock_before_persisting() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+    let deferred = adopted_and_selected(Adoption::Deferred);
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (prompt, decision, mut lease) = observed(&shared).await;
+    let lock = channel_lock("codex", CHANNEL);
+    let confirming = lock.try_lock().unwrap();
+    let anchor = MessageId::new(940_000_000_005_303);
+    let channel_id = ChannelId::new(CHANNEL);
+    let wiring = wire_tui_direct_synthetic_turn_start(
+        &shared, "codex", channel_id, &prompt, anchor, false, &decision, &mut lease,
+    );
+    tokio::pin!(wiring);
+    for _ in 0..8 {
+        assert!(
+            futures::poll!(&mut wiring).is_pending(),
+            "it waits on the lock"
+        );
+        tokio::task::yield_now().await;
+    }
+    drop(deferred);
+    let _committed = adopted_and_selected(Adoption::Committed);
+    assert!(turn_mode::confirm(CHANNEL));
+    let _confirmed = TestConfirmation::confirmed(CHANNEL);
+    drop(confirming);
+
+    assert!(wiring.await, "the observer stands down without a tail");
+    assert_no_legacy_start();
+}
