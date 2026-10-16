@@ -728,6 +728,14 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/ingress_shadow/compat_tests.rs",
         "src/services/session_host/herdr_gate/legacy_return_tests.rs",
         "src/services/tui_o/writer/rotation/transition_tests.rs",
+        "src/services/tui_o/writer/late_adopt/codex/prefix_tests.rs",
+        "src/services/discord/tui_direct_pending_start/turn_retirement/codex_tests.rs",
+        "src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs",
+        "src/services/tui_o/writer/host_codex_takeover_tests.rs",
+        "src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs",
+        "src/services/discord/turn_finalizer/completion_admission_codex_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start_wiring_codex_tests.rs",
+        "src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs",
     }
 )
 

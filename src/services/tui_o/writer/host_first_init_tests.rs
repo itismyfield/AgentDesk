@@ -256,3 +256,6 @@ async fn a_bound_codex_source_that_already_holds_output_gets_no_init() {
         assert!(harness.port.posts().is_empty(), "{why}");
     }
 }
+
+#[path = "host_codex_takeover_tests.rs"]
+mod codex_takeover;
