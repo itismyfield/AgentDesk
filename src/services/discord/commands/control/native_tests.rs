@@ -13,17 +13,17 @@ use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 use crate::services::tui_prompt_dedupe::binding_events::{
     self, BindingCause, CauseSource, HookSignal, Proposal, SourceId,
 };
+use crate::services::tui_prompt_dedupe::native_clear::ClearTicket;
 
-/// Records every native effect in order; a submit may run a hook and may wait to be released.
+/// Records every native effect in order.
 #[derive(Default)]
 pub(in crate::services::discord) struct Fake {
     calls: Mutex<Vec<String>>,
     pub(in crate::services::discord) save_fails: AtomicBool,
     composer: Mutex<Option<Option<String>>>,
-    on_submit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    submit_entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    submit_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-    pub(in crate::services::discord) submitted: Mutex<Option<NativeClearSubmission>>,
+    /// What a pane would have answered to a typed `/clear`; a user clear no longer types one.
+    pub(in crate::services::discord) submitted:
+        Mutex<Option<crate::services::claude_tui::host_input::NativeClearSubmission>>,
 }
 
 impl Fake {
@@ -44,29 +44,6 @@ impl NativeClearEffects for Fake {
         self.note(format!("save:{session}"));
         let ok = !self.save_fails.load(Ordering::SeqCst);
         Box::pin(async move { ok })
-    }
-    fn submit(&self, ticket: &ClearTicket, _: Instant) -> NativeClearSubmission {
-        self.note("submit".into());
-        if let Some(entered) = self.submit_entered.lock().unwrap().take() {
-            let _ = entered.send(());
-        }
-        if let Some(release) = self.submit_release.lock().unwrap().take() {
-            let _ = release.recv();
-        }
-        assert!(
-            crate::services::claude_tui::host_input::MutationGate::admit(
-                ticket,
-                &ticket.context.tmux_session
-            )
-            .is_ok()
-        );
-        if let Some(hook) = self.on_submit.lock().unwrap().take() {
-            hook();
-        }
-        self.submitted
-            .lock()
-            .unwrap()
-            .unwrap_or(NativeClearSubmission::Confirmed)
     }
     fn composer_empty(&self, _: &str, _: Instant) -> bool {
         self.composer
@@ -231,7 +208,7 @@ impl Fixture {
         tmux_common::session_temp_path(&self.tmux, "spawn_nonce")
     }
 
-    async fn clear(&self) -> anyhow::Result<()> {
+    async fn clear(&self) -> anyhow::Result<super::super::ClearReport> {
         super::super::clear_channel_session_state(
             &self.http,
             &self.shared,
@@ -335,212 +312,44 @@ pub(in crate::services::discord) fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// The clear hook the pane would send after `/clear`, run from the worker's submit.
-fn hook_on_submit(fake: &Fake, fixture: &Fixture, pending: bool) {
-    let root = fixture.binding_root.path().to_path_buf();
-    let (channel_id, tmux) = (fixture.channel_id, fixture.tmux.clone());
-    *fake.on_submit.lock().unwrap() = Some(Box::new(move || {
-        record_on(
-            &root,
-            channel_id,
-            &tmux,
-            "new",
-            BindingCause::Clear,
-            pending,
-        );
-    }));
-}
-
+/// A switched-on Claude channel's clear types no `/clear`: it ends the session like any other,
+/// and its boundary supersedes an unresolved native one, so admission no longer holds input.
 #[test]
-fn native_clear_keeps_the_pane_and_completes_inside_the_worker_pg() {
+fn a_switched_on_clear_ends_the_session_and_frees_an_unresolved_native_boundary_pg() {
     runtime().block_on(async {
         let fixture = Fixture::new(1).await;
         let fake = Arc::new(Fake::default());
         let _on = switch_on_for_tests(fake.clone());
-        hook_on_submit(&fake, &fixture, false);
-        let channel_id = fixture.channel_id;
-        fixture
-            .shared
-            .overrides
-            .model_session_reset_pending
-            .insert(channel_id);
-
-        fixture.clear().await.expect("native clear succeeds");
-
-        let key = &fixture.session_key;
-        assert_eq!(
-            fake.calls(),
-            [format!("clear:{key}"), "submit".into(), "save:new".into()],
-            "the selector is cleared before `/clear` and no process is reset"
-        );
-        assert_eq!(fixture.state().await, NativeClearBoundary::Resolved);
-        assert_eq!(fixture.session().await, (Some("new".into()), true));
-        assert!(
-            std::path::Path::new(&fixture.marker()).exists(),
-            "the running execution is kept"
-        );
-        assert!(
-            fixture
-                .shared
-                .overrides
-                .model_session_reset_pending
-                .contains(&channel_id),
-            "a native clear owes the unrestarted process its pending model reset"
-        );
-        drop(_on);
-        fixture.drop_db().await;
-    });
-}
-
-#[test]
-fn native_clear_without_a_clear_hook_falls_back_to_the_managed_reset_pg() {
-    runtime().block_on(async {
-        let fixture = Fixture::new(2).await;
-        let fake = Arc::new(Fake::default());
-        let _on = switch_on_for_tests(fake.clone());
-        *fake.submitted.lock().unwrap() = Some(NativeClearSubmission::NotSent);
-        let channel_id = fixture.channel_id;
-        fixture
-            .shared
-            .overrides
-            .model_session_reset_pending
-            .insert(channel_id);
-
-        fixture.clear().await.expect("the fallback clear succeeds");
-
-        let key = &fixture.session_key;
-        assert_eq!(
-            fake.calls(),
-            [
-                format!("clear:{key}"),
-                "submit".into(),
-                format!("clear:{key}"),
-                format!("reset:{}", fixture.tmux),
-            ]
-        );
-        assert_eq!(fixture.state().await, NativeClearBoundary::Resolved);
-        assert!(
-            !std::path::Path::new(&fixture.marker()).exists(),
-            "the fallback retires the execution before the reset"
-        );
-        assert!(
-            !fixture
-                .shared
-                .overrides
-                .model_session_reset_pending
-                .contains(&channel_id)
-        );
-        drop(_on);
-        fixture.drop_db().await;
-    });
-}
-
-/// Dropping the caller mid-clear neither frees admission early nor skips the completion mark.
-#[test]
-fn native_clear_marks_completion_before_the_worker_releases_admission_pg() {
-    runtime().block_on(async {
-        let fixture = Fixture::new(3).await;
-        let fake = Arc::new(Fake::default());
-        let _on = switch_on_for_tests(fake.clone());
-        hook_on_submit(&fake, &fixture, false);
-        let (entered_tx, entered) = tokio::sync::oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        *fake.submit_entered.lock().unwrap() = Some(entered_tx);
-        *fake.submit_release.lock().unwrap() = Some(release_rx);
-
-        let mut clear = Box::pin(fixture.clear());
-        tokio::select! {
-            result = &mut clear => panic!("clear finished before submit: {result:?}"),
-            _ = entered => {}
-        }
-        drop(clear);
-        let lock = fixture.shared.session_transition_lock(fixture.channel_id);
-        // A caller-side completion mark would race the reopened admission below.
-        assert!(lock.try_lock().is_err(), "the worker still owns admission");
-        release.send(()).unwrap();
-        let admitted = lock.lock_owned().await;
-
-        assert_eq!(
-            fixture.state().await,
-            NativeClearBoundary::Resolved,
-            "the completion mark is durable once admission reopens"
-        );
-        drop(admitted);
-        drop(_on);
-        fixture.drop_db().await;
-    });
-}
-
-#[test]
-fn held_native_clear_holds_input_until_admission_completes_it_pg() {
-    runtime().block_on(async {
-        let fixture = Fixture::new(4).await;
-        let fake = Arc::new(Fake::default());
-        let _on = switch_on_for_tests(fake.clone());
-        hook_on_submit(&fake, &fixture, true);
-        fake.save_fails.store(true, Ordering::SeqCst);
-
-        assert!(
-            fixture.clear().await.is_err(),
-            "a held clear is not success"
-        );
+        fixture.unresolved().await;
         assert!(matches!(
             fixture.state().await,
             NativeClearBoundary::Unresolved { .. }
         ));
-        assert_eq!(
-            fixture.admits().await.0,
-            false,
-            "a failed selector save keeps input held"
+        let alive = Arc::new(AtomicBool::new(true));
+        crate::services::session_backend::insert_process_session(
+            fixture.tmux.clone(),
+            crate::services::session_backend::SessionHandle::TestProcess {
+                pid: 6_577_201,
+                alive: alive.clone(),
+            },
         );
 
-        fake.save_fails.store(false, Ordering::SeqCst);
-        assert_eq!(fixture.admits().await, (true, Some("new".into())));
-        assert_eq!(fixture.state().await, NativeClearBoundary::Resolved);
-        assert!(
-            !fake.calls().iter().any(|call| call.starts_with("reset:")),
-            "a durable clear is completed without a reset"
-        );
+        fixture.clear().await.expect("the clear commits");
+
+        assert_eq!(fake.calls(), Vec::<String>::new(), "no native effect");
+        assert!(!alive.load(Ordering::SeqCst), "the session's process ends");
+        assert_eq!(fixture.session().await, (None, true));
+        assert_eq!(fixture.state().await, NativeClearBoundary::Superseded);
+        let key = fixture.channel_id.get().to_string();
+        let record = session_transcripts::native_channel_clear_record(&fixture.pool, &key);
+        let record = record
+            .await
+            .unwrap()
+            .expect("the earlier native record stays readable");
+        assert!(record.superseded && !record.resolved, "{record:?}");
+        assert_eq!(fixture.admits().await, (true, Some("stale".into())));
         drop(_on);
         fixture.drop_db().await;
-    });
-}
-
-#[test]
-fn switched_off_or_unowned_clear_keeps_the_managed_reset_pg() {
-    runtime().block_on(async {
-        for case in ["off", "unowned"] {
-            let fixture = Fixture::new(if case == "off" { 5 } else { 6 }).await;
-            let fake = Arc::new(Fake::default());
-            let on = (case == "unowned").then(|| switch_on_for_tests(fake.clone()));
-            let unowned = (case == "unowned")
-                .then(|| crate::services::tui_o::cutover::test_override::force_channels(&[]));
-            let alive = Arc::new(AtomicBool::new(true));
-            crate::services::session_backend::insert_process_session(
-                fixture.tmux.clone(),
-                crate::services::session_backend::SessionHandle::TestProcess {
-                    pid: 6_577_200,
-                    alive: alive.clone(),
-                },
-            );
-
-            fixture.clear().await.expect("managed clear succeeds");
-
-            assert!(fake.calls().is_empty(), "{case}: no native effect");
-            assert_eq!(fixture.state().await, NativeClearBoundary::Legacy, "{case}");
-            assert!(!alive.load(Ordering::SeqCst), "{case}: managed reset ran");
-            assert_eq!(fixture.session().await, (None, true), "{case}");
-            if case == "off" {
-                fixture.pool.close().await;
-                assert_eq!(
-                    fixture.admits().await,
-                    (true, Some("stale".into())),
-                    "switched off, admission reads nothing"
-                );
-            }
-            drop((on, unowned));
-            fixture.drop_db().await;
-        }
     });
 }
 
@@ -718,7 +527,6 @@ fn restart_admission_holds_undecidable_rows_until_a_new_clear_pg() {
                 "{case}"
             );
             fake.save_fails.store(false, Ordering::SeqCst);
-            *fake.submitted.lock().unwrap() = Some(NativeClearSubmission::NotSent);
             fixture
                 .clear()
                 .await

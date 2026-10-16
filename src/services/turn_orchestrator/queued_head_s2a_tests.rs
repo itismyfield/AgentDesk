@@ -304,7 +304,7 @@ fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
             assert_eq!(after.active_request_owner, Some(UserId::new(9)));
 
             let cleared = handle.clear(ctx()).await;
-            assert_eq!(cleared.persistence_error, None, "{phase}");
+            assert_eq!(cleared.persistence, Default::default(), "{phase}");
             assert!(cleared.removed_token.is_some());
             let (head_id, behind) = (head.message_id, MessageId::new(230 + index as u64));
             let reclaimed = MessageId::new(999);
@@ -423,16 +423,18 @@ fn s2a_save_failure_after_clear_still_signals_the_released_turn() {
                 .await
                 .is_err()
         );
-        let before = bytes(channel);
         crate::services::turn_orchestrator::pending_queue_persistence::save_fault::fail_next(
             channel,
         );
         let cleared = handle.clear(ctx()).await;
-        assert!(cleared.persistence_error.is_some());
+        assert_eq!(cleared.persistence.retried, ["queue_publish"]);
         assert!(cleared.removed_token.is_some());
-        assert_eq!(cleared.discarded_message_ids, [holder]);
-        assert_eq!(queue(&handle).await, [(280, "queued B".into())]);
-        assert_eq!(bytes(channel), before);
+        assert_eq!(cleared.discarded_message_ids[0], holder);
+        assert!(cleared.discarded_message_ids.contains(&MessageId::new(280)));
+        assert!(
+            queue(&handle).await.is_empty(),
+            "a failed save restores nothing"
+        );
         tokio::time::timeout(Duration::from_millis(25), signal.wait())
             .await
             .expect("the released turn must wake its deferred monitor even after save failure");
@@ -577,7 +579,7 @@ fn s2a_changed_metadata_refuses_a_queue_write_and_a_clear_replaces_it() {
         );
         assert_eq!(bytes(channel), before);
         let cleared = handle.clear(ctx()).await;
-        assert_eq!(cleared.persistence_error, None);
+        assert_eq!(cleared.persistence, Default::default());
         assert!(cleared.discarded_message_ids.contains(&head.message_id));
         let written = disk(channel);
         assert_eq!(written["items"], serde_json::json!([]));

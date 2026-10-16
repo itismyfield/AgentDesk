@@ -1,8 +1,7 @@
-//! A /clear that meets a pane effect holding the session transition waits it out and then
-//! discards the live queued head, instead of refusing after the transition timeout.
+//! A /clear that meets a pane effect holding the session transition waits the usual window, then
+//! goes ahead with a warning and discards the live queued head, never refusing.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -42,7 +41,7 @@ fn context(shared: &SharedData, provider: &ProviderKind) -> QueuePersistenceCont
 }
 
 #[test]
-fn a_clear_waits_out_a_held_pane_effect_and_then_discards_the_live_head() {
+fn a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head() {
     let root = tempfile::tempdir().expect("scratch runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let provider = ProviderKind::Gemini;
@@ -93,7 +92,7 @@ fn a_clear_waits_out_a_held_pane_effect_and_then_discards_the_live_head() {
             .await;
 
         let http = Arc::new(serenity::Http::new(""));
-        let mut clear = Box::pin(clear_channel_session_state_fenced(
+        let report = clear_channel_session_state_fenced(
             &http,
             &shared,
             &provider,
@@ -101,15 +100,13 @@ fn a_clear_waits_out_a_held_pane_effect_and_then_discards_the_live_head() {
             "/clear",
             SoftClearNotifyMode::Suppress,
             None,
-        ));
-        let waited = tokio::time::timeout(Duration::from_secs(10), &mut clear).await;
-        assert!(
-            waited.is_err(),
-            "the clear waits for the effect: {waited:?}"
-        );
-        assert_eq!(queue_len(&shared, channel_id).await, 2);
+        )
+        .await
+        .expect("the clear goes ahead past the held effect");
+        assert!(report.transition_busy, "{report:?}");
+        let warning = report.warning().expect("the overtaken effect is warned");
+        assert!(warning.contains("기다리지 않고"), "{warning}");
         drop(effect);
-        clear.await.expect("the clear runs once the effect ends");
 
         assert_eq!(queue_len(&shared, channel_id).await, 0);
         let late = mailbox
