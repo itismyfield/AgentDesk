@@ -351,10 +351,7 @@ async fn resolve(
     let input = if queued {
         fence::effect::admit(&request.provider, channel).map_err(|_| INPUT_RUNTIME_OWNED)?
     } else {
-        match fence::lookup(&request.provider, channel) {
-            Some(gate) => Some(gate.admit().map_err(|_| INPUT_RUNTIME_OWNED)?),
-            None => None,
-        }
+        None
     };
     // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
     // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.

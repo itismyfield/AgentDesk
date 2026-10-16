@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::input_runtime::fence;
 
 /// Normalized runtime coordinates the rebind adopts onto the existing turn.
 pub(super) struct AdoptionCoordinates<'a> {
@@ -60,24 +59,18 @@ pub(super) async fn adopt_coordinates(
         let expected_last_offset =
             existing_offset_rebase_to_output.map(|_| expected_last_offset_for_rebase);
         let recovery = crate::services::discord::live_bridge::held_recovery();
-        let permit = fence::effect::current();
         let adoption = tokio::task::spawn_blocking(move || {
             // A cancelled caller must not reopen the slot before this adoption commits.
             let _recovery = recovery;
             #[cfg(test)]
             super::coordinate_adoption_tests::adoption_gap::pause(adoption_state.channel_id);
-            // The caller's input permit and worker capability let a protected row's writer run.
-            fence::effect::synchronous(permit, || {
-                fence::blocking(|| {
-                    super::inflight::adopt_and_lock_inflight_episode(
-                        &adoption_state,
-                        &expected_identity,
-                        &expected_episode,
-                        expected_turn_start_offset,
-                        expected_last_offset,
-                    )
-                })
-            })
+            super::inflight::adopt_and_lock_inflight_episode(
+                &adoption_state,
+                &expected_identity,
+                &expected_episode,
+                expected_turn_start_offset,
+                expected_last_offset,
+            )
         })
         .await
         .unwrap_or(Err(super::inflight::GuardedSaveOutcome::IoError));
