@@ -20,7 +20,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
         &Option<String>,
         Option<crate::services::discord::turn_view_reconciler::TurnStartAttempt>,
         bool,
-        bool,
+        (bool, super::adk_thread::Route),
     ),
     fallback_state: (Option<String>, bool, String),
 ) -> Result<Option<IntakeRuntimeTransition>, Error> {
@@ -34,7 +34,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
         dispatch_id_for_thread,
         turn_start_attempt,
         preserve_on_cancel,
-        queued_drain,
+        (queued_drain, route),
     ) = requeue;
     // Busy queued drains return their already owned uploads to the restore owner.
     // Fresh input keeps the durable tail enqueue and slow wake policy.
@@ -95,6 +95,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 turn_start_attempt,
                 preserve_on_cancel,
                 race_loss::QueuedIntakeCause::SessionTransitionBusy,
+                route,
             )
             .await?;
             Ok(None)
@@ -112,6 +113,13 @@ mod tests {
         pre_admission_control_tests::{fixture, session_with},
         take_channel_input_state,
     };
+    fn route(target: ChannelId) -> super::super::adk_thread::Route {
+        super::super::adk_thread::Route {
+            target,
+            parent: None,
+            role: None,
+        }
+    }
     #[tokio::test]
     #[rustfmt::skip]
     async fn runtime_transition_busy_forwards_owned_uploads_without_taking_session_state() {
@@ -134,7 +142,7 @@ mod tests {
                 (&http, &shared, "test-token", &ProviderKind::Codex), (channel, channel),
                 (TurnKind::Foreground, UserId::new(1), MessageId::new(566_003), "A"),
                 (&None, false, false), (&mut owned, &None),
-                (false, &None, None, false, false), (None, false, String::new()),
+                (false, &None, None, false, (false, route(channel))), (None, false, String::new()),
             )).await.expect("busy handoff must finish").expect("busy enqueue must succeed");
         assert!(transition.is_none(), "held transition must requeue, not acquire");
         let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
@@ -166,7 +174,7 @@ mod tests {
             ),
             (&None, false, false),
             (&mut owned, &None),
-            (false, &None, None, false, true),
+            (false, &None, None, false, (true, route(channel))),
             (None, false, String::new()),
         )
         .await;
