@@ -250,6 +250,26 @@ pub(super) fn failed_synthetic_placeholder_cleanup_target(
     anchor_is_owned_placeholder.then_some(anchor_message_id)
 }
 
+/// For Codex, whether turn mode is confirmed under the start lock a confirmation takes; the lock is
+/// taken for a claim, or for a persist once a confirmation can land, and kept in `guard`.
+async fn codex_confirmed(
+    lock: &Arc<tokio::sync::Mutex<()>>,
+    guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+    provider: &ProviderKind,
+    channel: u64,
+    claim: bool,
+) -> bool {
+    use crate::services::tui_o::{cutover::codex_turn_awaited, turn_mode::transcript_turns};
+    if *provider != ProviderKind::Codex {
+        return false;
+    }
+    if !(claim || codex_turn_awaited(channel).is_some() || transcript_turns(channel)) {
+        return false;
+    }
+    *guard = Some(Arc::clone(lock).lock_owned().await);
+    transcript_turns(channel)
+}
+
 /// Turn mode was confirmed while this observation waited: no Legacy turn starts for it, so its
 /// owned placeholder and its lease are released.
 async fn release_confirmed_observation(
@@ -507,25 +527,6 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
             provider.as_str(),
             channel_id.get(),
         );
-        // A Codex turn confirmation takes this lock, so a start it could miss is persisted under it.
-        let mut confirming = None;
-        if provider == ProviderKind::Codex
-            && crate::services::tui_o::cutover::codex_turn_awaited(channel_id.get()).is_some()
-        {
-            confirming = Some(Arc::clone(&lock).lock_owned().await);
-            if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-                release_confirmed_observation(
-                    shared,
-                    &provider,
-                    channel_id,
-                    prompt,
-                    anchor_message_id,
-                    anchor_is_owned_placeholder,
-                )
-                .await;
-                return true;
-            }
-        }
         let prior = super::synthetic_start::synthetic_start_prior_turn_view(
             shared,
             &provider,
@@ -534,7 +535,16 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
             anchor_message_id.get(),
         )
         .await;
-        if super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view) {
+        let defer =
+            super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view);
+        let mut confirming = None;
+        if codex_confirmed(&lock, &mut confirming, &provider, channel_id.get(), !defer).await {
+            let (anchor, owned) = (anchor_message_id, anchor_is_owned_placeholder);
+            release_confirmed_observation(shared, &provider, channel_id, prompt, anchor, owned)
+                .await;
+            return true;
+        }
+        if defer {
             deferred_synthetic_start = true;
             crate::services::tui_prompt_dedupe::hand_native_turn_to_worker(
                 prompt,
