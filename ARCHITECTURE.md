@@ -1179,7 +1179,6 @@ src/
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
 │   │   │   │   ├── drive.rs
-│   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── ports.rs
@@ -1209,7 +1208,6 @@ src/
 │   │   │   ├── mapping.rs
 │   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
-│   │   │   ├── offer.rs
 │   │   │   ├── ordering.rs
 │   │   │   ├── ordering_tests.rs
 │   │   │   ├── receipt.rs
@@ -2697,8 +2695,7 @@ src/
 │   │   │   │   │   └── acceptance_tests.rs
 │   │   │   │   └── claude_guarded.rs
 │   │   │   ├── pane/
-│   │   │   │   ├── ownership.rs
-│   │   │   │   └── ownership_tests.rs
+│   │   │   │   └── submit_tests.rs
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
