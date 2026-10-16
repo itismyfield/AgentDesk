@@ -199,7 +199,7 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
 }
 
 /// A REST worker booted as target of a released row adopts it through the runtime's own port only
-/// once its turns are restored: before, two renewal periods leave the row and the gate untouched.
+/// once its turns are restored: before, two watch rounds leave the row and the gate untouched.
 #[tokio::test]
 async fn a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg() {
     const RELEASED: u64 = 9_300_000_000_000_014;
@@ -224,7 +224,18 @@ async fn a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored
     );
     let started = started.await;
     assert_eq!(started.len(), 1, "the released row names this node");
-    tokio::time::sleep(channel_home::RENEW_EVERY * 2 + std::time::Duration::from_secs(1)).await;
+    // The watch runs on this test's thread; each round it finishes is one unrestored judgement.
+    let judged = channel_home_boot::rounds(RELEASED) + 2;
+    for _ in 0..1_000 {
+        if channel_home_boot::rounds(RELEASED) >= judged {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        channel_home_boot::rounds(RELEASED) >= judged,
+        "the watch judged twice"
+    );
     let read = || o_channel_homes::read_home(&pool, &channel);
     assert_eq!(
         read().await.unwrap(),

@@ -822,19 +822,16 @@ mod tests {
             mailbox
                 .restore_active_turn(held.token.clone(), UserId::new(7), message)
                 .await;
-            let entry = |turn_key: TurnKey, deadline: Instant| LedgerEntry {
-                recovery_lease: None,
-                phase: Phase::Pending,
-                relay_owner: RelayOwnerKind::Watcher,
-                provider: ProviderKind::Codex,
-                turn_key,
-                terminal_deadline: None,
-                watcher_backstop_deadline: Some(deadline),
-                watcher_backstop_probe_at: None,
-                watcher_backstop_terminal_streak: 0,
-                watcher_backstop_deadline_pulled: false,
-                completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
-                finalized_at: None,
+            let entry = |turn_key: TurnKey, deadline: Instant| {
+                let (plan, watcher) = (CompletionAdmissionPlan::Immediate, RelayOwnerKind::Watcher);
+                LedgerEntry::registered(
+                    turn_key,
+                    ProviderKind::Codex,
+                    watcher,
+                    None,
+                    plan,
+                    Some(deadline),
+                )
             };
             let (now, far) = (Instant::now(), Instant::now() + WATCHER_REGISTER_BACKSTOP);
             let (channel, generation) = (held.channel, own.generation);

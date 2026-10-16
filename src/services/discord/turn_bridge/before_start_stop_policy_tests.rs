@@ -852,8 +852,8 @@ async fn p10_fin_panic_after_debit_before_fence() {
     assert_eq!(close.active(), 1);
 }
 
-/// A panic in the finalizer's trailing cleanup after the commit keeps the commit: the turn is
-/// released once, and asking again is a duplicate with no further debit or event.
+/// A panic after the tail's queue exit keeps the sealed commit: the turn is released once, and
+/// asking again resumes the rest of that tail with no second queue exit or debit.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_after_commit_feedback_panic() {
     let close = Close::open(5_340_984, |_| {}).await;
@@ -880,14 +880,16 @@ async fn p10_fin_after_commit_feedback_panic() {
     );
     let complete = probe.snapshot().complete(probe.request);
     assert_eq!(complete, Err(step::Judged::Incomplete));
-    let _ = close.released(&mut events);
-    let again = close.submit(close.intent(acked)).await;
-    assert!(
-        matches!(again, PolicyCloseOutcome::DuplicateConfirmed),
-        "{again:?}"
-    );
-    assert_released(&close, &queued, "after the duplicate").await;
-    assert_eq!(close.released(&mut events), 0);
+    assert_eq!(close.released(&mut events), 0, "the channel tail never ran");
+    let intent = close.intent(acked);
+    let resumed = intent.request.trace.probe();
+    let again = close.submit(intent).await;
+    assert!(matches!(again, PolicyCloseOutcome::Settled), "{again:?}");
+    let points = [Point::MailboxCommitted, Point::QueueExit];
+    let read = resumed.snapshot().judge(resumed.request, &points);
+    assert_eq!(read, Ok(vec![0, 0]), "the queue exit is handed out once");
+    assert_released(&close, &queued, "after the resumed tail").await;
+    assert_eq!(close.released(&mut events), 1);
 }
 
 /// Polls `work` once so its mailbox request is queued now, keeping it to await later.
@@ -951,11 +953,11 @@ async fn p10_fin_actor_serialization() {
                 finished.removed_token.is_none(),
                 "the finish ran after the release"
             );
-            assert!(
-                probe
-                    .stages()
-                    .ends_with(&[Stage::AfterCommit, Stage::BeforeFinalize])
-            );
+            assert!(probe.stages().ends_with(&[
+                Stage::AfterCommit,
+                Stage::BeforeSeal,
+                Stage::BeforeFinalize
+            ]));
             assert_released(&close, &queued, "close first").await;
         } else {
             assert!(
