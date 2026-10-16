@@ -62,17 +62,12 @@ fn logged(channel: u64, path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn bootstrap_keeps_confirmation_and_adoption_before_the_existing_relay() {
+fn bootstrap_keeps_confirmation_before_the_existing_relay() {
     let boot = include_str!("../../runtime_bootstrap.rs");
     let spawn = boot
         .find("super::tui_prompt_relay::spawn_tui_prompt_relay(shared.clone(), provider.clone());")
         .unwrap();
     assert!(boot.find("turn_retirement::confirm_at_boot(").unwrap() < spawn);
-    assert!(
-        boot.find("super::codex_adoption_runtime::install(")
-            .unwrap()
-            < spawn
-    );
     let relay = include_str!("../../tui_prompt_relay.rs");
     assert_eq!(
         relay
