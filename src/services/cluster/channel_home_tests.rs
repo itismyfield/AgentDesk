@@ -450,12 +450,17 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 }
                 continue;
             }
-            // Each loop is named once at its definition and once where the boot starts it.
-            for (owner, start) in [
-                ("src/services/cluster/channel_home.rs", "run_lease"),
-                ("src/services/cluster/channel_home_drain.rs", "run_drain"),
+            // Each loop is named once at its definition, the lease once more where the boot starts
+            // it; the boot's watch runs the drain a round at a time, never its loop.
+            for (owner, start, started) in [
+                ("src/services/cluster/channel_home.rs", "run_lease", true),
+                (
+                    "src/services/cluster/channel_home_drain.rs",
+                    "run_drain",
+                    false,
+                ),
             ] {
-                let starter = relative == "src/services/cluster/channel_home_boot.rs";
+                let starter = started && relative == "src/services/cluster/channel_home_boot.rs";
                 let expected = usize::from(relative == owner || starter);
                 let named = tokens.iter().filter(|token| **token == start).count();
                 if named != expected {

@@ -31,7 +31,13 @@ async fn acquire(
         ),
         (&None, false, false),
         (&mut owned, &None),
-        (false, &None, None, false, false),
+        (
+            false,
+            &None,
+            None,
+            false,
+            (false, route(fixture.channel_id)),
+        ),
         (Some("old".into()), false, String::new()),
     )
     .await
@@ -260,4 +266,12 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
         drop(enabled);
         fixture.drop_db().await;
     });
+}
+
+fn route(target: ChannelId) -> super::super::adk_thread::Route {
+    super::super::adk_thread::Route {
+        target,
+        parent: None,
+        role: None,
+    }
 }

@@ -376,8 +376,12 @@ impl DiscordPort for ObservedPort {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.port.history_after(channel, after)
     }
-    fn history_readable(&self, channel: u64) -> bool {
-        self.port.history_readable(channel)
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        self.port.message(channel, id)
     }
 }
 
@@ -409,6 +413,10 @@ async fn f6_unsent_and_429_do_not_raise_uncertain_alarm_pg() {
             harness.alarms.clone(),
         );
         writer.set_live(true);
+        if index == 2 {
+            // A listed message shows the history readable.
+            harness.port.say(BOT + 1, "chatter");
+        }
         let io = Io::over(&harness.port);
         io.throttle_first.store(index == 1, Ordering::SeqCst);
         *io.outcome.lock().unwrap() = outcome;

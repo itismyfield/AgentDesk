@@ -438,6 +438,11 @@ async fn c1_actor_unreachable_race_loss_clears_only_matching_pending_attempt() {
         Some(attempt),
         false,
         QueuedIntakeCause::RaceLoss,
+        crate::services::turn_orchestrator::QueuedRoute {
+            target: channel,
+            parent: None,
+            role: None,
+        },
     )
     .await;
     assert!(result.is_err());

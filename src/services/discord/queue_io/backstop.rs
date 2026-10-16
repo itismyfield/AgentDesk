@@ -228,44 +228,33 @@ async fn release_cancelled_backstop_anchor(
     if matching_residue_owns_anchor(shared, channel_id, snapshot) {
         return false;
     }
-    #[cfg(test)]
-    cancel_backstop_test_support::pause_before_admit(channel_id).await;
-    let Ok(permit) = input_runtime::fence::effect::admit(provider, channel_id.get()) else {
-        return false;
-    };
-    input_runtime::fence::effect::scope(permit.clone(), async {
-        let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
-        if !idle_queue_snapshot_blocked_by_cancelled_anchor(&snapshot)
-            || matching_residue_owns_anchor(shared, channel_id, &snapshot)
-            || health::legacy_supervision::legacy_retired(
-                provider.as_str(),
-                channel_id.get(),
-                "idle_queue_backstop",
-            )
-        {
-            return false;
-        }
-        super::zombie_foreground_release::release_zombie_foreground_turn_guarded(
-            shared,
-            provider,
-            channel_id,
+    let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
+    if !idle_queue_snapshot_blocked_by_cancelled_anchor(&snapshot)
+        || matching_residue_owns_anchor(shared, channel_id, &snapshot)
+        || health::legacy_supervision::legacy_retired(
+            provider.as_str(),
+            channel_id.get(),
             "idle_queue_backstop",
-            |observed| {
-                !matching_residue_owns_anchor(shared, channel_id, observed)
-                    && permit
-                        .as_ref()
-                        .is_none_or(|permit| permit.validate(provider, channel_id.get()).is_ok())
-                    && !health::legacy_supervision::legacy_retired(
-                        provider.as_str(),
-                        channel_id.get(),
-                        "idle_queue_backstop_before_finish",
-                    )
-            },
         )
-        .await
-        .released
-    })
+    {
+        return false;
+    }
+    super::zombie_foreground_release::release_zombie_foreground_turn_guarded(
+        shared,
+        provider,
+        channel_id,
+        "idle_queue_backstop",
+        |observed| {
+            !matching_residue_owns_anchor(shared, channel_id, observed)
+                && !health::legacy_supervision::legacy_retired(
+                    provider.as_str(),
+                    channel_id.get(),
+                    "idle_queue_backstop_before_finish",
+                )
+        },
+    )
     .await
+    .released
 }
 
 fn matching_residue_owns_anchor(

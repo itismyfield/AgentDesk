@@ -116,7 +116,6 @@ src/services/cluster/intake_router_hook/owner_record.rs
 src/services/cluster/intake_worker/dispatch_stamp_tests.rs
 src/services/cluster/intake_worker/home_accept_tests.rs
 src/services/cluster/intake_worker/home_route_tests.rs
-src/services/cluster/intake_worker/input_effect_tests.rs
 src/services/cluster/intake_worker/o_route_tests.rs
 src/services/cluster/intake_worker/owner_fence_pg_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
@@ -193,11 +192,13 @@ src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
 src/services/discord/router/message_handler/provider_isolation_host_tests.rs
+src/services/discord/router/message_handler/s1_entry_tests.rs
 src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/router/message_handler/watchdog_host_tests.rs
 src/services/discord/runtime_bootstrap/channel_homes_tests.rs
 src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs
 src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs
+src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs
 src/services/discord/runtime_bootstrap/intake_delivery_capability.rs
 src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
@@ -251,6 +252,9 @@ src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
+src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
+src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
+src/services/discord/turn_presence/activity/unbound/unit_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
 src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs
@@ -301,6 +305,7 @@ src/services/tui_o/repost/runtime_host_activation_tests.rs
 src/services/tui_o/repost/writer_activation_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/tui_o/writer/late_adopt_delegated_tests.rs
+src/services/tui_o/writer/local_retry_repost_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
 src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
@@ -417,6 +422,7 @@ services::automation_candidate_materializer::iteration_result_tests
 services::cluster::attachment_transfer::storage_tests
 services::cluster::channel_home::tests
 services::cluster::channel_home_boot::tests
+services::cluster::channel_home_boot::tests::writer_return
 services::cluster::channel_home_drain::tests
 services::cluster::execution_capacity::tests
 services::cluster::intake_preflight::tests
@@ -436,7 +442,6 @@ services::cluster::intake_worker::home_route_tests::s3_real::drain_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
-services::cluster::intake_worker::input_effect_tests
 services::cluster::intake_worker::o_route_tests
 services::cluster::intake_worker::owner_fence_pg_tests
 services::cluster::intake_worker::replay_hold_tests
@@ -513,6 +518,7 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::tests
 services::discord::router::message_handler::provider_isolation::host_tests
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests
 services::discord::router::message_handler::watchdog::host_tests
 services::discord::runtime_bootstrap::channel_homes_tests
@@ -526,6 +532,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
@@ -577,6 +584,9 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_s
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
+services::discord::turn_presence::activity::unbound::dormancy_tests
+services::discord::turn_presence::activity::unbound::live::review_tests
+services::discord::turn_presence::activity::unbound::tests
 services::discord::turn_teardown_clearance::tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
 services::dispatches::outbox_claiming::tests::outbox_claiming_pg_tests
@@ -626,6 +636,7 @@ services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
+services::tui_o::writer::tests::actor::repost_turn::local_retry
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
@@ -1320,6 +1331,8 @@ services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaim
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
+services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
+services::cluster::channel_home_boot::tests::writer_return::a_returned_writer_that_ends_after_its_start_is_started_again_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1430,6 +1443,8 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_reclaim_roundtrip_restores_writer_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_restart_under_a_worker_starts_no_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
@@ -1442,13 +1457,6 @@ services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_home_
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_home_moves_between_select_and_confirm_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_no_row_matches_legacy_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg::th8_two_routers_one_holder_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_afterclaim_closing_returns_only_own_claim_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_beforeclaim_excludes_closing_population_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_final_cas_miss_retains_effect_through_classification_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_final_db_error_releases_effect_after_error_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_final_done_waits_for_real_db_disposition_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_final_failure_waits_for_real_db_disposition_pg
-services::cluster::intake_worker::input_effect_tests::c1_worker_preaccept_closing_releases_admitted_claim_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_commits_accept_and_spawn_only_on_its_ready_gateway_pg
 services::cluster::intake_worker::o_route_tests::a_canary_row_reaches_accept_only_on_its_ready_gateway_while_a_legacy_row_reaches_it_anywhere_pg
 services::cluster::intake_worker::o_route_tests::a_worker_leaves_o_rows_to_their_ready_gateway_and_drains_the_rest_pg
@@ -1788,6 +1796,12 @@ services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e2
 services::discord::router::message_handler::provider_dispatch::herdr_tests::t_e3_an_unclear_send_is_never_sent_again_pg
 services::discord::router::message_handler::provider_dispatch::tests::configured_herdr_turn_reaches_no_tmux_or_process_driver_until_an_executor_is_wired_pg
 services::discord::router::message_handler::provider_isolation::host_tests::a_runtime_kind_mismatch_recreates_only_what_the_turn_key_admits_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_codex_unproven_and_changed_observations_hold_real_human_start_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_fallback_only_and_restored_owner_only_live_hold_real_effects_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_herdr_first_create_and_retired_use_herdr_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_kickoff_and_backstop_reach_selected_execution_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_large_human_start_requires_selected_execution_pg
+services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests::s1_real_missing_namespace_reaches_selected_tmux_start_pg
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::direct_dispatch_carry_forward_admits_announcement_and_still_dedups
 services::discord::router::message_handler::voice_announcement_route::voice_route_tests::durable_duplicate_voice_announcement_pg_invokes_foreground_once
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
@@ -1808,6 +1822,7 @@ services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_ex
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::gateway_orphan_reap_uses_production_query_and_right_parses_instance_id_pg
 services::discord::runtime_bootstrap::gateway_lease_recovery_tests::missing_existing_persisted_artifact_returns_false_and_reopens_every_runtime_fence_pg
+services::discord::runtime_bootstrap::gateway_lease_recovery_tests::promotion_cancel_keeps_the_writer_incarnation_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_accepts_public_0109_under_hostile_search_path_pg
 services::discord::runtime_bootstrap::intake_delivery_capability::postgres_tests::capability_rejects_catalog_and_data_mutations_pg
 services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests::journal_judgment_precedes_proof_lock_pg
@@ -1833,6 +1848,8 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_ho
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_expires_only_legacy_tmux_sessions_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg
 services::discord::session_idle_cleanup::tests::idle_cleanup_keeps_session_reactivated_during_probe_pg
@@ -2089,6 +2106,24 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests::backgr
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_prefers_voice_turn_link_by_dispatch_id_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::rehydrate_preserves_remaining_ttl_for_aged_rows_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::voice_turn_link_playback_lookup_falls_back_to_announce_message_pg
+services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_marker_change_during_publication_db_await_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_marker_change_during_second_snapshot_db_await_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_canonical_change_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_exact_change_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_fallback_change_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_inflight_change_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_marker_change_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_publication_rechecks_new_related_tmux_session_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_successful_unbound_reads_complete_in_reverse_order_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg
+services::discord::turn_presence::activity::unbound::tests::u_local_row_identity_pg
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg
 services::discord::turn_teardown_clearance::tests::a_turn_is_cleared_only_by_the_row_its_writer_posted_pg
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests::active_dispatch_delivery_unique_key_allows_one_concurrent_reserved_row
@@ -2300,7 +2335,7 @@ services::tui_o::repost::runner::activation_tests::d4act_identity_conflict_block
 services::tui_o::repost::runner::activation_tests::d4act_missing_pending_record_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::d4act_resume_error_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::d4act_source_revoked_after_tick_never_grants_pg
-services::tui_o::repost::runner::activation_tests::d4act_unsupported_original_remains_single_shot_when_sidecar_is_unavailable_pg
+services::tui_o::repost::runner::activation_tests::d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable_pg
 services::tui_o::repost::runner::activation_tests::f6_admission_error_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::f6_original_intent_failure_holds_until_durable_intent_pg
 services::tui_o::repost::runner::activation_tests::f6_sidecar_failure_blocks_ready_repost_pg
@@ -2359,6 +2394,8 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_blo
 services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_every_sender_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
+services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
+services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg

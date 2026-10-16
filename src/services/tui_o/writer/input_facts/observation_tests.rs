@@ -3,6 +3,39 @@ use super::*;
 use crate::services::tui_o::shadow::capture::io_trace;
 
 #[test]
+fn s1_checked_resume_rejects_mutation_between_guard_read_and_open() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("parent.jsonl");
+    lines(
+        &path,
+        &[
+            header(root.path()),
+            event("task_started", "A"),
+            blocked(),
+            event("task_complete", "A"),
+        ],
+    );
+    let mut facts = InputFacts::open_observation_at(bind(&path, ShadowProvider::Codex), 0).unwrap();
+    assert!(facts.poll(u64::MAX).is_err());
+    assert!(facts.resume_point().is_some());
+    let changed = path.clone();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = calls.clone();
+    io_trace::after_read_at(0, move || {
+        let mut bytes = std::fs::read(&changed).unwrap();
+        let at = bytes.windows(3).position(|w| w == b"\"A\"").unwrap();
+        bytes[at + 1] = b'B';
+        std::fs::write(changed, bytes).unwrap();
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    assert!(
+        facts.resume_observation_checked().is_err(),
+        "post-open continuity check accepted changed opener bytes"
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
 fn s0o_observation_records_filtered_native_boundaries_even_before_block() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("parent.jsonl");

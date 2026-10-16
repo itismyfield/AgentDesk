@@ -410,6 +410,7 @@ async fn p10_fin_s2_authority_spans_the_commit() {
                 Stage::AfterDebit,
                 Stage::AfterFence,
                 Stage::AfterCommit,
+                Stage::BeforeSeal,
             ],
             Some(_) => &[
                 Stage::BeforeClaim,
@@ -426,8 +427,8 @@ async fn p10_fin_s2_authority_spans_the_commit() {
     }
 }
 
-/// Two channels closing at once each see only their own request; a commit lost between its queue
-/// exit and its finalize reads as such, and a re-ask is no finalize or queue exit.
+/// Two channels closing at once each see only their own request; a commit lost before its tail
+/// reads as such, and a re-ask resumes that tail without asking the mailbox again.
 #[tokio::test(flavor = "current_thread")]
 async fn p10_fin_s2_probes_and_counts_per_request() {
     let root = tempfile::tempdir().unwrap();
@@ -479,7 +480,7 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
     );
     assert_released(&first, &queued_first, "first").await;
     assert_released(&second, &queued_second, "second").await;
-    // A commit whose finalize never started: committed and exited the queue, never finalized.
+    // A commit whose tail never started: committed, its queue exit not yet run.
     let third = Close::open_in(17, 5_341_112, |_| {}).await;
     let queued = third.other_turn_and_queue().await;
     let acked = third.acked().await;
@@ -502,7 +503,7 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
     ];
     assert_eq!(
         gap.snapshot().judge(gap.request, &points),
-        Ok(vec![1, 1, 0])
+        Ok(vec![1, 0, 0])
     );
     assert_eq!(
         gap.snapshot().complete(gap.request),
@@ -511,14 +512,11 @@ async fn p10_fin_s2_probes_and_counts_per_request() {
     let intent = third.intent(acked);
     let asked = intent.request.trace.probe();
     let again = third.submit(intent).await;
-    assert!(
-        matches!(again, PolicyCloseOutcome::DuplicateConfirmed),
-        "{again:?}"
-    );
-    // Each zero is this request's own reading, never one another request registered.
+    assert!(matches!(again, PolicyCloseOutcome::Settled), "{again:?}");
+    // The zero is this request's own reading: the sealed ticket, not a second mailbox step.
     assert_eq!(
         asked.snapshot().judge(asked.request, &points),
-        Ok(vec![0, 0, 0])
+        Ok(vec![0, 1, 1])
     );
     assert_eq!(asked.snapshot().complete(asked.request), Ok(()));
 }

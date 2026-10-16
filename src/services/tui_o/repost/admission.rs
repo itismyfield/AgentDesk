@@ -42,7 +42,7 @@ pub(crate) enum BacklogReason {
 pub(crate) enum Candidate {
     Eligible(OriginalAttempt),
     Backlog(BacklogReason),
-    /// Posted, rejected, certainly unsent, or already in admission: nothing to admit here.
+    /// No PG admission needed, including pieces owned by local retry.
     Settled,
 }
 
@@ -53,6 +53,9 @@ pub(crate) fn classify(
     record: &PieceRecord,
     provenance: &super::provenance::Provenance,
 ) -> Candidate {
+    if record.local_retry.is_some() {
+        return Candidate::Settled;
+    }
     match record.outcome {
         None
         | Some(PieceOutcome::NotFound)
@@ -187,7 +190,10 @@ pub(crate) enum AdmittedKeys {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OriginalGate {
-    Send,
+    /// PG did not take retry authority for this fresh original.
+    SendLocal,
+    /// PG's durable intent owns any further send.
+    SendPgManaged,
     /// Admitted under any earlier serial or holder; its original is never sent again.
     Admitted,
     /// Admission is unknown; hold the original.
@@ -197,11 +203,11 @@ pub(crate) enum OriginalGate {
 impl AdmittedKeys {
     pub(crate) fn original(&self, unit_key: &UnitKey, piece_index: u32) -> OriginalGate {
         let Some(key) = PieceKey::new(unit_key.clone(), piece_index) else {
-            return OriginalGate::Send;
+            return OriginalGate::SendLocal;
         };
         match self {
             Self::Known(keys) if keys.contains(&key) => OriginalGate::Admitted,
-            Self::Known(_) => OriginalGate::Send,
+            Self::Known(_) => OriginalGate::SendLocal,
             Self::Unreadable(_) => OriginalGate::Unknown,
         }
     }

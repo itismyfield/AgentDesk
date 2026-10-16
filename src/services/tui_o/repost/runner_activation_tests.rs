@@ -64,6 +64,7 @@ impl Writer {
         let serial = self.store.ledger().next_serial();
         self.store
             .append_ledger(LedgerEntry::Prepared {
+                local_retry: None,
                 serial,
                 unit_key: unit(native),
                 piece_index: 0,
@@ -545,6 +546,8 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
             let dir = tempfile::tempdir().unwrap();
             let io = Arc::new(Io::new());
             let record = PieceRecord {
+                local_retry: None,
+                outcome_at: None,
                 unit_key: unit("fresh"),
                 piece_index: 0,
                 payload: "fresh payload".into(),
@@ -577,10 +580,10 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                 if broken {
                     OriginalGate::Unknown
                 } else {
-                    OriginalGate::Send
+                    OriginalGate::SendPgManaged
                 }
             );
-            if gate == OriginalGate::Send {
+            if gate == OriginalGate::SendPgManaged {
                 let envelope = RepostEnvelope::additional(
                     CHANNEL,
                     "fresh payload".into(),
@@ -594,6 +597,8 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                 // Reopening cuts the failed append and writes the same key's durable intent.
                 turn.sidecar = dir.path().join("provenance.jsonl");
                 let retry = PieceRecord {
+                    local_retry: None,
+                    outcome_at: None,
                     unit_key: unit("fresh"),
                     piece_index: 0,
                     payload: "fresh payload".into(),
@@ -602,7 +607,10 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
                     prepared_at: Utc::now(),
                     outcome: None,
                 };
-                assert_eq!(turn.original_gate(0, retry).await, OriginalGate::Send);
+                assert_eq!(
+                    turn.original_gate(0, retry).await,
+                    OriginalGate::SendPgManaged
+                );
                 assert_eq!(
                     turn.log
                         .as_ref()
@@ -623,7 +631,7 @@ async fn f6_original_intent_failure_holds_until_durable_intent_pg() {
 }
 
 #[tokio::test]
-async fn d4act_unsupported_original_remains_single_shot_when_sidecar_is_unavailable_pg() {
+async fn d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let dir = tempfile::tempdir().unwrap();
@@ -636,6 +644,8 @@ async fn d4act_unsupported_original_remains_single_shot_when_sidecar_is_unavaila
         blocked.join("provenance.jsonl"),
     );
     let record = PieceRecord {
+        local_retry: None,
+        outcome_at: None,
         unit_key: unit("unsupported"),
         piece_index: 0,
         payload: "".into(),
@@ -645,7 +655,7 @@ async fn d4act_unsupported_original_remains_single_shot_when_sidecar_is_unavaila
         outcome: None,
     };
     assert!(ProvenanceEntry::intent(0, &record, 0).is_none());
-    assert_eq!(turn.original_gate(0, record).await, OriginalGate::Send);
+    assert_eq!(turn.original_gate(0, record).await, OriginalGate::SendLocal);
     assert!(turn.log.is_none());
     pool.close().await;
     db.drop().await;
