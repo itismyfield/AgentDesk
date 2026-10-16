@@ -49,7 +49,8 @@ pub(super) struct StreamingTurn<'a> {
 #[cfg(test)]
 pub(super) struct InputEffectProbe {
     pub channel: u64,
-    pub entered: tokio::sync::oneshot::Sender<(bool, bool)>,
+    /// Receives the thread the provider ran on, so a caller can tell it left the async task.
+    pub entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
     pub release: std::sync::mpsc::Receiver<()>,
     pub terminal_before_release: bool,
 }
@@ -82,10 +83,7 @@ fn input_effect_probe(
             None
         }
     }?;
-    use crate::services::discord::input_runtime::fence;
-    let named = fence::effect::current()
-        .is_some_and(|permit| permit.validate(turn.provider, turn.channel_id).is_ok());
-    let _ = probe.entered.send((named, fence::require_worker().is_ok()));
+    let _ = probe.entered.send(std::thread::current().id());
     let terminal = || {
         sender
             .send(StreamMessage::Done {
@@ -102,28 +100,6 @@ fn input_effect_probe(
     } else {
         let _ = probe.release.recv_timeout(Duration::from_secs(30));
         Some(terminal())
-    }
-}
-
-#[cfg(test)]
-pub(super) static INPUT_EFFECT_COMPLETION_PROBE: std::sync::Mutex<
-    Option<(u64, tokio::sync::oneshot::Sender<()>)>,
-> = std::sync::Mutex::new(None);
-#[cfg(test)]
-pub(super) fn observe_input_effect_completion(channel: u64, task: tokio::task::JoinHandle<()>) {
-    let probe = {
-        let mut slot = INPUT_EFFECT_COMPLETION_PROBE.lock().unwrap();
-        if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
-            slot.take()
-        } else {
-            None
-        }
-    };
-    if let Some((_, completed)) = probe {
-        tokio::spawn(async move {
-            task.await.unwrap();
-            let _ = completed.send(());
-        });
     }
 }
 

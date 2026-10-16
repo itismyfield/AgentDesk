@@ -117,7 +117,7 @@ fn request_for(channel: ChannelId, provider: ProviderKind) -> HumanInputRequest 
     }
 }
 type DriverProbe = (
-    tokio::sync::oneshot::Receiver<(bool, bool)>,
+    tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
     std::sync::mpsc::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
     Arc<AtomicUsize>,
@@ -164,7 +164,7 @@ fn arm(channel: u64) -> DriverProbe {
 }
 async fn finish_driver(
     channel: u64,
-    entered: tokio::sync::oneshot::Receiver<(bool, bool)>,
+    entered: tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
     release: std::sync::mpsc::Sender<()>,
     complete: tokio::sync::oneshot::Receiver<()>,
     extra: Arc<AtomicUsize>,
@@ -176,14 +176,15 @@ async fn finish_driver(
         selected_io, 1,
         "Started must reach the selected execution boundary"
     );
-    let capabilities = reached.unwrap().unwrap();
+    // The current-thread runtime runs the caller here, so a distinct id is the blocking worker.
+    let worker = reached.unwrap().unwrap() != std::thread::current().id();
     assert!(
-        capabilities.1,
+        worker,
         "the actual spawn_blocking provider worker did not execute"
     );
     eprintln!(
         "S1_SELECTED_DRIVER channel={channel} io=1 extra=0 worker={} skip=0",
-        capabilities.1
+        worker
     );
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(20), complete)

@@ -301,7 +301,7 @@ pub(super) async fn finish_admitted_local(
 pub(in crate::services::discord) fn hold_input_effect_for_tests(
     channel: u64,
 ) -> (
-    tokio::sync::oneshot::Receiver<(bool, bool)>,
+    tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
     std::sync::mpsc::Sender<()>,
 ) {
     let (entered, at) = tokio::sync::oneshot::channel();

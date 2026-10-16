@@ -123,15 +123,9 @@ fn both_ancestors_judge_as_the_last_step_before_spawn() {
         let end = call + source[call..].find(".await;").unwrap() + ".await;".len();
         let spawn = end + source[end..].find("tokio::task::spawn_blocking(").unwrap();
         let before_spawn = source[end..spawn].trim();
-        let capture = "let provider_permit = crate::services::discord::input_runtime::fence::effect::current();";
         assert_eq!(
-            before_spawn,
-            if file == "headless" {
-                format!("{capture}\n    let _provider_task =")
-            } else {
-                capture.to_owned()
-            },
-            "{file}: only capability capture precedes spawn after the verdict"
+            before_spawn, "",
+            "{file}: nothing runs between the verdict and the spawn"
         );
         for step in earlier
             .iter()

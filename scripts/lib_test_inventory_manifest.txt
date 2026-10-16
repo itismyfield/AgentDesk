@@ -6830,9 +6830,6 @@ services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
 services::discord::router::message_handler::goal_lifecycle::d2b_tests::d2b_goal_clear_holds_home_through_stale_cleanup
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
-services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_actual_start_holds_provider_and_bridge_effect_until_cleanup
-services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_off_and_preclose_empty_prompt_keep_original_error_and_drain
-services::discord::router::message_handler::headless_turn::entrypoints::input_effect_tests::c1b_headless_owner_refuses_closing_before_settings_and_original_registration
 services::discord::router::message_handler::headless_turn::foreign_row_refusal_tests::a_foreign_durable_row_refuses_the_start_and_unwinds_only_this_turn
 services::discord::router::message_handler::headless_turn::foreign_row_refusal_tests::the_row_refusal_returns_before_any_provider_or_bridge_spawn
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_label_becomes_the_session_key_basis
@@ -6868,9 +6865,6 @@ services::discord::router::message_handler::intake_turn::adk_thread::route_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_claimed_route_survives_a_later_tail
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_route_resolved_before_the_tail_is_published_by_its_claim
 services::discord::router::message_handler::intake_turn::adk_thread::tests::a_refused_queued_redirect_returns_its_uploads_and_clear_flag
-services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider
-services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_refusal_preserves_existing_thread_role_override
-services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::hosted_tui_busy_pre_submit_requeue_leaves_row_in_spawned_pg
@@ -6934,8 +6928,6 @@ services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_que
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
-services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_intake_holds_provider_and_bridge_through_cleanup
-services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::c1b_worker_actual_redirect_admits_protected_destination_from_off_root
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment
@@ -9491,7 +9483,6 @@ services::discord::turn_bridge::before_start_stop::tests::tail::s2f_reply_loss_s
 services::discord::turn_bridge::before_start_stop::tests::tail::s2f_successor_before_the_tail_keeps_its_claim_route_and_voice
 services::discord::turn_bridge::before_start_stop::tests::tail::s2f_unwound_commit_is_sealed_at_every_seam
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::a_pending_or_failing_refusal_notice_never_holds_the_unwind
-services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::c1_actual_spawn_bridge_retains_effect_until_future_disposal
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_does_not_clear_successor
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_error_without_proof_remains_held
 services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::cold_error::cold_launch_error_reaches_bridge_policy_close_both_providers
