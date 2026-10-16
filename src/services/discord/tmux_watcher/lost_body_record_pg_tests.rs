@@ -1,7 +1,7 @@
 //! The dead-letter row a plan-driven loss writes, read back from PostgreSQL.
 
 use super::soft_terminal_direct_send_authority_tests::{
-    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_under_root,
+    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, UNPROCESSED_TAIL, admitted_losses_under_root,
 };
 use super::*;
 use crate::db::relay_dead_letter::{
@@ -37,6 +37,13 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     )
     .await;
     let pool = pg_db.connect_and_migrate().await;
+    // An unprocessed tail splits the parser offset from the consumed end, so the
+    // row can tell which of the two the call site passed as `jsonl_end`.
+    let current_offset = FRAME_END + UNPROCESSED_TAIL.len() as u64;
+    assert_ne!(
+        current_offset, FRAME_END,
+        "the fixture must read past the frame"
+    );
 
     assert_eq!(
         admitted_losses_under_root(root.path(), ROW_CHANNEL, false, Some(pool.clone())).await,
@@ -51,6 +58,7 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     let fields: Vec<&str> = reason.split_whitespace().collect();
     for field in [
         format!("jsonl_end={FRAME_END}"),
+        format!("current_offset={current_offset}"),
         format!("jsonl_start={FRAME_START}"),
         format!("response_sent_offset={SENT_PREFIX}"),
         format!("full_response_len={}", SENT_PREFIX + LOST_BODY.len()),

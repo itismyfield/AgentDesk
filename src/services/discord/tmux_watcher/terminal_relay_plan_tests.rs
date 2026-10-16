@@ -16,6 +16,8 @@ const SESSION: &str = "AgentDesk-claude-adk-cc";
 pub(super) const FRAME_START: u64 = 1_534_426;
 const TURN_START: u64 = 1_534_500;
 pub(super) const FRAME_END: u64 = 1_650_085;
+/// A partial JSONL line read past the frame, so `current_offset` sits beyond the consumed end.
+pub(super) const UNPROCESSED_TAIL: &str = "{\"type\":\"user\",\"message\":";
 const WATCHER_NONCE: &str = "nonce-bound-while-consuming-this-turn";
 
 fn row(turn_nonce: Option<&str>, owner: RelayOwnerKind) -> InflightTurnState {
@@ -1036,7 +1038,7 @@ pub(super) async fn admitted_losses_under_root(
     }
     let before = admitted_losses(channel_id);
     let output_path = root.join("out.jsonl").display().to_string();
-    let all_data = String::new();
+    let all_data = UNPROCESSED_TAIL.to_string();
     let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
     let tool_state = WatcherToolState::new();
     let context = TerminalRelayPlanContext {
@@ -1056,7 +1058,7 @@ pub(super) async fn admitted_losses_under_root(
         startup_soft_terminal_authority: tui_direct_binding(),
     };
     let locals = TerminalRelayPlanLocals {
-        current_offset: FRAME_END,
+        current_offset: FRAME_END + UNPROCESSED_TAIL.len() as u64,
         data_start_offset: FRAME_START,
         all_data: &all_data,
         full_response: &full_response,
