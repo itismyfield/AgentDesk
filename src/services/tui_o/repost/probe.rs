@@ -12,17 +12,16 @@ pub(crate) mod tests;
 use std::collections::BTreeMap;
 use std::future::Future;
 
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 use crate::services::tui_o::repost::identity::payload_sha256;
+use crate::services::tui_o::writer::confirm::{bounded, first_proof};
 use evidence::{
     CompletedPass, EvidenceScope, FIRST_PASS_AFTER, NotFoundEvidence, PermissionProof, RunScope,
     SECOND_PASS_AFTER,
 };
 use matcher::{Attribution, AttributionSnapshot, ObservedMessage, match_observations};
 
-/// Bounds each read, rate-limit wait and body decode included.
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Discord's history page limit.
 pub(crate) const PAGE_LIMIT: u8 = 100;
 /// Pages one `advance` reads before yielding the channel back as `Partial`.
@@ -45,13 +44,6 @@ pub(crate) trait ProbeRead {
         before: Option<u64>,
         limit: u8,
     ) -> impl Future<Output = Result<Vec<ObservedMessage>, String>> + Send;
-}
-
-async fn bounded<T>(read: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    let late = |_| Err(format!("read exceeded {READ_TIMEOUT:?}"));
-    tokio::time::timeout(READ_TIMEOUT, read)
-        .await
-        .unwrap_or_else(late)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,29 +194,23 @@ impl ProbeSession {
         if started_at < due {
             return Err(Progress::Waiting { until: due });
         }
-        let channel = self.scope.key.unit().channel_id;
-        for &id in &self.proof_ids {
-            // A 404, another author or another channel proves nothing; try the next message.
-            match bounded(reader.message(channel, id)).await {
-                Ok(Some(read)) => {
-                    if let Some(proof) = PermissionProof::verify(&self.scope, id, &read) {
-                        let (upper, before) = (None, None);
-                        return Ok(PassCursor {
-                            number,
-                            upper,
-                            before,
-                            started_at,
-                            proof,
-                            proof_read: read,
-                            proof_listed: false,
-                        });
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => return Err(Progress::Incomplete(error)),
-            }
+        let (scope, channel) = (&self.scope, self.scope.key.unit().channel_id);
+        // A 404, another author or another channel proves nothing; the next message is tried.
+        let verify = |id, read| Some((PermissionProof::verify(scope, id, &read)?, read));
+        let read = |id| reader.message(channel, id);
+        match first_proof(&self.proof_ids, read, verify).await {
+            Ok(Some((proof, proof_read))) => Ok(PassCursor {
+                number,
+                upper: None,
+                before: None,
+                started_at,
+                proof,
+                proof_read,
+                proof_listed: false,
+            }),
+            Ok(None) => Err(Progress::Incomplete("read permission unproven".into())),
+            Err(error) => Err(Progress::Incomplete(error)),
         }
-        Err(Progress::Incomplete("read permission unproven".into()))
     }
 
     async fn scan(

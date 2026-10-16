@@ -229,7 +229,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
 
-    let provider_for_shutdown = provider.clone();
     let provider_for_error = provider.clone();
     let provider_for_framework = provider.clone();
     let startup_reconcile_remaining_for_client_start = startup_reconcile_remaining.clone();
@@ -347,6 +346,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         // Delegated homes hold their channels before any restored or new turn can run there.
         start_channel_homes(&shared, &provider, HomeRole::RestWorker, &homes).await;
         o_writer_host::spawn_delegated(&shared, &provider, boot_config.tui_o.as_ref());
+        run_bot_spawn_sigterm_handler(&shared, provider.clone());
         // REST workers persist the same mailbox state as Gateway runtimes.
         // Restore it before polling new intake; never replay Discord history.
         queued_recovery::restore_worker_queues(&shared, &provider).await;
@@ -359,8 +359,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             api_port,
         )
         .await;
-        // The existing restart poller owns this provider's shutdown slot.
-        // Dedicated workers never acquire, retry or promote a gateway lease.
+        // Its poller or SIGTERM handler takes the shutdown slot once; it takes no gateway lease.
         return;
     }
 
@@ -413,6 +412,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
             spawns::run_bot_spawn_reachability_observation(&shared, &provider);
             start_channel_homes(&shared, &provider, HomeRole::Standby, &homes).await;
             o_writer_host::spawn_delegated(&shared, &provider, boot_config.tui_o.as_ref());
+            run_bot_spawn_sigterm_handler(&shared, provider.clone());
             run_bot_maybe_spawn_intake_worker(&shared, &provider);
             spawn_standby_gateway_retry(
                 shared.clone(),
@@ -421,8 +421,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
                 handback_breaker,
             )
             .await;
-            // Keep this provider's shutdown-barrier slot: the marker poller
-            // consumes it exactly once after fencing and persisting state.
+            // Keep the shutdown slot: its poller or SIGTERM handler consumes it exactly once.
             return;
         }
         GatewayLeaseOutcome::Failed => {
@@ -454,13 +453,13 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     }
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
+    run_bot_spawn_sigterm_handler(&shared, provider.clone());
 
     run_bot_start_gateway_runtime(
         token,
         provider,
         provider_for_error,
         provider_for_framework,
-        provider_for_shutdown,
         startup_reconcile_remaining,
         startup_doctor_started,
         health_registry,
@@ -591,14 +590,14 @@ async fn start_channel_homes(
     }
     let restored = turns_restored(shared, role).await;
     let candidates = || {
-        let selected = crate::services::tui_o::channel_policy::boot();
-        let here = |channel: &u64| herdr_runs_here(*channel);
-        let selected = selected.map(|boot| boot.selected().iter().copied().filter(here));
-        selected.map(Iterator::collect).unwrap_or_default()
+        let mut selected = selected_herdr_channels(provider);
+        selected.retain(|channel| herdr_runs_here(*channel));
+        selected.into_iter().collect()
     };
     channel_home_boot::start(switch, || {
         let pool = shared.pg_pool.clone()?;
         let local = settings.instance_id.clone()?;
+        let writers = o_writer_host::home_writers(provider, role != HomeRole::Gateway);
         let rows = channel_home_boot::listed(&pool);
         let port = |channel: u64| {
             let reset = legacy_reset(shared, provider, channel);
@@ -617,6 +616,7 @@ async fn start_channel_homes(
             rows,
             candidates: candidates(),
             port,
+            writers: Some(writers),
         })
     })
     .await

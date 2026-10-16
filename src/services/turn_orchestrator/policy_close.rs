@@ -12,6 +12,9 @@ use super::{ChannelMailboxState, FinishTurnResult, InterventionMode, QueuePersis
 use crate::services::discord::input_runtime::fence::{Failure, PopulationScope};
 use crate::services::provider::{CancelToken, ProviderKind};
 
+#[path = "policy_tail.rs"]
+pub(crate) mod tail;
+
 /// Test seam at a typed stage of the close, on the request's own probe; gone outside tests.
 macro_rules! at {
     ($request:expr, $stage:ident) => {
@@ -100,6 +103,8 @@ pub(crate) enum PolicyStage {
 pub(crate) enum PolicyMailboxOutcome {
     Committed(FinishTurnResult),
     Duplicate,
+    /// The episode was already released exactly; only its receipt was cleared.
+    Reconciled,
     Superseded,
     Retained(PolicyRetain),
 }
@@ -113,6 +118,10 @@ pub(crate) struct PolicyCloseRequest {
     pub(crate) receipt: Box<dyn PolicyReceipt>,
     pub(crate) active: Arc<AtomicUsize>,
     pub(crate) persistence: QueuePersistenceContext,
+    /// Set only by the finalizer, when its ledger already holds this exact episode as finalized.
+    pub(crate) release_reconcile_allowed: bool,
+    /// The finalizer's ledger-owned ticket; a commit seals it before the step answers.
+    pub(crate) ticket: Option<Arc<tail::PolicyCommitTicket>>,
     pub(crate) trace: Trace,
 }
 
@@ -187,17 +196,49 @@ impl PolicyCloseRequest {
                 .turn_started_instant
                 .is_some_and(|started| started < self.observed_before)
     }
+
+    /// Only the receipt may go: the finalizer finalized this exact episode and the shared fence,
+    /// which notes every start into an empty slot, saw it released. A closed actor admits no more.
+    pub(super) fn reconciles(&self, state: &ChannelMailboxState, channel_id: ChannelId) -> bool {
+        self.release_reconcile_allowed
+            && !self.turn_nonce.is_empty()
+            && self.receipt.channel() == channel_id.get()
+            && (state.remint_fence).refuses(self.user_message_id, Some(&self.turn_nonce))
+    }
 }
 
-/// The mailbox arm of one close: runs the step under the guard's own authority and answers.
+/// The mailbox arm of a close or its tail claim: a close runs the step under the guard's own
+/// authority and answers; a tail claim is decided against the commit's stamp.
 pub(super) fn answer(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
-    request: PolicyCloseRequest,
-    guard: &super::input_fence::StepGuard,
-    reply: tokio::sync::oneshot::Sender<PolicyMailboxOutcome>,
+    msg: super::ChannelMailboxMsg,
+    (guard, recovery_done): (&super::input_fence::StepGuard, &super::RecoveryDoneSignal),
 ) {
-    let _ = reply.send(step(state, channel_id, request, guard.policy_authority()));
+    let (request, reply) = match msg {
+        super::ChannelMailboxMsg::PolicyClose { request, reply } => (*request, reply),
+        super::ChannelMailboxMsg::ClaimPolicyTail(claim) => {
+            return tail::answer(state, claim, recovery_done);
+        }
+        _ => unreachable!("only policy messages reach this arm"),
+    };
+    #[cfg(test)]
+    let lost = request.trace.lost(test_hooks::Loss::MailboxReply);
+    let outcome = step(state, channel_id, request, guard.policy_authority());
+    // Test seam: the step ran and sealed; only its reply is lost.
+    #[cfg(test)]
+    if lost {
+        return;
+    }
+    let _ = reply.send(outcome);
+}
+
+/// A purged actor commits nothing; the close stays held for restart.
+pub(super) fn refuse_closed(
+    reply: tokio::sync::oneshot::Sender<PolicyMailboxOutcome>,
+) -> &'static str {
+    let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
+    "PolicyClose"
 }
 
 /// Runs one close inside the actor under the step's own authority. A panic stops here; one after
@@ -232,6 +273,13 @@ pub(super) fn step(
         }
         (Err(_), None) => PolicyMailboxOutcome::Retained(PolicyRetain::Panicked),
     };
+    // A commit, unwound or not, seals the ticket before the actor answers or reads on.
+    let outcome = match (outcome, request.ticket.as_ref()) {
+        (PolicyMailboxOutcome::Committed(finish), Some(ticket)) => {
+            PolicyMailboxOutcome::Committed(ticket.seal(state, finish))
+        }
+        (outcome, _) => outcome,
+    };
     let committed = matches!(outcome, PolicyMailboxOutcome::Committed(_));
     request
         .trace
@@ -253,7 +301,7 @@ fn close(
     request.trace.note_started(state.turn_started_instant);
     at!(request, BeforeClaim);
     if !request.claims(state, channel_id) {
-        return PolicyMailboxOutcome::Superseded;
+        return reconcile(state, channel_id, request, authority);
     }
     // Built before the clear, so after it the guard only moves this value into the state.
     let witness = PolicyWitness {
@@ -305,7 +353,28 @@ fn close(
         "policy_close",
     );
     super::mark_turn_finished_signal_done(channel_id);
+    at!(request, BeforeSeal);
     PolicyMailboxOutcome::Committed(finish)
+}
+
+/// The receipt-only arm: no token, count, queue, marker, witness or signal is touched.
+fn reconcile(
+    state: &ChannelMailboxState,
+    channel_id: ChannelId,
+    request: &PolicyCloseRequest,
+    authority: &PolicyAuthority<'_>,
+) -> PolicyMailboxOutcome {
+    if !request.reconciles(state, channel_id) {
+        return PolicyMailboxOutcome::Superseded;
+    }
+    // A row already gone is this receipt already cleared; any other answer keeps the hold.
+    match request.receipt.try_clear(authority) {
+        PolicyClear::Cleared | PolicyClear::Missing => PolicyMailboxOutcome::Reconciled,
+        PolicyClear::InputFence(failure) => {
+            PolicyMailboxOutcome::Retained(PolicyRetain::InputFence(failure))
+        }
+        refused => PolicyMailboxOutcome::Retained(PolicyRetain::Clear(refused)),
+    }
 }
 
 /// Armed once the receipt row is gone: whichever stage a panic interrupts, dropping it finishes
@@ -384,6 +453,7 @@ pub(crate) mod test_hooks {
         AfterDebit,
         AfterFence,
         AfterCommit,
+        BeforeSeal,
         Unwound,
         BeforeFinalize,
     }
@@ -434,6 +504,8 @@ pub(crate) mod test_hooks {
         Dequeued,
         /// Processed, then only its ACK sender is dropped.
         Ack,
+        /// The mailbox step ran; only its reply is dropped.
+        MailboxReply,
     }
 
     /// One request's observations; it travels with the request to whatever thread runs it.
@@ -450,6 +522,8 @@ pub(crate) mod test_hooks {
         hook: Mutex<Option<Hook>>,
         loss: Mutex<Option<Loss>>,
         mailbox: Mutex<Option<super::super::input_fence::PolicyMailboxView>>,
+        tail: Mutex<Option<super::tail::PolicyTailDecision>>,
+        ticket: Mutex<Option<std::sync::Weak<super::tail::PolicyCommitTicket>>>,
     }
 
     thread_local! { static ARMED: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
@@ -480,6 +554,8 @@ pub(crate) mod test_hooks {
             hook: Mutex::new(ARMED.with(|slot| slot.borrow_mut().take())),
             loss: Mutex::default(),
             mailbox: Mutex::default(),
+            tail: Mutex::default(),
+            ticket: Mutex::default(),
         }));
         request
     }
@@ -518,6 +594,16 @@ pub(crate) mod test_hooks {
         /// The slot's start instant this request's step compared its cutoff with.
         pub(crate) fn started(&self) -> Option<Instant> {
             *lock(&self.started)
+        }
+
+        /// How this request's tail claim was decided, if its tail ran.
+        pub(crate) fn tail(&self) -> Option<super::tail::PolicyTailDecision> {
+            *lock(&self.tail)
+        }
+
+        /// The ledger ticket this request ran under, held weakly so its release is observable.
+        pub(crate) fn ticket(&self) -> Option<std::sync::Weak<super::tail::PolicyCommitTicket>> {
+            lock(&self.ticket).clone()
         }
 
         /// What the mailbox held as this request reached its input fence.
@@ -571,6 +657,18 @@ pub(crate) mod test_hooks {
         pub(crate) fn note_mailbox(&self, view: super::super::input_fence::PolicyMailboxView) {
             if let Some(probe) = &self.probe {
                 *lock(&probe.mailbox) = Some(view);
+            }
+        }
+
+        pub(crate) fn note_tail(&self, decision: super::tail::PolicyTailDecision) {
+            if let Some(probe) = &self.probe {
+                *lock(&probe.tail) = Some(decision);
+            }
+        }
+
+        pub(crate) fn note_ticket(&self, ticket: &Arc<super::tail::PolicyCommitTicket>) {
+            if let Some(probe) = &self.probe {
+                *lock(&probe.ticket) = Some(Arc::downgrade(ticket));
             }
         }
 

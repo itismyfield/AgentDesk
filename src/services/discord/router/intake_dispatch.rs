@@ -47,7 +47,8 @@ pub(crate) use skill::dispatch_skill_intake;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IntakeOrigin {
     LiveMessage,
-    QueuedDrain,
+    /// A queue item, carrying the route it resolved before it was queued.
+    QueuedDrain(Option<crate::services::turn_orchestrator::QueuedRoute>),
     SlashSkill,
     TextSkill,
     RawAttachment,
@@ -55,7 +56,7 @@ pub(crate) enum IntakeOrigin {
 
 impl IntakeOrigin {
     fn should_notify_blocked(self, reason: &IntakeBlockedReason) -> bool {
-        !matches!(self, Self::QueuedDrain)
+        !matches!(self, Self::QueuedDrain(_))
             || matches!(
                 reason,
                 IntakeBlockedReason::NonPortableAttachmentForeignOwner { .. }
@@ -687,8 +688,7 @@ pub(crate) async fn finish_admitted_local(
         return Ok(super::IntakeExecution::ConsumedProtected);
     }
     let preserve_on_cancel = submission.preserve_on_cancel;
-    let queued_drain = matches!(submission.origin, IntakeOrigin::QueuedDrain);
-    local_turn(deps, submission, preserve_on_cancel, queued_drain).await
+    local_turn(deps, submission, preserve_on_cancel).await
 }
 
 type BoxedIntake<'a, T = ()> = std::pin::Pin<
@@ -700,13 +700,17 @@ fn local_turn<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
     submission: IntakeSubmission,
     preserve_on_cancel: bool,
-    queued_drain: bool,
 ) -> BoxedIntake<'a, super::IntakeExecution> {
+    let (queued_drain, queued) = match submission.origin {
+        IntakeOrigin::QueuedDrain(route) => (true, route),
+        _ => (false, None),
+    };
     Box::pin(message_handler::finish_admitted_local(
         deps,
         submission.request,
         preserve_on_cancel,
         queued_drain,
+        queued,
         submission.preloaded_uploads,
         submission.voice_announcement,
     ))
@@ -742,7 +746,7 @@ async fn defer_live_submission(
     submission: IntakeSubmission,
     all_sources: bool,
 ) -> bool {
-    if matches!(submission.origin, IntakeOrigin::QueuedDrain) {
+    if matches!(submission.origin, IntakeOrigin::QueuedDrain(_)) {
         return true;
     }
     let request = submission.request;
