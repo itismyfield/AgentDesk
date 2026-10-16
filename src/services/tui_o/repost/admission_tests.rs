@@ -47,6 +47,8 @@ fn unit(native_key: &str, kind: UnitKind) -> UnitKey {
 
 fn record(native_key: &str, payload: &str, outcome: Option<PieceOutcome>) -> PieceRecord {
     PieceRecord {
+        local_retry: None,
+        outcome_at: None,
         unit_key: unit(native_key, UnitKind::Body),
         piece_index: 0,
         payload: payload.into(),
@@ -201,6 +203,7 @@ fn d4act_not_sent_replays_as_settled_without_reclassifying_legacy_records() {
         let serial = serial as u64;
         channel
             .append_ledger(LedgerEntry::Prepared {
+                local_retry: None,
                 serial,
                 unit_key: piece.unit_key.clone(),
                 piece_index: piece.piece_index,
@@ -402,9 +405,9 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
     let holder_b = Admitter::when_on(&mut on, &pool, "node-b", BOT).unwrap();
     let index = holder_b.admitted_keys(CHANNEL).await;
     assert_eq!(index.original(&sent.unit_key, 0), OriginalGate::Admitted);
-    assert_eq!(index.original(&sent.unit_key, 1), OriginalGate::Send);
+    assert_eq!(index.original(&sent.unit_key, 1), OriginalGate::SendLocal);
     let tool = unit("t10", UnitKind::Tool);
-    assert_eq!(index.original(&tool, 0), OriginalGate::Send);
+    assert_eq!(index.original(&tool, 0), OriginalGate::SendLocal);
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut log_b = sidecar(&dir_b);
@@ -822,5 +825,32 @@ fn f6_a_conflicting_record_of_an_activation_never_moves_its_frontier() {
     log.append(conflicting).unwrap();
     for state in [log.state().clone(), sidecar(&dir).state().clone()] {
         assert!(matches!(classify(5, &on, &state), Candidate::Eligible(o) if o.serial == 5));
+    }
+}
+
+#[test]
+fn local_retry_mark_excludes_both_root_and_child_before_pg_candidate_classification() {
+    use crate::services::tui_o::store::ledger::LocalRetryMark;
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = sidecar(&dir);
+    for outcome in [
+        Some(PieceOutcome::NotFound),
+        None,
+        Some(PieceOutcome::Unresolved("read failed".into())),
+        Some(PieceOutcome::Ambiguous(vec![45, 46])),
+    ] {
+        let mut original = record("local-owned", "payload", outcome);
+        sent_while_on(&mut log, 0, &[(0, &original)]);
+        assert!(matches!(
+            classify(0, &original, log.state()),
+            Candidate::Eligible(_)
+        ));
+        for mark in [
+            LocalRetryMark::Budget,
+            LocalRetryMark::Attempt { root_serial: 0 },
+        ] {
+            original.local_retry = Some(mark);
+            assert_eq!(classify(0, &original, log.state()), Candidate::Settled);
+        }
     }
 }

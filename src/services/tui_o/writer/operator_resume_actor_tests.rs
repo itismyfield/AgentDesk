@@ -8,6 +8,7 @@ fn seed_approval(harness: &Harness, provider: ShadowProvider) {
     key.provider = provider;
     channel
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 0,
             unit_key: key,
             piece_index: 0,
@@ -204,6 +205,7 @@ async fn operator_resume_open_consumed_retry_without_raw_work_settles_before_fol
     let original = channel.ledger().piece(0).unwrap().clone();
     channel
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 1,
             unit_key: original.unit_key,
             piece_index: 0,
@@ -214,7 +216,8 @@ async fn operator_resume_open_consumed_retry_without_raw_work_settles_before_fol
         .unwrap();
     harness.port.unreadable.store(true, Ordering::SeqCst);
     let (stop, task) = spawn(harness.writer());
-    polls(12).await;
+    // An unreadable history leaves the piece unresolved at the last look.
+    polls(32).await;
     let channel = harness.channel();
     assert!(matches!(
         channel.ledger().piece(1).unwrap().outcome,
@@ -231,7 +234,7 @@ async fn operator_resume_projection_does_not_overtake_a_real_schema_blocked_reco
     let (harness, path, _) = switched_over(b"");
     seed_approval(&harness, ShadowProvider::Claude);
     let line = serde_json::json!({"type":"assistant","uuid":"ambiguous","apiBlockIndex":0,
-        "message":{"id":"ambiguous","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}});
+        "message":{"id":"ambiguous","content":[{"type":"text","text":"a"},{"type":"image"}]}});
     append(&path, format!("{line}\n").as_bytes());
     let mut channel = harness.channel();
     let source = channel.cursors().next().unwrap().source.clone();

@@ -28,6 +28,34 @@ pub(crate) fn driver(
     )
 }
 
+/// The production cold launch for an exact resume of `native_session` in `cwd`.
+pub(crate) fn cold_driver(
+    cwd: &std::path::Path,
+    native_session: &str,
+    (tmux, channel): (&str, u64),
+    token: Arc<CancelToken>,
+    sender: Sender<StreamMessage>,
+) -> Result<(), String> {
+    execute_streaming_local_tui_tmux(
+        "resume prompt",
+        Some(native_session),
+        None,
+        None,
+        None,
+        cwd.to_str().unwrap(),
+        sender,
+        Some(token),
+        tmux,
+        None,
+        Some(channel),
+        Some(ProviderKind::Codex),
+        None,
+        false,
+        None,
+        false,
+    )
+}
+
 #[tokio::test]
 async fn s2b1b_actual_driver_missing_episode_refuses_before_transport() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

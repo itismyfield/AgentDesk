@@ -34,7 +34,9 @@ fn watcher_covers_only_the_output_file_it_reads() {
     let relay = dir.path().join("relay.jsonl");
     let tmux = "AgentDesk-codex-5704-covers";
     let channel = ChannelId::new(5_704_000_001);
-    let watchers = crate::services::discord::TmuxWatcherRegistry::new();
+    let watchers = crate::services::discord::TmuxWatcherRegistry::new_with_coords(
+        std::sync::Arc::new(dashmap::DashMap::new()),
+    );
     let covers = |watchers: &crate::services::discord::TmuxWatcherRegistry| {
         tui_direct_watcher_covers_output(watchers, tmux, Some(&rollout))
     };
