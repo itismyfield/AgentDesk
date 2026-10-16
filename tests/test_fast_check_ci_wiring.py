@@ -411,29 +411,39 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("while IFS= read -r path; do", guard)
         self.assertNotIn("done < <(git ls-files)\n", guard)
 
-    def test_pr_fast_check_is_compile_and_policy_only(self) -> None:
-        job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast")
+    def test_pr_lint_runner_is_the_ubuntu_compile_and_policy_lane(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        self.assertNotIn("check_fast", jobs)
+        job = jobs["lint"]
 
-        self.assertIn("name: Fast compile check (${{ matrix.os }})", job)
-        self.assertIn(
-            "if: needs.changes.outputs.rust_or_policy == 'true' || "
-            "needs.changes.outputs.relay_contract == 'true'",
-            job,
+        self.assertEqual(job["name"], "Lint runner")
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["if"], _LINT_FILTER)
+        # Clippy over every target and feature is the compile `cargo check` used to repeat.
+        self.assertEqual(
+            [line.strip() for step in job["steps"] for line in str(step.get("run", "")).splitlines() if line.strip()],
+            [
+                "just fmt-check",
+                "npm run test:policies",
+                "set -o pipefail",
+                "mkdir -p target/clippy-observation",
+                "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"',
+                "sccache --show-stats || true",
+            ],
         )
-        self.assertIn("os: [ubuntu-latest]", job)
-        self.assertIn("- name: Policy JS unit tests", job)
-        self.assertIn("- name: cargo check\n        run: just cargo-check", job)
-        self.assertNotIn("just test-non-pg", job)
-        self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
+        self.assertNotIn("continue-on-error", job_block(workflow, "lint"))
 
     def test_required_fast_check_context_mirrors_the_same_upstream_job(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         job = job_block(workflow, "fast_check_required_context")
 
         self.assertIn("name: Fast check (ubuntu-latest)", job)
-        self.assertIn("- check_fast", job)
+        self.assertRegex(job, r"(?m)^    needs:\n      - changes\n      - lint\n")
         self.assertIn(MIRROR_IF_LINE, job)
-        self.assertEqual(job.count("UPSTREAM_JOB_NAME: check_fast"), 2)
+        self.assertEqual(job.count("UPSTREAM_JOB_NAME: lint"), 2)
+        self.assertEqual(job.count("UPSTREAM_RESULT: ${{ needs.lint.result }}"), 2)
         self.assertIn(
             "if: ${{ needs.changes.outputs.relay_contract != 'true' }}", job
         )

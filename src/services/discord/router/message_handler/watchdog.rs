@@ -455,7 +455,7 @@ mod relay_state_contract_refs {
     //! a plain `#[cfg(test)]` anchor referencing it fails to compile (E0432,
     //! #4268 r3 / #4394). Matching its platform gate makes the anchor and the
     //! symbol appear/disappear together. `unix` is true on the required ubuntu
-    //! `check_fast` compile, so that required job still compiles this block and
+    //! `lint` clippy compile, so that required job still compiles this block and
     //! proves the symbol exists. `#[cfg(all(test, unix))]` is one of the two
     //! byte-exact cfg spellings the checker whitelists (the other is
     //! `#[cfg(test)]`); a windows-only gate is rejected because no required job

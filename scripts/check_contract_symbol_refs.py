@@ -42,7 +42,7 @@ itself**, never from comments. There are no ``// sym:`` labels anymore.
   block's gate must be one of ``_ALLOWED_ANCHOR_CFGS`` (``#[cfg(test)]`` or
   ``#[cfg(all(test, unix))]``) and every attribute INSIDE the block must be
   ``#[test]`` (``_ALLOWED_ITEM_ATTRS``). ``unix`` is allowed because the only
-  required PR Rust compile is ``check_fast`` (ubuntu-latest), where ``cfg(unix)``
+  required PR Rust compile is the ``lint`` clippy (ubuntu-latest), where ``cfg(unix)``
   is true, so that required job compiles the block. Anything else fails loudly —
   a windows/non-ubuntu gate (compiled by no required job), a malformed cfg, or an
   item-level ``#[cfg(feature = "never")]`` that would drop one reference while
@@ -173,8 +173,8 @@ _ATTR_START_RE = re.compile(r"^\s*#!?\[")
 # strip() — no grammar, no parser. A converged lesson of this PR (#4268) is that
 # every added cfg parser sprouts a new bypass within a round (regex, then
 # recursive-descent, then an evaluator), while removing interpretation holds.
-# `unix` is allowed because the only REQUIRED PR Rust compile is `check_fast`
-# (ci-pr.yml matrix `os: [ubuntu-latest]`), where `cfg(unix)` is true, so that
+# `unix` is allowed because the only REQUIRED PR Rust compile is the `lint`
+# clippy (ci-pr.yml `runs-on: ubuntu-latest`), where `cfg(unix)` is true, so that
 # required job compiles the block and a vanished symbol fails it. A windows-only
 # or non-ubuntu gate would compile in NO required job (the windows lane is
 # advisory and skipped for relay-only changes), silently disabling the proof. If

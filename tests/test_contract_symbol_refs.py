@@ -164,7 +164,7 @@ class CfgGateTest(unittest.TestCase):
 
     def test_accepted_block_cfgs(self) -> None:
         # The only two whitelisted gates. `unix` is allowed only because the
-        # required PR compile (check_fast) is ubuntu-latest.
+        # required PR compile (the `lint` clippy) is ubuntu-latest.
         for cfg in ("#[cfg(test)]", "#[cfg(all(test, unix))]"):
             self.assertEqual(self._errors(cfg=cfg), [], cfg)
 
@@ -571,7 +571,7 @@ class WiringTest(unittest.TestCase):
 
 
 class RelayContractPathFilterTest(unittest.TestCase):
-    """A doc-only PR reaches `check_fast` only via this output, so the filter
+    """A doc-only PR reaches the `lint` compile only via this output, so the filter
     key it reads must select exactly the checker's binding sources."""
 
     def setUp(self) -> None:
