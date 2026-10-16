@@ -381,11 +381,16 @@ impl InflightTurnState {
         provider: &ProviderKind,
         clearable: impl FnOnce(&InflightTurnState) -> bool,
     ) -> GuardedClearOutcome {
-        let Some(fresh) = fs::read_to_string(path)
-            .ok()
-            .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
-        else {
-            return GuardedClearOutcome::Missing;
+        // Only a row that is not there is Missing; one that cannot be read or parsed stays held.
+        let data = match fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return GuardedClearOutcome::Missing;
+            }
+            Err(_) => return GuardedClearOutcome::IoError,
+        };
+        let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
+            return GuardedClearOutcome::IoError;
         };
         if !clearable(&fresh) {
             return GuardedClearOutcome::UserMsgMismatch;
@@ -424,7 +429,7 @@ impl PolicyReceipt for AckedPolicyReceipt {
     fn try_clear(&self, authority: &PolicyAuthority<'_>) -> PolicyClear {
         let acked = &self.acked;
         let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
-            return PolicyClear::Missing;
+            return PolicyClear::Io;
         };
         let path = inflight_state_path(&root, &provider, acked.channel_id);
         let clear = || {
