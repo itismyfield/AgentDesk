@@ -1264,6 +1264,7 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
@@ -1547,6 +1548,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -2123,8 +2125,19 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
+│   │   │   │   ├── unbound/
+│   │   │   │   │   ├── dormancy_tests.rs
+│   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_review_tests.rs
+│   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
-│   │   │   │   └── tail_tests.rs
+│   │   │   │   ├── tail_switch_tests.rs
+│   │   │   │   ├── tail_tests.rs
+│   │   │   │   └── unbound.rs
+│   │   │   ├── activity_tests/
+│   │   │   │   ├── effect_tests.rs
+│   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── entrypoints.rs
@@ -2477,9 +2490,13 @@ src/
 │   │   ├── tmux/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
+│   │   │   ├── session_inventory/
+│   │   │   │   ├── real_tests.rs
+│   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── session_inventory.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
 │   │   ├── binary_resolver.rs
@@ -2763,6 +2780,7 @@ src/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
+│   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
@@ -2842,6 +2860,11 @@ src/
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs
+│   │   │   ├── local_retry.rs
+│   │   │   ├── local_retry_actor_tests.rs
+│   │   │   ├── local_retry_host_tests.rs
+│   │   │   ├── local_retry_repost_tests.rs
+│   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs

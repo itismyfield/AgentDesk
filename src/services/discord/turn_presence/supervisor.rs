@@ -57,6 +57,7 @@ fn registered(provider: &ProviderKind) -> Vec<u64> {
 
 /// Spawns the provider's supervisor; call once its bot token is set so no send precedes HTTP.
 pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: ProviderKind) {
+    super::activity::initialize_tail();
     LazyLock::force(&PROCESS_STARTED);
     let effects = Arc::new(LiveEffects { shared, provider });
     tokio::spawn(Supervisor::new(effects).run());
@@ -237,10 +238,12 @@ impl<E: Effects> Supervisor<E> {
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
-            let published = reading.publish_if_current(|| {
-                let mut presence = lock(&presence);
-                apply(&mut presence, channel, now, &reading, token, head)
-            });
+            let published = reading
+                .publish_if_current(|| {
+                    let mut presence = lock(&presence);
+                    apply(&mut presence, channel, now, &reading, token, head)
+                })
+                .await;
             let Some(actions) = published else {
                 tracing::debug!(channel, "[turn_presence] superseded reading not published");
                 continue;

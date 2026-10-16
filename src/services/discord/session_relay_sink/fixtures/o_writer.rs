@@ -75,8 +75,14 @@ impl DiscordPort for FakePort {
         async move { Ok(page) }
     }
 
-    fn history_readable(&self, _: u64) -> bool {
-        true
+    fn message(
+        &self,
+        _: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let history = self.history.lock().unwrap();
+        let found = history.iter().find(|m| m.id == id).cloned();
+        async move { Ok(found) }
     }
 }
 

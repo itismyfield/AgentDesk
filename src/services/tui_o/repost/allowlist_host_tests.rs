@@ -75,6 +75,7 @@ async fn d4b_two_hosted_channels_share_allowlist_with_empty_deny_and_wire_contro
             let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
             ledger
                 .append_ledger(LedgerEntry::Prepared {
+                    local_retry: None,
                     serial: 0,
                     unit_key: unit("proof"),
                     piece_index: 0,

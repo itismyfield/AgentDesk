@@ -32,8 +32,23 @@ from pathlib import Path
 
 
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
-PINNED_BASENAME_TEST_FILES = frozenset(
-    {
+PINNED_BASENAME_TEST_FILES = frozenset({
+        "src/services/discord/router/message_handler/s1_entry_tests.rs",
+        "src/services/discord/turn_presence/activity/tail_switch_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/live_review_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/live_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/unit_tests.rs",
+        "src/services/discord/turn_presence/activity_tests/effect_tests.rs",
+        "src/services/discord/turn_presence/activity_tests/large_tests.rs",
+        "src/services/platform/tmux/session_inventory/real_tests.rs",
+        "src/services/platform/tmux/session_inventory/unit_tests.rs",
+        "src/services/discord/outbound/local_retry_io_tests.rs",
+        "src/services/tui_o/store/local_retry_ledger_tests.rs",
+        "src/services/tui_o/writer/local_retry_actor_tests.rs",
+        "src/services/tui_o/writer/local_retry_host_tests.rs",
+        "src/services/tui_o/writer/local_retry_repost_tests.rs",
+        "src/services/tui_o/writer/local_retry_tests.rs",
         "src/engine/ops/exec_ops/circuit_evidence_tests.rs",
         "src/services/discord/inflight/circuit_evidence_tests.rs",
         "src/services/discord/relay_recovery_circuit_evidence_tests.rs",
@@ -731,12 +746,10 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
         "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
         "src/services/session_host/herdr_gate/legacy_return_tests.rs",
-    }
-)
+})
 
 # Production-looking basenames classified as test-only by the shared resolver.
-PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
-    {
+PINNED_RESOLVER_TEST_ONLY_FILES = frozenset({
         "src/services/discord/tui_prompt_relay/synthetic_start/non_bridge_claim.rs",
         "src/services/discord/tui_prompt_relay/synthetic_start/bridge_handoff/reown.rs",
         "src/services/discord/turn_bridge/replay_policy.rs",
@@ -813,7 +826,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
-        "src/services/discord/turn_presence/activity/tail.rs",
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
@@ -821,15 +833,12 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/restart_report/capacity.rs",
         "src/services/recovery_defer.rs",
         "src/services/recovery_defer/cursor.rs",
-    }
-)
+})
 
 if PINNED_BASENAME_TEST_FILES & PINNED_RESOLVER_TEST_ONLY_FILES:
     raise RuntimeError("writer-gate basename and resolver pins must be disjoint")
 
-PINNED_TEST_ONLY_MODULE_FILES = (
-    PINNED_BASENAME_TEST_FILES | PINNED_RESOLVER_TEST_ONLY_FILES
-)
+PINNED_TEST_ONLY_MODULE_FILES = PINNED_BASENAME_TEST_FILES | PINNED_RESOLVER_TEST_ONLY_FILES
 
 _UPDATE_HINT = (
     "Review basename and resolver classification, then update only "
