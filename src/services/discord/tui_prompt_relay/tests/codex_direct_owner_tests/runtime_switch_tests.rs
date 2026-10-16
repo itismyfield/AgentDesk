@@ -6,8 +6,7 @@ const A_PARKED: (u64, &str) = (7_632_520_301, "AgentDesk-codex-6325-a-parked");
 const B_HOOK: (u64, &str) = (7_632_520_401, "AgentDesk-codex-6325-b-hook");
 const B_ROLLOUT: (u64, &str) = (7_632_520_402, "AgentDesk-codex-6325-b-rollout");
 
-/// What one B channel's answer ended as: each accepted answer edit as `(method, path, content)`,
-/// and where its binding cursor ended.
+/// The final message state as `(method, path, content)`, and the binding cursor.
 type Output = (Vec<(String, String, String)>, u64);
 
 fn content(body: &str) -> String {
@@ -20,6 +19,8 @@ fn content(body: &str) -> String {
 fn output(requests: &Requests, codex: &CodexChannel) -> Output {
     let sent = deliveries(requests, codex.channel)
         .into_iter()
+        .rev()
+        .take(1)
         .map(|(method, path, body)| (method, path, content(&body)))
         .filter(|(_, _, content)| content == RESPONSE)
         .collect();
@@ -138,6 +139,7 @@ fn delivered_once(requests: &Requests, codex: &CodexChannel, anchor: u64) {
         "one answer edit on {}: {sent:?}",
         codex.tmux
     );
+    assert_eq!(content(&sent.last().expect("final edit").2), RESPONSE);
     let anchor = format!("/channels/{}/messages/{anchor}", codex.channel.get());
     for (method, path, _) in &sent {
         assert!(method == "PATCH" && path.ends_with(&anchor), "{sent:?}");

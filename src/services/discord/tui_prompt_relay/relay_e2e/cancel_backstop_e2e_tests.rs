@@ -13,6 +13,7 @@ use std::time::Duration;
 use super::discord_mock::USER_ID;
 use super::stop_command_catch_up_e2e::{hold_a_turn, queued_ids, recent_snowflake_base};
 use super::{AbortOnDrop, RelayE2eHarness, wait_until};
+use crate::config::test_env_lock::{SharedTestEnvLockGuard, acquire_shared_test_env_lock};
 use crate::services::discord::{self as discord, inflight, mailbox_snapshot, queue_io};
 use crate::services::provider::{CancelToken, ProviderKind};
 
@@ -22,14 +23,12 @@ const HEAD: &str = "i6016 previous turn head already visible";
 const TAIL: &str = "i6016 previous turn undelivered tail";
 const CLAUDE: ProviderKind = ProviderKind::Claude;
 
-fn fixture_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+fn fixture_env_lock() -> SharedTestEnvLockGuard {
+    acquire_shared_test_env_lock()
 }
 
 fn set_fixture_path(
-    _env_lock: &std::sync::MutexGuard<'static, ()>,
+    _env_lock: &SharedTestEnvLockGuard,
     key: &'static str,
     value: &Path,
 ) -> crate::config::TestEnvVarGuard {

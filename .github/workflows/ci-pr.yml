@@ -421,6 +421,7 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
+              - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
@@ -1151,8 +1152,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
-        timeout-minutes: 45
+        # Healthy runs took 24-46 min on 2026-10-15/16 and three PRs were cut at 45.
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2140,7 +2141,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
+          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2392,7 +2393,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
+          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

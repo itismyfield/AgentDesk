@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 use super::fork_lineage::{Class, RowIds};
-use super::{BindingEvents, Boundary, Derived, Sources, UnitDeriver};
+use super::{BindingEvents, Boundary, Derived, Sources, UnitDeriver, claude_boundary};
 use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
 use crate::services::tui_o::store::rotation::SourceLink;
 use crate::services::tui_o::store::spool::source_key;
@@ -37,8 +37,18 @@ impl<B: BindingEvents> Sources<B> {
         match link.boundary {
             Boundary::Pending { .. } => {}
             Boundary::Owed { from } => {
-                if record.start >= from && !self.masked(&link, record) {
-                    owed.owe(source, record, deriver.derive(record));
+                if record.start >= from {
+                    match self.masked(&link, record) {
+                        Ok(false) => owed.owe(source, record, deriver.derive(record)),
+                        Ok(true) => {}
+                        Err(reason) => owed.owe(
+                            source,
+                            record,
+                            vec![Derived::Blocked {
+                                reason: reason.into(),
+                            }],
+                        ),
+                    }
                 }
             }
             Boundary::Undecided => {
@@ -65,21 +75,38 @@ impl<B: BindingEvents> Sources<B> {
 
     /// Masks only identities consumed within the parent's publishing responsibility.
     /// Root/adopted parents retain their existing from-zero policy.
-    fn masked(&self, link: &SourceLink, record: &CapturedRecord) -> bool {
+    fn masked(&self, link: &SourceLink, record: &CapturedRecord) -> Result<bool, &'static str> {
+        if link.hot_candidate.is_some() {
+            let compare = || {
+                let parent = link.parent.as_ref()?;
+                let from = claude_boundary::parent_from(&self.rotation, parent)?;
+                let lineage = self.lineage.get(&source_key(parent))?;
+                let row = RowIds::of(self.provider, &record.line)?;
+                if row.is_empty() {
+                    return Some(false);
+                }
+                match lineage.native_class(self.provider, &record.line, from) {
+                    Class::Inherited => Some(true),
+                    Class::New => Some(false),
+                    Class::Unidentified => None,
+                }
+            };
+            return compare().ok_or("automatic parent content comparison failed");
+        }
         let Some(parent) = link.parent.as_ref() else {
-            return false;
+            return Ok(false);
         };
         let parent_link = self.rotation.link(parent).map(|l| &l.boundary);
         let from = match parent_link {
             None => 0,
             Some(Boundary::Owed { from }) => *from,
-            _ => return false,
+            _ => return Ok(false),
         };
         let Some(lineage) = self.lineage.get(&source_key(parent)) else {
-            return false;
+            return Ok(false);
         };
-        RowIds::of(self.provider, &record.line).is_some_and(|row| {
+        Ok(RowIds::of(self.provider, &record.line).is_some_and(|row| {
             !row.is_empty() && lineage.class_from(&row, from) == Class::Inherited
-        })
+        }))
     }
 }

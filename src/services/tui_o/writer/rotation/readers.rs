@@ -28,6 +28,7 @@ impl<B: BindingEvents> Sources<B> {
                 .prepare_cleanup_witnesses()
                 .map_err(halted("witness directory"))?;
         }
+        self.refined.clear();
         let resolved = writer.store().apply_resolved_boundaries();
         resolved.map_err(halted("resolved boundary"))?;
         renumbered::unique(writer.store().cursors()).map_err(halt)?;
@@ -46,12 +47,18 @@ impl<B: BindingEvents> Sources<B> {
             (predecessors(&self.rotation, &cursor.source), seq)
         });
         let now = Instant::now();
-        let consumed: HashMap<String, u64> = (cursors.iter())
-            .map(|cursor| (source_key(&cursor.source), cursor.captured_through))
+        let consumed: HashMap<String, (u64, String)> = (cursors.iter())
+            .map(|cursor| {
+                (
+                    source_key(&cursor.source),
+                    (cursor.captured_through, cursor.prefix_hash.clone()),
+                )
+            })
             .collect();
+        self.reevaluate_boundaries(writer, deriver, owed, false)?;
         for cursor in cursors {
             let (key, mut captured_any) = (source_key(&cursor.source), false);
-            self.sync_parent(&key, |parent| consumed.get(&source_key(parent)).copied());
+            self.sync_parent(&key, |parent| consumed.get(&source_key(parent)).cloned());
             if let Some(SourceLink {
                 boundary: Boundary::Pending { .. },
                 ..

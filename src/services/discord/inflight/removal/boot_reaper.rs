@@ -13,7 +13,6 @@ pub(crate) struct BootReapReport {
     pub(super) changed: usize,
     pub(super) missing: usize,
     pub(super) incomplete: usize,
-    pub(super) protected: usize,
     pub(super) reaped_stale: usize,
     pub(super) reaped_provider_mismatch: usize,
     pub(super) reaped_malformed: usize,
@@ -142,13 +141,6 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        // An input-protected channel's population waits for its move or handback, untouched.
-        let channel = channel_id_from_path(&path);
-        use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
-        if boot_skip(BootTarget::Channel(provider, channel)) {
-            report.protected += 1;
-            continue;
-        }
         let age_secs = inflight_age_secs_for_path(&path);
         let (label, unchanged, locked, _lock, stale) =
             match classify_inflight_row(&path, provider, allocation) {
@@ -239,7 +231,6 @@ pub(super) fn reap_inflight_rows_at_boot_in_root(
         changed = report.changed,
         missing = report.missing,
         incomplete = report.incomplete,
-        protected = report.protected,
         reaped_stale = report.reaped_stale,
         reaped_provider_mismatch = report.reaped_provider_mismatch,
         reaped_malformed = report.reaped_malformed,
