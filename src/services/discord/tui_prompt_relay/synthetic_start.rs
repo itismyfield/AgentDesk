@@ -2596,19 +2596,13 @@ thread_local! {
     pub(in crate::services::discord) static RESTORE_CLAIM_FOR_TEST: std::cell::RefCell<Option<super::super::tui_direct_pending_start::ClaimFn>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Restore matching pending starts only for channels without an input-fence gate.
-/// Protected records stay durable instead of spawning a second boot consumer.
+/// Restores this provider's durable pending starts and respawns their detached workers.
 pub(in crate::services::discord) fn restore_pending_starts(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
     for record in super::super::tui_direct_pending_start::load_all() {
         if !record.provider.eq_ignore_ascii_case(provider.as_str()) {
-            continue;
-        }
-        if crate::services::discord::input_runtime::fence::lookup(provider, record.channel_id)
-            .is_some()
-        {
             continue;
         }
         // Re-mark present (load_all does not touch the index) so the gates hold

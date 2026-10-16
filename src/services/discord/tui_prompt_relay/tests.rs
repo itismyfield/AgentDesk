@@ -6424,7 +6424,7 @@ mod synthetic_terminal_ordering_tests;
 mod retired_pending_start_claim_tests;
 
 #[cfg(unix)]
-mod pending_start_input_fence_tests;
+mod pending_start_worker_claim_tests;
 
 #[cfg(unix)]
 mod relayerless_claim_tests {

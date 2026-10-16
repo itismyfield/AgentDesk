@@ -43,17 +43,10 @@ struct ChildFixture {
     completion: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     disposed: Option<tokio::sync::oneshot::Sender<()>>,
     path: std::path::PathBuf,
-    channel: ChannelId,
-    protected: bool,
 }
 impl Drop for ChildFixture {
     fn drop(&mut self) {
-        use crate::services::discord::input_runtime::fence::{self, effect};
-        assert_eq!(effect::current().is_some(), self.protected);
-        fence::write(&ProviderKind::Claude, self.channel.get(), || {
-            std::fs::write(&self.path, b"child cleanup").map_err(|e| e.to_string())
-        })
-        .unwrap();
+        std::fs::write(&self.path, b"child cleanup").unwrap();
         let _ = self.disposed.take().unwrap().send(());
     }
 }
@@ -218,24 +211,18 @@ impl TurnGateway for StatusPanelFallbackGateway {
     }
 }
 
+// Each spawned bridge child runs its gateway call through cleanup; a retry's release child
+// waits for the dispatch completion.
 #[tokio::test(flavor = "current_thread")]
-async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_completion() {
-    use crate::services::discord::input_runtime::fence::{self, Gate, effect};
-    use futures::FutureExt;
+async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
         root.path(),
     );
-    for (n, (protected, retry)) in [(false, false), (false, true), (true, false), (true, true)]
-        .into_iter()
-        .enumerate()
-    {
+    for (n, retry) in [false, true].into_iter().enumerate() {
         let channel = ChannelId::new(6_325_439 + n as u64);
-        let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel.get()).unwrap());
-        let _health = gate.as_ref().map(fence::test_health::Clear::new);
-        let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let (disposed_tx, disposed_rx) = tokio::sync::oneshot::channel();
@@ -248,34 +235,25 @@ async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_compl
                 completion: completion.clone(),
                 disposed: Some(disposed_tx),
                 path: path.clone(),
-                channel,
-                protected,
             }),
             ..Default::default()
         });
-        effect::scope(permit, async {
-            if retry {
-                super::super::retry_state::spawn_retry_with_history_with_release(
-                    gateway,
-                    channel,
-                    MessageId::new(7),
-                    "retry".into(),
-                );
-            } else {
-                super::super::watcher_orphan_cleanup::spawn_watcher_orphan_spinner_cleanup_retry(
-                    crate::services::discord::make_shared_data_for_tests(),
-                    ProviderKind::Claude,
-                    gateway,
-                    channel,
-                    MessageId::new(7),
-                    None,
-                );
-            }
-        })
-        .await;
-        let closing = gate.as_ref().map(|gate| gate.close().unwrap());
-        if let Some(closing) = &closing {
-            assert!(closing.drain().now_or_never().is_none());
+        if retry {
+            super::super::retry_state::spawn_retry_with_history_with_release(
+                gateway,
+                channel,
+                MessageId::new(7),
+                "retry".into(),
+            );
+        } else {
+            super::super::watcher_orphan_cleanup::spawn_watcher_orphan_spinner_cleanup_retry(
+                crate::services::discord::make_shared_data_for_tests(),
+                ProviderKind::Claude,
+                gateway,
+                channel,
+                MessageId::new(7),
+                None,
+            );
         }
         tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
             .await
@@ -288,18 +266,7 @@ async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_compl
             .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"child cleanup");
         if retry {
-            if let Some(closing) = &closing {
-                assert!(
-                    closing.drain().now_or_never().is_none(),
-                    "release child outlives dispatch cleanup"
-                );
-            }
             completion.lock().unwrap().take().unwrap().send(()).unwrap();
-        }
-        if let Some(closing) = closing {
-            tokio::time::timeout(std::time::Duration::from_secs(10), closing.drain())
-                .await
-                .unwrap();
         }
     }
 }
