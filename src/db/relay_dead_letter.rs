@@ -153,12 +153,14 @@ pub(crate) fn record_detached_reporting(
     }))
 }
 
-/// Settled `redelivery_state` values (migration 0120). A row starts `'pending'`;
+/// `redelivery_state` values (migrations 0120 and 0142). A row starts `'pending'`;
 /// [`claim_pending_redeliveries`] moves it to `'claimed'` and only a settle leaves
 /// that state. Settling back to `'pending'` makes the row claimable again, so a
 /// claim is once per attempt, not once per row. A claim lost to a crash stays
-/// `'claimed'` until an operator recovers it.
+/// `'claimed'`; automatic recovery of abandoned claims is still open (#6009).
 ///
+/// Claimed for one attempt; settlement may return it to pending.
+pub(crate) const REDELIVERY_CLAIMED: &str = "claimed";
 /// The body was posted to the channel.
 pub(crate) const REDELIVERY_DELIVERED: &str = "delivered";
 /// Every byte of this row was already covered by a sibling row in the same plan.
@@ -200,7 +202,7 @@ pub(crate) async fn claim_pending_redeliveries(
 ) -> Result<Vec<ClaimedDeadLetter>, sqlx::Error> {
     let rows: Vec<(i64, String, Option<String>, String, String)> = sqlx::query_as(
         "UPDATE relay_dead_letter
-            SET redelivery_state = 'claimed',
+            SET redelivery_state = $5,
                 redelivery_attempts = redelivery_attempts + 1
           WHERE id IN (
                 SELECT id
@@ -219,6 +221,7 @@ pub(crate) async fn claim_pending_redeliveries(
     .bind(min_age_secs)
     .bind(max_age_secs)
     .bind(limit)
+    .bind(REDELIVERY_CLAIMED)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -247,11 +250,12 @@ pub(crate) async fn settle_redelivery(
         "UPDATE relay_dead_letter
             SET redelivery_state = $2,
                 redelivered_at = CASE WHEN $2 = $3 THEN NULL ELSE NOW() END
-          WHERE id = $1 AND redelivery_state = 'claimed'",
+          WHERE id = $1 AND redelivery_state = $4",
     )
     .bind(id)
     .bind(state)
     .bind(REDELIVERY_PENDING)
+    .bind(REDELIVERY_CLAIMED)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -370,6 +374,65 @@ mod tests {
             0,
             "a repeated settle is guarded on the claim"
         );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn redelivery_state_check_rejects_unknown_values_pg() {
+        let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "agentdesk_relay_dlq_state_check",
+            "relay dead letter redelivery state check",
+        )
+        .await;
+        let pool = pg_db.connect_and_migrate().await;
+        let validated: bool = sqlx::query_scalar(
+            "SELECT convalidated FROM pg_constraint \
+             WHERE conrelid = 'relay_dead_letter'::regclass \
+               AND conname = 'relay_dead_letter_redelivery_state_check'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(validated, "migration must validate all pre-existing rows");
+
+        let id = insert(&pool, &terminal_row("state contract"))
+            .await
+            .unwrap();
+
+        let states = [
+            REDELIVERY_PENDING,
+            REDELIVERY_CLAIMED,
+            REDELIVERY_DELIVERED,
+            REDELIVERY_DECLINED,
+            REDELIVERY_SUPERSEDED,
+        ];
+        for state in states {
+            sqlx::query("UPDATE relay_dead_letter SET redelivery_state = $2 WHERE id = $1")
+                .bind(id)
+                .bind(state)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let error = sqlx::query("UPDATE relay_dead_letter SET redelivery_state = $2 WHERE id = $1")
+            .bind(id)
+            .bind("pendign")
+            .execute(&pool)
+            .await
+            .expect_err("unknown state must fail at write time");
+        assert_eq!(
+            error.as_database_error().and_then(|db| db.constraint()),
+            Some("relay_dead_letter_redelivery_state_check")
+        );
+        let state: String =
+            sqlx::query_scalar("SELECT redelivery_state FROM relay_dead_letter WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, REDELIVERY_SUPERSEDED);
 
         pool.close().await;
         pg_db.drop().await;
