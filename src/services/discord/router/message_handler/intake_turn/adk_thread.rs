@@ -640,6 +640,7 @@ mod tests {
             pending_uploads: &mut uploads,
             session_was_cleared: Some(true),
             queued_drain: true,
+            queued: None,
         })
         .now_or_never()
         .expect("a queued refusal sends no notice");
