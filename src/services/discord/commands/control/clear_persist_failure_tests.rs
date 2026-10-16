@@ -442,7 +442,7 @@ pub(super) async fn trap_boundary_writes(pool: &sqlx::PgPool, trap: Trap) {
         ],
     };
     for statement in statements {
-        sqlx::query(*statement)
+        sqlx::query(sqlx::AssertSqlSafe(statement))
             .execute(pool)
             .await
             .expect("toggle the clear boundary trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
