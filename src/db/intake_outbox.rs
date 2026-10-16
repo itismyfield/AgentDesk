@@ -14,7 +14,7 @@
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use super::intake_outbox_status::IntakeOutboxStatus;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 #[cfg(test)]
 pub(crate) mod owner_fence_pg_tests;
@@ -333,7 +333,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
          FOR UPDATE OF parent SKIP LOCKED
         "#
     );
-    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(&capable_source_sql)
+    let capable_source: Option<IntakeOutboxRow> = sqlx::query_as(AssertSqlSafe(capable_source_sql))
         .bind(stale_after_secs)
         .bind(max_attempts)
         .bind(retry_after_secs)
@@ -366,7 +366,7 @@ pub(crate) async fn sweep_failed_pre_accept_once(
              FOR UPDATE OF parent SKIP LOCKED
             "#
         );
-        sqlx::query_as(&fallback_source_sql)
+        sqlx::query_as(AssertSqlSafe(fallback_source_sql))
             .bind(retry_after_secs)
             .fetch_optional(&mut *tx)
             .await?
@@ -617,7 +617,7 @@ pub(crate) async fn channel_has_open_row(
         "SELECT EXISTS (SELECT 1 FROM intake_outbox
                          WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL}))"
     );
-    sqlx::query_scalar(&sql)
+    sqlx::query_scalar(AssertSqlSafe(sql))
         .bind(channel_id)
         .fetch_one(pool)
         .await
@@ -658,7 +658,7 @@ mod migration_pg_tests {
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     use crate::db::intake_outbox_status::{IntakeOutboxStatus, OperatorRetryClass};
     use serde_json::json;
-    use sqlx::Row;
+    use sqlx::{AssertSqlSafe, Row};
 
     /// Migration 0080 verbatim. Every statement is idempotent — the DDL is
     /// `IF [NOT] EXISTS` and each backfill/fail-closed UPDATE is gated on
@@ -825,7 +825,7 @@ mod migration_pg_tests {
             "SELECT COUNT(*)::BIGINT FROM intake_outbox
              WHERE provider = '' AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
         );
-        let unclaimable: i64 = sqlx::query_scalar(&unclaimable_sql)
+        let unclaimable: i64 = sqlx::query_scalar(AssertSqlSafe(unclaimable_sql))
             .fetch_one(&pool)
             .await
             .expect("count unclaimable open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
@@ -1050,7 +1050,7 @@ mod migration_pg_tests {
              WHERE status IN ({prior_statuses})
              ORDER BY id"
         );
-        let old_ids: Vec<i64> = sqlx::query_scalar(&prior_sql)
+        let old_ids: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(prior_sql))
             .fetch_all(&pool)
             .await
             .expect("select pre-T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module
@@ -1059,7 +1059,7 @@ mod migration_pg_tests {
              WHERE status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})
              ORDER BY id"
         );
-        let widened_ids: Vec<i64> = sqlx::query_scalar(&widened_sql)
+        let widened_ids: Vec<i64> = sqlx::query_scalar(AssertSqlSafe(widened_sql))
             .fetch_all(&pool)
             .await
             .expect("select T2-M open rows"); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] module

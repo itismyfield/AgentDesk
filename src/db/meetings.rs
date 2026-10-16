@@ -8,7 +8,7 @@
 //! decomposition).
 
 use serde_json::{Value as JsonValue, json};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 // ── Transcript helpers ──────────────────────────────────────────────────────
 
@@ -160,7 +160,7 @@ pub async fn load_meeting_pg(
     id: &str,
     apply_fallback: impl FnOnce(&mut serde_json::Map<String, JsonValue>, &[JsonValue]),
 ) -> Result<Option<JsonValue>, sqlx::Error> {
-    let Some(row) = sqlx::query(&format!("{MEETING_SELECT} WHERE id = $1"))
+    let Some(row) = sqlx::query(AssertSqlSafe(format!("{MEETING_SELECT} WHERE id = $1")))
         .bind(id)
         .fetch_optional(pool)
         .await?
@@ -183,9 +183,8 @@ pub async fn list_meetings_pg(
     pool: &PgPool,
     apply_fallback: impl Fn(&mut serde_json::Map<String, JsonValue>, &[JsonValue]),
 ) -> Result<Vec<JsonValue>, sqlx::Error> {
-    let rows = sqlx::query(&format!("{MEETING_SELECT} ORDER BY started_at DESC"))
-        .fetch_all(pool)
-        .await?;
+    let sql = AssertSqlSafe(format!("{MEETING_SELECT} ORDER BY started_at DESC"));
+    let rows = sqlx::query(sql).fetch_all(pool).await?;
 
     let mut meetings: Vec<JsonValue> = rows.iter().map(meeting_row_to_json_pg).collect();
     for meeting in meetings.iter_mut() {

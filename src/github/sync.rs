@@ -1025,7 +1025,7 @@ async fn load_pg_agent_override(
 
 async fn load_pg_pipeline_override(
     pool: &PgPool,
-    sql: &str,
+    sql: &'static str,
     id: &str,
     label: &str,
 ) -> Result<Option<crate::pipeline::PipelineOverride>, String> {

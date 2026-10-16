@@ -46,14 +46,14 @@ pub(in crate::services::discord) async fn send_long_message_ctx(
 
 pub(in crate::services::discord) fn long_message_reply_builders(
     text: &str,
-) -> Vec<poise::CreateReply> {
+) -> Vec<(usize, poise::CreateReply)> {
     if !needs_multiple_messages(text) {
-        return vec![poise::CreateReply::default().content(text.to_string())];
+        return vec![(text.len(), poise::CreateReply::default().content(text))];
     }
 
     split_message(text)
         .into_iter()
-        .map(|chunk| poise::CreateReply::default().content(chunk))
+        .map(|chunk| (chunk.len(), poise::CreateReply::default().content(chunk)))
         .collect()
 }
 
@@ -69,8 +69,7 @@ pub(in crate::services::discord) async fn send_long_message_reply_ctx(
     let replies = long_message_reply_builders(text);
     let total = replies.len();
 
-    for (i, reply) in replies.into_iter().enumerate() {
-        let byte_len = reply.content.as_ref().map_or(0, String::len);
+    for (i, (byte_len, reply)) in replies.into_iter().enumerate() {
         tracing::debug!(
             target: "discord::chunker",
             path = "send_long_message_reply_ctx",

@@ -115,6 +115,16 @@ pub(super) async fn wait_until(
     .is_ok()
 }
 
+// Construct intake before polling it so its temporary state leaves the caller's stack.
+#[inline(never)]
+pub(super) fn boxed_intake<'a>(
+    ctx: &'a serenity::Context,
+    event: &'a serenity::FullEvent,
+    data: &'a Data,
+) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
+    Box::pin(router::handle_event(ctx, event, data))
+}
+
 fn watcher_handle(tmux_session_name: &str, output_path: &std::path::Path) -> TmuxWatcherHandle {
     TmuxWatcherHandle {
         tmux_session_name: tmux_session_name.to_string(),
@@ -221,19 +231,30 @@ impl RelayE2eHarness {
     }
 
     /// A runtime on the pool `storage` opens once the env lock is held; no session is bound.
-    pub(super) async fn start_unbound_on(
+    pub(super) fn start_unbound_on(
         storage: impl std::future::Future<Output = sqlx::PgPool>,
-    ) -> Self {
-        let storage = async { Some(storage.await) };
-        Self::start_inner(ProviderStub::Success, false, storage, false).await
+    ) -> impl std::future::Future<Output = Self> {
+        // Heap-pin bootstrap before an async caller captures its storage state.
+        let storage = Box::pin(async { Some(storage.await) });
+        Box::pin(Self::start_inner(
+            ProviderStub::Success,
+            false,
+            storage,
+            false,
+        ))
     }
 
     /// [`Self::start_unbound_on`] with the channel bound to its session.
-    pub(super) async fn start_bound_on(
+    pub(super) fn start_bound_on(
         storage: impl std::future::Future<Output = sqlx::PgPool>,
-    ) -> Self {
-        let storage = async { Some(storage.await) };
-        Self::start_inner(ProviderStub::Success, false, storage, true).await
+    ) -> impl std::future::Future<Output = Self> {
+        let storage = Box::pin(async { Some(storage.await) });
+        Box::pin(Self::start_inner(
+            ProviderStub::Success,
+            false,
+            storage,
+            true,
+        ))
     }
 
     /// Adds a health registry, the source of the utility bots SSH-direct
@@ -380,7 +401,7 @@ impl RelayE2eHarness {
     ) -> tokio::task::JoinHandle<Result<(), Error>> {
         let event = serenity::FullEvent::Message { new_message };
         let (ctx, data) = (self.ctx.clone(), self.clone_data());
-        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+        tokio::spawn(async move { boxed_intake(&ctx, &event, &data).await })
     }
 
     /// Answers `thread` as a guild thread of the fixture channel.
@@ -399,7 +420,7 @@ impl RelayE2eHarness {
             new_message: user_message(id, text),
         };
         let (ctx, data) = (self.ctx.clone(), self.clone_data());
-        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+        tokio::spawn(async move { boxed_intake(&ctx, &event, &data).await })
     }
 
     /// [`Self::run_catch_up`] on its own task.
@@ -433,7 +454,7 @@ impl RelayE2eHarness {
         let mut task = tokio::spawn({
             let ctx = self.ctx.clone();
             let data = self.clone_data();
-            async move { router::handle_event(&ctx, &event, &data).await }
+            async move { boxed_intake(&ctx, &event, &data).await }
         });
         tokio::select! {
             _ = &mut arrived => {}
@@ -882,10 +903,15 @@ mod test_thread_stack_budget {
     #[test]
     fn deliver_user_message_keeps_intake_off_the_test_thread_stack() {
         let intake = future_size(|h, event| router::handle_event(&h.ctx, event, &h.data));
+        let boxed = future_size(|h, event| boxed_intake(&h.ctx, event, &h.data));
         let delivered = future_size(|h, _| h.deliver_user_message(1, "status?"));
         assert!(
             intake > TEST_THREAD_INTAKE_BUDGET,
             "probe must see intake: {intake}"
+        );
+        assert!(
+            boxed <= TEST_THREAD_INTAKE_BUDGET,
+            "boxed_intake future is {boxed} bytes; construction must precede polling"
         );
         assert!(
             delivered <= TEST_THREAD_INTAKE_BUDGET,

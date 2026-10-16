@@ -10,7 +10,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 mod agent;
@@ -204,9 +204,9 @@ pub async fn get_scheduled_message_pg(
     pool: &PgPool,
     id: &str,
 ) -> Result<Option<ScheduledMessageRow>, sqlx::Error> {
-    sqlx::query_as::<_, ScheduledMessageRow>(&format!(
+    sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
         "SELECT {DEFINITION_COLUMNS} FROM scheduled_messages WHERE id = $1"
-    ))
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -216,11 +216,11 @@ pub async fn find_active_by_dedupe_key_pg(
     pool: &PgPool,
     dedupe_key: &str,
 ) -> Result<Option<ScheduledMessageRow>, sqlx::Error> {
-    sqlx::query_as::<_, ScheduledMessageRow>(&format!(
+    sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
         "SELECT {DEFINITION_COLUMNS} FROM scheduled_messages
          WHERE dedupe_key = $1 AND status IN ('scheduled', 'firing')
          LIMIT 1"
-    ))
+    )))
     .bind(dedupe_key)
     .fetch_optional(pool)
     .await
@@ -446,7 +446,7 @@ pub async fn claim_due_fires_pg(
     now: DateTime<Utc>,
 ) -> Result<Vec<ClaimedFire>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let due = sqlx::query_as::<_, ScheduledMessageRow>(&format!(
+    let due = sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
         "SELECT {DEFINITION_COLUMNS} FROM scheduled_messages
          WHERE status = 'scheduled' AND scheduled_at <= $1
            AND ($2 OR (
@@ -466,7 +466,7 @@ pub async fn claim_due_fires_pg(
          ORDER BY scheduled_at
          LIMIT $3
          FOR UPDATE SKIP LOCKED"
-    ))
+    )))
     .bind(now)
     .bind(delivery_runtime_available)
     .bind(batch)
@@ -611,11 +611,11 @@ pub async fn trigger_now_pg(
     lease_secs: i64,
 ) -> Result<Option<ClaimedFire>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let message = sqlx::query_as::<_, ScheduledMessageRow>(&format!(
+    let message = sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
         "SELECT {DEFINITION_COLUMNS} FROM scheduled_messages
          WHERE id = $1 AND status = 'scheduled'
          FOR UPDATE SKIP LOCKED"
-    ))
+    )))
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;

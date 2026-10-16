@@ -3,6 +3,8 @@
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs",
+        "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/route_claim_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/route_queue_tests.rs",
         "src/services/discord/turn_bridge/before_start_stop_reconcile_tests.rs",
@@ -144,7 +146,6 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/admin_host_guard_verified_reset_tests.rs",
         "src/services/auto_queue/runtime/verified_reset_pg_tests.rs",
         "src/services/discord/input_runtime/clear_tests.rs",
-        "src/services/cluster/intake_worker/input_effect_tests.rs",
         "src/services/discord/input_runtime/effect_tests.rs",
         "src/services/discord/queue_dispatch/input_effect_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",

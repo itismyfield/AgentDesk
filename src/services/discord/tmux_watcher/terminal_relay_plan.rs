@@ -691,3 +691,7 @@ mod rowless_delivery_authority;
 #[cfg(test)]
 #[path = "terminal_relay_plan_tests.rs"]
 mod soft_terminal_direct_send_authority_tests;
+
+#[cfg(test)]
+#[path = "lost_body_record_pg_tests.rs"]
+mod lost_body_record_pg_tests;

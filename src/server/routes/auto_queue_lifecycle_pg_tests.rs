@@ -117,7 +117,7 @@ mod tests {
         .expect("load slot run")
     }
 
-    async fn scalar_i64(pool: &sqlx::PgPool, query: &str) -> i64 {
+    async fn scalar_i64(pool: &sqlx::PgPool, query: &'static str) -> i64 {
         sqlx::query_scalar(query)
             .fetch_one(pool)
             .await
