@@ -65,9 +65,6 @@ pub(in crate::services::discord) mod tail_evidence;
 pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
-// Dormant until the input supervisor publishes views for channels it retires.
-#[allow(dead_code)]
-pub(in crate::services::discord) mod transcript_turn;
 mod turn_deliver;
 mod unpaired_active_token;
 pub(in crate::services::discord) mod watcher_respawn;

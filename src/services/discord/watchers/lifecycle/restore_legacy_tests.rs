@@ -1,7 +1,7 @@
 use super::*;
-use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::watcher_completion::Outcome;
-use crate::services::discord::tmux::n4d2_entry_support as support;
+use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
+use crate::services::discord::tmux::watcher_install_fixture as support;
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -24,7 +24,7 @@ fn legacy_restore_preserves_backfill_and_session_adoption() {
         let row = crate::services::discord::inflight::InflightTurnState::new(
             fixture.provider.clone(),
             fixture.channel.get(),
-            Some("n4d2-legacy".into()),
+            Some("legacy-restore".into()),
             7,
             101,
             102,

@@ -520,7 +520,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
-  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_and_then_edits_the_legacy_placeholder
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_closed_gate_holds_a_proven_unknown_head_until_it_opens_pg
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_pg

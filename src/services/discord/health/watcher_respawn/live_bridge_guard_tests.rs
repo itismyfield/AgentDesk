@@ -1,7 +1,7 @@
 use super::super::complete_force_clean_watcher_recovery;
 use super::*;
-use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
-use crate::services::discord::tmux::{InstallFixture, n4d2_entry_support as support};
+use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
+use crate::services::discord::tmux::{InstallFixture, watcher_install_fixture as support};
 use poise::serenity_prelude::{MessageId, UserId};
 
 fn run<F: std::future::Future<Output = ()>>(

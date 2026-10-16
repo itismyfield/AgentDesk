@@ -67,7 +67,7 @@ fn dequeues(h: &RelayE2eHarness) -> usize {
         .count()
 }
 
-struct WatcherTasks(discord::task_supervisor::n4d_spawn_observation::Scope);
+struct WatcherTasks(discord::task_supervisor::watcher_spawn_observation::Scope);
 
 impl Drop for WatcherTasks {
     fn drop(&mut self) {
@@ -181,9 +181,9 @@ impl Incident {
         write_row(&row);
         let observed = inflight::o_seed_observation::Guard::new(&CLAUDE, h.channel_id.get());
         observed.register_source(&source);
-        let tasks = WatcherTasks(discord::task_supervisor::n4d_spawn_observation::Scope::new(
-            &h.shared,
-        ));
+        let tasks = WatcherTasks(
+            discord::task_supervisor::watcher_spawn_observation::Scope::new(&h.shared),
+        );
         incident_attach(&h.shared, h.ctx.http.clone(), &mut row, false).await;
         pane.pane("busy");
         assert!(

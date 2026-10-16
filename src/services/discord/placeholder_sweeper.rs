@@ -335,13 +335,6 @@ async fn run_placeholder_sweep_pass(
     report.scanned = states.len();
     stalled_tracker.retain_live(provider, &states);
     for (state, age_secs) in states {
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            state.channel_id,
-            "placeholder_row_pass",
-        ) {
-            continue;
-        }
         if state.rebind_origin {
             // #3581: a rebind-origin inflight has no placeholder to edit (skipped)
             // — but an abandoned, never-progressed orphan (STALL-WATCHDOG respawn)
@@ -476,14 +469,6 @@ async fn run_placeholder_sweep_pass(
         } else {
             PlaceholderProbe::StillPlaceholder
         };
-        // The probe awaited Discord; re-judge before any edit or cleanup.
-        if super::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            state.channel_id,
-            "placeholder_row_pass_after_probe",
-        ) {
-            continue;
-        }
         // Transient probe failure: leave everything for next sweep.
         // Applies to both stalled and abandoned classifications.
         if matches!(probe, PlaceholderProbe::ProbeFailed) {
@@ -804,16 +789,7 @@ async fn sweep_orphan_status_panel(
     // Panel-only/TUI-direct rows have no real user-message identity to finalize,
     // so only those terminal-marker rows can discard their stale marker.
     let decision = abandoned_tmux_cleanup_decision_for(shared, provider, state).await;
-    #[cfg(test)]
-    retirement_tests::after_owner_probe().await;
     if !decision.allows_discord_cleanup() {
-        return;
-    }
-    if super::health::legacy_supervision::legacy_retired(
-        provider.as_str(),
-        state.channel_id,
-        "inline_orphan_panel_after_owner_probe",
-    ) {
         return;
     }
     // Do not delete a panel a replacement turn now owns, or one whose turn has

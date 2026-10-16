@@ -53,7 +53,7 @@ impl InstallFixture {
             .register(provider.as_str().to_owned(), shared.clone())
             .await;
         let session = provider.build_tmux_session_name(&format!(
-            "n4d-{}-{}",
+            "wfx-{}-{}",
             channel.get(),
             if provider == ProviderKind::Codex {
                 "cdx"
@@ -64,7 +64,7 @@ impl InstallFixture {
         let output = tc::session_temp_path(&session, "jsonl");
         std::fs::create_dir_all(Path::new(&output).parent().unwrap()).unwrap();
         std::fs::write(&output, []).unwrap();
-        std::fs::write(tc::session_temp_path(&session, "generation"), "n4d-source").unwrap();
+        std::fs::write(tc::session_temp_path(&session, "generation"), "wfx-source").unwrap();
         std::fs::write(
             tc::tmux_owner_path(&session),
             tc::current_tmux_owner_marker(),
@@ -83,7 +83,7 @@ impl InstallFixture {
         Self {
             shared,
             registry,
-            http: Arc::new(serenity::Http::new("n4d-fixture")),
+            http: Arc::new(serenity::Http::new("wfx-fixture")),
             provider,
             channel,
             session,
@@ -106,7 +106,7 @@ impl InstallFixture {
     }
 }
 
-const CHILD: &str = "ADK_N4D2_ENTRY_CHILD";
+const CHILD: &str = "ADK_WATCHER_FIXTURE_CHILD";
 const FAKE_TMUX: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "ROOT/tmux-calls"
 while [ "${1#-}" != "$1" ]; do
@@ -265,17 +265,5 @@ pub(in crate::services::discord) async fn until(
             observed.raw_process_snapshot()
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-pub(in crate::services::discord) fn assert_zero_loaders(observed: &Guard) {
-    for s in [observed.snapshot(), observed.raw_process_snapshot()] {
-        assert_eq!(s.writable_inflight_load_calls, 0, "{s:?}");
-        assert_eq!(s.readonly_inflight_load_calls, 0, "{s:?}");
-        assert_eq!(s.compatibility_backfill_attempts, 0, "{s:?}");
-        assert_eq!(s.legacy_prefix_restore_calls, 0, "{s:?}");
-        assert_eq!(s.event_count("legacy_row_seed_adopted"), 0, "{s:?}");
-        assert_eq!(s.event_count("capsule_legacy_adopted"), 0, "{s:?}");
-        assert_eq!(s.event_count("terminal_preflight_entries"), 0, "{s:?}");
     }
 }

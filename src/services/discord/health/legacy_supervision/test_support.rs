@@ -1,4 +1,4 @@
-//! Shared fixtures for the retired-channel gate tests: a local Discord stand-in and
+//! Shared fixtures for Legacy cleanup tests: a local Discord stand-in and
 //! durable-record fingerprints (bytes, existence, mtime).
 
 use std::path::{Path, PathBuf};
@@ -9,7 +9,6 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use poise::serenity_prelude::{Http, HttpBuilder};
 
-use super::RetiredForTest;
 use crate::services::discord::inflight::InflightTurnState;
 
 /// Status and JSON body for one request; `None` falls back to 204 for DELETE and an
@@ -123,20 +122,6 @@ pub(in crate::services::discord) fn message_json(
         "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
         "attachments": [], "embeds": [], "pinned": false, "type": 0
     })
-}
-
-/// Retires a channel from inside a mock answer, modelling a mark that lands while
-/// the gated pass awaits Discord.
-#[derive(Clone, Default)]
-pub(in crate::services::discord) struct RetireLater(Arc<Mutex<Option<RetiredForTest>>>);
-
-impl RetireLater {
-    pub(in crate::services::discord) fn retire(&self, provider: &str, channel_id: u64) {
-        let mut slot = self.0.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(RetiredForTest::new(provider, channel_id));
-        }
-    }
 }
 
 /// Writes `state` as a row file without its finalizer id, so the writing loader rewrites it.
