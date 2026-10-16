@@ -33,6 +33,8 @@ mod auto;
 
 struct Fixture {
     _db: TestPostgresDb,
+    pool: sqlx::PgPool,
+    context: serenity::Context,
     app: Router,
     shared: Arc<SharedData>,
     pane: InjectPane,
@@ -195,7 +197,11 @@ impl Fixture {
                 format!("ws://{address}/gateway"),
             )
             .await;
-        shared.http.cached_serenity_ctx.set(context).unwrap();
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(context.clone())
+            .unwrap();
         let config = crate::config::Config::default();
         let engine = crate::engine::PolicyEngine::new(&config).unwrap();
         let broadcast = crate::eventbus::new_broadcast();
@@ -206,10 +212,12 @@ impl Fixture {
             broadcast,
             buffer,
             Some(registry),
-            Some(pool),
+            Some(pool.clone()),
         );
         Self {
             _db: db,
+            pool,
+            context,
             app,
             shared,
             pane,
@@ -222,6 +230,35 @@ impl Fixture {
             server,
             _rest: rest,
         }
+    }
+
+    /// A process restart: a new runtime with its own mailbox registry restores the queue from disk
+    /// as startup does, on the same pane, transcript and database; `busy` holds the same turn again.
+    async fn restart(&mut self, busy: bool) {
+        let registry = HealthRegistry::new();
+        let channels = [self.channel.get()];
+        let shared = register_inject_runtime(&registry, &channels, Some(self.pool.clone())).await;
+        let token = "s2b-test-token".to_string();
+        shared.http.cached_bot_token.set(token).unwrap();
+        let context = self.context.clone();
+        shared.http.cached_serenity_ctx.set(context).unwrap();
+        // Startup restores only channels the configuration binds, where the route read the allowlist.
+        let role_map = runtime_store::role_map_path().unwrap();
+        std::fs::create_dir_all(role_map.parent().unwrap()).unwrap();
+        let bound = json!({ "byChannelId": { self.channel.get().to_string():
+            { "roleId": "s2b-head-agent", "promptFile": "prompt.md", "provider": "claude" } } });
+        std::fs::write(role_map, bound.to_string()).unwrap();
+        let restore =
+            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests;
+        restore(&self.http, &shared, &ProviderKind::Claude).await;
+        let mailbox = shared.mailbox(self.channel);
+        let (holder, owner) = (self.holder.clone(), UserId::new(100));
+        if busy && mailbox.snapshot().await.cancel_token.is_none() {
+            mailbox
+                .restore_active_turn(holder, owner, self.holder_message)
+                .await;
+        }
+        self.shared = shared;
     }
 
     async fn enqueue(&self, text: &str) {
@@ -493,7 +530,7 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     );
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -561,7 +598,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
         fixture.channel, before[0].message_id
     )));
     assert!(!buffer.contains("distinct tail B"));
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -650,6 +687,111 @@ async fn s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_re
     assert!(take.persistence_error.is_none());
     assert_eq!(fixture.bytes(), original);
     fixture.assert_holder_kept().await;
+}
+
+/// Claude Code's paste block around `inner`, opened and closed with the given ids.
+fn paste_block(open: &str, inner: &str, close: &str) -> String {
+    format!("<pasted_content id=\"{open}\">\n{inner}\n</pasted_content id=\"{close}\">")
+}
+
+/// The pane's enqueue receipt with `content` as its prompt.
+fn enqueue_receipt(content: Value) -> String {
+    json!({"type": "queue-operation", "operation": "enqueue", "content": content}).to_string()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_block_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(6_813_430, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let block = paste_block("b0ac", "@BODY@", "b0ac");
+    fixture.pane.set("receipt", &enqueue_receipt(json!(block)));
+    let before = fixture.queue().await;
+    fixture.kick().await;
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\nstatus?"));
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let after = fixture.queue().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(format!("{:?}", after[0]), format!("{:?}", before[1]));
+
+    // The composer is empty again, so the next kick types B once in the same way.
+    std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+    fixture.kick().await;
+    assert_eq!(
+        fixture.pane.keys(),
+        ["paste-buffer", "send-keys", "paste-buffer", "send-keys"]
+    );
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\ndistinct tail B"));
+    assert!(fixture.queue().await.is_empty());
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let terminal = disk["terminal_identities"].as_array().unwrap();
+    assert_eq!(terminal.len(), 2);
+    for (identity, head) in terminal.iter().zip(&before) {
+        assert_eq!(identity["primary"], head.message_id.get());
+        assert_eq!(identity["queued_generation"], head.queued_generation);
+        assert_eq!(identity["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(identity["sources"][0]["message_id"], head.message_id.get());
+    }
+    fixture.assert_holder_kept().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let block = |inner: &str| paste_block("b0ac", inner, "b0ac");
+    let quoted = block("@BODY@");
+    let cases = [
+        ("suffix inside", enqueue_receipt(json!(block("@BODY@\nX")))),
+        ("changed body", enqueue_receipt(json!(block("@HEAD@\nstatus!")))),
+        ("text after", enqueue_receipt(json!(format!("{quoted}\nX")))),
+        ("trailing newline", enqueue_receipt(json!(format!("{quoted}\n")))),
+        ("leading space", enqueue_receipt(json!(format!(" {quoted}")))),
+        ("other close id", enqueue_receipt(json!(paste_block("b0ac", "@BODY@", "c1d2")))),
+        ("uppercase id", enqueue_receipt(json!(paste_block("B0AC", "@BODY@", "B0AC")))),
+        (
+            "extra attribute",
+            enqueue_receipt(json!(quoted.replacen("\">", "\" source=\"x\">", 1))),
+        ),
+        ("nested", enqueue_receipt(json!(paste_block("c1d2", &quoted, "c1d2")))),
+        (
+            "nontext",
+            enqueue_receipt(json!([{"type": "text", "text": quoted},
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}])),
+        ),
+        (
+            "assistant quote",
+            json!({"type": "assistant", "message": {"content": quoted}}).to_string(),
+        ),
+        (
+            "tool result",
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": quoted}]}})
+                .to_string(),
+        ),
+        (
+            "meta",
+            json!({"type": "user", "isMeta": true, "message": {"content": quoted}}).to_string(),
+        ),
+    ];
+    for (offset, (case, receipt)) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(6_813_431 + offset as u64, "all").await;
+        let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+        fixture.pane.set("receipt", &receipt);
+        let before = payloads(items(fixture.disk()));
+        fixture.kick().await;
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"], "{case}");
+        assert_eq!(
+            fixture.disk()["head_injection"]["phase"],
+            "unknown",
+            "{case}"
+        );
+        fixture.assert_unknown_barrier(before).await;
+        fixture.assert_holder_kept().await;
+    }
 }
 
 async fn reached(signal: &tokio::sync::Notify) {
@@ -750,14 +892,14 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         assert_eq!(fixture.disk()["head_injection"]["phase"], phase);
         assert_eq!(fixture.pane.tmux_calls(), 0);
         if idle {
-            let transcript_path = fixture.pane.path("transcript.jsonl");
+            let transcript_path = fixture.pane.path(InjectPane::TRANSCRIPT);
             assert!(
                 crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&transcript_path)
                     .is_busy()
             );
             let transcript = std::fs::read_to_string(&transcript_path).unwrap();
             fixture.pane.set(
-                "transcript.jsonl",
+                InjectPane::TRANSCRIPT,
                 &format!("{transcript}{{\"type\":\"result\"}}\n"),
             );
             fixture.pane.idle();
@@ -896,14 +1038,14 @@ async fn s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_
     assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
     assert!(fixture.pane.transcript_recorded_the_paste());
     fixture.pane.idle();
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     fixture.pane.set(
-        "transcript.jsonl",
+        InjectPane::TRANSCRIPT,
         &format!("{transcript}{{\"type\":\"result\"}}\n"),
     );
     assert_eq!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
-            &fixture.pane.path("transcript.jsonl")
+            &fixture.pane.path(InjectPane::TRANSCRIPT)
         ),
         crate::services::tui_turn_state::TuiTurnState::Idle
     );
