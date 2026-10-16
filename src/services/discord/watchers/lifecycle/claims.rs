@@ -647,7 +647,8 @@ pub(crate) fn claim_cross_channel_tmux_watcher_for_test(
         }
     }
 
-    let watchers = TmuxWatcherRegistry::new();
+    let watchers =
+        TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let tmux_session_name = "AgentDesk-claude-4984-cross-channel-claim";
     assert!(try_claim_watcher(
         &watchers,

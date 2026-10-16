@@ -1013,6 +1013,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         let mut ledger = store.open_channel(&era, channel).unwrap().unwrap();
         for entry in [
             LedgerEntry::Prepared {
+                local_retry: None,
                 serial: 0,
                 unit_key: key.unit().clone(),
                 piece_index: 0,
@@ -1022,6 +1023,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
             },
             LedgerEntry::NotFound { serial: 0 },
             LedgerEntry::Prepared {
+                local_retry: None,
                 serial: 1,
                 unit_key: unit("permission-proof"),
                 piece_index: 0,
@@ -1038,10 +1040,7 @@ async fn d4act2_gateway_repost_reload_off_and_rollback_quiescence_pg() {
         }
         let original = ledger.ledger().piece(0).unwrap().clone();
         drop(ledger);
-        let ledger_path = root
-            .join("o_store")
-            .join(channel.to_string())
-            .join("ledger.jsonl");
+        let ledger_path = root.join(format!("o_store/{channel}/ledger.jsonl"));
         let old_bytes = std::fs::read(&ledger_path).unwrap();
         activated_ledgers.push(ledger_path.clone());
         let sidecar = runtime

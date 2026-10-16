@@ -2,6 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::services::tui_o::shadow::IDENTITY_VERSION;
+use crate::services::tui_o::shadow::identity::V3Rule;
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::writer::rotation::{MAX_READERS, RETIRE_QUIET, Sources};
 
@@ -234,6 +235,7 @@ async fn h4_retained_prepared_payload_identity_and_posted_delivery_survive_resto
     writer
         .store()
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key: open.unit_key.clone(),
             piece_index: open.index,
@@ -366,13 +368,13 @@ impl AlarmSink for HealthSink {
     }
 }
 
-fn health_writer(
-    harness: &Harness,
-) -> (
+type HealthyWriter = (
     ChannelWriter<FakePort, Arc<FakeLease>, HealthSink>,
     Arc<crate::services::tui_o::alarm::AlarmHealth>,
     Arc<Mutex<Vec<usize>>>,
-) {
+);
+
+fn health_writer(harness: &Harness) -> HealthyWriter {
     let health = Arc::new(crate::services::tui_o::alarm::AlarmHealth::default());
     let router = Arc::new(crate::services::tui_o::alarm::AlarmRouter::new(
         None,
@@ -706,7 +708,7 @@ fn payloads(owed: &VecDeque<Derived>) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_v2_codex_spool_resumes_under_v3_without_reposting_a_delivered_piece() {
+async fn a_v2_codex_spool_resumes_under_the_current_version_without_reposting_a_delivered_piece() {
     let (harness, ids, bindings) = fixture(1);
     let long = "중단 전 긴 본문".repeat(400);
     let turn = [
@@ -760,4 +762,58 @@ async fn a_v2_codex_spool_resumes_under_v3_without_reposting_a_delivered_piece()
     assert_eq!(rolled.len(), written.len() + 1);
     let current = header_version(rolled.last().unwrap(), None);
     assert_eq!(current, u64::from(IDENTITY_VERSION));
+}
+
+/// A store a v3 writer really stopped on a whole-message row resumes under v4: rows past the stop
+/// post once, earlier posts never repeat, and new frames go to a current-version segment.
+#[tokio::test(start_paused = true)]
+async fn a_store_a_v3_writer_stopped_on_a_whole_message_row_resumes_once() {
+    let (harness, path, _) = switched_over(&row("m0", "before the switch"));
+    harness.gate.acquired();
+    let v3 = V3Rule::hold();
+    let (_stop, task) = spawn(harness.writer());
+    append(&path, &row("m1", "first"));
+    polls(3).await;
+    append(
+        &path,
+        &[thinking_then_tool("m2"), row("m3", "after")].concat(),
+    );
+    let cause = task.await.unwrap().unwrap();
+    drop(v3);
+    assert!(matches!(cause.alarm, WriterAlarm::SchemaBlocked { .. }));
+    assert!(matches!(
+        harness.alarms.taken()[..],
+        [WriterAlarm::SchemaBlocked { .. }]
+    ));
+    assert_eq!(harness.port.posts(), ["first"]);
+    assert!(excluded_keys(&harness).is_empty());
+    // As in the stopped production store, the cursor has captured every row the writer stopped on.
+    let cursor = harness.channel().cursors().next().unwrap().captured_through;
+    assert_eq!(cursor, std::fs::metadata(&path).unwrap().len());
+    let stopped = segments(&harness);
+    for segment in &stopped {
+        header_version(segment, Some(3));
+    }
+    append(&path, &row("m4", "while stopped"));
+    let (stop, task) = spawn(harness.writer());
+    polls(3).await;
+    append(&path, &row("m5", "live"));
+    polls(3).await;
+    assert!(!task.is_finished(), "the actor keeps running");
+    let posts = ["first", "after", "while stopped", "live"];
+    assert_eq!(harness.port.posts(), posts);
+    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    let current = segments(&harness).pop().unwrap();
+    assert!(
+        !stopped.contains(&current),
+        "new frames roll past the v3 segments"
+    );
+    assert_eq!(header_version(&current, None), u64::from(IDENTITY_VERSION));
+    halt(stop, task).await;
+    let (stop, task) = spawn(harness.writer());
+    polls(3).await;
+    assert_eq!(harness.port.posts(), posts);
+    assert_eq!(excluded_keys(&harness), ["m2:2"]);
+    assert_eq!(harness.alarms.taken(), []);
+    halt(stop, task).await;
 }

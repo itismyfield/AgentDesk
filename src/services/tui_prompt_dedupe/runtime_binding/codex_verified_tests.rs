@@ -1950,3 +1950,6 @@ fn s2b1b_p2_snapshot_rejects_a_valid_successor_incarnation() {
     );
     assert!(recheck(&b).is_ok());
 }
+
+#[path = "codex_verified_executed_resume_tests.rs"]
+mod executed_resume;

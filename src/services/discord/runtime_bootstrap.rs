@@ -591,10 +591,9 @@ async fn start_channel_homes(
     }
     let restored = turns_restored(shared, role).await;
     let candidates = || {
-        let selected = crate::services::tui_o::channel_policy::boot();
-        let here = |channel: &u64| herdr_runs_here(*channel);
-        let selected = selected.map(|boot| boot.selected().iter().copied().filter(here));
-        selected.map(Iterator::collect).unwrap_or_default()
+        let mut selected = selected_herdr_channels(provider);
+        selected.retain(|channel| herdr_runs_here(*channel));
+        selected.into_iter().collect()
     };
     channel_home_boot::start(switch, || {
         let pool = shared.pg_pool.clone()?;
@@ -617,6 +616,7 @@ async fn start_channel_homes(
             rows,
             candidates: candidates(),
             port,
+            writers: (role == HomeRole::Gateway).then(|| o_writer_host::home_writers(provider)),
         })
     })
     .await

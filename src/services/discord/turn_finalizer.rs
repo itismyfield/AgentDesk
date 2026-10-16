@@ -54,8 +54,10 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
 use self::actor_state::{FinalizeMsg, LedgerEntry, PendingCompletionAdmission, Phase};
+#[cfg(test)]
+use self::completion_admission::CompletionAdmission;
 pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
-use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
+use self::completion_admission::publish_claimed_queue_eligible;
 use self::completion_admission_actor::{
     apply_pending_completion_admission, handle_completion_admission_message,
     note_mailbox_release_after_finalize, take_exact_pending_completion_admission,
@@ -662,22 +664,13 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             &mut pending_admission,
                             exact_key,
                         );
-                        let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
-                            recovery_lease,
-                            phase: Phase::Pending,
-                            relay_owner,
-                            provider: provider.clone(),
-                            turn_key: key,
-                            terminal_deadline: None,
-                            watcher_backstop_deadline: arm_watcher_backstop
-                                .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
-                            watcher_backstop_probe_at: None,
-                            watcher_backstop_terminal_streak: 0,
-                            watcher_backstop_deadline_pulled: false,
-                            completion_admission: CompletionAdmission::new(
-                                completion_admission_plan,
-                            ),
-                            finalized_at: None,
+                        let deadline = arm_watcher_backstop
+                            .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP);
+                        let (lease, plan) = (recovery_lease, completion_admission_plan);
+                        let entry = ledger.entry(exact_key).or_insert_with(|| {
+                            LedgerEntry::registered(
+                                key, provider.clone(), relay_owner, lease, plan, deadline,
+                            )
                         });
                         if entry.phase != Phase::Finalized {
                             entry.relay_owner = relay_owner;
