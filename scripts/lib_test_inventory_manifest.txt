@@ -4684,11 +4684,10 @@ services::discord::inflight::removal::nondestructive_loader_tests::boot_reaper_w
 services::discord::inflight::removal::nondestructive_loader_tests::loader_backfills_only_rows_it_keeps_on_the_unlocked_verdict
 services::discord::inflight::removal::nondestructive_loader_tests::production_readers_hide_but_never_unlink_retirable_rows
 services::discord::inflight::removal::nondestructive_loader_tests::restart_marking_leaves_hidden_rows_to_the_next_boot_reaper
-services::discord::inflight::restart_mark::tests::c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unseen_rows
-services::discord::inflight::restart_mark::tests::c2b_failed_protected_marker_write_records_gate_health_until_a_complete_pass
+services::discord::inflight::restart_mark::tests::c2b_async_marking_marks_every_readable_row_and_reports_failed_and_unseen_rows
+services::discord::inflight::restart_mark::tests::c2b_failed_marker_write_keeps_a_short_pass_until_a_complete_pass
+services::discord::inflight::restart_mark::tests::marking_waits_on_a_row_lock_off_the_scheduler_thread
 services::discord::inflight::restart_mark::tests::receipt_rows_are_skipped_byte_identical_and_never_counted_as_failed
-services::discord::inflight::restart_mark_fence_tests::c2_loop_rechecks_protection_installed_after_loading
-services::discord::inflight::restart_mark_fence_tests::c2_restart_marking_skips_a_held_row_and_marks_the_rest
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_preserves_newer_owner_bytes_on_identity_mismatch
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_accepts_same_value_prior_write_within_ui_group
@@ -4718,6 +4717,7 @@ services::discord::inflight::save_store::identity_gate::bridge_entry::tests::sli
 services::discord::inflight::save_store::identity_gate::host_locator::tests::hosted_binding_is_installed_once_and_only_its_own_nonce_and_locator_may_write
 services::discord::inflight::save_store::identity_gate::host_locator::tests::legacy_rows_without_a_binding_stamp_and_reload_unchanged
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_failed_receipt_write_publishes_nothing
+services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_transition_runs_on_a_blocking_worker_and_its_panic_is_none
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_adds_only_the_receipt_to_the_advanced_row
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_refuses_every_fresh_row_that_is_not_this_bridge_turn
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_stays_off_without_settlement_and_without_identity
@@ -4995,15 +4995,11 @@ services::discord::input_runtime::fence::modes::tests::g1a_a_later_handback_reje
 services::discord::input_runtime::fence::modes::tests::g1a_handback_settle_rechecks_current_capability_and_retains_barrier_on_refusal
 services::discord::input_runtime::fence::modes::tests::g1a_unrelated_order_cannot_issue_a_post_release_settle_capability
 services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
-services::discord::input_runtime::fence::tests::b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io
-services::discord::input_runtime::fence::tests::b2_scheduler_late_protection_refuses_inflight_before_any_io
-services::discord::input_runtime::fence::tests::b2_scope_raw_reentry_keeps_blocking_refusal_and_try_contention
 services::discord::input_runtime::fence::tests::canonical_borrowing_and_supervisor_contention_never_prepare
 services::discord::input_runtime::fence::tests::closing_drains_only_existing_permits_and_rejects_redirect
 services::discord::input_runtime::fence::tests::off_failure_health_does_not_change_actual_snapshot
 services::discord::input_runtime::fence::tests::off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore
 services::discord::input_runtime::fence::tests::ordinary_writer_waits_for_release_and_timeout_is_typed
-services::discord::input_runtime::fence::tests::queue_primitives_share_canonical_sidecar_wait_and_borrow_without_scheduler_stall
 services::discord::input_runtime::fence::tests::released_registration_and_stale_closing_cannot_issue_capabilities
 services::discord::input_runtime::fence::tests::stale_epoch_is_not_mode_or_duplicate
 services::discord::input_runtime::supervisor::activation::scope_tests::g2_e2_codex_primary_and_same_provider_routes_are_supported
@@ -6598,8 +6594,6 @@ services::discord::relay_recovery::tests::incarnation_follow_up::a_foreign_actor
 services::discord::relay_recovery::tests::incarnation_follow_up::accepted_wrapper_follow_up_never_latches_a_successor_recovery
 services::discord::relay_recovery::tests::incarnation_follow_up::cancelled_finish_is_bound_to_the_expected_actor
 services::discord::relay_recovery::tests::incarnation_follow_up::force_purge_finish_never_reaches_a_successor_actor
-services::discord::relay_recovery::tests::input_fence::c2_admitted_relay_apply_holds_input_drain_through_reserved_episode
-services::discord::relay_recovery::tests::input_fence::c2_closed_input_gate_skips_relay_recovery_before_reserving_or_mutating
 services::discord::relay_recovery::tests::input_fence::reserved_relay_reattach_completes_its_pinned_rebind
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_reattach_watcher_when_evidence_is_complete
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
@@ -13782,7 +13776,6 @@ services::turn_orchestrator::inbound_order::tests::an_immediate_turn_cycle_never
 services::turn_orchestrator::inbound_order::tests::nothing_ahead_of_the_claim_clears_the_stall_clock
 services::turn_orchestrator::inbound_order::tests::the_fail_open_window_spans_three_idle_queue_backstop_rounds
 services::turn_orchestrator::injected_inputs::tests::a_busy_slot_keeps_its_turn_when_an_injected_message_is_claimed
-services::turn_orchestrator::injected_inputs::tests::a_cancel_that_removed_the_file_but_failed_its_fsync_still_holds_the_reservation
 services::turn_orchestrator::injected_inputs::tests::a_closed_actor_refuses_reserve_and_settle_and_passes_abandon
 services::turn_orchestrator::injected_inputs::tests::a_fresh_actor_reads_any_provider_terminal_and_a_known_one_only_its_own
 services::turn_orchestrator::injected_inputs::tests::a_fresh_actor_refuses_a_message_claimed_for_injection_elsewhere
@@ -13801,7 +13794,6 @@ services::turn_orchestrator::injected_inputs::tests::take_next_and_behind_queue_
 services::turn_orchestrator::injected_inputs::tests::the_handback_makes_four_attempts_then_abandons_the_reservation
 services::turn_orchestrator::input_fence::tests::b2_freeze_refuses_other_token_queue_or_marker_without_ack_or_mutation
 services::turn_orchestrator::input_fence::tests::c2_restart_drain_leaves_a_held_channel_alone_and_still_persists_legacy
-services::turn_orchestrator::input_fence::tests::freeze_barrier_waits_for_actual_queued_writer
 services::turn_orchestrator::input_fence::tests::freeze_rejects_active_lease_malformed_snapshot_and_wrong_identity_without_mutation
 services::turn_orchestrator::lease_release::lease_release_identity_tests::a_provider_named_like_the_sentinel_stays_distinguishable_from_unmeasured
 services::turn_orchestrator::lease_release::lease_release_identity_tests::clear_arm_release_names_the_channel_and_the_message_provider
@@ -13828,6 +13820,7 @@ services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::an_entry_error_is_returned_while_other_channels_still_restore
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::tests::permission_denied_is_returned_and_logged_without_changing_the_queue
 services::turn_orchestrator::pending_queue_persistence::tests::backward_clock_restore_lands_outside_dedup_window
+services::turn_orchestrator::pending_queue_persistence::tests::empty_queue_and_marker_removal_never_open_the_parent
 services::turn_orchestrator::pending_queue_persistence::tests::legacy_payload_without_created_at_wall_time_falls_back_to_reload_now
 services::turn_orchestrator::pending_queue_persistence::tests::own_file_count_includes_dangling_links_the_purge_would_unlink
 services::turn_orchestrator::pending_queue_persistence::tests::own_file_count_is_unknown_when_lstat_fails_for_another_reason
@@ -13894,7 +13887,6 @@ services::turn_orchestrator::queued_head::s2a_tests::s2a_unknown_head_cannot_be_
 services::turn_orchestrator::queued_head::tests::a_claim_and_a_dispatch_never_both_own_the_queue_front
 services::turn_orchestrator::queued_head::tests::a_clear_discards_a_dequeued_input_and_retries_a_failed_marker_removal
 services::turn_orchestrator::queued_head::tests::a_clear_discards_an_unknown_head_from_disk_even_when_its_writes_fail
-services::turn_orchestrator::queued_head::tests::a_clear_leaves_memory_and_disk_alike_when_a_parent_fsync_fails
 services::turn_orchestrator::queued_head::tests::a_corrupt_legacy_queue_refuses_input_and_keeps_its_bytes
 services::turn_orchestrator::queued_head::tests::a_not_sent_head_keeps_its_place_and_payload
 services::turn_orchestrator::queued_head::tests::a_possibly_sent_head_found_by_a_restart_is_unknown_and_never_resubmitted

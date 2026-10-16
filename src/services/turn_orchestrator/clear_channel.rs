@@ -141,16 +141,14 @@ fn write_cleared_files(
         queued_head::keep_disk_terminal(state, &path);
     }
     let unlinked = report.attempt("queue_unlink", || {
-        crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-            #[cfg(test)]
-            if let Some(after) = take_fault(channel_id, Op::Queue) {
-                if after {
-                    let _ = std::fs::remove_file(&path);
-                }
-                return Err(format!("injected removal failure {}", path.display()));
+        #[cfg(test)]
+        if let Some(after) = take_fault(channel_id, Op::Queue) {
+            if after {
+                let _ = std::fs::remove_file(&path);
             }
-            unlink(&path)
-        })
+            return Err(format!("injected removal failure {}", path.display()));
+        }
+        unlink(&path)
     });
     let marker_removed = report.attempt("marker_unlink", || {
         #[cfg(test)]
@@ -166,20 +164,18 @@ fn write_cleared_files(
     let snapshot =
         queued_head::snapshot_json(Vec::new(), meta).unwrap_or_else(|_| "[]".to_string());
     let published = report.attempt("queue_publish", || {
-        crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-            #[cfg(test)]
-            if super::pending_queue_persistence::save_fault::take(channel_id) {
-                return Err(format!(
-                    "injected pending queue save failure {}",
-                    path.display()
-                ));
-            }
-            let context = AtomicWriteContext::new("discord_pending_queue")
-                .provider(provider.as_str())
-                .token_hash(token_hash)
-                .channel_id(channel_id.get());
-            critical_atomic_write(&path, &snapshot, context)
-        })
+        #[cfg(test)]
+        if super::pending_queue_persistence::save_fault::take(channel_id) {
+            return Err(format!(
+                "injected pending queue save failure {}",
+                path.display()
+            ));
+        }
+        let context = AtomicWriteContext::new("discord_pending_queue")
+            .provider(provider.as_str())
+            .token_hash(token_hash)
+            .channel_id(channel_id.get());
+        critical_atomic_write(&path, &snapshot, context)
     });
     let namespace = super::remint_fence::namespace(persistence);
     if published {
