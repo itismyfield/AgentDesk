@@ -4674,17 +4674,12 @@ services::discord::inflight::removal::custody_notice_tests::an_unreadable_or_gar
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
+services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
+services::discord::inflight::removal::custody_notice_tests::pending_notify_readdresses_when_custody_copy_identifies_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::the_notice_reports_a_failed_copy_and_promises_nothing_more
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::removal::host_liveness_stale_tests::stale_row_stays_when_its_host_evidence_is_not_tmux
-services::discord::inflight::removal::input_fence_reaper_tests::c2_boot_reaper_leaves_input_protected_rows_untouched
-services::discord::inflight::removal::input_fence_reaper_tests::c2_stale_generation_invalidate_leaves_input_protected_rows_untouched
-services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_custody_leaves_a_protected_channel_unread
 services::discord::inflight::removal::input_fence_reaper_tests::c2b_boot_preparation_settles_before_the_reaper_pass_is_reserved
 services::discord::inflight::removal::input_fence_reaper_tests::c2b_public_boot_preparation_and_access_attempts
 services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
@@ -5015,7 +5010,7 @@ services::discord::input_runtime::fence::modes::tests::g1a_unrelated_order_canno
 services::discord::input_runtime::fence::tests::admitted_writer_scope_finishes_after_close_without_new_admission
 services::discord::input_runtime::fence::tests::b2_inflight_writer_waits_then_persists_and_closing_refuses_without_io
 services::discord::input_runtime::fence::tests::b2_scheduler_late_protection_refuses_inflight_before_any_io
-services::discord::input_runtime::fence::tests::b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait
+services::discord::input_runtime::fence::tests::b2_scope_raw_reentry_keeps_blocking_refusal_and_try_contention
 services::discord::input_runtime::fence::tests::canonical_borrowing_and_supervisor_contention_never_prepare
 services::discord::input_runtime::fence::tests::closing_drains_only_existing_permits_and_rejects_redirect
 services::discord::input_runtime::fence::tests::off_failure_health_does_not_change_actual_snapshot
@@ -7274,11 +7269,11 @@ services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_r
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_checked_reads_distinguish_absence_from_corruption
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_install_rolls_back_on_required_persistence_failure
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_old_format_backfill_requires_save_ack
-services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_protected_probe_does_not_backfill
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_probe_requires_complete_read_and_backfill
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b3a1_scoped_probe_excludes_stale_planned_restart
+services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::scoped_probe_backfills_old_rows_under_the_sidecar_lock
 services::discord::runtime_bootstrap::queued_placeholders::tests::n3bc_tests::stale_cleanup_unprotected_success_and_error_keep_existing_detach_policy
 services::discord::runtime_bootstrap::queued_placeholders::tests::recovery_consumer_routes_uninstalled_candidates_to_cleanup
 services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_and_cleanup_preserve_current_owners
@@ -7325,7 +7320,6 @@ services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
 services::discord::runtime_bootstrap::spawns::tests::an_unflushed_parent_sync_publishes_the_identity_without_an_index
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
-services::discord::runtime_bootstrap::spawns::tests::c2_deferred_marking_skips_old_format_held_rows_before_backfill
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_retains_the_runtime_when_a_row_marker_fails
 services::discord::runtime_bootstrap::spawns::tests::c2b_deferred_poller_shows_an_incomplete_pass_on_the_health_snapshot
@@ -7336,6 +7330,7 @@ services::discord::runtime_bootstrap::spawns::tests::cancellation_guard_rolls_ba
 services::discord::runtime_bootstrap::spawns::tests::cancellation_restores_admission_health_and_consumed_barrier_slot
 services::discord::runtime_bootstrap::spawns::tests::commit_latch_child
 services::discord::runtime_bootstrap::spawns::tests::commit_publishes_the_identity_and_derives_the_index_from_it
+services::discord::runtime_bootstrap::spawns::tests::deferred_marking_backfills_old_rows_and_marks_siblings
 services::discord::runtime_bootstrap::spawns::tests::disposal_removes_both_of_its_own_names_and_repeats_harmlessly
 services::discord::runtime_bootstrap::spawns::tests::disposal_restores_a_foreign_lease_and_leaves_its_identity_alone
 services::discord::runtime_bootstrap::spawns::tests::nothing_between_the_point_of_no_return_and_the_exit_can_undo_it
@@ -7768,7 +7763,6 @@ services::discord::startup_reclaim::tests::orphan_placeholder_candidate_is_exact
 services::discord::startup_reclaim::tests::orphan_placeholder_delete_is_terminal_cleanup_guarded
 services::discord::startup_reclaim::tests::prior_generation_filter_excludes_post_boot_rows
 services::discord::startup_reclaim::tests::startup_outer_sweep_builds_durable_plan_and_preserves_retired_channels
-services::discord::startup_reclaim::tests::startup_passes_leave_protected_channels_before_claim_and_after_read
 services::discord::startup_reclaim::tests::startup_passes_skip_retired_channels_before_claim_and_after_read
 services::discord::status_panel_orphan_store::tests::checked_pending_bind_removal_proves_removal_and_never_queues_a_delete
 services::discord::status_panel_orphan_store::tests::checked_pending_bind_removal_reports_only_proven_store_states
