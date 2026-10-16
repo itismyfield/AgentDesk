@@ -110,7 +110,9 @@ def sync_skips(root, promoted_paths=(), deleted_paths=()):
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
     pin.validate_basename_mounts(files, basename, resolved)
-    path = root / "scripts/test_only_module_skip_pin.py"
+    path = root / "scripts/test_only_module_skip_pin_paths.py"
+    if not path.is_file():
+        path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
     actual = {p.relative_to(root).as_posix() for p in resolved}
     pinned = pin.PINNED_RESOLVER_TEST_ONLY_FILES

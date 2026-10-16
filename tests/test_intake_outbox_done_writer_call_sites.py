@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -132,6 +133,10 @@ class DiscriminationTests(unittest.TestCase):
         shutil.copy2(
             ROOT / "scripts/test_only_module_skip_pin.py",
             root / "scripts/test_only_module_skip_pin.py",
+        )
+        shutil.copy2(
+            ROOT / "scripts/test_only_module_skip_pin_paths.py",
+            root / "scripts/test_only_module_skip_pin_paths.py",
         )
         shutil.copy2(
             ROOT / "scripts/generate_inventory_docs.py",
@@ -480,6 +485,22 @@ class TransportLegacyInventoryTests(unittest.TestCase):
 
 
 class SharedSkipRuleTests(unittest.TestCase):
+    def test_repository_skips_match_data_resolver_pin_and_basename_rule(self):
+        data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
+        self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
+        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"]
+        self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
+        basename = {
+            path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")
+            if path.name == "tests.rs" or path.name.endswith("_tests.rs")
+        }
+        files, skips = guard._SKIP_PIN.validated_scan_files(
+            ROOT, guard.SCAN_ROOT, guard.is_test_file
+        )
+        self.assertEqual({path.relative_to(ROOT).as_posix() for path in skips}, basename | resolver)
+        self.assertEqual(len(skips), len(basename) + len(resolver))
+        self.assertTrue(set(files) - skips)
+
     def test_basename_rule_is_exact(self):
         for name in ("tests.rs", "a_tests.rs", "_tests.rs"):
             self.assertTrue(guard.is_test_file(name), name)
