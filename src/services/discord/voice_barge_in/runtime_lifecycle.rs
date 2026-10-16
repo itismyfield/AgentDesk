@@ -558,44 +558,25 @@ impl VoiceBargeInRuntime {
         http: &Arc<serenity::http::Http>,
         channel_id: ChannelId,
         text: &str,
-        provider: &ProviderKind,
+        _provider: &ProviderKind,
     ) -> bool {
         let text = text.trim();
         if text.is_empty() {
             return false;
         }
 
-        let target_channel_id = if crate::services::discord::input_runtime::fence::any_protected() {
-            let target = match self.text_reply_target(channel_id, provider).await {
-                Ok(Some(target)) => target,
-                Ok(None) | Err(_) => return false,
-            };
-            let gate = crate::services::discord::input_runtime::fence::channel_gate;
-            if gate(channel_id.get()).is_some() || gate(target.get()).is_some() {
-                return false;
-            }
-            target
-        } else {
-            let config = self.cached_config().await;
-            let Some(target) = config.agents.iter().find_map(|agent| {
-                agent_voice_matches_channel(agent, channel_id)
-                    .then(|| agent_voice_background_channel(agent).unwrap_or(channel_id))
-            }) else {
-                return false;
-            };
-            target
+        let config = self.cached_config().await;
+        let Some(target_channel_id) = config.agents.iter().find_map(|agent| {
+            agent_voice_matches_channel(agent, channel_id)
+                .then(|| agent_voice_background_channel(agent).unwrap_or(channel_id))
+        }) else {
+            return false;
         };
 
         let language = self.spoken_result_language().await;
         let foreground = self
             .resolve_effective_foreground_config(channel_id, target_channel_id)
             .await;
-        if crate::services::discord::input_runtime::fence::any_protected() {
-            let gate = crate::services::discord::input_runtime::fence::channel_gate;
-            if gate(channel_id.get()).is_some() || gate(target_channel_id.get()).is_some() {
-                return false;
-            }
-        }
         let cancel_token = Arc::new(crate::services::provider::CancelToken::new());
         // #3911 + #2335 (c): the guard OWNS the registration. It registers the
         // token BEFORE the generate `.await` below and unregisters on drop, so

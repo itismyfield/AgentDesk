@@ -193,7 +193,6 @@ pub(super) fn spawn_worker(
     abort_cleanup_fn: AbortCleanupFn,
     reclaim_orphan_fn: ReclaimOrphanFn,
 ) {
-    let effect = restore_gate::input_effect(&record);
     let active_guard = active_worker_guard_for_spawn(&record.provider, record.channel_id);
     let native_turn = WorkerNativeTurn {
         provider: record.provider.clone(),
@@ -201,7 +200,7 @@ pub(super) fn spawn_worker(
         anchor: record.anchor_message_id,
         claimed: false,
     };
-    restore_gate::spawn_admitted(effect, async move {
+    super::task_supervisor::spawn_observed("tui_direct_pending_start_worker", async move {
         let _active_guard = active_guard;
         // Bind the whole guard so the block owns it, not only its `claimed` field.
         let mut native_turn = native_turn;
