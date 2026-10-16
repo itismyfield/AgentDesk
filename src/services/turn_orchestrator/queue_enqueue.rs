@@ -59,7 +59,7 @@ pub(super) fn enqueue_behind(
     let merge_index = (queue.len().checked_sub(1))
         .filter(|index| !(reserved_front && *index == 0) && !last_budgeted);
     if let Some(index) = merge_index
-        && should_merge_intervention(&queue[index], &intervention)
+        && queue[index].merges_with(&intervention)
         && let Some((provider, channel_id)) = settlement
     {
         // Retire already visible completions before appending the new input.
@@ -74,7 +74,7 @@ pub(super) fn enqueue_behind(
 
     if let Some(last) = merge_index.and_then(|index| queue.get_mut(index)) {
         ensure_source_message_ids(last);
-        if should_merge_intervention(last, &intervention) {
+        if last.merges_with(&intervention) {
             let incoming_text_segments = intervention.source_text_segments();
             last.message_id = intervention.message_id;
             last.queued_generation = intervention.queued_generation;

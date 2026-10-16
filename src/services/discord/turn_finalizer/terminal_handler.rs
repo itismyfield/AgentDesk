@@ -1,4 +1,8 @@
 use super::*;
+
+#[path = "policy_commit.rs"]
+mod policy_commit;
+pub(super) use policy_commit::PolicyCommit;
 pub(super) async fn handle_terminal(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
@@ -176,6 +180,7 @@ pub(super) async fn handle_terminal(
     // poison `ledger_has_live_watcher_pending` / `resolve_channel_only` for this
     // channel+generation. Resetting it to `Finalized` (the normal post-finalize
     // flip) lets GC reap it and frees the channel for the next turn.
+    let exact_normal = released.is_none() && finalize_key.episode.is_some();
     let outcome = match AssertUnwindSafe(super::finalize::do_finalize_with_release(
         finalize_key,
         provider,
@@ -195,6 +200,15 @@ pub(super) async fn handle_terminal(
                 entry.completion_admission.queue_eligible_published = false;
             }
             note_mailbox_release_after_finalize(&outcome, entry, shared);
+            // Only an exact finish that removed this episode's token proves its release.
+            let removed = matches!(
+                &outcome,
+                FinalizeOutcome::Finalized {
+                    removed_token: Some(_),
+                    ..
+                }
+            );
+            entry.exact_release_confirmed |= exact_normal && removed;
             outcome
         }
         Err(payload) => {
@@ -217,33 +231,19 @@ pub(super) async fn handle_terminal(
 }
 
 impl LedgerEntry {
-    /// A terminal-first entry with no prior `register_start`.
+    /// A terminal-first entry with no prior `register_start`: no borrowed takeover lease, and it
+    /// finalizes right away, so it never needs the watcher far-backstop.
     fn orphan(key: TurnKey, provider: ProviderKind) -> Self {
-        Self {
-            // An orphan completion cannot borrow the current takeover's lease.
-            recovery_lease: None,
-            phase: Phase::Pending,
-            relay_owner: RelayOwnerKind::None,
-            provider,
-            turn_key: key,
-            terminal_deadline: None,
-            // Orphan/terminal-first entries finalize right away, so they never need the
-            // watcher far-backstop.
-            watcher_backstop_deadline: None,
-            watcher_backstop_probe_at: None,
-            watcher_backstop_terminal_streak: 0,
-            watcher_backstop_deadline_pulled: false,
-            completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
-            finalized_at: None,
-        }
+        let immediate = CompletionAdmissionPlan::Immediate;
+        Self::registered(key, provider, RelayOwnerKind::None, None, immediate, None)
     }
 }
 
-/// The finalizer half of a policy close: it owns the exact ledger entry while the captured
-/// mailbox commits. Anything short of a commit restores the entry, so the close stays retryable.
+/// The finalizer half of a policy close: the exact entry owns its commit until the tail settles,
+/// and anything short of that restores the entry so the close stays retryable.
 pub(super) async fn handle_policy_close(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
-    intent: super::episode::PolicyCloseIntent,
+    mut intent: super::episode::PolicyCloseIntent,
     shared: &Arc<SharedData>,
 ) -> PolicyCloseOutcome {
     let key = intent.key;
@@ -255,10 +255,28 @@ pub(super) async fn handle_policy_close(
         .entry(exact)
         .or_insert_with(|| LedgerEntry::orphan(key, intent.provider.clone()));
     let prior = std::mem::replace(&mut entry.phase, Phase::Finalizing);
-    let settled = AssertUnwindSafe(settle_policy_close(intent, shared))
+    // The fence only refuses episodes older than the latest release, so the receipt-only grant
+    // also needs this exact key and a release of its own token.
+    let request = &intent.request;
+    let (message, nonce) = (request.user_message_id, request.turn_nonce.as_str());
+    let named = key.user_msg_id == message.get() && key.matches_episode_nonce(Some(nonce));
+    let reused = (entry.pending_policy_commit.as_ref())
+        .filter(|commit| commit.ticket().names(message, nonce))
+        .cloned();
+    intent.request.release_reconcile_allowed =
+        named && prior == Phase::Finalized && entry.exact_release_confirmed;
+    let commit = match reused {
+        Some(commit) => commit,
+        _ => entry
+            .pending_policy_commit
+            .insert(PolicyCommit::new(&intent))
+            .clone(),
+    };
+    intent.request.ticket = Some(commit.ticket());
+    let settled = AssertUnwindSafe(policy_commit::settle(intent, &commit, shared))
         .catch_unwind()
         .await;
-    let (outcome, finalized) = settled.unwrap_or((
+    let (outcome, released) = settled.unwrap_or((
         PolicyCloseOutcome::Unconfirmed(PolicyStage::FinalizerPanic),
         None,
     ));
@@ -267,80 +285,22 @@ pub(super) async fn handle_policy_close(
             outcome,
             PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed
         ) {
+            // A finalized entry keeps its age, so a confirmation never widens the reconcile window.
+            if prior != Phase::Finalized {
+                entry.finalized_at = Some(Instant::now());
+            }
             entry.phase = Phase::Finalized;
-            entry.finalized_at = Some(Instant::now());
             entry.terminal_deadline = None;
+            entry.exact_release_confirmed |= matches!(outcome, PolicyCloseOutcome::Settled);
+            if let Some(commit) = entry.pending_policy_commit.take() {
+                commit.release();
+            }
         } else {
             entry.phase = prior;
         }
-        if let Some(finalized) = finalized.as_ref() {
-            note_mailbox_release_after_finalize(finalized, entry, shared);
+        if let Some(released) = released.as_ref() {
+            note_mailbox_release_after_finalize(released, entry, shared);
         }
     }
     outcome
-}
-
-/// The mailbox commit, then the bridge cancel's trailing cleanup on its receipt only; the
-/// commit already debited the active count, so the cleanup never debits again.
-async fn settle_policy_close(
-    intent: super::episode::PolicyCloseIntent,
-    shared: &Arc<SharedData>,
-) -> (PolicyCloseOutcome, Option<FinalizeOutcome>) {
-    use crate::services::turn_orchestrator::policy_close::{
-        Point, PolicyMailboxOutcome as Mailbox,
-    };
-    let super::episode::PolicyCloseIntent {
-        key,
-        provider,
-        mailbox,
-        request,
-        snapshot,
-    } = intent;
-    let channel = key.channel_id;
-    let trace = request.trace.clone();
-    let captured =
-        super::super::mailbox_finish::policy_close_on_captured(shared, &mailbox, channel, request)
-            .await;
-    // The wrapper returned, so a commit's queue-exit feedback ran; nothing downstream of it.
-    trace.note(
-        Point::QueueExit,
-        u64::from(matches!(captured, Ok(Mailbox::Committed(_)))),
-    );
-    #[cfg(test)]
-    use crate::services::turn_orchestrator::policy_close::test_hooks::{Branch, Stage};
-    #[cfg(test)]
-    if !matches!(captured, Ok(Mailbox::Committed(_))) {
-        trace.not_run(Branch::NotCommitted);
-    }
-    let finish = match captured {
-        Err(stage) => return (PolicyCloseOutcome::Unconfirmed(stage), None),
-        Ok(Mailbox::Duplicate) => return (PolicyCloseOutcome::DuplicateConfirmed, None),
-        Ok(Mailbox::Superseded) => return (PolicyCloseOutcome::Superseded, None),
-        Ok(Mailbox::Retained(reason)) => return (PolicyCloseOutcome::Retained(reason), None),
-        Ok(Mailbox::Committed(finish)) => finish,
-    };
-    let ctx = FinalizeContext {
-        clear_inflight: false,
-        ..FinalizeContext::bridge()
-    };
-    // Test seam between the commit and its trailing finalize, which has not been entered yet.
-    #[cfg(test)]
-    {
-        trace.not_run(Branch::BeforeFinalize);
-        trace.fire(Stage::BeforeFinalize);
-    }
-    trace.note(Point::FinalizeEntered, 1);
-    let finalized = super::finalize::do_finalize_with_release(
-        key,
-        provider,
-        &TerminalEvent::Cancel,
-        ctx,
-        Some(&snapshot),
-        shared,
-        Some(finish),
-        true,
-    )
-    .await;
-    trace.note(Point::FinalizeReturned, 1);
-    (PolicyCloseOutcome::Settled, Some(finalized))
 }
