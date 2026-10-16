@@ -658,7 +658,7 @@ mod migration_pg_tests {
     use crate::db::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     use crate::db::intake_outbox_status::{IntakeOutboxStatus, OperatorRetryClass};
     use serde_json::json;
-    use sqlx::Row;
+    use sqlx::{AssertSqlSafe, Row};
 
     /// Migration 0080 verbatim. Every statement is idempotent — the DDL is
     /// `IF [NOT] EXISTS` and each backfill/fail-closed UPDATE is gated on
