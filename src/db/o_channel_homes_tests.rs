@@ -675,6 +675,14 @@ async fn retry_tick(pool: &PgPool) -> crate::db::intake_outbox::FailedPreAcceptS
     outcome.expect("maintenance").expect("retry enabled")
 }
 
+async fn status_and_touch(pool: &PgPool, id: i64) -> (String, DateTime<Utc>) {
+    sqlx::query_as("SELECT status, updated_at FROM intake_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read source")
+}
+
 /// A home-stamped failure is retried only to the holder of its exact Worker home, and once that
 /// home is gone (returned, then a later release aborted) it stays terminal with nothing reopened.
 #[tokio::test]
@@ -717,12 +725,7 @@ async fn an_old_home_failed_pre_accept_is_not_retried_after_abort_release_pg() {
     applied(abort_release(&pool, C, new, "gw").await);
     assert_eq!(home(&pool).await, None);
 
-    let before: (String, chrono::DateTime<chrono::Utc>) =
-        sqlx::query_as("SELECT status, updated_at FROM intake_outbox WHERE id = $1")
-            .bind(source.id)
-            .fetch_one(&pool)
-            .await
-            .expect("read source");
+    let before = status_and_touch(&pool, source.id).await;
     assert_eq!(retry_tick(&pool).await, Sweep::Empty);
     let open = INTAKE_OUTBOX_OPEN_STATUSES_SQL;
     let open =
@@ -733,12 +736,7 @@ async fn an_old_home_failed_pre_accept_is_not_retried_after_abort_release_pg() {
         .await
         .expect("count open");
     assert_eq!(open, 0);
-    let after: (String, chrono::DateTime<chrono::Utc>) =
-        sqlx::query_as("SELECT status, updated_at FROM intake_outbox WHERE id = $1")
-            .bind(source.id)
-            .fetch_one(&pool)
-            .await
-            .expect("read source");
+    let after = status_and_touch(&pool, source.id).await;
     assert_eq!(after, before);
     assert_eq!(after.0, "failed_pre_accept");
     pool.close().await;
