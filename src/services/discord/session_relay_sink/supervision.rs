@@ -5,22 +5,6 @@ pub(super) struct LegacySessionRelayConsumer(pub(super) Arc<SessionBoundDiscordR
 #[async_trait::async_trait]
 impl RelaySink for LegacySessionRelayConsumer {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
-        if frame
-            .binding
-            .channel_id
-            .parse::<u64>()
-            .is_ok_and(|channel| {
-                super::health::legacy_supervision::is_retired(
-                    frame.binding.provider.as_str(),
-                    channel,
-                )
-            })
-        {
-            // Keep the raw producer alive without granting its Legacy consumer O's range.
-            return Err(RelaySinkError::Transient(
-                "retired Legacy relay consumer".into(),
-            ));
-        }
         self.0.deliver(frame).await
     }
 }
@@ -85,10 +69,6 @@ pub(super) async fn run_idle_jsonl_relay_loop(
             let Ok(channel_id) = matched.channel_id.parse::<u64>() else {
                 continue;
             };
-            if super::health::legacy_supervision::is_retired(matched.provider.as_str(), channel_id)
-            {
-                continue;
-            }
             let Ok(metadata) = std::fs::metadata(&relay_source.path) else {
                 continue;
             };

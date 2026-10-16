@@ -165,14 +165,6 @@ impl TurnTracker {
         }
         TurnEvent::None
     }
-
-    pub fn add_unit(&mut self, key: &UnitKey) {
-        if let TurnState::Open(turn) = &mut self.0
-            && !turn.unit_keys.contains(key)
-        {
-            turn.unit_keys.push(key.clone());
-        }
-    }
 }
 
 /// Exact `[o-shadow-synth:<entry_id>]` tokens in native user input, in order, without repeats.

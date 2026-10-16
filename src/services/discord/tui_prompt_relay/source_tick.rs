@@ -112,14 +112,14 @@ pub(super) async fn codex_source_phase(
     let now = tokio::time::Instant::now();
     if now >= *next_rehydrate {
         let shared_for_rehydrate = shared.clone();
-        super::codex_idle_rollout::codex_discovery_pass(shared, move |observer| {
+        super::codex_idle_rollout::codex_discovery_pass(move || {
             #[cfg(test)]
             super::codex_idle_rollout::note_relay_target(
                 super::codex_idle_rollout::RelayUse::Discovery,
                 &shared_for_rehydrate,
             );
             crate::services::tui_prompt_dedupe::resolve_codex_claims();
-            rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate, observer)
+            rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate);
         })
         .await;
         *next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;

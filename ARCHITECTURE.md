@@ -626,6 +626,7 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
+│   │   │   ├── receipt.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
@@ -881,9 +882,6 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
-│   │   ├── codex_adoption_runtime/
-│   │   │   ├── boot.rs
-│   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_end_tests.rs
@@ -1023,6 +1021,9 @@ src/
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
+│   │   │   │   │   ├── queued_owner.rs
+│   │   │   │   │   ├── queued_reconcile.rs
+│   │   │   │   │   ├── queued_reconcile_tests.rs
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   └── test_hook.rs
 │   │   │   │   ├── inject.rs
@@ -1081,7 +1082,6 @@ src/
 │   │   │   │   ├── serde_adapters.rs
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── o_seed_observation/
-│   │   │   │   ├── initial_parse_barrier_test.rs
 │   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
 │   │   │   │   └── tests.rs
@@ -1322,8 +1322,7 @@ src/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
 │   │   │   ├── retirement_tests.rs
-│   │   │   ├── tick.rs
-│   │   │   └── tick_cleanup_tests.rs
+│   │   │   └── tick.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
@@ -1350,6 +1349,7 @@ src/
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
+│   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -1643,10 +1643,6 @@ src/
 │   │   │   ├── journal.rs
 │   │   │   ├── o_adoption_e2e_tests.rs
 │   │   │   ├── o_delivery_e2e_tests.rs
-│   │   │   ├── o_retired_terminal_e2e_tests.rs
-│   │   │   ├── o_retired_terminal_legacy_fixture_tests.rs
-│   │   │   ├── o_retired_terminal_race_tests.rs
-│   │   │   ├── o_retired_terminal_source_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
 │   │   │   ├── short_controller.rs
@@ -1760,7 +1756,6 @@ src/
 │   │   │   ├── entry.rs
 │   │   │   ├── herdr_entry_host_tests.rs
 │   │   │   ├── host_gate.rs
-│   │   │   ├── inherited_fixture_tests.rs
 │   │   │   ├── jsonl_rotation.rs
 │   │   │   ├── judged_stop_harness_tests.rs
 │   │   │   ├── legacy_state.rs
@@ -1787,8 +1782,6 @@ src/
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
-│   │   │   ├── retired_host_tick_tests.rs
-│   │   │   ├── retired_o_boundary_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
@@ -2202,7 +2195,6 @@ src/
 │   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
-│   │   │   │   ├── n4d2_o_writer_test.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
@@ -2236,7 +2228,6 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
-│   │   ├── codex_adoption_runtime.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs
@@ -2781,7 +2772,6 @@ src/
 │   │   │   │   └── observation.rs
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
-│   │   │   ├── derive.rs
 │   │   │   ├── identity.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── seal.rs
@@ -2954,7 +2944,6 @@ src/
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
-│   │   ├── shadow_host.rs
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
@@ -3024,6 +3013,8 @@ src/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
+│   │   │   ├── mend.rs
+│   │   │   ├── mend_tests.rs
 │   │   │   └── prefix.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs

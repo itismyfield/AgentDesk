@@ -6891,7 +6891,7 @@ mod o_stale_leak_cut_tests {
 }
 
 #[cfg(test)]
-mod retired_channel_tests {
+mod legacy_channel_backfill_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
@@ -6899,17 +6899,15 @@ mod retired_channel_tests {
 
     use super::super::HealthRegistry;
     use crate::config::TestEnvVarGuard;
-    use crate::services::discord::health::legacy_supervision::RetiredForTest;
     use crate::services::discord::health::legacy_supervision::test_support::{
         fingerprint, seed_backfill_row,
     };
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
 
-    /// The stall watchdog never opens a retired channel's row with the writing loader;
-    /// a Legacy channel watched in the same pass still has its row loaded.
+    // The whole watchdog pass still loads and backfills a normal Legacy row.
     #[tokio::test(flavor = "current_thread")]
-    async fn stall_watchdog_skips_retired_channel_before_row_load() {
+    async fn stall_watchdog_loads_and_backfills_legacy_channel() {
         let _absence = super::watcher_respawn::lock_watcher_absence_for_test().await;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
@@ -6921,54 +6919,48 @@ mod retired_channel_tests {
         registry
             .register(provider.as_str().to_string(), shared.clone())
             .await;
-        let (retired, legacy) = (6_325_401_001u64, 6_325_401_002u64);
-        let mut rows = Vec::new();
-        for channel in [retired, legacy] {
-            let session = format!("AgentDesk-codex-n4a-stall-{channel}");
-            let output = temp.path().join(format!("{channel}.jsonl"));
-            std::fs::write(&output, "").unwrap();
-            let output = output.to_string_lossy().to_string();
-            rows.push(seed_backfill_row(&InflightTurnState::new(
-                provider.clone(),
-                channel,
-                None,
-                1,
-                channel * 10,
-                channel * 10 + 1,
-                "prompt".into(),
-                None,
-                Some(session.clone()),
-                Some(output.clone()),
-                None,
-                0,
-            )));
-            shared.tmux_watchers.insert(
-                ChannelId::new(channel),
-                crate::services::discord::TmuxWatcherHandle {
-                    tmux_session_name: session,
-                    output_path: output,
-                    paused: Arc::new(AtomicBool::new(false)),
-                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
-                    cancel: Arc::new(AtomicBool::new(false)),
-                    pause_epoch: Arc::new(AtomicU64::new(0)),
-                    turn_delivered: Arc::new(AtomicBool::new(false)),
-                    last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
-                        chrono::Utc::now().timestamp_millis(),
-                    )),
-                },
-            );
-        }
-        let before: Vec<_> = rows.iter().map(|row| fingerprint(row)).collect();
-        let _retired = RetiredForTest::new(provider.as_str(), retired);
+        let channel = 6_325_401_002u64;
+        let session = format!("AgentDesk-codex-legacy-stall-{channel}");
+        let output = temp.path().join(format!("{channel}.jsonl"));
+        std::fs::write(&output, "").unwrap();
+        let output = output.to_string_lossy().to_string();
+        let row = seed_backfill_row(&InflightTurnState::new(
+            provider.clone(),
+            channel,
+            None,
+            1,
+            channel * 10,
+            channel * 10 + 1,
+            "prompt".into(),
+            None,
+            Some(session.clone()),
+            Some(output.clone()),
+            None,
+            0,
+        ));
+        shared.tmux_watchers.insert(
+            ChannelId::new(channel),
+            crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: session,
+                output_path: output,
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::new(AtomicBool::new(false)),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                    chrono::Utc::now().timestamp_millis(),
+                )),
+            },
+        );
+        let before = fingerprint(&row);
+        assert!(before.is_some());
 
         super::run_stall_watchdog_pass(&registry, &provider).await;
 
-        assert!(before[0].is_some() && fingerprint(&rows[0]) == before[0]);
-        assert_ne!(
-            fingerprint(&rows[1]),
-            before[1],
-            "the Legacy row is loaded and backfilled"
-        );
+        let after = fingerprint(&row);
+        assert!(after.is_some());
+        assert_ne!(after, before, "the Legacy row is loaded and backfilled");
     }
 }
 

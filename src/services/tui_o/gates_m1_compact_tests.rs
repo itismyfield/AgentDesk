@@ -16,12 +16,7 @@ use crate::services::tui_input::attempt::{AttemptMeta, Effect, Tracking, Witness
 use crate::services::tui_input::ledger::Ledger;
 use crate::services::tui_input::rows::{AttemptEvidence, DoneReason, Entry, RowState};
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
-use crate::services::tui_o::shadow::capture::SourceCapture;
-use crate::services::tui_o::shadow::derive::TranscriptDerive;
-use crate::services::tui_o::shadow::{
-    CaptureBatch, CaptureOutcome, CaptureSource, DeriveOutput, ShadowDerive, ShadowProvider,
-    SourceBinding, SourceId, UnitKey, UnitKind,
-};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId, UnitKey, UnitKind};
 use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_o::writer::actor::{POLL_INTERVAL, run_channel};
 use crate::services::tui_o::writer::binding::{
@@ -130,23 +125,6 @@ fn body(id: &str, text: &str) -> Value {
     json!({"type":"assistant", "sessionId":SESSION, "uuid":format!("row-{id}"),
         "parentUuid":"own-native-turn", "apiBlockIndex":0,
         "message":{"id":id,"content":[{"type":"text","text":text}]}})
-}
-
-fn batch(capture: &mut SourceCapture) -> CaptureBatch {
-    match capture.poll(u64::MAX) {
-        CaptureOutcome::Batch(batch) => batch,
-        CaptureOutcome::Anomaly(anomaly) => panic!("{anomaly:?}"),
-    }
-}
-
-fn sealed(output: &[DeriveOutput]) -> Vec<UnitKey> {
-    output
-        .iter()
-        .filter_map(|item| match item {
-            DeriveOutput::Sealed(unit) => Some(unit.unit_key.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn key(id: &str) -> UnitKey {
@@ -321,10 +299,6 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
 
     let mut facts = InputFacts::open(binding.clone()).unwrap();
     assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
-    let mut shadow_capture = SourceCapture::open(source.clone(), initial.len() as u64).unwrap();
-    let mut shadow = TranscriptDerive::default();
-    shadow.attach(&source, initial.len() as u64, Utc::now());
-    shadow.window_open(Utc::now());
     let frame = token::render(TOKEN, "keep working through automatic compaction");
     let input_runtime = fs::canonicalize(root.path()).unwrap().join("input");
     let mut inputs = Ledger::open(&input_runtime, CHANNEL).unwrap();
@@ -413,10 +387,6 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
         before.witnesses[0].witness.turn_ref.as_deref(),
         Some("own-native-turn")
     );
-    assert_eq!(
-        sealed(&shadow.derive(&binding, &batch(&mut shadow_capture))),
-        [key("old-body")]
-    );
     tokio::time::sleep(POLL_INTERVAL * 3).await;
     assert_eq!(port.posts(), ["existing body"]);
     let old_piece = open_o()
@@ -477,21 +447,9 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
         event,
         crate::services::tui_o::writer::input_facts::Ordered::Closed { .. }
     )));
-    let compact_batch = batch(&mut shadow_capture);
     println!(
         "FIXTURE auto_compact provider=Claude version=unknown source_unchanged=true parent=own-native-turn native_units=old-body:0,new-body:0 sha256={}",
         hex::encode(Sha256::digest(fs::read(&path).unwrap()))
-    );
-    let compact_output = shadow.derive(&binding, &compact_batch);
-    assert_eq!(
-        sealed(&compact_output),
-        [key("new-body")],
-        "only the new body seals after compact"
-    );
-    assert!(
-        compact_output
-            .iter()
-            .all(|item| !matches!(item, DeriveOutput::TurnClosed(_)))
     );
     tokio::time::sleep(POLL_INTERVAL * 3).await;
     assert_eq!(
@@ -513,16 +471,6 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
     assert_eq!(persisted.cursors().count(), 1);
     assert!(!persisted.cursor(&source).unwrap().retired);
 
-    // A source alias is only an identity control; the input binding and compact source stay unchanged.
-    let mut alias_binding = binding.clone();
-    alias_binding.source.session_id = "alias-session".into();
-    let mut alias_batch = compact_batch;
-    alias_batch.source = alias_binding.source.clone();
-    let alias_output = shadow.derive(&alias_binding, &alias_batch);
-    assert!(
-        sealed(&alias_output).is_empty(),
-        "source session ID cannot fork existing native UnitKeys"
-    );
     append(&path, &[json!({"type":"system","subtype":"turn_duration"})]);
     let done_fact = facts.poll(u64::MAX).unwrap();
     assert_eq!(done_fact.state, TurnState::Idle);
@@ -545,9 +493,7 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
     println!(
         "PROBE InputActor::step/InputFacts::poll attempt_generation=1 own_witness=1 compact_enters=0 matched_closer_enters=1"
     );
-    println!(
-        "PROBE run_channel/ChannelWriter::deliver/TranscriptDerive::derive old_posts=1 new_posts=1 old_reposts=0 alias_new_units=0"
-    );
+    println!("PROBE run_channel/ChannelWriter::deliver old_posts=1 new_posts=1 old_reposts=0");
     stop.send(true).unwrap();
     assert!(
         output.await.unwrap().is_none(),

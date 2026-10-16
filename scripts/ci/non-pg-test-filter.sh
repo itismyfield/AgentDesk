@@ -171,7 +171,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
-  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
@@ -522,6 +521,13 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_closed_gate_holds_a_proven_unknown_head_until_it_opens_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_proof_counts_only_in_the_session_its_bound_file_is_named_for_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_an_overlapping_kick_or_a_failed_write_never_consumes_twice_or_types_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_an_unnamed_paste_is_handed_back_untyped_and_typed_once_named_pg
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
   services::discord::recovery_engine::herdr_before_start_restart::tests::an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again
@@ -685,9 +691,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::retired_host_probe_keeps_unanswered_and_preserves_legacy_liveness
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::retired_host_probe_requires_independent_tmux_and_native_source_evidence
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_through_both_eofs
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rewound_read_below_a_live_row_baseline
