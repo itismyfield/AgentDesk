@@ -148,9 +148,8 @@ async fn drained(id: u64, case: Case) -> (&'static str, bool) {
     (reason, taken.is_some())
 }
 
-// After a restart, a Herdr channel's admitted Bound run is judged on its own transcript before any
-// watcher claims it: a closed turn drains the queue, an open one keeps it, and every row the
-// reconnect did not admit as this node's own Bound execution keeps the Unbound answer.
+// Before a watcher claims it, only this node's admitted Bound Herdr run is judged on its transcript;
+// every other row keeps the Unbound answer.
 #[tokio::test(flavor = "current_thread")]
 async fn restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg() {
     let cases = [
