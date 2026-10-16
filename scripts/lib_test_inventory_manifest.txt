@@ -30,6 +30,7 @@ cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
 cli::args::tests::turn_lease_cli_parses_read_and_exact_release
 cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
+cli::channel_home::tests::abort_release_runs_from_the_cli_and_says_why_it_refused_pg
 cli::channel_home::tests::mutations_are_refused_before_any_database_access_while_the_switch_is_off_pg
 cli::channel_home::tests::reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg
 cli::channel_home::tests::status_reads_only_and_shows_open_intake_by_routed_epoch_pg
@@ -665,8 +666,14 @@ db::o_channel_activation::fence_tests::intake_fence_uses_app_role_update_privile
 db::o_channel_activation::fence_tests::sweep_committed_before_fence_is_visible_in_fresh_facts_pg
 db::o_channel_activation::postgres_tests::activation_rows_count_only_open_intake_and_foreign_live_sessions_of_the_channel_pg
 db::o_channel_homes::tests::a_delegate_naming_an_unknown_provider_writes_nothing_pg
+db::o_channel_homes::tests::a_finished_release_and_an_abort_racing_on_one_releasing_row_never_both_win_pg
 db::o_channel_homes::tests::a_renewal_and_a_force_racing_on_one_row_never_both_win_pg
 db::o_channel_homes::tests::a_row_read_carries_pgs_clock_from_the_same_statement_pg
+db::o_channel_homes::tests::abort_release_refuses_while_any_intake_is_open_pg
+db::o_channel_homes::tests::abort_release_removes_only_a_released_row_at_its_exact_epoch_from_the_gateway_pg
+db::o_channel_homes::tests::abort_release_takes_a_releasing_row_only_from_its_holder_pg
+db::o_channel_homes::tests::an_abort_and_an_adopt_racing_on_one_released_row_never_both_win_pg
+db::o_channel_homes::tests::an_old_home_failed_pre_accept_is_not_retried_after_abort_release_pg
 db::o_channel_homes::tests::every_home_transition_applies_only_under_its_exact_condition_pg
 db::o_channel_homes::tests::force_never_runs_inside_f_and_leaves_an_orphan_nobody_adopts_pg
 db::o_channel_homes::tests::force_orphans_only_a_holder_silent_past_the_window_and_adopts_nothing_pg
@@ -2462,6 +2469,7 @@ services::cluster::channel_home_boot::tests::a_delegated_channel_is_adopted_by_i
 services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
+services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
@@ -12665,6 +12673,7 @@ services::tui_o::store::tests::a_torn_ledger_append_is_cut_so_the_channel_reopen
 services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsync_is_a_no_op
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
+services::tui_o::store::tests::opening_seals_the_era_only_over_a_sole_takeover_init_that_recovers
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::store::windows_tests::enabling_the_store_is_refused_without_directory_fsync
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
@@ -12909,6 +12918,7 @@ services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_start
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
