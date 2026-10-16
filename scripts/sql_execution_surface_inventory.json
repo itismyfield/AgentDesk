@@ -35177,6 +35177,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/turn_presence/activity/unbound/unit_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b93aec1872af65bba31fc23bc291c68562925a2d328b10f25bc0bb77c5c4b770"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/watchers/dispatched_origin_ghost.rs",
       "api": "sqlx::query",
       "symbol": "query",

@@ -151,6 +151,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::router::message_handler::provider_dispatch::herdr_tests
   --skip services::discord::router::message_handler::provider_dispatch::tests
   --skip services::discord::router::message_handler::provider_isolation::host_tests
+  --skip services::discord::router::message_handler::session_strategy_lifecycle_tests::s1_entry_tests
   --skip services::discord::router::message_handler::voice_announcement_route::voice_route_tests
   --skip services::discord::router::message_handler::watchdog::host_tests
   --skip services::discord::runtime_bootstrap::channel_homes_tests
@@ -197,6 +198,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
+  --skip services::discord::turn_presence::activity::unbound::dormancy_tests
+  --skip services::discord::turn_presence::activity::unbound::live::review_tests
+  --skip services::discord::turn_presence::activity::unbound::tests
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
   --skip services::dispatches::wait_queue::tests
@@ -761,6 +765,17 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_returns_marker_recorded_voice_channel
   services::discord::turn_bridge::voice_completion::voice_completion_tests::handoff_prompt_classification_requires_typed_marker
   services::discord::turn_bridge::voice_completion::voice_completion_tests::recognizes_voice_background_handoff_via_typed_marker
+  services::discord::turn_presence::activity::tail::switch_tests::s1_tail_off_preserves_real_unbound_absence_and_live_holds_pg
+  services::discord::turn_presence::activity::unbound::dormancy_tests::activation_candidates_counter_crosses_the_blocking_worker
+  services::discord::turn_presence::activity::unbound::live::review_tests::s1e_runtime_marker_restore_preserves_legacy_and_canonical_priority
+  services::discord::turn_presence::activity::unbound::tests::s1_hosted_absence_cannot_hide_related_inventory
+  services::discord::turn_presence::activity::unbound::tests::s1_nameless_local_scope_requires_a_complete_empty_inventory
+  services::discord::turn_presence::activity::unbound::tests::u_absent_logs_and_read_failures
+  services::discord::turn_presence::activity::unbound::tests::u_candidate_conflicts
+  services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
+  services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
+  services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
+  services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
   services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
   services::discord::voice_barge_in::tests::background_handoff_refuses_publish_when_pg_reservation_fails
   services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at

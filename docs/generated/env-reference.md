@@ -53,6 +53,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_TEST_INPUT_G1A_MUTANT` | `src/services/discord/input_runtime/supervisor.rs`, `src/services/tui_input/actor.rs`, `src/services/tui_input/receipt_identity.rs` |  |
 | `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs` |  |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
+| `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
@@ -162,7 +163,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
@@ -171,7 +172,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
-| `TMUX` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
-| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs` |  |

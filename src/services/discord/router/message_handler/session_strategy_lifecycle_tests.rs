@@ -1762,3 +1762,7 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
     });
     dedupe::reset_state_for_tests();
 }
+
+#[cfg(unix)]
+#[path = "s1_entry_tests.rs"]
+mod s1_entry_tests;

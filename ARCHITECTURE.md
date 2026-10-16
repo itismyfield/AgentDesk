@@ -1522,6 +1522,8 @@ src/
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── replay_start.rs
 │   │   │   │   │   ├── replay_start_tests.rs
+│   │   │   │   │   ├── route_claim_tests.rs
+│   │   │   │   │   ├── route_queue_tests.rs
 │   │   │   │   │   ├── runtime_transition.rs
 │   │   │   │   │   ├── stale_dispatch_guard.rs
 │   │   │   │   │   ├── voice_intake.rs
@@ -1548,6 +1550,7 @@ src/
 │   │   │   │   ├── provider_dispatch_submission_tests.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── provider_isolation_host_tests.rs
+│   │   │   │   ├── s1_entry_tests.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
@@ -2047,6 +2050,8 @@ src/
 │   │   │   ├── before_start_stop_disk_gate_tests.rs
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
+│   │   │   ├── before_start_stop_reconcile_tests.rs
+│   │   │   ├── before_start_stop_tail_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
 │   │   │   ├── body_mutation_telemetry_tests.rs
@@ -2118,6 +2123,7 @@ src/
 │   │   │   ├── finalize.rs
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
+│   │   │   ├── policy_commit.rs
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
 │   │   │   └── watcher_backstop.rs
@@ -2125,8 +2131,19 @@ src/
 │   │   │   └── registry.rs
 │   │   ├── turn_presence/
 │   │   │   ├── activity/
+│   │   │   │   ├── unbound/
+│   │   │   │   │   ├── dormancy_tests.rs
+│   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_review_tests.rs
+│   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
-│   │   │   │   └── tail_tests.rs
+│   │   │   │   ├── tail_switch_tests.rs
+│   │   │   │   ├── tail_tests.rs
+│   │   │   │   └── unbound.rs
+│   │   │   ├── activity_tests/
+│   │   │   │   ├── effect_tests.rs
+│   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── entrypoints.rs
@@ -2479,9 +2496,13 @@ src/
 │   │   ├── tmux/
 │   │   │   ├── liveness/
 │   │   │   │   └── tests.rs
+│   │   │   ├── session_inventory/
+│   │   │   │   ├── real_tests.rs
+│   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
 │   │   │   ├── liveness.rs
+│   │   │   ├── session_inventory.rs
 │   │   │   ├── sized.rs
 │   │   │   └── sized_cleanup_tests.rs
 │   │   ├── binary_resolver.rs
@@ -3005,6 +3026,7 @@ src/
 │   │   ├── overflow_s2b_tests.rs
 │   │   ├── pending_queue_persistence.rs
 │   │   ├── policy_close.rs
+│   │   ├── policy_tail.rs
 │   │   ├── queue_cancellation.rs
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
