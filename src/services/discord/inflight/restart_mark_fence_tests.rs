@@ -21,13 +21,10 @@ async fn c2_loop_rechecks_protection_installed_after_loading() {
         temp.path(),
     );
     let root = inflight_runtime_root().unwrap();
-    for (index, channel) in (6_325_601..6_325_604).enumerate() {
+    for (index, channel) in (6_325_601..6_325_603).enumerate() {
         let mut state = row(channel);
         if index == 1 {
             state.restart_generation = Some(1);
-        }
-        if index == 2 {
-            state.rebind_origin = true;
         }
         save_inflight_state_in_root(&root, &state).unwrap();
         let path = inflight_state_path(&root, &ProviderKind::Codex, channel);
@@ -42,16 +39,7 @@ async fn c2_loop_rechecks_protection_installed_after_loading() {
                 Ok(0),
                 "marking must recheck after the snapshot"
             ),
-            1 => assert_eq!(invalidate_stale_generation(&ProviderKind::Codex, 2), 0),
-            _ => {
-                let shared = crate::services::discord::make_shared_data_for_tests();
-                crate::services::discord::recovery_engine::restore_inflight_turns(
-                    &std::sync::Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
-                    &shared,
-                    &ProviderKind::Codex,
-                )
-                .await;
-            }
+            _ => assert_eq!(invalidate_stale_generation(&ProviderKind::Codex, 2), 0),
         }
         assert_eq!(
             std::fs::read(&path).unwrap(),

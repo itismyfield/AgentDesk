@@ -72,9 +72,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    let states = inflight::load_inflight_states_excluding(provider, |channel| {
-        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    });
+    let states = inflight::load_inflight_states(provider);
     observe_restore_inflight_snapshot(
         provider,
         &states,
@@ -104,12 +102,6 @@ pub(in crate::services::discord) async fn restore_inflight_states(
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
     for mut state in states {
-        // An input-protected channel's row waits for its move or handback.
-        if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
-            .is_some()
-        {
-            continue;
-        }
         #[cfg(unix)]
         if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
             continue;
