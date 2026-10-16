@@ -1,4 +1,4 @@
-//! Explicit operator termination of one Herdr execution; the operator route is its only entry.
+//! Explicit termination of one Herdr execution, by the operator route or a user clear.
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
 use super::turn_finalizer::{FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey};
@@ -295,7 +295,7 @@ async fn confirm_captured_released(
         _ => Err("captured mailbox replaced"),
     }
 }
-/// Its only production caller is [`terminate_registered_herdr`].
+/// Production callers: [`terminate_registered_herdr`] and a user clear of a Herdr channel.
 pub(crate) async fn terminate_explicit_herdr(
     request: OperatorTerminate,
     shared: Arc<SharedData>,
