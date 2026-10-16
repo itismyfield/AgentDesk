@@ -166,7 +166,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
-  --skip services::discord::terminal_ui_obligation::input_fence_tests
+  --skip services::discord::terminal_ui_obligation::sweep_tests
   --skip services::discord::terminal_ui_obligation::tests
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
@@ -441,7 +441,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::health::turn_deliver::inject_codex_tests::an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_is_refused_as_before_until_codex_is_enabled
   services::discord::health::turn_deliver::inject_codex_tests::codex_input_on_a_listed_herdr_channel_stays_refused
-  services::discord::health::turn_deliver::inject_tests::a_channel_closed_to_legacy_input_takes_no_paste
   services::discord::health::turn_deliver::inject_tests::a_headless_claim_returns_the_token_it_registered
   services::discord::health::turn_deliver::inject_tests::a_held_transition_keeps_the_registry_purge_off_an_idle_mailbox
   services::discord::health::turn_deliver::inject_tests::a_pane_veto_stays_logged_when_the_delivery_starts_or_fails
@@ -522,7 +521,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
-  services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
@@ -578,11 +576,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
   services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint
-  services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
-  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_cached_attachment_permit_does_not_write_history
-  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_final_admission_never_returns_false_local_or_nonlocal_success
-  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_live_dispatch_does_not_checkpoint_or_consume_the_original
-  services::discord::router::intake_dispatch::tests::final_guards::c2b_protected_skill_refuses_both_local_permit_and_unadmitted_dispatch
+  services::discord::router::intake_dispatch::tests::final_guards::skill_dispatch_rejects_a_mismatched_local_permit
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_enforce_without_postgres_blocks_owner_unknown
   services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_queued_entrypoints_promote_markers_after_admission_before_finish

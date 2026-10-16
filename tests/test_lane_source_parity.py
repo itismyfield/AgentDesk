@@ -573,6 +573,14 @@ def sharded_repo(name: str = "test_fast", keys: str = SHARD_KEYS) -> Repo:
     repo.pr["targeted"].remove(PG_LANE)
     repo.pr[name], repo.mirrors[name], repo.keys[name] = [PG_LANE], None, keys
     repo.filters = {"pg_db": ["src/**"], "docs": ["docs/**"]}
+    # An empty shard would run `--exact` with no names, so give every shard a PG test.
+    covered = {pgm.pg_test_shard(f"pgmod::{name}") for name in repo.modules["pgmod"]}
+    for index in range(100):
+        name = f"uses_pg_fill_{index}"
+        if len(covered) < pgm.PG_SHARD_COUNT and pgm.pg_test_shard(f"pgmod::{name}") not in covered:
+            covered.add(pgm.pg_test_shard(f"pgmod::{name}"))
+            repo.modules["pgmod"] = (*repo.modules["pgmod"], name)
+            repo.pg_tests.append(f"pgmod::{name}")
     repo.trailer = SHARD_PLAN
     repo.filter_tail = "\n".join((pgm.NON_PG_SELECTION_END, *pgm.PG_INCLUDE_DERIVATION, ""))
     # The shard contract reads the coverage parser from the checkout it judges.

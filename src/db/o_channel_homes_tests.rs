@@ -425,3 +425,320 @@ async fn a_row_read_carries_pgs_clock_from_the_same_statement_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+async fn open_intake(pool: &PgPool, key: &str, home_epoch: Option<i64>) {
+    sqlx::query(
+        "INSERT INTO intake_outbox (
+            target_instance_id, forwarded_by_instance_id, channel_id, user_msg_id,
+            request_owner_id, user_text, turn_kind, agent_id, provider, status, home_epoch
+         ) VALUES ('mini', 'gw', $1, $2, 'user', 'text', 'standard', 'agent', 'claude',
+            'pending', $3)",
+    )
+    .bind(C)
+    .bind(key)
+    .bind(home_epoch)
+    .execute(pool)
+    .await
+    .expect("seed open intake");
+}
+
+async fn settle_intake(pool: &PgPool) {
+    sqlx::query("UPDATE intake_outbox SET status = 'done' WHERE channel_id = $1")
+        .bind(C)
+        .execute(pool)
+        .await
+        .expect("settle intake");
+}
+
+/// A released row goes only from a node that is not its target, at its exact epoch; every other
+/// state of a channel's lifecycle is kept by abort-release.
+#[tokio::test]
+async fn abort_release_removes_only_a_released_row_at_its_exact_epoch_from_the_gateway_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let released = applied(delegate(&pool, C, "claude", "gw", "mini").await);
+    let released = applied(finish_release(&pool, C, "gw", released.epoch).await).epoch;
+    for epoch in [released - 1, released + 1] {
+        refused(&pool, "other epoch", abort_release(&pool, C, epoch, "gw")).await;
+    }
+    let on_target = abort_release(&pool, C, released, "mini");
+    refused(&pool, "run on the target", on_target).await;
+    let row = applied(abort_release(&pool, C, released, "gw").await);
+    let removed = (row.state, row.target.as_deref(), row.epoch);
+    assert_eq!(removed, (HomeState::Released, Some("mini"), released));
+    assert_eq!(home(&pool).await, None);
+    refused(&pool, "no row", abort_release(&pool, C, released, "gw")).await;
+
+    let row = applied(delegate(&pool, C, "claude", "gw", "mini").await);
+    let epoch = applied(finish_release(&pool, C, "gw", row.epoch).await).epoch;
+    applied(adopt(&pool, C, "mini", epoch).await);
+    for node in ["gw", "mini"] {
+        refused(&pool, "worker", abort_release(&pool, C, epoch, node)).await;
+    }
+    applied(begin_reclaim(&pool, C, epoch, "gw").await);
+    for node in ["gw", "mini"] {
+        refused(&pool, "reclaiming", abort_release(&pool, C, epoch, node)).await;
+    }
+    let reclaimed = applied(finish_reclaim(&pool, C, "mini", epoch).await).epoch;
+    for node in ["gw", "mini"] {
+        refused(&pool, "reclaimed", abort_release(&pool, C, reclaimed, node)).await;
+    }
+    applied(remove_reclaimed(&pool, C, "gw", reclaimed).await);
+
+    applied(delegate(&pool, C, "claude", "gw", "mini").await);
+    let epoch = home(&pool).await.expect("row").epoch;
+    age_lease(&pool, 250).await;
+    let ForceOutcome::Orphaned(orphan) = force_orphan(&pool, C, epoch, F, "op").await.unwrap()
+    else {
+        panic!("expected orphaned");
+    };
+    for node in ["gw", "mini"] {
+        let abort = abort_release(&pool, C, orphan.epoch, node);
+        refused(&pool, "orphaned", abort).await;
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A releasing row goes only from its holder at its exact epoch, and an open intake row routed
+/// before the delegation keeps it.
+#[tokio::test]
+async fn abort_release_takes_a_releasing_row_only_from_its_holder_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let epoch = applied(delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    for node in ["mini", "book"] {
+        refused(
+            &pool,
+            "not the holder",
+            abort_release(&pool, C, epoch, node),
+        )
+        .await;
+    }
+    for other in [epoch - 1, epoch + 1] {
+        refused(&pool, "other epoch", abort_release(&pool, C, other, "gw")).await;
+    }
+    open_intake(&pool, "unrouted", None).await;
+    refused(&pool, "open intake", abort_release(&pool, C, epoch, "gw")).await;
+    settle_intake(&pool).await;
+    let row = applied(abort_release(&pool, C, epoch, "gw").await);
+    let removed = (row.state, row.holder.as_deref(), row.epoch);
+    assert_eq!(removed, (HomeState::Releasing, Some("gw"), epoch));
+    assert_eq!(home(&pool).await, None);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// One open intake row of any routed epoch, alone, keeps a row abort-release would otherwise drop.
+#[tokio::test]
+async fn abort_release_refuses_while_any_intake_is_open_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let first = applied(delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    let released = applied(finish_release(&pool, C, "gw", first).await).epoch;
+    let open = [
+        ("current", Some(released)),
+        ("other_epoch", Some(first)),
+        ("unrouted", None),
+    ];
+    for (key, routed) in open {
+        open_intake(&pool, key, routed).await;
+        let expected = OpenIntake {
+            current: i64::from(key == "current"),
+            other_epoch: i64::from(key == "other_epoch"),
+            unrouted: i64::from(key == "unrouted"),
+        };
+        let counted = open_intake_by_epoch(&pool, C, released).await.unwrap();
+        assert_eq!(counted, expected, "{key}");
+        refused(&pool, key, abort_release(&pool, C, released, "gw")).await;
+        settle_intake(&pool).await;
+    }
+    applied(abort_release(&pool, C, released, "gw").await);
+    assert_eq!(home(&pool).await, None);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// Queues `first` then `second` on the channel's locked row, then lets both run in that order.
+async fn queued_on_the_row<A, B>(pool: &PgPool, first: A, second: B) -> (A::Output, B::Output)
+where
+    A: std::future::Future + Send + 'static,
+    A::Output: Send + 'static,
+    B: std::future::Future + Send + 'static,
+    B::Output: Send + 'static,
+{
+    let mut blocker = pool.begin().await.expect("blocker");
+    sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
+        .bind(C)
+        .execute(&mut *blocker)
+        .await
+        .expect("lock row");
+    let first = tokio::spawn(first);
+    lock_waiters(pool, 1).await;
+    let second = tokio::spawn(second);
+    lock_waiters(pool, 2).await;
+    blocker.commit().await.expect("release lock");
+    (first.await.expect("join"), second.await.expect("join"))
+}
+
+async fn drop_home(pool: &PgPool) {
+    sqlx::query("DELETE FROM o_channel_homes WHERE channel_id = $1")
+        .bind(C)
+        .execute(pool)
+        .await
+        .expect("drop row");
+}
+
+/// The target's adopt and the gateway's abort on one released row: whichever runs first decides,
+/// and the other finds the row it left.
+#[tokio::test]
+async fn an_abort_and_an_adopt_racing_on_one_released_row_never_both_win_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+    for adopt_first in [true, false] {
+        let row = applied(delegate(&pool, C, "claude", "gw", "mini").await);
+        let epoch = applied(finish_release(&pool, C, "gw", row.epoch).await).epoch;
+        let (adopt_pool, abort_pool) = (pool.clone(), pool.clone());
+        let adopting = async move { adopt(&adopt_pool, C, "mini", epoch).await.unwrap() };
+        let aborting = async move { abort_release(&abort_pool, C, epoch, "gw").await.unwrap() };
+        let (adopted, aborted) = if adopt_first {
+            queued_on_the_row(&pool, adopting, aborting).await
+        } else {
+            let (aborted, adopted) = queued_on_the_row(&pool, aborting, adopting).await;
+            (adopted, aborted)
+        };
+        let after = home(&pool).await.map(|row| (row.state, row.epoch));
+        match (adopt_first, &adopted, &aborted) {
+            (true, HomeWrite::Applied(_), HomeWrite::Stale) => {
+                assert_eq!(after, Some((HomeState::Worker, epoch)));
+            }
+            (false, HomeWrite::Stale, HomeWrite::Applied(_)) => assert_eq!(after, None),
+            other => panic!("adopt first {adopt_first}: {other:?}"),
+        }
+        drop_home(&pool).await;
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// The holder's drain finishing and the gateway's abort on one releasing row: exactly one applies,
+/// leaving the row released or gone, and neither retries.
+#[tokio::test]
+async fn a_finished_release_and_an_abort_racing_on_one_releasing_row_never_both_win_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+    for release_first in [true, false] {
+        let epoch = applied(delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+        let (release_pool, abort_pool) = (pool.clone(), pool.clone());
+        let leaving = async move { finish_release(&release_pool, C, "gw", epoch).await.unwrap() };
+        let aborting = async move { abort_release(&abort_pool, C, epoch, "gw").await.unwrap() };
+        let (left, aborted) = if release_first {
+            queued_on_the_row(&pool, leaving, aborting).await
+        } else {
+            let (aborted, left) = queued_on_the_row(&pool, aborting, leaving).await;
+            (left, aborted)
+        };
+        let after = home(&pool).await;
+        let after = after.map(|row| (row.state, row.holder, row.target, row.epoch > epoch));
+        match (release_first, &left, &aborted) {
+            (true, HomeWrite::Applied(_), HomeWrite::Stale) => {
+                let released = (HomeState::Released, None, Some("mini".into()), true);
+                assert_eq!(after, Some(released));
+            }
+            (false, HomeWrite::Stale, HomeWrite::Applied(_)) => assert_eq!(after, None),
+            other => panic!("release first {release_first}: {other:?}"),
+        }
+        drop_home(&pool).await;
+    }
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// Fails the channel's one pending retry child for `holder` through the worker's claim and returns
+/// it, so the next sweep sees a terminal `failed_pre_accept` stamped like the child was.
+async fn fail_pending_on(pool: &PgPool, holder: &str) -> crate::db::intake_outbox::IntakeOutboxRow {
+    use crate::db::intake_outbox::{claim_pending_for_target, mark_failed_pre_accept};
+    let claimed = claim_pending_for_target(pool, holder, "claude", "lease");
+    let claimed = claimed.await.expect("claim").expect("claimable row");
+    let failed = mark_failed_pre_accept(pool, claimed.id, "lease", "retryable");
+    assert!(failed.await.expect("fail pre-accept"));
+    claimed
+}
+
+async fn retry_tick(pool: &PgPool) -> crate::db::intake_outbox::FailedPreAcceptSweepOutcome {
+    sqlx::query("UPDATE worker_nodes SET last_heartbeat_at = NOW()")
+        .execute(pool)
+        .await
+        .expect("heartbeat");
+    let retry = crate::services::cluster::node_registry::run_leader_intake_retry_maintenance_once;
+    let outcome = retry(pool, "gw", 60, 60, || Some((5, 300))).await;
+    outcome.expect("maintenance").expect("retry enabled")
+}
+
+async fn status_and_touch(pool: &PgPool, id: i64) -> (String, DateTime<Utc>) {
+    sqlx::query_as("SELECT status, updated_at FROM intake_outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("read source")
+}
+
+/// A home-stamped failure is retried only to the holder of its exact Worker home, and once that
+/// home is gone (returned, then a later release aborted) it stays terminal with nothing reopened.
+#[tokio::test]
+async fn an_old_home_failed_pre_accept_is_not_retried_after_abort_release_pg() {
+    use crate::db::intake_outbox::FailedPreAcceptSweepOutcome as Sweep;
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO worker_nodes (instance_id, status, labels, capabilities, last_heartbeat_at)
+         VALUES ('mini', 'online', '[]', $1, NOW()), ('book', 'online', '[]', $1, NOW())",
+    )
+    .bind(serde_json::json!({"intake_worker": {"enabled": true, "providers": ["claude"]}}))
+    .execute(&pool)
+    .await
+    .expect("seed workers");
+    let row = applied(delegate(&pool, C, "claude", "gw", "mini").await);
+    let old = applied(finish_release(&pool, C, "gw", row.epoch).await).epoch;
+    applied(adopt(&pool, C, "mini", old).await);
+    open_intake(&pool, "msg", Some(old)).await;
+    let first = fail_pending_on(&pool, "mini").await;
+    // `book` sorts ahead of the holder among equally fresh workers, so a worker-order pick takes it.
+    let Sweep::Retried { new_id, .. } = retry_tick(&pool).await else {
+        panic!("the exact Worker home's holder takes the retry");
+    };
+    let child: (String, Option<i64>) =
+        sqlx::query_as("SELECT target_instance_id, home_epoch FROM intake_outbox WHERE id = $1")
+            .bind(new_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read child");
+    assert_eq!(child, ("mini".to_string(), Some(old)));
+    let source = fail_pending_on(&pool, "mini").await;
+    assert_ne!(source.id, first.id);
+
+    applied(begin_reclaim(&pool, C, old, "gw").await);
+    let reclaimed = applied(finish_reclaim(&pool, C, "mini", old).await).epoch;
+    applied(remove_reclaimed(&pool, C, "gw", reclaimed).await);
+    let new = applied(delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    assert!(new > old);
+    applied(abort_release(&pool, C, new, "gw").await);
+    assert_eq!(home(&pool).await, None);
+
+    let before = status_and_touch(&pool, source.id).await;
+    assert_eq!(retry_tick(&pool).await, Sweep::Empty);
+    let open = INTAKE_OUTBOX_OPEN_STATUSES_SQL;
+    let open =
+        format!("SELECT COUNT(*) FROM intake_outbox WHERE channel_id = $1 AND status IN ({open})");
+    let open: i64 = sqlx::query_scalar(AssertSqlSafe(open))
+        .bind(C)
+        .fetch_one(&pool)
+        .await
+        .expect("count open");
+    assert_eq!(open, 0);
+    let after = status_and_touch(&pool, source.id).await;
+    assert_eq!(after, before);
+    assert_eq!(after.0, "failed_pre_accept");
+    pool.close().await;
+    pg_db.drop().await;
+}

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from scripts import check_durable_frontier_writer_call_sites as durable
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/check_intake_outbox_done_writer_call_sites.py"
@@ -478,6 +482,118 @@ class TransportLegacyInventoryTests(unittest.TestCase):
                     "struct ShutdownReader(pub(in crate::services) Arc<",
                 )
             )
+
+
+class SharedSkipRuleTests(unittest.TestCase):
+    def test_repository_skips_match_data_resolver_pin_and_basename_rule(self):
+        data = runpy.run_path(str(ROOT / "scripts/test_only_module_skip_pin_paths.py"))
+        self.assertNotIn("PINNED_BASENAME_TEST_FILES", data)
+        resolver = data["PINNED_RESOLVER_TEST_ONLY_FILES"]
+        self.assertEqual(guard.PINNED_TEST_ONLY_MODULE_FILES, resolver)
+        basename = {
+            path.relative_to(ROOT).as_posix() for path in (ROOT / "src").rglob("*.rs")
+            if path.name == "tests.rs" or path.name.endswith("_tests.rs")
+        }
+        files, skips = guard._SKIP_PIN.validated_scan_files(
+            ROOT, guard.SCAN_ROOT, guard.is_test_file
+        )
+        self.assertEqual({path.relative_to(ROOT).as_posix() for path in skips}, basename | resolver)
+        self.assertEqual(len(skips), len(basename) + len(resolver))
+        self.assertTrue(set(files) - skips)
+
+    def test_basename_rule_is_exact(self):
+        for name in ("tests.rs", "a_tests.rs", "_tests.rs"):
+            self.assertTrue(guard.is_test_file(name), name)
+        for name in ("test.rs", "tests/mod.rs", "a_test.rs", "tests_pg.rs", "Tests.rs", "a_tests.RS"):
+            self.assertFalse(guard.is_test_file(name), name)
+        self.assertIs(guard.PINNED_TEST_ONLY_MODULE_FILES,
+                      guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES)
+        self.assertFalse(hasattr(guard._SKIP_PIN, "PINNED_BASENAME_TEST_FILES"))
+
+    def run_both_skip_gates(self, root, pinned):
+        names = ("EXPECTED_CALL_SITES", "EXPECTED_RAW_ATOMIC_MUTATIONS",
+                 "EXPECTED_BARE_REFERENCES", "EXPECTED_PINNED_USE_ALIASES",
+                 "EXPECTED_DEFINITION_FILE_COUNTS")
+        expected = {name: {} for name in names}
+        expected["EXPECTED_CALL_SITES"] = {symbol: {} for symbol in durable.EXPECTED_CALL_SITES}
+        with patch.multiple(durable, **expected):
+            return (durable.check(root, pinned_test_only_files=pinned),
+                    guard.check(root, {}, pinned_test_only_files=pinned))
+
+    def test_new_basename_files_need_no_pin_change(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "#[cfg(test)] mod new_tests;\nfn main() {}\n")
+        body = (
+            "fn probe() { crate::write_delivered_frontier(); "
+            "crate::db::intake_outbox::mark_done(); }\n"
+        )
+        for rel in ("src/new_tests.rs", "src/nested/tests.rs"):
+            write(root, rel, body)
+        before = (ROOT / "scripts/test_only_module_skip_pin.py").read_bytes()
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertTrue(ok, message)
+        self.assertEqual(before, (ROOT / "scripts/test_only_module_skip_pin.py").read_bytes())
+
+    def test_production_mod_mounts_of_basename_files_fail_without_pin(self):
+        for declaration in (
+            "mod hidden_tests;",
+            '#[path="hidden_tests.rs"] mod helper;',
+            '#[cfg(not(test))] mod hidden_tests;',
+            '#[cfg(any(test, feature="x"))] mod hidden_tests;',
+        ):
+            with self.subTest(declaration=declaration):
+                root = Path(tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, root)
+                write(root, "src/main.rs", declaration + "\nfn main() {}\n")
+                write(root, "src/hidden_tests.rs", "pub fn probe() {}\n")
+                for ok, message in self.run_both_skip_gates(root, frozenset()):
+                    self.assertFalse(ok, message)
+                    self.assertIn("production module mounts basename test file", message)
+
+    def test_basename_classifier_widening_is_rejected(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "fn main() {}\n")
+        write(root, "src/helper_test.rs", "")
+        with self.assertRaisesRegex(RuntimeError, "basename classifier differs"):
+            guard._SKIP_PIN.validated_scan_files(
+                root, guard.SCAN_ROOT, lambda name: name.endswith("_test.rs"), pinned_paths=()
+            )
+
+    def test_test_only_parents_and_nested_test_cfg_mounts_are_accepted(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", '#[cfg(test)] mod harness;\nfn main() {}\n'
+              '#[cfg(all(test, unix))] mod nested { #[path="../hidden_tests.rs"] mod helper; }\n')
+        write(root, "src/harness.rs", '#[path="hidden_tests.rs"] mod helper;\n')
+        write(root, "src/hidden_tests.rs", "fn probe() {}\n")
+        for ok, message in self.run_both_skip_gates(root, {"src/harness.rs"}):
+            self.assertTrue(ok, message)
+
+    def test_production_basename_mount_cannot_be_authorized_by_resolver_pin(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "mod hidden_tests;\nfn main() {}\n")
+        write(root, "src/hidden_tests.rs", "pub fn probe() {}\n")
+        for ok, message in self.run_both_skip_gates(root, {"src/hidden_tests.rs"}):
+            self.assertFalse(ok, message)
+            self.assertIn("production module mounts basename test file", message)
+
+    def test_ungated_mount_of_imports_and_test_gated_modules_keeps_production_items_visible(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        write(root, "src/main.rs", "mod hidden_tests;\nfn main() {}\n")
+        gated = "use super::*;\n#[cfg(test)] mod tests { fn probe() {} }"
+        write(root, "src/hidden_tests.rs", gated)
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
+            self.assertTrue(ok, message)
+        for tail in (" fn production() {}", "\nconst PRODUCTION: u8 = 1;"):
+            with self.subTest(tail=tail):
+                write(root, "src/hidden_tests.rs", gated + tail)
+                for ok, message in self.run_both_skip_gates(root, frozenset()):
+                    self.assertFalse(ok, message)
+                    self.assertIn("production module mounts basename test file", message)
 
 
 if __name__ == "__main__":

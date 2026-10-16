@@ -109,42 +109,45 @@ def sync_skips(root, promoted_paths=(), deleted_paths=()):
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
+    pin.validate_basename_mounts(files, basename, resolved)
     path = root / "scripts/test_only_module_skip_pin_paths.py"
     if not path.is_file():
         path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
-    actual = {p.relative_to(root).as_posix() for p in basename | resolved}
+    actual = {p.relative_to(root).as_posix() for p in resolved}
+    pinned = pin.PINNED_RESOLVER_TEST_ONLY_FILES
     existing = {p.relative_to(root).as_posix() for p in files}
     promoted = set(promoted_paths)
     deleted = set(deleted_paths)
     for rel in sorted(deleted):
         if (root / rel).exists() or (root / rel).is_symlink():
             raise RuntimeError("deletion path still exists: " + rel)
-        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+        if rel not in pinned:
             raise RuntimeError("deletion is not pinned: " + rel)
     for rel in sorted(promoted):
         if rel not in existing:
             raise RuntimeError("promotion path missing: " + rel)
         if rel in actual:
             raise RuntimeError("promotion remains test-only: " + rel)
-        if rel not in pin.PINNED_TEST_ONLY_MODULE_FILES:
+        if rel not in pinned:
             raise RuntimeError("promotion is not pinned: " + rel)
-    if pin.PINNED_TEST_ONLY_MODULE_FILES - actual - promoted - deleted:
+    if pinned - actual - promoted - deleted:
         raise RuntimeError("refusing pin removal")
     for rel in sorted(promoted | deleted):
         pattern = r'(?m)^[ \t]*"' + re.escape(rel) + r'",\n'
         source, count = re.subn(pattern, '', source)
         if count != 1:
             raise RuntimeError("removal pin is ambiguous: " + rel)
-    for name, paths in (("PINNED_BASENAME_TEST_FILES", basename), ("PINNED_RESOLVER_TEST_ONLY_FILES", resolved)):
-        measured = {p.relative_to(root).as_posix() for p in paths}
-        for rel in sorted(measured - pin.PINNED_TEST_ONLY_MODULE_FILES):
-            start = source.index(name + " =")
-            end = source.index("\n    }\n)", start)
-            directory = re.escape(Path(rel).parent.as_posix() + '/')
-            sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
-            at = start + sibling.start() if sibling else end
-            source = source[:at] + '\n        "' + rel + '",' + source[at:]
+    for rel in sorted(actual - pinned):
+        start = source.index("PINNED_RESOLVER_TEST_ONLY_FILES =")
+        closing = re.search(r"\n[ \t]*\}\s*\)", source[start:])
+        if closing is None:
+            raise RuntimeError("resolver pin closing delimiter missing")
+        end = start + closing.start()
+        directory = re.escape(Path(rel).parent.as_posix() + '/')
+        sibling = re.search(r'\n[ \t]*"' + directory + r'[^"/]+",', source[start:end])
+        at = start + sibling.start() if sibling else end
+        source = source[:at] + '\n        "' + rel + '",' + source[at:]
     path.write_text(source)
 
 
