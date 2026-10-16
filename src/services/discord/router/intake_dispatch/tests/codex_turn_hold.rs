@@ -29,8 +29,12 @@ fn codex_message(message_id: u64) -> IntakeSubmission {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode() {
-    let env = ScopedIntakeTestEnv::with_mode("disabled");
-    let config = crate::runtime_layout::config_file_path(env._root.path());
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "ADK_INTAKE_ROUTING_MODE",
+        std::ffi::OsStr::new("disabled"),
+    );
+    let config = crate::runtime_layout::config_file_path(&crate::config::runtime_root().unwrap());
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "server: {}\n").unwrap();
     let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
