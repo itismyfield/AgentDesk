@@ -75,9 +75,11 @@ impl Intervention {
         SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
-    /// The route this item resolved before it was queued; `None` resolves again on replay.
+    /// The first route any source resolved before queueing; `None` resolves again on replay.
     pub(crate) fn queued_route(&self) -> Option<QueuedRoute> {
-        self.source_message_queued_generations.first()?.route
+        self.source_message_queued_generations
+            .iter()
+            .find_map(|source| source.route)
     }
 
     /// Stamps every source with the route, so merges and per-source exits keep it.
@@ -91,7 +93,7 @@ impl Intervention {
         self
     }
 
-    /// Consecutive soft inputs from one author merge unless a reply boundary or a route splits them.
+    /// Consecutive soft inputs from one author merge unless a reply boundary or two routes split them.
     pub(crate) fn merges_with(&self, incoming: &Intervention) -> bool {
         self.mode == InterventionMode::Soft
             && incoming.mode == InterventionMode::Soft
@@ -100,7 +102,11 @@ impl Intervention {
             && self.author_id == incoming.author_id
             && !self.has_reply_boundary
             && !incoming.has_reply_boundary
-            && self.queued_route() == incoming.queued_route()
+            && match (self.queued_route(), incoming.queued_route()) {
+                (Some(held), Some(arrived)) => held == arrived,
+                // A route-less input resolves again in this channel, so it takes the other's route.
+                _ => true,
+            }
     }
 
     pub(crate) fn preserve_on_cancel(&self) -> bool {

@@ -434,8 +434,8 @@ fn queued(id: u64, text: &str, route: Option<QueuedRoute>) -> Intervention {
     }
 }
 
-/// Consecutive inputs merge only when they carry the same route, and every merged source keeps
-/// it, so whichever source an item keeps, its route is the same.
+/// Consecutive inputs merge unless they carry two different routes; a route-less input resolves
+/// again in its channel, so it joins a routed item and that item keeps the route.
 #[test]
 fn s2f_only_inputs_with_one_route_merge() {
     let route = |parent: Option<u64>| QueuedRoute {
@@ -443,30 +443,33 @@ fn s2f_only_inputs_with_one_route_merge() {
         parent: parent.map(ChannelId::new),
         role: None,
     };
-    let mut queue = Vec::new();
-    let inputs = [
-        (1, Some(route(Some(9)))),
-        (2, Some(route(Some(9)))),
-        (3, Some(route(None))),
-        (4, None),
-        (5, None),
-    ];
-    for (id, route) in inputs {
-        let text = format!("input {id}");
-        let enqueue = crate::services::turn_orchestrator::enqueue_intervention;
-        assert!(enqueue(&mut queue, queued(id, &text, route), None).enqueued);
-    }
-    let routes: Vec<_> = queue.iter().map(Intervention::queued_route).collect();
-    assert_eq!(routes, [Some(route(Some(9))), Some(route(None)), None]);
+    let enqueue = |inputs: &[(u64, Option<QueuedRoute>)]| {
+        let mut queue = Vec::new();
+        for &(id, route) in inputs {
+            let item = queued(id, &format!("input {id}"), route);
+            let enqueued =
+                crate::services::turn_orchestrator::enqueue_intervention(&mut queue, item, None);
+            assert!(enqueued.enqueued);
+        }
+        queue
+    };
     let sources = |item: &Intervention| -> Vec<(u64, Option<QueuedRoute>)> {
         let records = item.source_message_queued_generations.iter();
         records.map(|s| (s.message_id.get(), s.route)).collect()
     };
+    let (a, b) = (Some(route(Some(9))), Some(route(None)));
+    let queue = enqueue(&[(1, a), (2, a), (3, b), (4, None)]);
+    let routes: Vec<_> = queue.iter().map(Intervention::queued_route).collect();
+    assert_eq!(routes, [a, b]);
+    assert_eq!(sources(&queue[0]), [(1, a), (2, a)]);
+    assert_eq!(sources(&queue[1]), [(3, b), (4, None)]);
+    let queue = enqueue(&[(5, None), (6, a)]);
     assert_eq!(
-        sources(&queue[0]),
-        [(1, Some(route(Some(9)))), (2, Some(route(Some(9))))]
+        queue.len(),
+        1,
+        "a routed input joins the route-less one before it"
     );
-    assert_eq!(sources(&queue[2]), [(4, None), (5, None)]);
+    assert_eq!(queue[0].queued_route(), a);
 }
 
 /// A queue file keeps the route through a restart; a file written before routes were kept reads
