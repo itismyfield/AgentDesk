@@ -499,7 +499,8 @@ fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
 // #5941: the durable record at the #5175 loss seam, and the observability that
 // stops "there is no record" from reading as "there is no problem".
 
-pub(super) const LOST_BODY: &str = "the assistant answer the sink declined and the watcher could not send";
+pub(super) const LOST_BODY: &str =
+    "the assistant answer the sink declined and the watcher could not send";
 const LOST_CHANNEL: u64 = 1_479_671_298_497_183_835;
 pub(super) const SENT_PREFIX: usize = 4_096;
 const GENERATION_MTIME_NS: i64 = 1_758_000_000_000_000_000;
@@ -1013,13 +1014,21 @@ fn admitted_losses(channel: u64) -> u64 {
 /// delivered-content fingerprint for `LOST_BODY` first, and is the ONLY input that
 /// differs between the two callers below — so the delta between them isolates the
 /// duplicate-guard conjunct from every other one.
-pub(super) async fn admitted_losses_over_one_plan_pass(
+async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel: bool) -> u64 {
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
+    admitted_losses_over_one_plan_pass_under(root.path(), channel_id, already_on_channel, None)
+        .await
+}
+
+/// The same pass under a runtime root the caller already pinned, which a PostgreSQL
+/// fixture needs because the env lock must be taken before the database is created.
+pub(super) async fn admitted_losses_over_one_plan_pass_under(
+    root: &std::path::Path,
     channel_id: u64,
     already_on_channel: bool,
     pg_pool: Option<sqlx::PgPool>,
 ) -> u64 {
-    let root = tempfile::tempdir().expect("isolated runtime root");
-    let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pg_pool);
     let channel = serenity::ChannelId::new(channel_id);
     let http = std::sync::Arc::new(serenity::Http::new("fixture-no-network"));
@@ -1031,7 +1040,7 @@ pub(super) async fn admitted_losses_over_one_plan_pass(
         );
     }
     let before = admitted_losses(channel_id);
-    let output_path = root.path().join("out.jsonl").display().to_string();
+    let output_path = root.join("out.jsonl").display().to_string();
     let all_data = String::new();
     let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
     let tool_state = WatcherToolState::new();
@@ -1102,7 +1111,7 @@ async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
     // assistant body, no inflight row (soft-terminal authority is denied) and no
     // cached relay producer (the sink never owns the frame).
     assert_eq!(
-        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false, None).await,
+        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false).await,
         1,
         "a frame the plan itself left with no delivery owner must be admitted to the record exactly once"
     );
@@ -1118,7 +1127,7 @@ async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_59
     // row is owed and the threshold-1 aggregate behind that gate must not move — while
     // the seam read the routed flag it did move.
     assert_eq!(
-        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true, None).await,
+        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true).await,
         0,
         "a body the duplicate guard found already on the channel is not a loss and must not page"
     );

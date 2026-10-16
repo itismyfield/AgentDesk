@@ -1,7 +1,7 @@
 //! The dead-letter row a plan-driven loss writes, read back from PostgreSQL.
 
 use super::soft_terminal_direct_send_authority_tests::{
-    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_over_one_plan_pass,
+    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_over_one_plan_pass_under,
 };
 use super::*;
 
@@ -30,6 +30,8 @@ async fn terminal_rows(pool: &sqlx::PgPool) -> Vec<(String, String, String)> {
 async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     // The plan itself feeds the seam, so the row must hold the unsent body and
     // the consumed JSONL end, not merely some non-empty body and some offset.
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
         "agentdesk_terminal_lost_body",
         "terminal relay plan lost body",
@@ -38,7 +40,13 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     let pool = pg_db.connect_and_migrate().await;
 
     assert_eq!(
-        admitted_losses_over_one_plan_pass(ROW_CHANNEL, false, Some(pool.clone())).await,
+        admitted_losses_over_one_plan_pass_under(
+            root.path(),
+            ROW_CHANNEL,
+            false,
+            Some(pool.clone())
+        )
+        .await,
         1
     );
     let rows = terminal_rows(&pool).await;
@@ -52,7 +60,10 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
         format!("jsonl_start={FRAME_START}"),
         format!("response_sent_offset={SENT_PREFIX}"),
         format!("full_response_len={}", SENT_PREFIX + LOST_BODY.len()),
-        format!("denial={}", SoftTerminalAuthorityDenial::NoInflightRow.as_str()),
+        format!(
+            "denial={}",
+            SoftTerminalAuthorityDenial::NoInflightRow.as_str()
+        ),
         "provider=claude".to_string(),
     ] {
         assert!(
