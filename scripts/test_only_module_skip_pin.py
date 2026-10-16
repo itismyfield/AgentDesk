@@ -1,8 +1,8 @@
 """Single lexical pin for whole-file skips in the two #5071 writer gates.
 
-The ordinary basename skips and the higher-risk resolver skips are listed
-separately for review, then exposed as one immutable set.  Every exclusion is
-compared with this repo-relative lexical set before either gate scans files.
+Ordinary basename skips follow exactly ``tests.rs`` / ``*_tests.rs``.
+Production module mounts of those files are rejected; higher-risk resolver
+skips must match the immutable repo-relative pin before either gate scans.
 
 The reused resolver is deliberately unchanged.  It does not guarantee at
 least these seven measured Rust forms: a comment between ``#[path]`` and
@@ -26,10 +26,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+try:
+    from scripts.rust_lex import StripState, strip_line
+except ModuleNotFoundError:
+    from rust_lex import StripState, strip_line
 
 _paths_spec = importlib.util.spec_from_file_location(
     "test_only_module_skip_pin_paths", Path(__file__).with_name("test_only_module_skip_pin_paths.py")
@@ -37,17 +42,16 @@ _paths_spec = importlib.util.spec_from_file_location(
 assert _paths_spec is not None and _paths_spec.loader is not None
 _paths = importlib.util.module_from_spec(_paths_spec)
 _paths_spec.loader.exec_module(_paths)
-PINNED_BASENAME_TEST_FILES = _paths.PINNED_BASENAME_TEST_FILES
 PINNED_RESOLVER_TEST_ONLY_FILES = _paths.PINNED_RESOLVER_TEST_ONLY_FILES
 
-PINNED_TEST_ONLY_MODULE_FILES = (
-    PINNED_BASENAME_TEST_FILES | PINNED_RESOLVER_TEST_ONLY_FILES
-)
+# Basenames are classified by rule; only resolver exclusions need review pins.
+PINNED_TEST_ONLY_MODULE_FILES = PINNED_RESOLVER_TEST_ONLY_FILES
 
 _UPDATE_HINT = (
-    "Review basename and resolver classification in scripts/test_only_module_skip_pin.py, then update "
-    "scripts/test_only_module_skip_pin_paths.py; both gates and tests derive their "
-    "path/count expectation from that single file."
+    "Review basename and resolver classification in scripts/test_only_module_skip_pin.py, "
+    "then update PINNED_RESOLVER_TEST_ONLY_FILES in "
+    "scripts/test_only_module_skip_pin_paths.py for resolver drift; "
+    "tests.rs / *_tests.rs need no path pin."
 )
 
 _SYMLINK_HINT = (
@@ -74,13 +78,62 @@ def _load_inventory_generator():
 _INVENTORY = _load_inventory_generator()
 
 
+def is_basename_test_file(name: str) -> bool:
+    return name == "tests.rs" or name.endswith("_tests.rs")
+
+
+def _has_production_items(text: str) -> bool:
+    # Some mounted fixtures contain only imports and test-gated inline modules.
+    # Mask exact spans so a production item on the same line stays visible.
+    spans = []
+    for match in _INVENTORY._CFG_MOD_RE.finditer(text):
+        if _INVENTORY.cfg_requires_test(match.group("predicate")):
+            try:
+                _, end = _INVENTORY.scan_balanced(text, match.end() - 1, "{", "}")
+            except _INVENTORY.ParseError:
+                continue
+            spans.append((match.start(), end))
+    for start, end in reversed(spans):
+        text = text[:start] + " " * (end - start) + text[end:]
+    state = StripState()
+    code = "\n".join(strip_line(line, state) for line in text.splitlines())
+    return re.fullmatch(r"(?:\s*(?:pub(?:\([^)]*\))?\s+)?use\b[^;]*;)*\s*", code) is None
+
+
+def validate_basename_mounts(
+    all_files: Iterable[Path],
+    basename_skips: set[Path],
+    resolver_skips: set[Path],
+    *,
+    read_text_fn: Callable[[Path], str] = lambda path: path.read_text(encoding="utf-8"),
+) -> None:
+    """Reject lexical production module declarations targeting basename skips."""
+    targets = {path.resolve() for path in basename_skips}
+    for parent in all_files:
+        if parent in basename_skips or parent in resolver_skips:
+            continue
+        for declaration in _INVENTORY._module_file_declarations(parent, read_text_fn(parent)):
+            if declaration.requires_test:
+                continue
+            for child in declaration.child_paths:
+                if child in targets and _has_production_items(read_text_fn(child)):
+                    raise RuntimeError(
+                        "FAIL: production module mounts basename test file: "
+                        f"{parent.as_posix()} -> {child.as_posix()}. "
+                        "Require a test-only cfg on the module or use a production basename."
+                    )
+
+
 def skip_pin_drift(
     excluded_paths: Iterable[str],
     pinned_paths: Iterable[str] = PINNED_TEST_ONLY_MODULE_FILES,
 ) -> str | None:
-    """Compare lexical repo-relative paths in both directions."""
+    """Accept basename rules and compare resolver paths in both directions."""
 
-    actual = frozenset(Path(path).as_posix() for path in excluded_paths)
+    actual = frozenset(
+        Path(path).as_posix() for path in excluded_paths
+        if not is_basename_test_file(Path(path).name)
+    )
     expected = frozenset(Path(path).as_posix() for path in pinned_paths)
     if actual == expected:
         return None
@@ -152,6 +205,9 @@ def validated_scan_files(
     pinned = frozenset(Path(path).as_posix() for path in pinned_paths)
     all_files = _lexical_rust_files(root, scan_root)
     basename_skips = {path for path in all_files if is_test_file(path.name)}
+    rule_skips = {path for path in all_files if is_basename_test_file(path.name)}
+    if basename_skips != rule_skips:
+        raise RuntimeError("FAIL: writer-gate basename classifier differs from tests.rs / *_tests.rs rule")
     production_files = [path for path in all_files if path not in basename_skips]
     if not production_files:
         if all_files:
@@ -171,10 +227,17 @@ def validated_scan_files(
             "extend the gate policy."
         )
     resolved_to_lexical = {path.resolve(): path for path in all_files}
+    texts: dict[Path, str] = {}
+
+    def read_text(path: Path) -> str:
+        if path not in texts:
+            texts[path] = path.read_text(encoding="utf-8")
+        return texts[path]
+
     resolver_results = _INVENTORY.test_only_module_files(
         production_files=production_files,
         all_files=all_files,
-        read_text_fn=lambda path: path.read_text(encoding="utf-8"),
+        read_text_fn=read_text,
     )
     resolver_skips: set[Path] = set()
     unmapped: list[str] = []
@@ -192,16 +255,20 @@ def validated_scan_files(
             + _UPDATE_HINT
         )
 
+    validate_basename_mounts(
+        all_files, basename_skips, resolver_skips, read_text_fn=read_text
+    )
     whole_skips = frozenset(basename_skips | resolver_skips)
     lexical_skips = {
         path.relative_to(root).as_posix() for path in whole_skips
     }
     drift = skip_pin_drift(lexical_skips, pinned)
-    pinned_count = len(pinned)
+    pinned_count = len(basename_skips) + len(pinned)
     if len(whole_skips) != pinned_count:
         census = (
             "FAIL: writer-gate skipped census differs from pin count "
-            f"({len(whole_skips)} skipped, {pinned_count} pinned).\n  {_UPDATE_HINT}"
+            f"({len(whole_skips)} skipped, {len(basename_skips)} basename + "
+            f"{len(pinned)} resolver pinned).\n  {_UPDATE_HINT}"
         )
         raise RuntimeError(f"{drift}\n{census}" if drift else census)
     if drift:
