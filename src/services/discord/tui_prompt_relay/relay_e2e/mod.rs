@@ -19,8 +19,14 @@ mod busy_inject_e2e;
 #[path = "cancel_backstop_e2e_tests.rs"]
 mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
+#[cfg(unix)]
+#[path = "codex_o_handoff_replay_tests.rs"]
+mod codex_o_handoff_replay;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
+#[cfg(unix)]
+#[path = "idle_phase_split_tests.rs"]
+mod idle_phase_split;
 // The literal test gate keeps the source censuses from reading this file as production.
 #[cfg(test)]
 #[cfg(unix)]
@@ -63,6 +69,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use tokio::sync::broadcast::Receiver;
 
+use crate::config::test_env_lock::{SharedTestEnvLockGuard, acquire_shared_test_env_lock};
 use crate::services::discord::turn_completion_events::{
     TurnCompletionEvent, subscribe_turn_completion_events,
 };
@@ -197,7 +204,7 @@ pub(super) struct RelayE2eHarness {
     _provider_guard: crate::config::TestEnvVarGuard,
     _config_guard: crate::config::TestEnvVarGuard,
     _root_guard: crate::config::TestEnvVarGuard,
-    _env_lock: std::sync::MutexGuard<'static, ()>,
+    _env_lock: SharedTestEnvLockGuard,
     root: tempfile::TempDir,
 }
 
@@ -262,9 +269,7 @@ impl RelayE2eHarness {
         storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
         bind_with_pool: bool,
     ) -> Self {
-        let env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let env_lock = acquire_shared_test_env_lock();
         Self::start_inner_with_env_lock(
             stub,
             with_health_registry,
@@ -280,7 +285,7 @@ impl RelayE2eHarness {
         with_health_registry: bool,
         storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
         bind_with_pool: bool,
-        env_lock: std::sync::MutexGuard<'static, ()>,
+        env_lock: SharedTestEnvLockGuard,
     ) -> Self {
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -301,10 +306,6 @@ impl RelayE2eHarness {
             "AGENTDESK_CONFIG",
             &root.path().join("config").join("agentdesk.yaml"),
         );
-        let dedupe_guard = dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-
         let mock = discord_mock::DiscordMockState::new();
         let (proxy, gateway_url, server) = discord_mock::start(mock.clone()).await;
         let ctx = discord_mock::serenity_context(proxy.clone(), gateway_url).await;
@@ -347,6 +348,10 @@ impl RelayE2eHarness {
             .await;
         }
 
+        // Async setup touches only this fixture; guard global dedupe before exposing it.
+        let dedupe_guard = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         Self {
             data,
             shared,
