@@ -2474,7 +2474,9 @@ services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_unti
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
 services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
+services::cluster::channel_home_boot::tests::writer_return::a_return_without_a_writer_candidate_keeps_readiness_closed_pg
 services::cluster::channel_home_boot::tests::writer_return::a_returned_writer_that_ends_after_its_start_is_started_again_pg
+services::cluster::channel_home_boot::tests::writer_return::a_stale_return_keeps_the_new_delegation_and_starts_no_writer_pg
 services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
 services::cluster::channel_home_boot::tests::writer_return::unreadable_boot_rows_start_no_first_writer
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
@@ -7279,10 +7281,12 @@ services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_wa
 services::discord::runtime_bootstrap::shutdown::gateway_waiter_tests::gateway_waiter_last_same_provider_owner_controls_advertisement
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_late_old_cleanup_leaves_the_successor_running
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_stuck_writer_stays_stuck_and_the_commit_still_exits
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::an_os_sigterm_joins_the_writer_before_exit
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::backend_exit_joins_writers_before_the_lease_drops
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_child
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_joins_every_provider_writer_before_exit
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::every_slot_holding_runtime_registers_one_sigterm_handler
+services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::os_sigterm_child
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::switch_off_shutdown_builds_no_lifecycle
