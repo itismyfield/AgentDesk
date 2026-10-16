@@ -33705,25 +33705,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:0015744af59de0303342b42e98bb44709db8480f7f12f1210cbbf4e115e173ff"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:1a80b39033f1c25153908289cc87e17141beab9792b1f59941b638643302af5f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:4d4ec4d989a5a46c575aa97f0f3df69a690e708d2fb98d8dc2f48e66fad031a3"
     },
     {
       "root": "src",
@@ -33751,15 +33733,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:ac59595cffa0a17b6582ee5218ad24cbb85d57103f03d97d18d375077058cc0d"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/tmux_reaper/host_guard_tests.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:79f4f870093ab2aa6b1163ffadd66bd4f91e7a431eec35aa91250f6f511f6e91"
     },
     {
       "root": "src",
@@ -35173,42 +35146,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:cab425c94b4287cba88f996392d80aea65d2101ac13759fe8de4dba9aa185bc4"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:9daea49fa15d7b22dfd9a24624285e950559d1622a9267bbf073b63d3e28fb9e"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:a2f92c086df705c6b6f1a0e1b778e1c724dc459a584f24d76702ca2af82d498f"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:89a1c17924a8c7e791e54e0536aa57abf526281b456e3cb5d09d26a5f5c80cad"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:cba22123b106d11e46916df9cc5fd333586447514c65350698991f7e7dcb713e"
     },
     {
       "root": "src",
