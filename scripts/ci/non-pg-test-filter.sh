@@ -159,7 +159,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
   --skip services::discord::runtime_bootstrap::o_writer_host::activation_tests
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
-  --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+  --skip services::discord::runtime_bootstrap::orphan_recovery::tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
   --skip services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
   --skip services::discord::session_idle_cleanup::tests
