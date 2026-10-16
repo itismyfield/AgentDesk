@@ -323,7 +323,6 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/intake_worker/home_accept_tests.rs'
               - 'src/services/cluster/intake_worker/home_route_tests.rs'
-              - 'src/services/cluster/intake_worker/input_effect_tests.rs'
               - 'src/services/cluster/intake_worker/o_route_tests.rs'
               - 'src/services/cluster/intake_worker/owner_fence_pg_tests.rs'
               - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
