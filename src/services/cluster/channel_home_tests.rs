@@ -450,12 +450,17 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 }
                 continue;
             }
-            // Each loop is named once at its definition and once where the boot starts it.
-            for (owner, start) in [
-                ("src/services/cluster/channel_home.rs", "run_lease"),
-                ("src/services/cluster/channel_home_drain.rs", "run_drain"),
+            // Each loop is named once at its definition, the lease once more where the boot starts
+            // it; the boot's watch runs the drain a round at a time, never its loop.
+            for (owner, start, started) in [
+                ("src/services/cluster/channel_home.rs", "run_lease", true),
+                (
+                    "src/services/cluster/channel_home_drain.rs",
+                    "run_drain",
+                    false,
+                ),
             ] {
-                let starter = relative == "src/services/cluster/channel_home_boot.rs";
+                let starter = started && relative == "src/services/cluster/channel_home_boot.rs";
                 let expected = usize::from(relative == owner || starter);
                 let named = tokens.iter().filter(|token| **token == start).count();
                 if named != expected {
@@ -799,49 +804,4 @@ async fn command_registration_never_discards_a_preexisting_local_execution() {
     register(new.clone());
     assert!(Arc::ptr_eq(&registered(old.channel_id()).unwrap(), &new));
     unregister(old.channel_id());
-}
-
-/// Whether a Home mount on this thread's registry would wait right now.
-pub(crate) fn mount_waits() -> bool {
-    with_homes(|homes| match homes.get() {
-        Some(homes) => homes.try_lock().is_err(),
-        None => FIRST_MOUNT.try_lock().is_err(),
-    })
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct SharedHomes(Arc<Registry>);
-
-pub(crate) struct HomesScope(Arc<Registry>);
-
-impl SharedHomes {
-    pub(crate) fn enter(&self) -> HomesScope {
-        HomesScope(HOMES.with(|homes| homes.replace(self.0.clone())))
-    }
-
-    pub(crate) fn available(&self) -> bool {
-        self.0.get().is_some_and(|homes| homes.try_lock().is_ok())
-    }
-}
-
-impl Drop for HomesScope {
-    fn drop(&mut self) {
-        HOMES.with(|homes| homes.replace(self.0.clone()));
-    }
-}
-
-thread_local! {
-    static UNHOMED_POLL: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) fn before_unhomed_poll() {
-    UNHOMED_POLL.with(|hook| {
-        if let Some(hook) = hook.borrow().as_ref() {
-            hook();
-        }
-    });
-}
-
-pub(crate) fn at_unhomed_poll(hook: Option<Box<dyn Fn()>>) {
-    UNHOMED_POLL.with(|current| current.replace(hook));
 }

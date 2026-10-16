@@ -1720,6 +1720,8 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
 }
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
+const UNBOUND_OBSERVER: &str = "src/services/discord/turn_presence/activity/unbound.rs";
+const UNBOUND_ADAPTER: &str = "src/services/discord/turn_presence/activity/unbound/live.rs";
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 /// The timeouts policy repair facade: the one production caller of the target guard.
 const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
@@ -1758,6 +1760,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/discord/inflight/host_locator.rs", 1),
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
+        (UNBOUND_OBSERVER, 1),
         (SESSION_RECORD, 1),
         (POLICY_REPAIR, 2),
         // Dormant Herdr launch: names the host for the pane location and its marker.
@@ -1829,7 +1832,10 @@ fn herdr_items_have_no_production_caller() {
                 "src/services/termination_audit/host_terminate.rs",
             ],
         ),
-        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
+        (
+            "HostKind::from_persisted",
+            &[LOCATOR, MARKER, UNBOUND_ADAPTER],
+        ),
         (
             "HostKindMarker",
             &[
@@ -1845,6 +1851,8 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                UNBOUND_OBSERVER,
+                UNBOUND_ADAPTER,
             ],
         ),
         (
@@ -1878,6 +1886,7 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                UNBOUND_OBSERVER,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
@@ -1958,6 +1967,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, 0),
                 (GUARD_ADAPTER, 1),
                 (POLICY_REPAIR, 1),
+                (UNBOUND_OBSERVER, 1),
             ],
         ),
         ("resolve_target_host", &[(RESOLVE, 1)]),
@@ -1988,9 +1998,23 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 ("src/services/discord/host_teardown_gate.rs", 1),
             ],
         ),
-        ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
+        (
+            "with_inflight_row",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                (UNBOUND_OBSERVER, 1),
+            ],
+        ),
         ("locator_witness", &[(GUARD_ADAPTER, 1)]),
-        ("marker_witness", &[(GUARD_ADAPTER, 1)]),
+        (
+            "marker_witness",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                (UNBOUND_OBSERVER, 1),
+            ],
+        ),
         (
             "session_record_witness",
             &[
@@ -1998,6 +2022,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, 0),
                 (GUARD_ADAPTER, 1),
                 (POLICY_REPAIR, 1),
+                (UNBOUND_OBSERVER, 1),
             ],
         ),
         ("with_host_marker", &[(RESOLVE, 0), (POLICY_REPAIR, 1)]),
@@ -2019,6 +2044,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, ANY),
                 (GUARD_ADAPTER, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2028,6 +2054,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, ANY),
                 (GUARD_ADAPTER, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2038,6 +2065,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (GUARD_ADAPTER, ANY),
                 (SESSION_RECORD, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2063,6 +2091,101 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
         violations.is_empty(),
         "session target guard production caller: {violations:?}"
     );
+}
+
+#[test]
+fn u_observer_callers_confined() {
+    const U: &str = "src/services/discord/turn_presence/activity/unbound.rs";
+    const I: &str = "src/services/platform/tmux/session_inventory.rs";
+    let sources = production_sources();
+    let items: &[(&str, Owners)] = &[
+        ("probe_session_inventory", &[(I, 0)]),
+        ("observe_candidates", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("unbound_candidates", &[(U, 1)]),
+        ("host_scope", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("decide_unbound", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("observe_inventory", &[(I, 0), (UNBOUND_ADAPTER, 1)]),
+    ];
+    let violations = guarded_item_violations(&sources, items);
+    assert!(
+        violations.is_empty(),
+        "observer escaped its activity adapter: {violations:?}"
+    );
+    let adapter = code_tokens(&sources[UNBOUND_ADAPTER]);
+    for (item, count) in [
+        ("observe_candidates", 1),
+        ("host_scope", 1),
+        ("decide_unbound", 1),
+        ("observe_inventory", 1),
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, count, "adapter lost {item}");
+        let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(count));
+        let admitted = [(UNBOUND_ADAPTER.into(), body)].into_iter().collect();
+        assert!(guarded_item_violations(&admitted, items).is_empty());
+        for (path, calls) in [
+            ("src/services/unlisted.rs", 1),
+            (UNBOUND_ADAPTER, count + 1),
+        ] {
+            let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(calls));
+            let extra = [(path.into(), body)].into_iter().collect();
+            assert!(
+                !guarded_item_violations(&extra, items).is_empty(),
+                "caller budget missed {path}: {item} x{calls}"
+            );
+        }
+    }
+    assert_eq!(item_uses(&adapter, "collect_pair").0, 2);
+    for item in [
+        "clear_legacy_session",
+        "guard_first_state_change",
+        "probe_for_policy",
+        "teardown_for_lookup",
+        "keyed_teardown",
+        "resolve_session_target",
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, 0, "adapter acquired {item}");
+    }
+    let code = code_tokens(include_str!("../discord/turn_presence/activity/unbound.rs"));
+    for (item, count) in [
+        ("SessionTargetEvidence", 6),
+        ("SessionTargetInput", 2),
+        ("HostWitness", 11),
+        ("HostKindMarker", 3),
+    ] {
+        assert_eq!(item_uses(&code, item).0, count, "{item}");
+    }
+    for item in [
+        "resolve_session_target",
+        "with_inflight_row",
+        "marker_witness",
+        "session_record_witness",
+    ] {
+        let (calls, aliases) = item_uses(&code, item);
+        assert_eq!(calls, 1, "{item}");
+        assert!(aliases.is_empty(), "{item}: {aliases:?}");
+    }
+    for item in [
+        "clear_legacy_session",
+        "guard_first_state_change",
+        "probe_for_policy",
+        "teardown_for_lookup",
+        "keyed_teardown",
+    ] {
+        assert_eq!(item_uses(&code, item).0, 0, "observer acquired {item}");
+    }
+    for body in [
+        "probe_session_inventory();",
+        "let p = probe_session_inventory;",
+        "use crate::services::platform::tmux::session_inventory::probe_session_inventory as p; fn live() { p(); }",
+    ] {
+        let extra = [("src/services/unlisted.rs".into(), body.into())]
+            .into_iter()
+            .collect();
+        assert!(
+            !guarded_item_violations(&extra, items).is_empty(),
+            "caller/alias audit missed {body}"
+        );
+    }
 }
 
 // The caller scans above run on today's tree, which has none of these shapes; this
@@ -2335,7 +2458,6 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
     const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
-    const LEDGER: &str = "behind the ledger clear's managed-reset refusal and keyed clearance";
     const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
@@ -2409,11 +2531,6 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                     MISSING,
                 ),
                 ("src/services/discord/commands/control/native.rs", 1, NATIVE),
-                (
-                    "src/services/discord/commands/control/input_clear.rs",
-                    1,
-                    LEDGER,
-                ),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
                 ("src/services/discord/admin_host_guard.rs", 1, MISSING),

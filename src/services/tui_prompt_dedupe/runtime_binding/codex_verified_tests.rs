@@ -116,7 +116,7 @@ impl Fixture {
             .unwrap()
             .join(format!("rollout-{id}.jsonl"))
     }
-    fn header(&self, id: &str, child: bool) {
+    fn header(&self, id: &str, child: bool) -> u64 {
         let source = if child {
             json!({"subagent":{"thread_spawn":{"parent_thread_id":ID}}})
         } else {
@@ -124,6 +124,7 @@ impl Fixture {
         };
         let meta = json!({"type":"session_meta", "timestamp":(self.context.created_at + chrono::Duration::seconds(1)).to_rfc3339(), "payload":{"id":id,"timestamp":(self.context.created_at + chrono::Duration::seconds(1)).to_rfc3339(),"cwd":self.root.path(),"source":source,"originator":"codex_cli_rs"}});
         fs::write(self.path(id), format!("{meta}\n")).unwrap();
+        fs::metadata(self.path(id)).unwrap().len()
     }
     fn send(
         &self,
@@ -224,8 +225,8 @@ fn s2b1a_owned_source_snapshot_is_read_only_without_delivery_permission_and_rech
     assert_eq!(h.fold(), before);
     assert_eq!(fs::read(h.marker()).unwrap(), marker);
     assert!(
-        h.consumer().is_none(),
-        "source evidence does not grant delivery"
+        h.consumer().is_some(),
+        "verified source reads are independent of episode permission"
     );
     crate::services::tmux_common::with_tmux_source_authority(
         &h.context.tmux_session,
@@ -266,7 +267,7 @@ fn lifecycle_stop_preserves_proof_pending_and_cursors_without_permission() {
     assert_eq!(fs::read(h.marker()).unwrap(), marker);
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
     h.send("Stop", ID, Value::Null, None);
-    assert!(h.consumer().is_none(), "Stop cannot grant permission");
+    assert_eq!(h.consumer(), Some(binding.clone()));
     assert_eq!(h.fold(), fold);
     assert_eq!(h.raw(), Some(binding.clone()));
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
@@ -298,14 +299,12 @@ fn actual_rehydration_recovers_proof_only_restart_without_manual_registration() 
             &h.context.tmux_session,
         );
         assert_eq!(h.fold(), fold, "recovery must not append ownership");
-        if permission == DeliveryPermission::Allowed {
+        {
             h.assert_proof();
             assert_eq!(
                 owner_channel_for_tmux_session(&h.context.tmux_session),
                 Some(584_504)
             );
-        } else {
-            h.absent();
         }
     }
 }
@@ -397,8 +396,8 @@ fn actual_watcher_restore_claims_only_a_proven_source_and_its_output_namespace()
     wrong_source.session_id = Some(CHILD.into());
     assert!(!call(Some(wrong_source), &relay));
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
-    assert!(!call(Some(linked), &relay));
-    assert_eq!(attempts.get(), 2);
+    assert!(call(Some(linked), &relay));
+    assert_eq!(attempts.get(), 3);
 }
 
 #[test]
@@ -527,7 +526,7 @@ fn restart_refuses_unlinked_or_foreign_proof_cursors_and_replaced_relay_identity
 #[test]
 fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     let h = Fixture::new("fresh", None);
-    h.header(ID, false);
+    let end = h.header(ID, false);
     h.send("session-start", ID, Value::Null, None);
     let relay = crate::services::tmux_common::session_temp_path(&h.context.tmux_session, "jsonl");
     fs::write(&relay, "delivered\nunread relay bytes\n").unwrap();
@@ -537,7 +536,7 @@ fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     assert!(advance_tmux_runtime_binding_offset(
         &h.context.tmux_session,
         h.path(ID).to_str().unwrap(),
-        12
+        end
     ));
     assert!(advance_tmux_runtime_binding_offset(
         &h.context.tmux_session,
@@ -560,7 +559,7 @@ fn relay_replacement_cannot_rebind_checkpoint_during_native_advance() {
     register_tmux_channel(&h.context.tmux_session, 584_504);
     codex_verified::resolve_registered_claims();
     let restored = h.consumer().unwrap();
-    assert_eq!(restored.last_offset, 12);
+    assert_eq!(restored.last_offset, end);
     assert_eq!(restored.relay_last_offset, Some(0));
     // Explicit reconnection may certify the replacement, starting at zero.
     let mut reconnect = restored;
@@ -685,7 +684,7 @@ fn child_rejection_retries_remaining_parent_in_the_same_resolver_pass() {
 }
 
 #[test]
-fn cancelled_and_unknown_permission_preserve_proof_but_publish_nothing() {
+fn cancelled_and_unknown_episode_permission_allow_verified_source_publication() {
     for permission in [DeliveryPermission::Cancelled, DeliveryPermission::Unknown] {
         let h = Fixture::new("fresh", None);
         h.header(ID, false);
@@ -694,11 +693,11 @@ fn cancelled_and_unknown_permission_preserve_proof_but_publish_nothing() {
         assert_eq!(
             outcome,
             IngressOutcome::Durable(
-                crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Pending
+                crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Adopted
             )
         );
         assert!(h.fold().verified.is_some());
-        h.absent();
+        h.assert_proof();
         STATE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -710,9 +709,9 @@ fn cancelled_and_unknown_permission_preserve_proof_but_publish_nothing() {
                     recorded_at: Instant::now(),
                 },
             );
-        assert!(h.consumer().is_none());
+        assert!(h.consumer().is_some());
         crate::services::tmux_common::with_tmux_source_authority(&h.context.tmux_session, |a| {
-            assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_none())
+            assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_some())
         });
     }
 }
@@ -724,14 +723,14 @@ fn production_default_permission_reaches_claim_publication_and_getters() {
     codex_verified::clear_permissions_for_tests();
     let outcome = h.send("session-start", ID, Value::Null, None);
     assert!(h.fold().verified.is_some(), "the actual claim must resolve");
-    h.absent();
+    h.assert_proof();
     assert_eq!(
         outcome,
         IngressOutcome::Durable(
-            crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Pending
+            crate::services::claude_tui::hook_server::adoption_retry::DurableKind::Adopted
         )
     );
-    assert!(h.consumer().is_none());
+    assert!(h.consumer().is_some());
 
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
     codex_verified::resolve_registered_claims();
@@ -743,11 +742,11 @@ fn production_default_permission_reaches_claim_publication_and_getters() {
         &h.context.tmux_session,
         |authority| {
             assert!(codex_verified::proof_for_binding(authority, &h.context, &binding).is_ok());
-            assert!(!codex_verified::publication_allowed(authority, &binding));
-            assert!(runtime_binding_for_tmux_session_under_source_authority(authority).is_none());
+            assert!(codex_verified::publication_allowed(authority, &binding));
+            assert!(runtime_binding_for_tmux_session_under_source_authority(authority).is_some());
         },
     );
-    assert!(h.consumer().is_none());
+    assert!(h.consumer().is_some());
     assert_eq!(fs::read(h.marker()).unwrap(), marker);
 }
 
@@ -876,7 +875,7 @@ fn concurrent_start_and_matching_ups_share_one_native_proof() {
 #[test]
 fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     let h = Fixture::new("fresh", None);
-    h.header(ID, false);
+    let end = h.header(ID, false);
     h.send("session-start", ID, Value::Null, None);
     h.assert_proof();
     let before = h.fold();
@@ -895,7 +894,7 @@ fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
         &h.context.tmux_session,
         &h.path(ID),
-        12,
+        end,
     );
     register_rehydrated_tmux_runtime_binding("codex", &h.context.tmux_session, 584_504, discovered);
     h.send(
@@ -906,8 +905,7 @@ fn published_proof_later_ups_and_discovery_preserve_delivery_cursors() {
     );
     assert_eq!(h.fold(), before);
     let binding = h.consumer().unwrap();
-    assert_eq!(binding.last_offset, 12);
-    assert_eq!(binding.relay_last_offset(), 12);
+    assert_eq!([binding.last_offset, binding.relay_last_offset()], [end; 2]);
     assert_eq!(binding.relay_output_path, None);
 }
 
@@ -916,7 +914,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
     for restart in [false, true] {
         for normalized in [false, true] {
             let h = Fixture::new("fresh", None);
-            h.header(ID, false);
+            let end = h.header(ID, false);
             h.send("session-start", ID, Value::Null, None);
             let first = h.fold().verified.unwrap();
             let relay =
@@ -930,7 +928,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert!(advance_tmux_runtime_binding_offset(
                 &h.context.tmux_session,
                 h.path(ID).to_str().unwrap(),
-                12
+                end
             ));
             if normalized {
                 assert!(advance_tmux_runtime_binding_offset(
@@ -939,7 +937,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
                     10
                 ));
             }
-            let m = if normalized { 10 } else { 12 };
+            let m = if normalized { 10 } else { end };
             let held = h.path(ID).with_extension("held");
             fs::rename(h.path(ID), &held).unwrap();
             h.send("user-prompt-submit", ID, json!("later prompt"), None);
@@ -948,7 +946,7 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert!(pending.conflicted);
             assert!(h.consumer().is_none());
             let pending_seq = pending.pending[0].seq;
-            assert_eq!(h.raw().unwrap().last_offset, 12);
+            assert_eq!(h.raw().unwrap().last_offset, end);
             fs::rename(&held, h.path(ID)).unwrap();
             if restart {
                 dedupe::reset_state_for_tests();
@@ -964,10 +962,10 @@ fn resolved_same_source_proof_refresh_preserves_native_relay_and_marker_cursors(
             assert_eq!(latest.source, first.source);
             let raw = h.raw().unwrap();
             assert_eq!(h.consumer(), Some(raw.clone()));
-            assert_eq!(raw.last_offset, 12);
+            assert_eq!(raw.last_offset, end);
             assert_eq!(raw.relay_last_offset, Some(m));
             let marker: Value = serde_json::from_slice(&fs::read(h.marker()).unwrap()).unwrap();
-            assert_eq!(marker["rollout_start_offset"], 12);
+            assert_eq!(marker["rollout_start_offset"], end);
             assert_eq!(marker["codex_ownership"]["proof_seq"], latest.seq);
             if normalized {
                 assert_eq!(marker["codex_relay"]["last_offset"], 10);
@@ -1031,7 +1029,7 @@ fn proof_refresh_rejects_foreign_source_nonce_and_nonproof_marker_sequences() {
 }
 
 #[test]
-fn revoked_permission_blocks_both_getters_with_an_intact_proof_and_marker() {
+fn episode_permission_does_not_block_getters_with_an_intact_proof_and_marker() {
     for permission in [DeliveryPermission::Unknown, DeliveryPermission::Cancelled] {
         let h = Fixture::new("fresh", None);
         h.header(ID, false);
@@ -1040,20 +1038,20 @@ fn revoked_permission_blocks_both_getters_with_an_intact_proof_and_marker() {
         let marker = fs::read(h.marker()).unwrap();
         let before = h.fold();
         codex_verified::set_permission_for_tests(&h.context, permission);
-        assert!(h.consumer().is_none());
+        assert!(h.consumer().is_some());
         crate::services::tmux_common::with_tmux_source_authority(&h.context.tmux_session, |a| {
-            assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_none());
-            assert!(!codex_verified::publication_allowed(a, &h.binding()));
+            assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_some());
+            assert!(codex_verified::publication_allowed(a, &h.binding()));
         });
-        assert!(runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui).is_empty());
+        assert!(!runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui).is_empty());
         assert!(
             crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
                 &h.context.tmux_session,
                 &h.path(ID),
                 Some(ID),
-                Some(u64::MAX)
+                Some(0)
             )
-            .is_err()
+            .is_ok()
         );
         assert_eq!(fs::read(h.marker()).unwrap(), marker);
         assert_eq!(h.fold(), before);
@@ -1353,17 +1351,17 @@ fn optional_path_pending_does_not_merge_replaced_descriptors_or_other_parents() 
         }
         h.send("session-start", candidate, Value::Null, None);
         let pending = h.fold();
-        assert_eq!(pending.pending.len(), 1);
+        assert_eq!(pending.pending.len(), usize::from(!other_parent));
         h.header(candidate, false);
         codex_verified::resolve_registered_claims();
         assert_eq!(h.fold(), pending);
         assert_eq!(h.fold().verified.as_ref(), Some(&original));
-        assert!(h.consumer().is_none());
+        assert_eq!(h.consumer().is_none(), !other_parent);
     }
 }
 
 #[test]
-fn canary_actual_native_read_and_witness_require_current_proof_and_permission() {
+fn canary_actual_native_read_and_witness_require_current_proof() {
     use crate::services::discord::{
         codex_native_read_for_tests, codex_source_witness_present_for_tests,
     };
@@ -1379,10 +1377,9 @@ fn canary_actual_native_read_and_witness_require_current_proof_and_permission() 
     let raw = h.raw();
     for permission in [DeliveryPermission::Unknown, DeliveryPermission::Cancelled] {
         codex_verified::set_permission_for_tests(&h.context, permission);
-        assert!(h.consumer().is_none());
-        assert!(!codex_source_witness_present_for_tests(CANARY_TMUX, &path));
-        let error = codex_native_read_for_tests(CANARY_TMUX, &path).unwrap_err();
-        assert!(error.contains("proof or permission"), "{error}");
+        assert!(h.consumer().is_some());
+        assert!(codex_source_witness_present_for_tests(CANARY_TMUX, &path));
+        assert!(codex_native_read_for_tests(CANARY_TMUX, &path).is_ok());
         assert_eq!(h.fold(), fold);
         assert_eq!(h.raw(), raw);
         assert_eq!(fs::read(h.marker()).unwrap(), marker);
@@ -1409,7 +1406,7 @@ fn canary_actual_manual_rebind_refuses_before_relay_generation_or_spawn() {
     let raw = h.raw();
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
     assert_eq!(
-        codex_rebind_spawn_for_tests(CANARY_TMUX, &path, Some(ID.into()), false),
+        codex_rebind_spawn_for_tests(CANARY_TMUX, &path, Some(CHILD.into()), false),
         (false, 0)
     );
     assert!(
@@ -1430,7 +1427,7 @@ fn canary_actual_manual_rebind_refuses_before_relay_generation_or_spawn() {
 }
 
 #[test]
-fn canary_actual_restart_requires_source_permission_and_destination_channel() {
+fn canary_actual_restart_requires_source_proof_and_destination_channel() {
     use crate::services::discord::codex_restart_output_for_tests;
     let h = Fixture::canary();
     let _codex_home =
@@ -1479,12 +1476,14 @@ fn canary_actual_restart_requires_source_permission_and_destination_channel() {
         Some(h.path(ID))
     );
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
-    for output in [path.clone(), missing_relay] {
-        assert!(
-            codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), output)
-                .is_none()
-        );
-    }
+    assert_eq!(
+        codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), path.clone()),
+        Some(path.clone())
+    );
+    assert!(
+        codex_restart_output_for_tests(CANARY_TMUX, CANARY_CHANNEL, Some(ID.into()), missing_relay)
+            .is_none()
+    );
     assert_eq!(fs::read(h.marker()).unwrap(), marker);
     codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
     assert_eq!(
@@ -1623,7 +1622,7 @@ fn canary_source_policy_first_launch_and_existing_legacy_remain_legacy_until_pin
 }
 
 #[test]
-fn canary_actual_o_log_holds_source_without_losing_sequence_or_durable_record() {
+fn canary_actual_o_log_reads_source_without_episode_permission() {
     use crate::services::tui_o::writer::binding::{BindingEvents, BindingLog, BindingRecord};
     let h = Fixture::canary();
     h.header(ID, false);
@@ -1644,7 +1643,7 @@ fn canary_actual_o_log_holds_source_without_losing_sequence_or_durable_record() 
     let held = BindingLog.binding_events_since(channel, 0).unwrap();
     assert_eq!(held.len(), before.len());
     assert_eq!(held[0].seq, seq);
-    assert!(matches!(held[0].record, BindingRecord::Rejected { .. }));
+    assert_eq!(held, before);
     assert!(
         BindingLog
             .binding_events_since(channel, seq)
@@ -1762,98 +1761,42 @@ fn capture_verified_tail_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
 }
 
 #[test]
-fn canary_actual_fresh_and_native_tail_hold_unknown_pending_and_dead_pane_without_frames() {
+fn canary_actual_fresh_tail_holds_missing_proof_and_dead_pane_without_frames() {
     use crate::services::provider::CancelToken;
-    use std::{
-        sync::{Arc, atomic::Ordering},
-        time::Duration,
-    };
-    for pending in [false, true] {
-        let h = Fixture::canary();
-        if !pending {
-            h.header(ID, false);
-        }
-        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
-        let outcome = h.send("session-start", ID, Value::Null, None);
-        assert!(!outcome.refused(), "{outcome:?}");
-        let before = h.fold();
-        let token = Arc::new(CancelToken::new());
-        let cancel = token.clone();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(450));
-            cancel.cancelled.store(true, Ordering::Release);
-        });
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (result, logs) = capture_verified_tail_logs(|| {
-            crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
-                h.root.path(), std::time::UNIX_EPOCH, tx, Some(token), || false,
-                &h.context.tmux_session, Some(PROMPT),
-            )
-        });
-        release.join().unwrap();
-        assert!(result.unwrap_err().contains("cancelled"));
-        assert_eq!(
-            logs.matches("Codex verified output is held").count(),
-            1,
-            "{logs}"
-        );
-        assert!(
-            logs.contains(if pending {
-                "verified_unavailable"
-            } else {
-                "permission_unknown"
-            }),
-            "{logs}"
-        );
-        assert!(rx.try_recv().is_err());
-        assert_eq!(h.fold(), before);
-        assert!(h.raw().is_none());
-        assert!(!h.marker().exists());
-        if pending {
-            h.header(ID, false);
-            codex_verified::resolve_registered_claims();
-        }
-        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Allowed);
-        h.send("session-start", ID, Value::Null, None);
-        h.assert_proof();
-        append_tail_response(&h.path(ID), "must stay held");
-        let binding = h.consumer().unwrap();
-        let marker = fs::read(h.marker()).unwrap();
-        codex_verified::set_permission_for_tests(&h.context, DeliveryPermission::Unknown);
-        let token = Arc::new(CancelToken::new());
-        let cancel = token.clone();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(450));
-            cancel.cancelled.store(true, Ordering::Release);
-        });
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (result, logs) = capture_verified_tail_logs(|| {
-            crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
-                &h.path(ID),
-                0,
-                Some(ID),
-                tx,
-                Some(token),
-                || false,
-                &h.context.tmux_session,
-            )
-            .unwrap()
-        });
-        release.join().unwrap();
-        assert!(matches!(
-            result,
-            crate::services::provider::ReadOutputResult::Cancelled { offset: 0 }
-        ));
-        assert!(rx.try_recv().is_err());
-        assert_eq!(h.raw(), Some(binding));
-        assert_eq!(fs::read(h.marker()).unwrap(), marker);
-        assert_eq!(
-            logs.matches("Codex verified output is held").count(),
-            1,
-            "{logs}"
-        );
-        assert!(logs.contains("permission_unknown"), "{logs}");
-    }
+    use std::sync::{Arc, atomic::Ordering};
+    let h = Fixture::canary();
+    codex_verified::clear_permissions_for_tests();
+    h.send("session-start", ID, Value::Null, None);
+    let before = h.fold();
+    let token = Arc::new(CancelToken::new());
+    let cancel = token.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        cancel.cancelled.store(true, Ordering::Release);
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (result, logs) = capture_verified_tail_logs(|| {
+        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
+            h.root.path(),
+            std::time::UNIX_EPOCH,
+            tx,
+            Some(token),
+            || false,
+            &h.context.tmux_session,
+            Some(PROMPT),
+        )
+    });
+    release.join().unwrap();
+    assert!(result.unwrap_err().contains("cancelled"));
+    assert_eq!(
+        logs.matches("Codex verified output is held").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("verified_unavailable"), "{logs}");
+    assert!(rx.try_recv().is_err());
+    assert_eq!(h.fold(), before);
+    h.absent();
 }
 
 #[test]
@@ -2007,3 +1950,6 @@ fn s2b1b_p2_snapshot_rejects_a_valid_successor_incarnation() {
     );
     assert!(recheck(&b).is_ok());
 }
+
+#[path = "codex_verified_executed_resume_tests.rs"]
+mod executed_resume;

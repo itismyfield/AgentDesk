@@ -1072,9 +1072,6 @@ async fn collect_turn_stream_body(
     commit_collect_state!();
     #[rustfmt::skip]
     let source_authority = WatcherSourceAuthority { source_stamp: if ctx.legacy_mode.is_legacy() || !clean_decoded_provenance { None } else { source_authority.source_stamp }, ..source_authority };
-    #[cfg(unix)]
-    #[rustfmt::skip]
-    let injected_candidates = if terminal_kind.is_some() { crate::services::discord::replay_policy::injected::collect(&shared, channel_id.get(), &tmux_session_name, &output_path, terminal_event_consumed_offset(current_offset, &all_data)) } else { Vec::new() };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
         source_authority,
@@ -1109,8 +1106,6 @@ async fn collect_turn_stream_body(
         found_result,
         terminal_kind,
         terminal_evidence_offset,
-        #[cfg(unix)]
-        injected_candidates,
         is_prompt_too_long,
         stale_resume_detected,
         task_notification_kind,

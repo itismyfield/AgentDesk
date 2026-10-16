@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 mod runtime_settings;
+mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_channels;
@@ -199,11 +200,7 @@ pub struct DiscordConfig {
 pub struct ProviderConfig {
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
-    /// Phase 0 of the claude-e rollout. Accepted values: `pipe`, `tui`,
-    /// `claude-e`. When both `runtime` and the legacy `tui_hosting` boolean
-    /// are present, `runtime` wins. Unknown strings are ignored and the
-    /// legacy `tui_hosting` derivation runs as before. See
-    /// `docs/claude-e-rollout/decision-log.md` for rationale.
+    /// `pipe` or `tui` overrides `tui_hosting`; unknown values use legacy derivation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Issue #2193 — Codex remote SSH runtime gate.
@@ -548,10 +545,7 @@ impl AgentChannel {
         }
     }
 
-    /// Phase 0 of the claude-e rollout. Returns the per-channel `runtime`
-    /// override string (`pipe` / `tui` / `claude-e`) if explicitly set,
-    /// without parsing or back-compat derivation. Callers should use
-    /// `provider_hosting::resolve_runtime_mode` for the resolved value.
+    /// Raw runtime override for validation and supported runtime selection.
     pub fn runtime_mode_raw(&self) -> Option<String> {
         match self {
             Self::Legacy(_) => None,
@@ -670,8 +664,7 @@ pub struct AgentChannelConfig {
     pub provider: Option<String>,
     #[serde(default, alias = "tuiHosting", skip_serializing_if = "Option::is_none")]
     pub tui_hosting: Option<bool>,
-    /// Phase 0 of the claude-e rollout. Per-channel override. Same accepted
-    /// values as `ProviderConfig::runtime`: `pipe`, `tui`, `claude-e`.
+    /// Per-channel runtime override, using the provider runtime vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2891,6 +2884,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
+    runtime_validation::validate(config)?;
     crate::services::tui_o::channel_policy::BootChannels::validate(config)?;
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;

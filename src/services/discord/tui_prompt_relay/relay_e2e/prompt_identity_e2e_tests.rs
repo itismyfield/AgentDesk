@@ -23,6 +23,141 @@ const ROW_UUID: &str = "5845e2e0-0000-0000-0000-00000000a001";
 const QUIET: Duration = Duration::from_millis(1500);
 const WAIT: Duration = Duration::from_secs(10);
 
+static REGISTRY_MISS_LOG: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+struct RegistryMissCapture;
+
+impl std::io::Write for RegistryMissCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        REGISTRY_MISS_LOG.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Boot configuration and tracing must reach spawned observer tasks without leaking to other tests.
+fn registry_miss_child(name: &str, herdr: bool) -> bool {
+    const CHILD: &str = "ADK_PROMPT_REGISTRY_MISS_CHILD";
+    if let Some(child) = std::env::var_os(CHILD) {
+        assert_eq!(child, name);
+        let channels = if herdr {
+            vec![(super::CHANNEL_ID, "local")]
+        } else {
+            vec![]
+        };
+        crate::config::session_hosts::install_for_test(Some("local"), &channels);
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(|| RegistryMissCapture)
+                .finish(),
+        )
+        .unwrap();
+        return true;
+    }
+    let exact = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+    let root = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &exact, "--nocapture"])
+        .env(CHILD, name)
+        .env("AGENTDESK_ROOT_DIR", root.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout.lines().any(|line| line
+                .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+        "{exact}: {}\n{stdout}\n{stderr}",
+        output.status
+    );
+    eprintln!("{stdout}\n{stderr}");
+    false
+}
+
+async fn hook_prompt_without_watcher(herdr: bool) {
+    let tmux = if herdr {
+        "herdr-prompt-registry-miss"
+    } else {
+        "tmux-prompt-registry-miss"
+    };
+    let session = "7d4a7a0e-d052-488b-9a89-d0f3aac426cc";
+    let hooks = HookServerState::new();
+    let setup = Setup {
+        owner: false,
+        ..READY
+    };
+    let (harness, relayed) = start(tmux, &[session], hooks.subscribe(), setup).await;
+    dedupe::register_tmux_channel(tmux, super::CHANNEL_ID);
+    assert_eq!(
+        harness
+            .shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(tmux),
+        None
+    );
+    assert_eq!(
+        dedupe::owner_channel_for_tmux_session(tmux),
+        Some(super::CHANNEL_ID)
+    );
+    assert_eq!(
+        crate::config::session_hosts::herdr_endpoint(super::CHANNEL_ID).is_some(),
+        herdr
+    );
+
+    post_hook(&hooks, session, PROMPT).await;
+    wait_for_relays(&relayed, 1).await;
+    if herdr {
+        wait_for_announcement(&harness).await;
+    }
+    let counts = settled_counts(&harness).await;
+    let log = String::from_utf8(REGISTRY_MISS_LOG.lock().unwrap().clone()).unwrap();
+    eprintln!("registry_miss herdr={herdr} posts/announcements/placeholders={counts:?}\n{log}");
+    assert_eq!(counts, if herdr { (1, 1, 1) } else { (0, 0, 0) });
+    assert_eq!(harness.messages().len(), if herdr { 2 } else { 0 });
+    assert_eq!(relayed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness
+            .shared
+            .tmux_watchers
+            .owner_channel_for_tmux_session(tmux),
+        None
+    );
+    for warning in [
+        "tmux-session→channel registry miss while dedupe mirror has a mapping",
+        "dropping (drift alert)",
+    ] {
+        assert_eq!(log.matches(warning).count(), usize::from(!herdr), "{log}");
+    }
+    drop(hooks);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn herdr_hook_prompt_registry_miss_is_mirrored_exactly_once() {
+    if registry_miss_child(
+        "herdr_hook_prompt_registry_miss_is_mirrored_exactly_once",
+        true,
+    ) {
+        hook_prompt_without_watcher(true).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_hook_prompt_registry_miss_still_warns_and_drops() {
+    if registry_miss_child(
+        "tmux_hook_prompt_registry_miss_still_warns_and_drops",
+        false,
+    ) {
+        hook_prompt_without_watcher(false).await;
+    }
+}
+
 /// What the relay can reach when the hook arrives; either can be restored later.
 struct Setup {
     notify_timeout: Option<Duration>,

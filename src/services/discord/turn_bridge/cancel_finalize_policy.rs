@@ -532,7 +532,8 @@ mod bridge_owner_channel_resolution_tests {
     // channel's separate cell (which would let both deliver = duplicate).
     #[test]
     fn recovered_bridge_resolves_reused_watcher_owner_channel_not_dispatch() {
-        let registry = TmuxWatcherRegistry::new();
+        let registry =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let tmux = "AgentDesk-claude-adk-cc-t1500000000000000001";
         let owner_channel_x = ChannelId::new(1_500_000_000_000_000_001);
         let dispatch_channel_y = ChannelId::new(2_600_000_000_000_000_002);
@@ -563,7 +564,8 @@ mod bridge_owner_channel_resolution_tests {
     // different cell than the relay path that re-registered the owner.
     #[test]
     fn recovered_bridge_resolves_restored_owner_channel() {
-        let registry = TmuxWatcherRegistry::new();
+        let registry =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let tmux = "AgentDesk-claude-adk-cc-t1500000000000000003";
         let restored_owner = ChannelId::new(1_500_000_000_000_000_003);
         let dispatch_channel_y = ChannelId::new(2_600_000_000_000_000_004);
@@ -579,7 +581,8 @@ mod bridge_owner_channel_resolution_tests {
     // owns its own channel → fall back to the dispatch channel.
     #[test]
     fn no_reused_watcher_falls_back_to_dispatch_channel() {
-        let registry = TmuxWatcherRegistry::new();
+        let registry =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let dispatch_channel = ChannelId::new(3_700_000_000_000_000_005);
         assert_eq!(
             resolve_bridge_owner_channel(

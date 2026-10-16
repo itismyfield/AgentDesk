@@ -112,6 +112,15 @@ pub(super) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
+#[cfg(test)]
+fn before_commit() {
+    BEFORE_COMMIT.with(|action| {
+        if let Some(action) = action.borrow_mut().take() {
+            action();
+        }
+    });
+}
+
 pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
     #[cfg(test)]
     if let Some(value) =
@@ -262,6 +271,7 @@ fn commit(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     claim: &Claim,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> io::Result<Fold> {
     let prior_fold = binding_events::codex::read_ownership(context)?;
     let matching_pending = prior_fold
@@ -274,12 +284,18 @@ fn commit(
             .as_ref()
             .is_some_and(|proof| proof.source.session_id == claim.session_id);
     let mut verified = None;
-    let decision = if !retry && !claim_eligible(context, claim) {
+    let decision = if !retry
+        && !claim_eligible(context, claim)
+        && !previous
+            .as_ref()
+            .is_some_and(|proof| claim.transition_from(&proof.source))
+    {
         Decision::Pending
     } else {
         match native(context, claim) {
             Ok(source)
                 if context.launch_mode != "fresh"
+                    || previous.is_some()
                     || source
                         .created_at
                         .is_some_and(|time| time >= context.created_at) =>
@@ -294,11 +310,7 @@ fn commit(
         }
     };
     #[cfg(test)]
-    BEFORE_COMMIT.with(|action| {
-        if let Some(action) = action.borrow_mut().take() {
-            action();
-        }
-    });
+    before_commit();
     // A path hint cannot split a retry of the same opened native descriptor.
     let persisted_claim = match (&previous, &decision) {
         (Some(proof), Decision::Verified(source))
@@ -308,17 +320,23 @@ fn commit(
         }
         _ => claim,
     };
-    binding_events::codex::commit_claim(context, persisted_claim, decision, || {
-        validate_context(authority, context)?;
-        if let Some(before) = &verified {
-            let after = native(context, claim)
-                .map_err(|_| invalid("Codex descriptor changed before commit"))?;
-            if after != *before {
-                return Err(invalid("Codex descriptor changed before commit"));
+    binding_events::codex::commit_claim_published(
+        context,
+        persisted_claim,
+        decision,
+        published_at,
+        || {
+            validate_context(authority, context)?;
+            if let Some(before) = &verified {
+                let after = native(context, claim)
+                    .map_err(|_| invalid("Codex descriptor changed before commit"))?;
+                if after != *before {
+                    return Err(invalid("Codex descriptor changed before commit"));
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 
 pub(super) fn proof_for_binding(
@@ -364,9 +382,7 @@ fn publication_decision(
         super::codex_policy::SourcePolicyState::Legacy => OwnershipPublicationDecision::Permitted,
         super::codex_policy::SourcePolicyState::VerifiedCurrent(pin) => {
             let context = pin.into_context();
-            if proof_for_binding(authority, &context, binding).is_ok()
-                && permission(&context) == DeliveryPermission::Allowed
-            {
+            if proof_for_binding(authority, &context, binding).is_ok() {
                 OwnershipPublicationDecision::Permitted
             } else {
                 OwnershipPublicationDecision::Unavailable
@@ -405,9 +421,6 @@ pub(super) fn marker_metadata(
         relay_last_offset: Some(0),
     };
     let proof = proof_for_binding(authority, &context, &binding).map_err(|e| e.to_string())?;
-    if permission(&context) != DeliveryPermission::Allowed {
-        return Err("Codex delivery permission held".into());
-    }
     Ok(Some(marker_proof(&context, &proof)))
 }
 
@@ -435,9 +448,6 @@ fn source_read_decision(
     let Ok(proof) = proof_for_binding(authority, &context, binding) else {
         return SourceReadDecision::Unavailable;
     };
-    if permission(&context) != DeliveryPermission::Allowed {
-        return SourceReadDecision::Unavailable;
-    }
     let path = tc::session_temp_path(authority.session(), tc::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT);
     if std::fs::read(path)
         .ok()
@@ -466,9 +476,6 @@ pub(super) fn publish_proof(
     else {
         return Ok(false);
     };
-    if permission(context) != DeliveryPermission::Allowed {
-        return Ok(false);
-    }
     let binding = TuiRuntimeBinding {
         runtime_kind: RuntimeHandoffKind::CodexTui,
         output_path: proof.source.path.display().to_string(),
@@ -505,6 +512,90 @@ pub(super) fn publish_proof(
         );
     });
     Ok(true)
+}
+
+/// Records the source a successful resume spawn executed as that execution's ExplicitResume proof;
+/// the published native cursor then starts at the resume point instead of replaying history.
+pub(crate) fn record_executed_resume(
+    context: &BindingContext,
+    selected_session_id: &str,
+    selected_rollout_path: &Path,
+    start_offset: u64,
+) -> io::Result<bool> {
+    tc::with_tmux_source_authority(&context.tmux_session, |authority| {
+        validate_context(authority, context)?;
+        let fold = executed_resume(
+            authority,
+            context,
+            selected_session_id,
+            Some(selected_rollout_path),
+        )?;
+        let published = publish_proof(authority, context, &fold)?;
+        if let Some(proof) = fold.verified.as_ref().filter(|_| published)
+            && !super::codex_cursor::advance_tmux_runtime_binding_offset_under_source_authority(
+                authority,
+                &proof.source.path.display().to_string(),
+                start_offset,
+            )
+        {
+            tracing::warn!(
+                tmux = context.tmux_session,
+                start_offset,
+                "Codex resume cursor stayed at the proof start"
+            );
+        }
+        Ok(published)
+    })
+}
+
+fn executed_resume(
+    authority: &TmuxSourceAuthority<'_>,
+    context: &BindingContext,
+    executed: &str,
+    path: Option<&Path>,
+) -> io::Result<Fold> {
+    let fold = binding_events::codex::read_ownership(context)?;
+    if fold.verified.is_some() {
+        return Ok(fold);
+    }
+    let probe = Claim {
+        session_id: executed.to_owned(),
+        path: path.map(Path::to_path_buf),
+        evidence: ClaimEvidence::ExplicitResume {
+            executed_session_id: executed.to_owned(),
+        },
+    };
+    if !claim_eligible(context, &probe) {
+        return Err(invalid("Codex executed resume is not this launch"));
+    }
+    let descriptor = |claim: &Claim| {
+        native(context, claim)
+            .map_err(|_| invalid("Codex resume descriptor unavailable"))
+            .and_then(|source| source_id(&source))
+    };
+    let source = descriptor(&probe)?;
+    #[cfg(test)]
+    before_commit();
+    let same = |claim: &Claim| {
+        (descriptor(claim)? == source)
+            .then_some(())
+            .ok_or_else(|| invalid("Codex descriptor changed before commit"))
+    };
+    // The durable claim names the canonical file the verifier opened, not the selected spelling.
+    let claim = Claim {
+        path: Some(source.path.clone()),
+        ..probe
+    };
+    binding_events::codex::commit_executed_resume_published(
+        context,
+        &claim,
+        source.clone(),
+        || {
+            validate_context(authority, context)?;
+            same(&claim)
+        },
+        &same,
+    )
 }
 
 pub(crate) fn observe_verified_codex_hook(
@@ -564,11 +655,15 @@ pub(crate) fn observe_verified_codex_hook(
                     .is_some_and(|proof| proof.source.session_id == id)
             });
             let result = if qualified || retry {
-                commit(authority, context, &claim)
+                commit(authority, context, &claim, hook.published_at)
             } else {
-                binding_events::codex::commit_claim(context, &claim, Decision::Pending, || {
-                    validate_context(authority, context)
-                })
+                binding_events::codex::commit_claim_published(
+                    context,
+                    &claim,
+                    Decision::Pending,
+                    hook.published_at,
+                    || validate_context(authority, context),
+                )
             };
             match result {
                 Err(_) => IngressOutcome::NotDurable(NotDurableReason::Append),
@@ -589,11 +684,19 @@ pub(crate) fn resolve_under_authority(authority: &TmuxSourceAuthority<'_>) -> In
         Err(_) => return IngressOutcome::Unavailable(UnavailableReason::HistoryUnreadable),
     };
     let result = (|| -> io::Result<bool> {
+        // The current spawn marker follows the resume gates, so it proves the resume executed.
+        if let Some(executed) = context
+            .expected_native_session_id
+            .as_deref()
+            .filter(|_| context.launch_mode == "resume")
+        {
+            let _ = executed_resume(authority, &context, executed, None);
+        }
         let mut fold = binding_events::codex::read_ownership(&context)?;
         for _ in 0..=fold.pending.len() {
             let before = fold.clone();
             for pending in before.pending.iter() {
-                fold = commit(authority, &context, &pending.claim)?;
+                fold = commit(authority, &context, &pending.claim, pending.published_at)?;
             }
             if fold == before {
                 break;
@@ -693,4 +796,49 @@ fn recover_discovered_under_authority(authority: &TmuxSourceAuthority<'_>, chann
             resolve_under_authority(authority),
             IngressOutcome::Durable(DurableKind::Adopted)
         )
+}
+
+/// O validates the exact durable source before translating its stored file name.
+pub(crate) fn historical_source_proven(
+    event: &crate::services::tui_o::writer::binding::BindingEvent,
+    source: &binding_events::SourceId,
+) -> bool {
+    tc::with_tmux_source_authority(&event.tmux_session, |authority| {
+        let Ok(Some(context)) = current_context(authority) else {
+            return false;
+        };
+        if event.provider != crate::services::tui_o::shadow::ShadowProvider::Codex
+            || event.channel_id != context.channel_id.unwrap_or(0)
+            || event.execution_nonce != context.execution_nonce
+        {
+            return false;
+        }
+        if binding_events::codex::proof_at_seq(&context, event.seq)
+            .is_ok_and(|proof| proof.is_some_and(|proof| proof.source == *source))
+        {
+            return true;
+        }
+        use crate::services::tui_o::writer::binding::{BindingRecord, BindingTarget};
+        let BindingRecord::Bound {
+            new:
+                BindingTarget::Pending {
+                    payload_session_id,
+                    payload_transcript_path,
+                },
+            ..
+        } = &event.record
+        else {
+            return false;
+        };
+        if payload_session_id != &source.session_id || payload_transcript_path != &source.path {
+            return false;
+        }
+        // A delayed descriptor binds at Pending's sequence using its exact durable resolution.
+        binding_events::binding_events_since(event.channel_id, event.seq).is_ok_and(|events| {
+            events.iter().any(|resolved| {
+                matches!(&resolved.new, binding_events::BindingTarget::Resolved { pending_seq, source: resolved_source } if *pending_seq == event.seq && resolved_source == source)
+                    && binding_events::codex::proof_at_seq(&context, resolved.seq).is_ok_and(|proof| proof.is_some_and(|proof| proof.source == *source && proof.ownership.pending_seq == Some(event.seq)))
+            })
+        })
+    })
 }

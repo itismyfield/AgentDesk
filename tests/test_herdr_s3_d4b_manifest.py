@@ -28,7 +28,12 @@ REQUIRED_MUTANTS = {
     "prepared_as_zero", "unsealed_as_zero", "binding_pending_as_zero", "drain_ignores_running_posts",
     "accepts_ignores_home", "orphan_read_opens_gate", "skip_post_abort_join", "posts_unreadable_as_zero",
     "release_ignores_reset_refusal", "release_skips_reset", "release_refused_changes_detail",
-    "release_before_reset", "boot_skips_releasing_drain",
+    "release_before_reset", "boot_skips_releasing_drain", "reconcile_as_channel_restored",
+    "restored_always_true", "standby_skips_persisted_restore", "standby_marks_restored_before_restore",
+    "watch_ends_when_row_names_other_holder", "return_keeps_home_bound_writer",
+    "return_starts_writer_before_old_join", "return_read_error_as_absence",
+    "running_slot_counts_as_alive", "first_spawn_ignores_boot_rows",
+    "first_spawn_reads_error_as_absence",
 }
 S3 = "services::cluster::intake_worker::home_route_tests::s3_real::"
 # The release-reset rows piece 6 made `now`, the mutants that must kill them and the rows still blocked.
@@ -43,7 +48,7 @@ RELEASE_MUTANTS = {
     "release_before_reset": ["H6-2b", "H7-R"],
     "boot_skips_releasing_drain": ["H6-2b"],
 }
-BLOCKED = {"H6-2a", "H6-3a", "H6-3b", "H6-6b"}
+BLOCKED = {"H6-6b"}
 
 
 def complete() -> dict:

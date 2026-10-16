@@ -8,6 +8,7 @@ use super::interrupt_policy::ProviderTurnInterruptOutcome;
 use super::judged_stop::CommandStop;
 use super::stop_host::StopTarget;
 use crate::services::discord::SharedData;
+use crate::services::discord::tmux_watcher_registry::AuthoritativeSessionBinding;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
@@ -87,14 +88,13 @@ impl SessionStop {
         let open = Arc::new(move || {
             #[cfg(test)]
             let _root = TestBindingRoot::enter(binding_root.as_deref());
-            let open =
-                observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected);
-            // Withdrawn at each delivery recheck that lets the interrupt go, not at the judgment.
-            if open {
-                let withdraw = crate::services::discord::turn_presence::entrypoints::withdraw;
-                withdraw(&shared, channel.get(), "session_stop");
+            #[cfg(all(test, unix))]
+            if crate::services::discord::tmux_watcher_registry::owner_stop_mutant(
+                "2a-delivery-recheck-off",
+            ) {
+                return true;
             }
-            open
+            observe(&shared, &provider, channel).ok().flatten().as_ref() == Some(&expected)
         });
         super::interrupt_session_on(&self.target, &self.provider, reason, open).await
     }
@@ -110,28 +110,57 @@ fn observe(
         ProviderKind::Codex => ShadowProvider::Codex,
         _ => return Ok(None),
     };
-    let Some(watcher) = shared.tmux_watchers.channel_binding(&channel) else {
-        return Ok(None);
-    };
-    if watcher.owner_channel_id != channel {
+    let owners: Vec<AuthoritativeSessionBinding> =
+        shared.tmux_watchers.authoritative_session_bindings(channel);
+    #[cfg(all(test, unix))]
+    let owners = tests::mutate_initial_owners(channel, owners);
+    if owners.is_empty() {
         return Ok(None);
     }
-    let session = watcher.tmux_session_name;
     let events =
-        ChannelBindingLog::new(channel.get(), shadow).binding_events_since(channel.get(), 0)?;
-    let session_events: Vec<_> = events
-        .into_iter()
-        .filter(|event| event.tmux_session == session)
-        .collect();
-    let (sources, _) = crate::services::tui_o::writer::adoption::logged(&session_events)
-        .map_err(|error| format!("unresolved session binding: {error:?}"))?;
-    let Some(source) = sources.last().cloned().cloned() else {
+        ChannelBindingLog::new(channel.get(), shadow).binding_events_since(channel.get(), 0);
+    #[cfg(all(test, unix))]
+    let events = tests::mutate_events(channel, events);
+    let events = events?;
+    #[cfg(all(test, unix))]
+    let owners = tests::mutate_bound_owners(channel, &events, owners);
+    let mut candidates = Vec::new();
+    for owner in owners {
+        if owner.owner_channel_id != channel {
+            continue;
+        }
+        let session = owner.tmux_session_name;
+        let session_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.tmux_session == session)
+            .cloned()
+            .collect();
+        if session_events.is_empty() {
+            continue;
+        }
+        let (sources, _) = crate::services::tui_o::writer::adoption::logged(&session_events)
+            .map_err(|error| format!("unresolved session binding: {error:?}"))?;
+        let source = sources
+            .last()
+            .cloned()
+            .cloned()
+            .ok_or("no source is bound")?;
+        candidates.push((
+            session,
+            SourceBinding {
+                channel_id: channel.get(),
+                provider: shadow,
+                source,
+            },
+        ));
+    }
+    #[cfg(all(test, unix))]
+    tests::mutate_candidates(&mut candidates);
+    if candidates.len() > 1 {
+        return Err("ambiguous authoritative session binding".into());
+    }
+    let Some((session, binding)) = candidates.pop() else {
         return Ok(None);
-    };
-    let binding = SourceBinding {
-        channel_id: channel.get(),
-        provider: shadow,
-        source,
     };
     let mut facts = InputFacts::open(binding.clone())?;
     let mut through = 0;

@@ -56,7 +56,7 @@ pub type Unsettled = watch::Sender<Option<usize>>;
 /// What a Herdr-configured channel's actor still owes Discord, as its last poll read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Undelivered {
-    /// Derived items not delivered yet.
+    /// Derived items and pending local retries not delivered yet.
     pub owed: usize,
     /// A `Prepared` piece without a recorded result.
     pub prepared: usize,
@@ -252,35 +252,14 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let mut writer = writer.with_repost_stop(stop.clone());
+    let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
     let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel())
-        || (commands.is_some()
-            && provider == ShadowProvider::Codex
-            && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
-            && crate::services::tui_prompt_dedupe::codex_verified_channel_requires_proof(
-                writer.channel(),
-            )
-            && {
-                let channel = writer.channel();
-                let mut cursors = writer
-                    .store()
-                    .cursors()
-                    .filter(|cursor| !cursor.retired)
-                    .peekable();
-                cursors.peek().is_some()
-                    && cursors.all(|cursor| {
-                        crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
-                            channel,
-                            &cursor.source,
-                        )
-                    })
-            });
+    let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
@@ -315,10 +294,20 @@ where
             }
         }
         actor.observe_waiting(false);
-        actor.deliver_owed().await;
+        let now = actor.utc_now();
+        if actor.delivery_allowed() {
+            actor.writer.retry_local(now).await;
+        }
+        if !actor.writer.has_local_retry() {
+            actor.deliver_owed().await;
+        }
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
-        if actor.verified.is_none() && actor.owed.is_empty() && actor.delivery_allowed() {
+        if actor.verified.is_none()
+            && actor.owed.is_empty()
+            && !actor.writer.has_local_retry()
+            && actor.delivery_allowed()
+        {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
@@ -432,18 +421,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
     }
 
+    fn utc_now(&self) -> chrono::DateTime<chrono::Utc> {
+        let elapsed =
+            chrono::Duration::from_std(self.clock.0.elapsed()).unwrap_or(chrono::Duration::MAX);
+        self.clock
+            .1
+            .checked_add_signed(elapsed)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    }
+
     fn observe_waiting(&mut self, restored: bool) {
         if self.writer.is_stopped() {
             return;
         }
         let now = tokio::time::Instant::now();
-        let elapsed =
-            chrono::Duration::from_std(now - self.clock.0).unwrap_or(chrono::Duration::MAX);
-        let utc = self
-            .clock
-            .1
-            .checked_add_signed(elapsed)
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let utc = self.utc_now();
         let open = self
             .writer
             .store()
@@ -510,7 +502,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn delivery_allowed(&mut self) -> bool {
-        self.writer.delivery_allowed(!self.owed.is_empty())
+        let owing = !self.owed.is_empty() || self.writer.has_local_retry();
+        self.writer.delivery_allowed(owing)
     }
 
     /// Verified sources are restored apart from delivery permission, which each piece proves.
@@ -546,6 +539,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             match self.writer.deliver(item).await {
                 Step::Done => {
                     self.owed.pop_front();
+                    if self.writer.has_local_retry() {
+                        return;
+                    }
                 }
                 Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
             }
@@ -614,7 +610,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let channel = self.writer.channel();
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
-        let (owed, unsealed) = (self.owed.len(), usize::from(self.deriver.has_unsealed()));
+        let (owed, unsealed) = (
+            self.owed.len() + usize::from(self.writer.has_local_retry()),
+            usize::from(self.deriver.has_unsealed()),
+        );
         let store = self.writer.store();
         let prepared = usize::from(store.ledger().unresolved().is_some());
         let rotation = store.rotation().ok()?;
@@ -727,7 +726,13 @@ mod test_support {
         hold();
         actor.read_sources();
         actor.collect_settled();
-        actor.deliver_owed().await;
+        let now = actor.utc_now();
+        if actor.delivery_allowed() {
+            actor.writer.retry_local(now).await;
+        }
+        if !actor.writer.has_local_retry() {
+            actor.deliver_owed().await;
+        }
         assert_eq!(
             cursor(&mut actor),
             previous_cursor,

@@ -183,69 +183,6 @@ fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() 
 }
 
 #[test]
-fn borrowed_handback_reads_latest_bytes_without_reacquiring_and_rejects_redirect() {
-    use crate::services::tui_input::handover::EnqueueOutcome;
-    use crate::services::turn_orchestrator::input_handback::{
-        Destination, enqueue, enqueue_borrowed,
-    };
-    let root = tempfile::tempdir().unwrap();
-    let channel = 6_325_108;
-    let destination = Destination {
-        root: root.path(),
-        provider: &ProviderKind::Claude,
-        token_hash: "borrowed",
-        channel,
-        authorized: true,
-        active_sources: &[],
-    };
-    let item = |id| serde_json::json!({"author_id":7,"message_id":id,"source_message_ids":[id],"text":"same","channel_id":channel});
-    let gate = Gate::protect(ProviderKind::Claude, channel).unwrap();
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-    let closing = gate.close().unwrap();
-    let guard = closing.population(root.path()).unwrap();
-    assert!(enqueue(&destination, &item(2)).is_err());
-    let queue = root.path().join(format!(
-        "discord_pending_queue/claude/borrowed/{channel}.json"
-    ));
-    std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
-    std::fs::write(&queue, serde_json::to_vec(&vec![item(1)]).unwrap()).unwrap();
-    #[cfg(windows)]
-    let original = std::fs::read(&queue).unwrap();
-    let outcome = enqueue_borrowed(&destination, &item(2), &guard).unwrap();
-    #[cfg(not(windows))]
-    {
-        assert_eq!(outcome, EnqueueOutcome::Persisted);
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&queue).unwrap()).unwrap(),
-            serde_json::json!([item(1), item(2)])
-        );
-    }
-    #[cfg(windows)]
-    {
-        // Without a parent-directory flush, handback must refuse without writing.
-        assert_eq!(outcome, EnqueueOutcome::Rejected);
-        assert_eq!(std::fs::read(&queue).unwrap(), original);
-    }
-    let wrong = Destination {
-        provider: &ProviderKind::Codex,
-        ..destination
-    };
-    assert!(enqueue_borrowed(&wrong, &item(3), &guard).is_err());
-    assert!(!root.path().join("discord_pending_queue/codex").exists());
-    let mut pinned = item(3);
-    pinned["blob_pins"] = serde_json::json!([]);
-    assert!(enqueue_borrowed(&destination, &pinned, &guard).is_err());
-    let bytes = std::fs::read(&queue).unwrap();
-    std::fs::write(queue.with_extension("dispatch"), b"invalid").unwrap();
-    let invalid_dispatch = enqueue_borrowed(&destination, &item(3), &guard);
-    #[cfg(not(windows))]
-    assert!(invalid_dispatch.is_err());
-    #[cfg(windows)]
-    assert_eq!(invalid_dispatch.unwrap(), EnqueueOutcome::Rejected);
-    assert_eq!(std::fs::read(queue).unwrap(), bytes);
-}
-
-#[test]
 fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
     use crate::services::discord::inflight::{
         lock_inflight_state_path, try_lock_inflight_state_path,
@@ -291,59 +228,6 @@ fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
         "cross-thread drop expires origin marker"
     );
     gate.clear_failure_for_test();
-}
-
-#[test]
-fn b2_borrowed_row_keeps_episode_cas_and_never_reacquires_sidecar() {
-    use crate::services::discord::inflight::{
-        BorrowedInflightRow, GuardedClearOutcome, InflightEpisodePin, InflightTurnState,
-        operator_disposition_remove_borrowed,
-    };
-    let root = tempfile::tempdir().unwrap();
-    let channel = 6_325_302;
-    let closing = Closing::frozen_for_test(ProviderKind::Claude, channel);
-    let guard = closing.frozen_population(root.path()).unwrap();
-    let borrowed =
-        BorrowedInflightRow::new(&guard, root.path(), &ProviderKind::Claude, channel).unwrap();
-    assert!(BorrowedInflightRow::new(&guard, root.path(), &ProviderKind::Codex, channel).is_err());
-    let path = root
-        .path()
-        .join(format!("discord_inflight/claude/{channel}.json"));
-    let row = InflightTurnState::new(
-        ProviderKind::Claude,
-        channel,
-        None,
-        7,
-        8,
-        0,
-        "input".into(),
-        None,
-        Some("b2-cas".into()),
-        None,
-        None,
-        0,
-    );
-    let pin = InflightEpisodePin::from_state(&row);
-    let mut successor = row.clone();
-    successor.turn_nonce = Some("successor".into());
-    let bytes = serde_json::to_vec(&successor).unwrap();
-    std::fs::write(&path, &bytes).unwrap();
-    assert_eq!(
-        operator_disposition_remove_borrowed(&borrowed, &pin).0,
-        GuardedClearOutcome::UserMsgMismatch
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    std::fs::write(&path, serde_json::to_vec(&row).unwrap()).unwrap();
-    assert_eq!(
-        operator_disposition_remove_borrowed(&borrowed, &pin).0,
-        GuardedClearOutcome::Cleared
-    );
-    assert!(!path.exists());
-    let second = std::fs::File::open(path.with_extension("json.lock")).unwrap();
-    assert!(matches!(
-        second.try_lock(),
-        Err(std::fs::TryLockError::WouldBlock)
-    ));
 }
 
 #[test]

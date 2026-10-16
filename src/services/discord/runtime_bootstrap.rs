@@ -1,9 +1,9 @@
 use super::codex_adoption_runtime::boot::{BootRole, record_role};
 use super::*;
+#[cfg(test)]
+use crate::services::cluster::channel_home_boot::restore_mutant;
 use crate::services::cluster::{home_availability, node_registry::GatewayWaiterGuard};
 
-#[cfg(test)]
-pub mod boot_retirement;
 #[cfg(test)]
 mod channel_homes_tests;
 mod deferred_restart;
@@ -486,19 +486,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
 // and run_bot calls them in the same order with the same threaded state.
 // INITIALIZATION/SPAWN ORDER IS LOAD-BEARING — do not reorder. ──
 
-/// Register a standby provider runtime and settle its reconcile obligation.
-///
-/// The standby branch returns before `recovery_flush` is spawned, so nothing on
-/// this path ever reached `mark_reconcile_complete`: the provider stayed
-/// `reconcile_in_progress` for the life of the process and kept blocking deploys
-/// to a standby-only node (#5449). A standby runtime still executes complete
-/// turns through the intake worker, which is the same shape as the utility-bot
-/// branch of `recovery_flush` — it marks the reconcile done precisely because it
-/// skipped recovery.
-///
-/// This does not leak an unreconciled runtime into a gateway: standby promotion
-/// runs through `attempt_clean_standby_promotion`, which issues a fenced
-/// restart, so the promoted process starts over with `reconcile_done == false`.
+/// Registers a standby and settles the reconcile it skips, so deploys are not held; promotion is a
+/// fenced restart. Its delegated homes restore per channel and never read this as restored.
 async fn register_standby_and_settle_reconcile(
     health_registry: &Arc<health::HealthRegistry>,
     provider: &ProviderKind,
@@ -519,7 +508,7 @@ enum HomeRole {
 }
 
 /// The flag a delegated drain reads as "persisted turns restored": `reconcile_done` where recovery
-/// ran first (gateway, REST worker); a standby or utility gateway sets it unrestored, so never.
+/// ran first (gateway, REST worker), never on a utility gateway; a standby restores per channel.
 async fn turns_restored(shared: &SharedData, role: HomeRole) -> Arc<std::sync::atomic::AtomicBool> {
     let restores = match role {
         HomeRole::Gateway => shared.settings.read().await.agent.is_none(),
@@ -602,10 +591,9 @@ async fn start_channel_homes(
     }
     let restored = turns_restored(shared, role).await;
     let candidates = || {
-        let selected = crate::services::tui_o::channel_policy::boot();
-        let here = |channel: &u64| herdr_runs_here(*channel);
-        let selected = selected.map(|boot| boot.selected().iter().copied().filter(here));
-        selected.map(Iterator::collect).unwrap_or_default()
+        let mut selected = selected_herdr_channels(provider);
+        selected.retain(|channel| herdr_runs_here(*channel));
+        selected.into_iter().collect()
     };
     channel_home_boot::start(switch, || {
         let pool = shared.pg_pool.clone()?;
@@ -613,6 +601,12 @@ async fn start_channel_homes(
         let rows = channel_home_boot::listed(&pool);
         let port = |channel: u64| {
             let reset = legacy_reset(shared, provider, channel);
+            if role == HomeRole::Standby {
+                let (restored, persisted, run) =
+                    queued_recovery::standby_restore(shared, provider, channel);
+                let port = BootPort::reading_persisted(channel, restored, persisted, reset);
+                return port.restoring(provider.as_str(), run);
+            }
             BootPort::reading(channel, Arc::clone(&restored), reset)
         };
         Some(Boot {
@@ -622,6 +616,7 @@ async fn start_channel_homes(
             rows,
             candidates: candidates(),
             port,
+            writers: (role == HomeRole::Gateway).then(|| o_writer_host::home_writers(provider)),
         })
     })
     .await

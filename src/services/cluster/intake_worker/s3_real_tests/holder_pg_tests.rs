@@ -752,3 +752,344 @@ pub(super) async fn applied_then_released(
     );
     assert_eq!(reset_calls(dir, tag), 2, "a call after the leave");
 }
+
+/// T-H6 return: one gateway watch follows a delegation through the worker's reclaim; its writer
+/// ends with the release, a new one posts once the row goes, and no two processes' POSTs overlap.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_gateway_reclaim_roundtrip_restores_writer_pg() {
+    let scene = Scene::new().await;
+    let channel = C.to_string();
+    let mut gateway = Node::spawn(&scene, "th6_return_gateway", GW);
+    gateway
+        .wait_signal("return.before", Duration::from_secs(180))
+        .await;
+    assert_eq!(scene.row().await, None, "the gateway booted with no row");
+    applied(o_channel_homes::delegate(&scene.pool, &channel, "claude", GW, MINI).await);
+    // The worker starts only once the gateway has seen its writer end, not just the row released.
+    gateway
+        .wait_signal("return.released", Duration::from_secs(240))
+        .await;
+    let (state, ..) = home(&scene).await;
+    assert_eq!(state, HomeState::Released);
+    let mut worker = Node::spawn(&scene, "th6_return_worker", MINI);
+    worker
+        .wait_signal("return.worker", Duration::from_secs(180))
+        .await;
+    let (state, holder, epoch) = home(&scene).await;
+    assert_eq!((state, holder.as_deref()), (HomeState::Worker, Some(MINI)));
+    applied(o_channel_homes::begin_reclaim(&scene.pool, &channel, epoch, GW).await);
+    worker.finish(Duration::from_secs(180)).await;
+    gateway.finish(Duration::from_secs(240)).await;
+    assert_eq!(
+        scene.row().await,
+        None,
+        "the gateway's watch removed the row"
+    );
+    let spans = post_spans(&lifecycle(scene.dir()).unwrap()).unwrap();
+    let posts: Vec<_> = spans
+        .iter()
+        .map(|span| (span.node.as_str(), span.content.as_str()))
+        .collect();
+    let expected = [(GW, "gw-before"), (MINI, "mini-out"), (GW, "gw-after")];
+    assert_eq!(posts, expected);
+    scene.drop_db().await;
+}
+
+/// The gateway: its writer posts with no row, the delegation's drain releases through its watch and
+/// ends that writer, and after the reclaim the same watch starts a writer that posts once more.
+pub(super) async fn return_gateway_node(env: &Env) {
+    let dir = env.dir.as_path();
+    let (node, writers) = Booted::boot_gateway(env, Discord::default().recording(env)).await;
+    assert!(node.gates.is_empty(), "no row mounts no gate");
+    until("the gateway writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("b1", "gw-before"));
+    node.until_posts(&["gw-before"]).await;
+    signal(dir, "return.before");
+    let released = || async { node.state().await == Some(HomeState::Released) };
+    until_async("the delegation is released", WITHIN * 3, released).await;
+    for _ in 0..2400 {
+        if !node.accepts() && node.gate().is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let ended = (node.accepts(), node.gate().is_some(), writers.phase(C));
+    assert_eq!(
+        ended,
+        (false, false, None),
+        "the released channel's writer ends"
+    );
+    signal(dir, "return.released");
+    let returned = || async { node.state().await.is_none() };
+    until_async("the reclaimed row is gone", WITHIN * 4, returned).await;
+    assert!(
+        crate::services::cluster::channel_home_boot::running(&C.to_string()).0,
+        "the same watch"
+    );
+    until("the returned channel's writer takes work", WITHIN, || {
+        node.accepts() && node.gate().is_none()
+    })
+    .await;
+    append(&node.transcript, &row("a1", "gw-after"));
+    node.until_posts(&["gw-before", "gw-after"]).await;
+    writers.stop(C).await;
+    node.stop().await;
+}
+
+/// The worker: it adopts the released channel through its own watch, posts, then drains the
+/// reclaim and leaves.
+pub(super) async fn return_worker_node(env: &Env) {
+    let node = Booted::boot_adopting(env, Discord::default().recording(env)).await;
+    let adopted = || async { node.state().await == Some(HomeState::Worker) };
+    until_async("the worker adopts", WITHIN, adopted).await;
+    until("the worker writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("w1", "mini-out"));
+    node.until_posts(&["mini-out"]).await;
+    signal(&env.dir, "return.worker");
+    let left = || async {
+        let state = node.state().await;
+        !matches!(state, Some(HomeState::Worker | HomeState::Reclaiming))
+    };
+    until_async("the reclaim drains and leaves", WITHIN * 3, left).await;
+    until("the worker writer stops", WITHIN, || !node.accepts()).await;
+    node.stop().await;
+}
+
+/// T-H6 first spawn: a gateway restarting on its store's root while MINI holds the channel starts
+/// no writer for it from its first spawn through its watch's next round; MINI keeps posting.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_gateway_restart_under_a_worker_starts_no_writer_pg() {
+    let scene = Scene::new().await;
+    let before = Node::spawn(&scene, "th6_first_gateway_before", GW);
+    before.finish(Duration::from_secs(180)).await;
+    let epoch = scene.worker_home().await;
+    put(scene.dir(), "epoch", epoch);
+    let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
+    let mut worker = Node::spawn(&scene, "th6_first_worker", MINI);
+    worker.wait_signal("first.worker", WITHIN).await;
+    let gateway = Node::spawn(&scene, "th6_first_gateway", GW);
+    gateway.finish(Duration::from_secs(180)).await;
+    worker.finish(Duration::from_secs(120)).await;
+    assert_eq!(home(&scene).await, held, "the gateway's boot moved nothing");
+    let spans = post_spans(&lifecycle(scene.dir()).unwrap()).unwrap();
+    let posts: Vec<_> = spans
+        .iter()
+        .map(|span| (span.node.as_str(), span.content.as_str()))
+        .collect();
+    let expected = [
+        (GW, "gw-before"),
+        (MINI, "mini-before"),
+        (MINI, "mini-after"),
+    ];
+    assert_eq!(posts, expected);
+    scene.drop_db().await;
+}
+
+/// The gateway's earlier generation: with no row its writer posts once and leaves its store.
+pub(super) async fn first_gateway_before_node(env: &Env) {
+    let (node, writers) = Booted::boot_gateway(env, Discord::default().recording(env)).await;
+    until("the gateway writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("b1", "gw-before"));
+    node.until_posts(&["gw-before"]).await;
+    writers.stop(C).await;
+    node.stop().await;
+}
+
+/// The gateway: its watch's first round sees MINI's row before the runtime's first spawn runs, and
+/// from that spawn through the next round no writer of its own hosts, takes work or posts.
+pub(super) async fn first_gateway_node(env: &Env) {
+    use crate::services::cluster::channel_home_boot::rounds;
+    let discord = Discord::default().recording(env);
+    let (node, writers, first_spawn) = Booted::boot_gateway_homes(env, discord).await;
+    assert!(node.gates.is_empty(), "MINI's row mounts no gate here");
+    until("the watch's first round", WITHIN, || rounds(C) >= 1).await;
+    assert_eq!(rounds(C), 1, "the spawn runs before the next round");
+    first_spawn();
+    let writer = || {
+        let hosted = host::process_readiness().is_hosted(C);
+        (
+            node.accepts(),
+            hosted,
+            writers.phase(C),
+            node.discord().seen(),
+        )
+    };
+    let none = (false, false, None, Vec::<Seen>::new());
+    // Every non-quiet state seen in the window; a row each second gives a ready writer a POST.
+    let (mut observed, mut tick) = (Vec::new(), 0);
+    while rounds(C) < 2 {
+        if tick % 40 == 0 {
+            append(
+                &node.transcript,
+                &row(&format!("g{tick}"), "gw-must-not-post"),
+            );
+        }
+        let now = writer();
+        if now != none && !observed.contains(&now) {
+            observed.push(now);
+        }
+        tick += 1;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(observed, [], "no gateway writer before the next round");
+    tokio::time::sleep(POLL_INTERVAL * 3).await;
+    assert_eq!(writer(), none, "nor after it");
+    signal(&env.dir, "first.gateway");
+    node.stop().await;
+}
+
+/// The worker: it holds the channel through its own watch and lease and posts before and after the
+/// gateway's boot.
+pub(super) async fn first_worker_node(env: &Env) {
+    let epoch = epoch_of(env);
+    let node = Booted::boot_on(env, Discord::default().recording(env)).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the worker writer takes work", WITHIN, || node.accepts()).await;
+    append(&node.transcript, &row("w1", "mini-before"));
+    node.until_posts(&["mini-before"]).await;
+    signal(&env.dir, "first.worker");
+    wait_signal(&env.dir, "first.gateway", Duration::from_secs(150)).await;
+    assert!(node.accepts(), "the worker kept the channel");
+    append(&node.transcript, &row("w2", "mini-after"));
+    node.until_posts(&["mini-before", "mini-after"]).await;
+    node.stop().await;
+}
+
+/// T-H6 released target: booted through the runtime's `BootPort::reading`, MINI's watch leaves the
+/// released row alone until restored, then adopts it and the lease opens the home; no test adopt.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_released_target_adopts_through_its_boot_watch_pg() {
+    let scene = Scene::new().await;
+    let (channel, provider) = (C.to_string(), provider_name(scene.provider));
+    let delegated = o_channel_homes::delegate(&scene.pool, &channel, provider, GW, MINI).await;
+    let delegated = applied(delegated);
+    let released =
+        o_channel_homes::finish_release(&scene.pool, &channel, GW, delegated.epoch).await;
+    let epoch = applied(released).epoch;
+    put(scene.dir(), "epoch", epoch);
+    let released = home_facts(&scene.pool).await.expect("the home row");
+    let mut target = Node::spawn(&scene, "th6_adopt_target", MINI);
+    target.wait_signal("booted", WITHIN).await;
+    tokio::time::sleep(TWO_ROUNDS).await;
+    let unrestored = home_facts(&scene.pool).await;
+    assert_eq!(unrestored.as_ref(), Some(&released), "adopted unrestored");
+    signal(scene.dir(), "restored");
+    target.finish(Duration::from_secs(120)).await;
+    let held = (HomeState::Worker, Some(MINI.to_string()), epoch);
+    assert_eq!(home(&scene).await, held, "the target holds the channel");
+    assert_eq!(scene.row().await.expect("the home row").target, None);
+    scene.drop_db().await;
+}
+
+pub(super) async fn adopt_target_node(env: &Env) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let epoch = epoch_of(env);
+    let restored = Arc::new(AtomicBool::new(false));
+    let node = Booted::boot_reading(env, Arc::clone(&restored)).await;
+    assert_eq!(node.gates.len(), 1, "the released row names this node");
+    signal(&env.dir, "booted");
+    wait_signal(&env.dir, "restored", WITHIN).await;
+    assert_eq!(node.state().await, Some(HomeState::Released));
+    let opened = (node.home_epoch(), node.accepts());
+    assert_eq!(opened, (None, false), "unrestored: the home opened");
+    restored.store(true, Ordering::Release);
+    let adopted = || async { node.state().await == Some(HomeState::Worker) };
+    until_async("the watch adopts the row", WITHIN, adopted).await;
+    until("the lease opens the home", WITHIN, || {
+        node.home_epoch() == Some(epoch)
+    })
+    .await;
+    until("the writer takes work", WITHIN, || node.accepts()).await;
+    node.stop().await;
+}
+
+/// T-H6 adopt against unregister: the target's gate unregisters while its adopt UPDATE waits on a
+/// row lock; the adopt lands once, no lease runs, and the next boot holds and renews the row.
+#[tokio::test(flavor = "current_thread")]
+async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
+    use crate::services::cluster::channel_home::{self, HomeIntake};
+    use crate::services::cluster::channel_home_boot::{self, Boot, BootPort, ResetRefused};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let scene = Scene::new().await;
+    let (channel, provider) = (C.to_string(), provider_name(scene.provider));
+    let delegated = o_channel_homes::delegate(&scene.pool, &channel, provider, GW, MINI).await;
+    let delegated = applied(delegated);
+    let released =
+        o_channel_homes::finish_release(&scene.pool, &channel, GW, delegated.epoch).await;
+    let epoch = applied(released).epoch;
+    let url = scene.url();
+    let pool = crate::db::postgres::connect_test_pool_with_max_connections(url, "s3 target", 2);
+    let pool = pool.await.expect("target pool");
+    let restored = Arc::new(AtomicBool::new(true));
+    let boot = || {
+        let restored = Arc::clone(&restored);
+        let reset: channel_home_boot::LegacyReset =
+            Arc::new(|| Box::pin(async { Err(ResetRefused::NotWired) }));
+        let port = move |id| BootPort::reading(id, Arc::clone(&restored), reset.clone());
+        Some(Boot {
+            provider: provider.into(),
+            local: MINI.into(),
+            pool: pool.clone(),
+            rows: channel_home_boot::listed(&pool),
+            candidates: vec![],
+            port,
+            writers: None,
+        })
+    };
+    let lock = lock_home_row(&scene.pool).await;
+    let gates = channel_home_boot::start(Some(true), boot).await;
+    assert_eq!(gates.len(), 1, "the released row names MINI");
+    // The watch's only query that holds a connection across two samples is the blocked adopt.
+    let in_use = || pool.size() as usize > pool.num_idle();
+    let mut held = 0;
+    for _ in 0..400 {
+        held = if in_use() { held + 1 } else { 0 };
+        if held >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(held >= 3, "the adopt never waited on the row lock");
+    assert!(channel_home::unregister(&channel).is_some());
+    lock.commit().await.unwrap();
+
+    let worker = || async { scene.row().await.map(|row| row.state) == Some(HomeState::Worker) };
+    until_async("the adopt lands", WITHIN, worker).await;
+    let row = scene.row().await.expect("the home row");
+    let one = (row.holder.as_deref(), row.target.as_deref(), row.epoch);
+    assert_eq!(
+        one,
+        (Some(MINI), None, epoch),
+        "one adopt for the one target"
+    );
+    let ended = || channel_home_boot::running(&channel) == (false, None);
+    until("the withdrawn watch ends without a lease", WITHIN, ended).await;
+    assert_eq!(
+        gates[0].ownership(),
+        HomeOwnership::Lost,
+        "a withdrawn gate opened"
+    );
+    assert!(channel_home::registered_channel(C).is_none());
+
+    channel_home_boot::stop(&channel).await;
+    channel_home_boot::start(Some(true), boot).await;
+    let open = || {
+        let gate = channel_home::registered_channel(C);
+        matches!(gate.map(|gate| gate.ownership()), Some(HomeOwnership::Owned { home_epoch, intake: HomeIntake::Open, .. }) if home_epoch == epoch)
+    };
+    until("the restart's lease opens the home", WITHIN, open).await;
+    assert_eq!(channel_home_boot::running(&channel), (true, Some(epoch)));
+    assert_eq!(
+        home(&scene).await,
+        (HomeState::Worker, Some(MINI.to_string()), epoch)
+    );
+    channel_home_boot::stop(&channel).await;
+    channel_home::unregister(&channel);
+    pool.close().await;
+    scene.drop_db().await;
+}

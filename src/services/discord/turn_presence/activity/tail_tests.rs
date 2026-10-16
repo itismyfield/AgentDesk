@@ -56,6 +56,60 @@ fn idle(reader: &mut TailReader) -> bool {
 }
 
 #[test]
+fn s1_tail_shrink_ahead_of_cursor_is_not_eof() {
+    let rows = [
+        event("task_started", Some("A")),
+        event("task_complete", Some("A")),
+        event("task_started", Some("B")),
+    ];
+    let (_root, binding) = fixture(ShadowProvider::Codex, &rows);
+    let mut reader = TailReader::open(binding.clone(), limits(1)).unwrap();
+    let end = std::fs::metadata(&binding.source.path).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&binding.source.path)
+        .unwrap()
+        .set_len(end - serde_json::to_vec(&rows[2]).unwrap().len() as u64 - 1)
+        .unwrap();
+    assert!(
+        reader.bootstrap().is_err(),
+        "snapshot shrink ahead of cursor was accepted"
+    );
+}
+
+#[test]
+fn s1_resume_revalidates_old_guard_before_carry() {
+    for tamper in [false, true] {
+        let (_root, binding) = fixture(
+            ShadowProvider::Codex,
+            &[
+                event("task_started", Some("A")),
+                blocked(),
+                event("task_complete", Some("A")),
+            ],
+        );
+        let mut reader = TailReader::open(binding.clone(), limits(4096)).unwrap();
+        assert!(reader.poll(4096, Some(reader.meta.bootstrap_end)).is_err());
+        assert!(reader.facts.resume_point().is_some());
+        if tamper {
+            let mut bytes = std::fs::read(&binding.source.path).unwrap();
+            let at = bytes.windows(3).position(|w| w == b"\"A\"").unwrap();
+            bytes[at + 1] = b'B';
+            std::fs::write(&binding.source.path, bytes).unwrap();
+        }
+        let resumed = reader.resume();
+        assert_eq!(
+            resumed.is_err(),
+            tamper,
+            "old observation must authenticate the handoff"
+        );
+        if !tamper {
+            assert!(idle(&mut reader));
+        }
+    }
+}
+
+#[test]
 fn s0o_codex_lifetime_across_worker_installed_and_typed_resume() {
     let start = event("task_started", Some("A"));
     let close = event("task_complete", Some("A"));
@@ -222,7 +276,7 @@ fn s0o_snapshot_budget_counts_alignment_and_resume_rereads() {
 }
 
 #[test]
-fn s0o_limits_and_dormant_activity_source_are_unchanged() {
+fn s1_limits_and_activity_activation_source_are_pinned() {
     use sha2::{Digest, Sha256};
     let limits = Limits::default();
     assert_eq!(limits.tail, 32 * 1024 * 1024);
@@ -232,12 +286,10 @@ fn s0o_limits_and_dormant_activity_source_are_unchanged() {
         Some(limits.full + 1 - limits.tail)
     );
     let source = include_str!("../activity.rs").replace("\r\n", "\n");
-    let production = source
-        .strip_suffix("\n#[cfg(all(test, unix))]\nmod tail;\n")
-        .unwrap();
+    let production = &source;
     assert_eq!(
         hex::encode(Sha256::digest(production.as_bytes())),
-        "bb6977908888dc3c71abc6815bd0eb5635918da5a07c3e2560c9f8f554fc0a14"
+        "bb5e41108ccb86b31f56faac02f81f36e7a2f63fc1dc648451fc3455c4710f7c"
     );
 }
 
@@ -269,4 +321,67 @@ fn s0o_closed_resume_waits_and_parse_errors_discard_proof() {
     assert!(reader.poll_installed().is_err());
     assert!(reader.facts.resume_point().is_none());
     assert_eq!(reader.meta.codex, CodexBoundary::Unproven);
+}
+struct Scheduled {
+    bootstrap: Option<Job>,
+    resume: Option<Job>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+static HANDOFFS: LazyLock<Mutex<HashMap<u64, Scheduled>>> = LazyLock::new(Default::default);
+pub(in crate::services::discord::turn_presence::activity) struct HandoffHook(
+    u64,
+    Arc<std::sync::atomic::AtomicUsize>,
+);
+impl HandoffHook {
+    pub(in crate::services::discord::turn_presence::activity) fn new(
+        channel: u64,
+        bootstrap: Option<Job>,
+        resume: Option<Job>,
+    ) -> Self {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(
+            lock(&HANDOFFS)
+                .insert(
+                    channel,
+                    Scheduled {
+                        bootstrap,
+                        resume,
+                        calls: calls.clone()
+                    }
+                )
+                .is_none()
+        );
+        Self(channel, calls)
+    }
+    pub(in crate::services::discord::turn_presence::activity) fn calls(&self) -> usize {
+        self.1.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+impl Drop for HandoffHook {
+    fn drop(&mut self) {
+        lock(&HANDOFFS).remove(&self.0);
+    }
+}
+fn run_handoff(channel: u64, bootstrap: bool) {
+    let job = {
+        let mut guard = lock(&HANDOFFS);
+        guard.get_mut(&channel).and_then(|scheduled| {
+            let job = if bootstrap {
+                scheduled.bootstrap.take()
+            } else {
+                scheduled.resume.take()
+            }?;
+            Some((job, scheduled.calls.clone()))
+        })
+    };
+    if let Some((job, calls)) = job {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        job();
+    }
+}
+pub(super) fn before_bootstrap(channel: u64) {
+    run_handoff(channel, true);
+}
+pub(super) fn before_resume(channel: u64) {
+    run_handoff(channel, false);
 }

@@ -854,11 +854,12 @@ mod tests {
         channel: ChannelId,
         output_path: &str,
     ) -> discord::TmuxWatcherRegistry {
-        let registry = discord::TmuxWatcherRegistry::new();
+        let registry = discord::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+            dashmap::DashMap::new(),
+        ));
         registry.insert(channel, watcher_handle(tmux_session_name, output_path));
         registry
     }
-
     // #5071 T4-B0 (#4987 S0): the health load reaches the live watcher's
     // transcript through the channel binding. A binding that resolves the
     // channel but drops the path leaves the enrichment/load snapshot without
@@ -869,7 +870,6 @@ mod tests {
         let tmux_session_name = "AgentDesk-claude-adk-b0-enrichment";
         let channel = ChannelId::new(5_071_000_000_000_040);
         let registry = registry_with_watcher(tmux_session_name, channel, NATIVE_TRANSCRIPT);
-
         let binding = registry.channel_binding(&channel);
         assert!(
             binding.is_some(),
@@ -1021,12 +1021,13 @@ mod tests {
 
     #[test]
     fn health_reports_no_watcher_transcript_for_a_channel_without_a_binding() {
-        let registry = discord::TmuxWatcherRegistry::new();
+        let registry = discord::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+            dashmap::DashMap::new(),
+        ));
         let binding = registry.channel_binding(&ChannelId::new(5_071_000_000_000_041));
         assert!(binding.is_none());
         assert_eq!(watcher_output_path_from_binding(binding.as_ref()), None);
     }
-
     // #4986: the watcher had been promoted to the provider-native transcript
     // while the in-flight row still named the prelaunch wrapper file. Discovery
     // must pick the watcher's side of that split.
@@ -1037,7 +1038,6 @@ mod tests {
             Some(NATIVE_TRANSCRIPT)
         );
     }
-
     #[test]
     fn transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing() {
         assert_eq!(

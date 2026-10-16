@@ -882,28 +882,36 @@ impl Attempt<'_> {
             }
             Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
         }
-        // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
         let request = self.request;
-        loop {
-            if Instant::now() >= deadline {
-                return Outcome::Unconfirmed(Unconfirmed::NotObserved);
-            }
-            if let Some(exact) = transcript_submission(
-                request.transcript,
-                self.offset,
-                request.nonce,
-                Some(self.text),
-            ) && Instant::now() < deadline
-            {
-                return if exact {
-                    Outcome::Injected
-                } else {
-                    Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit)
-                };
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(self.timing.confirm_poll.min(left));
+        let receipt = (request.transcript, self.offset, request.nonce, self.text);
+        await_receipt(receipt, deadline, self.timing.confirm_poll)
+            .map_or_else(Outcome::Unconfirmed, |()| Outcome::Injected)
+    }
+}
+
+/// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:
+/// only the exact `text` is a receipt, another body under the nonce is contaminated.
+pub(crate) fn await_receipt(
+    (transcript, offset, nonce, text): (&Path, u64, &str, &str),
+    deadline: Instant,
+    poll: Duration,
+) -> Result<(), Unconfirmed> {
+    // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Unconfirmed::NotObserved);
         }
+        if let Some(exact) = transcript_submission(transcript, offset, nonce, Some(text))
+            && Instant::now() < deadline
+        {
+            return if exact {
+                Ok(())
+            } else {
+                Err(Unconfirmed::ContaminatedSubmit)
+            };
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(poll.min(left));
     }
 }
 

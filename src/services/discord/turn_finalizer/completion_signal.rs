@@ -15,7 +15,7 @@ use super::*;
 /// - `PausedLive` — in-flight or inconclusive evidence; conservatively a live,
 ///   paused turn.
 /// - `Unknown` — no structured on-disk JSONL turn state (LegacyTmuxWrapper /
-///   ProcessBackend / ClaudeEAdapter, or a non-JSONL provider).
+///   ProcessBackend, or a non-JSONL provider).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 // #3016 S3: wired into the watcher fresh-idle finalize decision.
 pub(in crate::services::discord) enum CompletionSignal {
@@ -316,19 +316,11 @@ mod tests {
             ),
             CompletionSignal::Unknown,
         );
-        // ProcessBackend and ClaudeEAdapter are also non-JSONL.
+        // ProcessBackend is also non-JSONL.
         assert_eq!(
             fin.completion_signal_state(
                 &ProviderKind::Claude,
                 Some(RuntimeHandoffKind::ProcessBackend),
-                file.path(),
-            ),
-            CompletionSignal::Unknown,
-        );
-        assert_eq!(
-            fin.completion_signal_state(
-                &ProviderKind::Claude,
-                Some(RuntimeHandoffKind::ClaudeEAdapter),
                 file.path(),
             ),
             CompletionSignal::Unknown,
