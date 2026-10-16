@@ -420,8 +420,7 @@ fn queued_input(message: u64) -> crate::services::turn_orchestrator::Interventio
 
 #[test]
 fn b_foreign_provider_lookup_skip_admit_permit() {
-    use crate::services::discord::{queue_dispatch, queued_placeholders_store, runtime_store};
-    use crate::services::turn_orchestrator::EnqueueRefusalReason;
+    use crate::services::discord::{queue_dispatch, runtime_store};
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let dir = sandbox();
     let _env = Env::set(dir.path());
@@ -441,71 +440,9 @@ fn b_foreign_provider_lookup_skip_admit_permit() {
                 let off = ChannelId::new(channel.get() + 1);
                 let gate = Gate::protect(owner, channel.get()).unwrap();
                 let _health = test_health::Clear::new(&gate);
-                let old_permit = gate.admit().unwrap();
                 let _closing = gate.close().unwrap();
-                let token = "g2b-backstop";
-                let store = runtime_store::discord_queue_exit_placeholder_clears_root()
-                    .unwrap()
-                    .join(foreign.as_str())
-                    .join(token);
-                std::fs::create_dir_all(&store).unwrap();
-                let protected_file = store.join(format!("{}.json", channel.get()));
-                let off_file = store.join(format!("{}.json", off.get()));
-                let original = b"{malformed queue clear";
-                std::fs::write(&protected_file, original).unwrap();
-                std::fs::write(&off_file, original).unwrap();
-                let restored =
-                    queued_placeholders_store::load_queue_exit_placeholder_clears(&foreign, token);
-                assert!(restored.is_empty());
-                assert!(
-                    protected_file.exists(),
-                    "foreign lookup skip preserves the protected file"
-                );
-                assert_eq!(std::fs::read(&protected_file).unwrap().as_slice(), original);
-                assert!(!off_file.exists(), "the unprotected cleanup still runs");
-
                 let mut shared = crate::services::discord::make_shared_data_for_tests();
                 Arc::get_mut(&mut shared).unwrap().provider = foreign.clone();
-                let refused = queue_dispatch::mailbox_requeue_intervention_front(
-                    &shared,
-                    &foreign,
-                    channel,
-                    queued_input(channel.get() + 10),
-                )
-                .await;
-                assert!(!refused.enqueued);
-                assert_eq!(
-                    refused.refusal_reason,
-                    Some(EnqueueRefusalReason::InputModeFenced(Mode::Closing))
-                );
-                assert!(shared.mailboxes.snapshot_all().await.is_empty());
-
-                let persistence = QueuePersistenceContext::new(&foreign, &shared.token_hash, None);
-                let reused = shared
-                    .mailbox(channel)
-                    .requeue_front_with_permit(
-                        queued_input(channel.get() + 11),
-                        persistence,
-                        None,
-                        Some(old_permit),
-                    )
-                    .await;
-                assert!(
-                    !reused.enqueued,
-                    "the owner's permit cannot authorize the foreign queue"
-                );
-                assert_eq!(
-                    reused.refusal_reason,
-                    Some(EnqueueRefusalReason::InputPersistence)
-                );
-                assert!(
-                    shared
-                        .mailbox(channel)
-                        .snapshot()
-                        .await
-                        .intervention_queue
-                        .is_empty()
-                );
                 let pending = runtime_store::runtime_root()
                     .unwrap()
                     .join("discord_pending_queue")

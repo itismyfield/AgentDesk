@@ -13,7 +13,10 @@
     "restored_always_true", "standby_skips_persisted_restore", "standby_marks_restored_before_restore",
     "watch_ends_when_row_names_other_holder", "return_keeps_home_bound_writer",
     "return_starts_writer_before_old_join", "return_read_error_as_absence", "running_slot_counts_as_alive",
-    "first_spawn_ignores_boot_rows", "first_spawn_reads_error_as_absence"
+    "first_spawn_ignores_boot_rows", "first_spawn_reads_error_as_absence",
+    "promotion_preflight_stops_writer", "committed_restart_skips_writer_join",
+    "shutdown_stops_only_last_provider", "old_cleanup_stops_replacement", "writer_stuck_as_joined", "target_skips_adopt",
+    "adopt_ignores_restored", "reading_drops_restored", "bootstrap_port_ignores_role_flag"
   ],
   "cases": [
     {"id": "H6-1", "profile": "now", "piece": 4, "status": "implemented",
@@ -53,8 +56,18 @@
     {"id": "H6-6a", "profile": "now", "piece": 4, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg"],
      "what": "a new GW boots with the gateway role while the existing MINI keeps its old config; PG holder and epoch stay unchanged"},
-    {"id": "H6-6b", "profile": "after", "piece": 6, "status": "blocked:B3b-6 standby lifecycle not wired", "tests": [],
-     "what": "a real gateway/standby switch stops and resumes the writer"},
+    {"id": "H6-6b", "profile": "after", "piece": 6, "status": "implemented",
+     "tests": ["services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_joins_every_provider_writer_before_exit",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_stuck_writer_stays_stuck_and_the_commit_still_exits",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::backend_exit_joins_writers_before_the_lease_drops",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_late_old_cleanup_leaves_the_successor_running",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::switch_off_shutdown_builds_no_lifecycle",
+               "services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::every_slot_holding_runtime_registers_one_sigterm_handler",
+               "services::discord::runtime_bootstrap::gateway_lease_recovery_tests::promotion_cancel_keeps_the_writer_incarnation_pg"],
+     "what": "a fenced restart's role switch ends the old process's writers before it exits and the next process starts the writer its role and authority allow; a cancelled promotion keeps the current writer",
+     "evidence_scope": "in process, not through run_bot, over writers started by start_managed on a test host: a child process re-running the test binary holds a Claude and a Codex runtime's homes and runs the real deferred restart poller, which commits its sentinel and calls exit(0); an atexit hook records that both writers' slots were empty and their claims released, and a stuck third writer is left blocked while the commit still exits 0. The standby's production start_channel_homes and spawn_delegated over real PG, then the real SIGTERM handler with a test signal, end its watch and writer after the save and before the barrier; the real backend exit joins before its lease task drops; a cancelled attempt_clean_standby_promotion and a deferred rollback keep the writer's generation and readiness; a late stop of an earlier start leaves the later watch and writer; a lifecycle stop ends its watch before its writers. The registration of one handler per slot-holding run_bot branch is a source pin. Not covered: two process generations deciding their roles through a real PG lease and the next process's writer start and POST (left to the s3_real acceptance version), a real OS SIGTERM, and SIGKILL, for which no graceful join is claimed"},
     {"id": "H7-P-posted", "profile": "now", "piece": 3, "status": "implemented",
      "tests": ["services::cluster::intake_worker::home_route_tests::s3_real::drain_pg::th7_prepared_alone_blocks_reclaim_pg"],
      "what": "a lone Prepared blocks the leave; the replayed source settles it Posted with no new POST"},
@@ -119,9 +132,14 @@
     {"name": "running_slot_counts_as_alive", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs ensure counts a running slot whose host ended as alive"},
     {"name": "first_spawn_ignores_boot_rows", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs start_boot starts every boot channel, another node's row or not"},
     {"name": "first_spawn_reads_error_as_absence", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs start reads unreadable boot rows as no row for the first spawn"},
-    {"name": "target_skips_adopt", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch released-target adopt branch removed"},
-    {"name": "adopt_ignores_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch restored condition inverted"},
-    {"name": "reading_drops_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs BootPort::reading without restored_by"},
-    {"name": "bootstrap_port_ignores_role_flag", "cases": ["H6-3a"], "at": "discord/runtime_bootstrap.rs start_channel_homes port given a fresh flag"}
+    {"name": "target_skips_adopt", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch released-target adopt branch removed; guards that a released target adopts through its own watch"},
+    {"name": "adopt_ignores_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch restored condition inverted; guards that an unrestored target leaves the row released"},
+    {"name": "reading_drops_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs BootPort::reading without restored_by; guards that the runtime's reading port carries the channel's restore"},
+    {"name": "bootstrap_port_ignores_role_flag", "cases": ["H6-3a"], "at": "discord/runtime_bootstrap.rs start_channel_homes port given a fresh flag; guards that start_channel_homes passes its own role's restored flag"},
+    {"name": "promotion_preflight_stops_writer", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/gateway_lease_recovery.rs the promotion preflight ends every runtime's homes"},
+    {"name": "committed_restart_skips_writer_join", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/spawns.rs the committed restart exits without joining any home"},
+    {"name": "shutdown_stops_only_last_provider", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/spawns.rs the committed restart joins only the final provider's homes"},
+    {"name": "old_cleanup_stops_replacement", "cases": ["H6-6b"], "at": "cluster/channel_home_boot.rs a lifecycle's watch end removes the channel's watch whatever its identity"},
+    {"name": "writer_stuck_as_joined", "cases": ["H6-6b"], "at": "cluster/channel_home_boot.rs a lifecycle stop reports Joined whatever phase its writers are left in"}
   ]
 }

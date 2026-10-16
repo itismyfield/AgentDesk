@@ -57,9 +57,8 @@ impl ChannelMailboxHandle {
     ) -> Result<policy_close::PolicyMailboxOutcome, policy_close::PolicyStage> {
         let (reply, answer) = oneshot::channel();
         let request = Box::new(request);
-        let permit = crate::services::discord::input_runtime::fence::effect::current();
         (self.sender)
-            .send((ChannelMailboxMsg::PolicyClose { request, reply }, permit))
+            .send(ChannelMailboxMsg::PolicyClose { request, reply })
             .map_err(|_| policy_close::PolicyStage::MailboxSend)?;
         answer
             .await

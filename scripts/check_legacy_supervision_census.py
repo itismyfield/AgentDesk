@@ -20,7 +20,7 @@ ENTRIES = {}
 # "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'de34ae33a679f5db0c88dc5a2446f992e0dd323dd2e296bc29876f0702458060'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'eb11a170ba7bf7d135a352e69f4a1d8a3810a28284615e651383923a427baccd'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',
@@ -109,7 +109,9 @@ def sync_skips(root, promoted_paths=(), deleted_paths=()):
     files = pin._lexical_rust_files(root, Path("src"))
     basename = {p for p in files if classifier.is_test_file(p.name)}
     resolved = pin._INVENTORY.test_only_module_files(production_files=[p for p in files if p not in basename], all_files=files)
-    path = root / "scripts/test_only_module_skip_pin.py"
+    path = root / "scripts/test_only_module_skip_pin_paths.py"
+    if not path.is_file():
+        path = root / "scripts/test_only_module_skip_pin.py"
     source = path.read_text()
     actual = {p.relative_to(root).as_posix() for p in basename | resolved}
     existing = {p.relative_to(root).as_posix() for p in files}

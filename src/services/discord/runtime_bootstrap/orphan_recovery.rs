@@ -337,7 +337,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
             {keep}
       RETURNING s.session_key, d.id AS dispatch_id, d.status AS dispatch_status",
     );
-    let query = sqlx::query(&sql);
+    let query = sqlx::query(sqlx::AssertSqlSafe(sql));
     let query = if kept.is_empty() {
         query
     } else {
@@ -394,7 +394,7 @@ async fn clear_stale_session_dispatch_links(pg_pool: Option<&sqlx::PgPool>) {
           WHERE s.session_key = stale.session_key
       RETURNING s.session_key",
     );
-    let query = sqlx::query(&sql);
+    let query = sqlx::query(sqlx::AssertSqlSafe(sql));
     let query = if kept.is_empty() {
         query
     } else {

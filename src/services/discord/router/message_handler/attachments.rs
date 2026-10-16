@@ -25,7 +25,18 @@ pub(super) fn is_allowed_discord_attachment_url(raw_url: &str) -> bool {
         .is_some_and(|host| DISCORD_ATTACHMENT_HOSTS.contains(&host))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Bytes a test serves for an attachment URL in place of the CDN.
+    pub(in crate::services::discord::router) static TEST_DOWNLOADS:
+        std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>> = Default::default();
+}
+
 pub(super) async fn download_discord_attachment(raw_url: &str) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    if let Some(bytes) = TEST_DOWNLOADS.with(|served| served.borrow().get(raw_url).cloned()) {
+        return Ok(bytes);
+    }
     if !is_allowed_discord_attachment_url(raw_url) {
         return Err("attachment URL host is not allowed".to_string());
     }

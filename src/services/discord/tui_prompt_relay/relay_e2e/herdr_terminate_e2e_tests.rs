@@ -15,7 +15,6 @@ use crate::services::discord::herdr_terminate::{
     terminate_explicit_herdr, test_turn,
 };
 use crate::services::discord::queue_io::cancel_backstop_test_support as observed;
-use crate::services::discord::router;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 
@@ -129,7 +128,7 @@ async fn scenario(rig: herdr::P11TerminationRig) {
             let event = serenity::FullEvent::Message {
                 new_message: user_message(queued.get(), ORIGINAL),
             };
-            let intake = router::handle_event(&ctx, &event, &data).await;
+            let intake = super::boxed_intake(&ctx, &event, &data).await;
             assert!(intake.is_ok(), "{intake:?}");
             let delivered = wait_until(Duration::from_secs(15), || {
                 let shared = probe_data_shared.clone();
@@ -584,9 +583,25 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
         let acted = calls.lines().filter(|call| !call.ends_with("-V"));
         acted.map(str::to_owned).collect()
     };
+    let upload = crate::services::cluster::attachment_transfer::uploads::Upload::Local;
+    let (queued_record, session_record) =
+        ("[upload] herdr-queued.png", "[upload] herdr-session.png");
     if refused_first {
         let map = crate::services::discord::host_defer_gate::tests::map_channel;
         map(&shared, channel, FALLBACK).await;
+        // The queued input carries its own upload while another one waits on the mapped session.
+        let mut queue = harness.mailbox().await.intervention_queue;
+        queue[0].pending_uploads = vec![upload(queued_record.into())];
+        let persist = crate::services::turn_orchestrator::QueuePersistenceContext::new;
+        let persistence = persist(&provider, &shared.token_hash, None);
+        shared
+            .mailbox(channel)
+            .replace_queue(queue, persistence)
+            .await;
+        let session_uploads = vec![upload(session_record.into())];
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&channel).unwrap().pending_uploads = session_uploads.clone();
+        drop(core);
         let turn_switch = |on| {
             let mut config = (*crate::config_live_reload::current().unwrap()).clone();
             config.runtime.herdr_turn_enabled = Some(on);
@@ -608,6 +623,25 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
         let before = input(&harness.durable_queue());
         let started = kick_off(&harness).await;
         let held = harness.mailbox().await.intervention_queue;
+        // The refusal ran before the session's input was taken, so only the queued upload returns.
+        let uploads = |queue: &[crate::services::discord::Intervention]| -> Vec<_> {
+            queue.iter().map(|i| i.pending_uploads.clone()).collect()
+        };
+        let queued_once = vec![vec![upload(queued_record.into())]];
+        assert_eq!(
+            uploads(&held),
+            queued_once,
+            "the queued upload returns once"
+        );
+        assert_eq!(
+            uploads(&harness.durable_queue()),
+            queued_once,
+            "the queued upload returns to the durable queue once"
+        );
+        let kept = shared.core.lock().await.sessions[&channel]
+            .pending_uploads
+            .clone();
+        assert_eq!(kept, session_uploads, "the session keeps its own upload");
         assert_eq!(input(&held), before, "refused input left the queue");
         assert_eq!(
             input(&harness.durable_queue()),
@@ -655,6 +689,21 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
         "the paste carries the input: {text}"
     );
     assert_eq!(sends[1].1["keys"], json!(["enter"]), "{sends:?}");
+    if refused_first {
+        // The started turn takes the session's upload ahead of the queued one, each once.
+        let at = |record: &str| {
+            assert_eq!(text.matches(record).count(), 1, "{record} in {text}");
+            text.find(record)
+        };
+        assert!(at(session_record) < at(queued_record), "{text}");
+        let left = shared.core.lock().await.sessions[&channel]
+            .pending_uploads
+            .clone();
+        assert!(
+            left.is_empty(),
+            "the turn took the session's upload: {left:?}"
+        );
+    }
     assert!(
         rig.writes()
             .iter()

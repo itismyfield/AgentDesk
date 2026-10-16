@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{FromRow, Postgres};
+use sqlx::{AssertSqlSafe, FromRow, Postgres};
 
 pub(super) const MAX_SIBLINGS: i64 = 20;
 
@@ -114,7 +114,10 @@ where
     let query = format!(
         "SELECT id,target,content,bot,source,status,reason_code,session_key,retry_count,error,dedupe_key,created_at,sent_at,claimed_at,next_attempt_at FROM message_outbox WHERE id=ANY($1) ORDER BY id{suffix}"
     );
-    sqlx::query_as(&query).bind(ids).fetch_all(executor).await
+    sqlx::query_as(AssertSqlSafe(query))
+        .bind(ids)
+        .fetch_all(executor)
+        .await
 }
 
 pub(super) async fn semantic_siblings<'e, E>(

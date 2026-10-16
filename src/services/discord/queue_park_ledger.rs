@@ -141,10 +141,6 @@ fn classify(
     } else if super::health::legacy_supervision::is_retired(provider.as_str(), channel.get()) {
         result.recovery_state = Some("no_periodic_caller");
         ("legacy_retired".to_string(), "none")
-    } else if super::input_runtime::fence::lookup(provider, channel.get())
-        .is_some_and(|gate| gate.mode() != super::input_runtime::fence::Mode::LegacyOpen)
-    {
-        ("fenced".to_string(), "none")
     } else if cancelled(snapshot) {
         let evidence = super::zombie_foreground_release::collect_zombie_foreground_evidence(
             provider,

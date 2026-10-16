@@ -323,7 +323,6 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/intake_worker/home_accept_tests.rs'
               - 'src/services/cluster/intake_worker/home_route_tests.rs'
-              - 'src/services/cluster/intake_worker/input_effect_tests.rs'
               - 'src/services/cluster/intake_worker/o_route_tests.rs'
               - 'src/services/cluster/intake_worker/owner_fence_pg_tests.rs'
               - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
@@ -335,10 +334,10 @@ jobs:
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_drop_pg_tests.rs'
               - 'src/services/discord/commands/cancel_backstop_tests.rs'
-              - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/control/clear_end_tests.rs'
+              - 'src/services/discord/commands/control/clear_entry_tests.rs'
+              - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
               - 'src/services/discord/commands/control/home_fence_tests.rs'
-              - 'src/services/discord/commands/control/native_herdr_e2e_tests.rs'
-              - 'src/services/discord/commands/control/native_herdr_tests.rs'
               - 'src/services/discord/commands/control/native_policy_tests.rs'
               - 'src/services/discord/commands/control/native_tests.rs'
               - 'src/services/discord/commands/restart.rs'
@@ -387,6 +386,7 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'
               - 'src/services/discord/router/intake_dispatch/replay_admission_tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
+              - 'src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs'
               - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
@@ -406,10 +406,13 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/channel_homes_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs'
               - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
@@ -421,6 +424,7 @@ jobs:
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
               - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
+              - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
               - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
@@ -1151,8 +1155,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
-        timeout-minutes: 45
+        # Healthy runs took 24-46 min on 2026-10-15/16 and three PRs were cut at 45.
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -2140,7 +2144,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
+          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2392,7 +2396,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6
+          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

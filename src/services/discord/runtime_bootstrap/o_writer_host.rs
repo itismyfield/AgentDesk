@@ -8,6 +8,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::services::cluster::channel_home_boot::ChannelWriters;
+use crate::services::cluster::home_supervisor::HomeLifecycle;
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
@@ -182,6 +183,7 @@ impl HostIo for GatewayHost {
     }
 
     /// Legacy inflight, delivery custody and pending starts, durable or in memory: all local files.
+    /// A pending start alone is told apart from one beside a terminal delivery Legacy holds.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
@@ -197,11 +199,24 @@ impl HostIo for GatewayHost {
                 kind.as_str(),
                 channel,
             );
-        if pending_start || super::super::terminal_delivery_custody::retains_channel(channel)? {
-            return Ok(Custody::Active);
+        #[cfg(test)]
+        {
+            use crate::services::tui_o::writer::activation::test_hook;
+            test_hook::run(channel, test_hook::Step::CustodyRead)?;
         }
-        let row = super::super::inflight::inflight_state_file_exists(&kind, channel);
-        Ok(if row { Custody::Row } else { Custody::Free })
+        // Beside a pending start, delivery custody that cannot be read still counts as held.
+        match (
+            pending_start,
+            super::super::terminal_delivery_custody::retains_channel(channel),
+        ) {
+            (true, Ok(false)) => Ok(Custody::PendingStart),
+            (true, _) | (false, Ok(true)) => Ok(Custody::Active),
+            (false, Err(error)) => Err(error),
+            (false, Ok(false)) => {
+                let row = super::super::inflight::inflight_state_file_exists(&kind, channel);
+                Ok(if row { Custody::Row } else { Custody::Free })
+            }
+        }
     }
 
     fn legacy(&self) -> Arc<dyn LegacyView> {
@@ -355,11 +370,18 @@ fn with_writers<R>(use_writers: impl FnOnce(&mut Writers) -> R) -> R {
     WRITERS.with(locked)
 }
 
-/// The gateway runtime's supervised writers, made when its delegated homes start, before
-/// [`spawn`] hands them the writers it starts.
-pub(super) fn home_writers(provider: &ProviderKind) -> Arc<ChannelWriters> {
+/// The provider runtime's supervised writers, made when its delegated homes start, before
+/// [`spawn`] or [`spawn_delegated`] hands them the writers it starts.
+pub(super) fn home_writers(provider: &ProviderKind, delegated: bool) -> Arc<ChannelWriters> {
     let gateway = crate::services::tui_o::ownership::gate(provider.as_str());
-    let make = || Arc::new(ChannelWriters::new(gateway, host::process_readiness()));
+    let made = || ChannelWriters::new(gateway, host::process_readiness());
+    let make = || {
+        Arc::new(if delegated {
+            made().delegated()
+        } else {
+            made()
+        })
+    };
     with_writers(|writers| {
         Arc::clone(
             writers
@@ -369,23 +391,39 @@ pub(super) fn home_writers(provider: &ProviderKind) -> Arc<ChannelWriters> {
     })
 }
 
-/// Starts the writer for each delegated channel whose home gate is registered here and whose Herdr
-/// endpoint runs on this node, off the gateway; with none, nothing is built.
+/// Every provider runtime's homes in this process, or only `provider`'s; none with the switch off.
+pub(super) fn lifecycles(provider: Option<&ProviderKind>) -> Vec<Arc<dyn HomeLifecycle>> {
+    let named = |name: &String| provider.is_none_or(|provider| provider.as_str() == name);
+    let homes = |(name, homes): (&String, &Arc<ChannelWriters>)| {
+        named(name).then(|| Arc::clone(homes) as Arc<dyn HomeLifecycle>)
+    };
+    with_writers(|writers| writers.iter().filter_map(homes).collect())
+}
+
+/// Starts, off the gateway, a writer supervised for shutdown for each delegated channel registered
+/// here whose Herdr endpoint runs on this node; returns their channels, none building nothing.
 pub(super) fn spawn_delegated(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     config: Option<&TuiOConfig>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+) -> Vec<u64> {
     let Some(shadow) = shadow_of(provider) else {
         return Vec::new();
     };
     let delegated = crate::services::cluster::channel_home_boot::delegated_boot_ownership(
         super::herdr_runs_here,
     );
-    host::start_delegated(shadow, delegated, || {
+    let started = host::start_managed(shadow, false, delegated, || {
         let rest = shared.serenity_http_or_token_fallback();
         parts(shared, provider, config, rest)
-    })
+    });
+    if started.is_empty() {
+        return Vec::new();
+    }
+    let channels = started.iter().map(host::ManagedWriterHandle::channel);
+    let channels = channels.collect();
+    home_writers(provider, true).arm(None, started);
+    channels
 }
 
 #[cfg(test)]

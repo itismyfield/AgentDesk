@@ -251,7 +251,11 @@ pub(super) fn adopt(
     let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
     let path = pending_queue_file_path(provider, token_hash, channel_id)
         .ok_or_else(|| format!("pending queue root unavailable for channel {channel_id}"))?;
-    ledger.meta = read_snapshot_meta(&path)?.unwrap_or_default();
+    // A file a clear could not rewrite holds no head or record this actor may adopt.
+    ledger.meta = match state.remint_fence.trusts_queue(&key) {
+        true => read_snapshot_meta(&path)?.unwrap_or_default(),
+        false => SnapshotMeta::default(),
+    };
     ledger.persisted_meta = meta_value(&ledger.meta);
     ledger.lease = None;
     ledger.adopted = Some(key);
@@ -264,17 +268,26 @@ pub(super) fn meta_value(meta: &SnapshotMeta) -> Option<serde_json::Value> {
         .then(|| serde_json::to_value(meta).expect("snapshot metadata serializes"))
 }
 
+/// After a queue write landed: its metadata is what disk holds, and the namespace is trusted again.
 pub(super) fn record_write(state: &mut ChannelMailboxState) {
     state.queued_head.persisted_meta = meta_value(&state.queued_head.meta);
+    if let Some(namespace) = &state.queued_head.adopted {
+        state.remint_fence.trust_queue(namespace);
+    }
 }
 
-/// Refuses unless the metadata on disk is what this owner last wrote.
+/// Refuses unless the metadata on disk is what this owner last wrote; a file a clear could not
+/// rewrite is no record at all.
 fn validate_disk(
     state: &mut ChannelMailboxState,
     channel: ChannelId,
     persistence: &QueuePersistenceContext,
 ) -> Result<(), String> {
     adopt(state, channel, persistence)?;
+    let namespace = super::remint_fence::namespace(persistence);
+    if !state.remint_fence.trusts_queue(&namespace) {
+        return Ok(());
+    }
     let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
         .ok_or("pending queue root unavailable")?;
     let meta = read_snapshot_meta(&path)?.unwrap_or_default();
@@ -302,32 +315,46 @@ pub(super) fn refuse_destructive(
     Ok(())
 }
 
-/// An explicit clear drops the head and its lease, and takes the disk record as read even when it
-/// changed outside its owner, so the clear's write replaces it. Returns the ledger to restore.
+/// An explicit clear drops the head and its lease without reading disk; the submitted sources this
+/// owner recorded stay recorded, so none of them can replay. The clear's writer sets what disk holds.
 pub(super) fn release_for_clear(
     state: &mut ChannelMailboxState,
-    channel: ChannelId,
     persistence: &QueuePersistenceContext,
-) -> Result<HeadLedger, String> {
-    adopt(state, channel, persistence)?;
-    let path = pending_queue_file_path(&persistence.provider, &persistence.token_hash, channel)
-        .ok_or("pending queue root unavailable")?;
-    let disk = read_snapshot_meta(&path)?.unwrap_or_default();
+) {
+    let key = super::remint_fence::namespace(persistence);
     let previous = std::mem::take(&mut state.queued_head);
-    let mut meta = disk.clone();
-    meta.head_injection = None;
-    // Sources the owner recorded as submitted stay recorded, so none of them can replay.
-    let owned = previous.meta.terminal_identities.iter();
-    let missing = owned.filter(|t| !disk.terminal_identities.contains(t));
-    meta.terminal_identities
-        .extend(missing.cloned().collect::<Vec<_>>());
-    state.queued_head = HeadLedger {
-        adopted: previous.adopted.clone(),
-        meta,
-        lease: None,
-        persisted_meta: meta_value(&disk),
+    let owned = previous.adopted.as_ref() == Some(&key);
+    let terminal_identities = match owned {
+        true => previous.meta.terminal_identities,
+        false => Vec::new(),
     };
-    Ok(previous)
+    state.queued_head = HeadLedger {
+        adopted: Some(key),
+        meta: SnapshotMeta {
+            head_injection: None,
+            terminal_identities,
+        },
+        lease: None,
+        persisted_meta: None,
+    };
+}
+
+/// Adds the submitted sources a trusted queue file records to the ledger before a clear rewrites
+/// it; an unreadable file adds none.
+pub(super) fn keep_disk_terminal(state: &mut ChannelMailboxState, path: &Path) {
+    let disk = match read_snapshot_meta(path) {
+        Ok(disk) => disk.unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "clear kept no submitted sources from an unreadable queue file");
+            return;
+        }
+    };
+    let terminal = &mut state.queued_head.meta.terminal_identities;
+    for identity in disk.terminal_identities {
+        if !terminal.contains(&identity) {
+            terminal.push(identity);
+        }
+    }
 }
 
 /// A head nobody owns, after a restart or a dropped ticket: a reservation never pasted is
@@ -562,15 +589,6 @@ mod claim {
     }
 
     impl HeadMsg {
-        pub(in crate::services::turn_orchestrator) fn persistence(
-            &self,
-        ) -> &QueuePersistenceContext {
-            match self {
-                Self::Claim { persistence, .. } | Self::Settle { persistence, .. } => persistence,
-                Self::Mend(msg) => msg.persistence(),
-            }
-        }
-
         pub(in crate::services::turn_orchestrator) fn refuse(self, error: String) {
             match self {
                 Self::Claim { reply, .. } => {
@@ -653,13 +671,16 @@ mod claim {
             return QueuedHeadClaim::PersistenceFailed(error);
         }
         let (provider, token_hash) = (&persistence.provider, persistence.token_hash.as_str());
-        let marker =
+        let namespace = super::super::remint_fence::namespace(persistence);
+        let marker = state.remint_fence.trusts_marker(&namespace).then(|| {
             super::super::pending_queue_persistence::load_channel_pending_dispatch_marker_checked(
                 provider, token_hash, channel_id,
-            );
+            )
+        });
         let marker_held = match marker {
-            Ok(marker) => marker.is_some(),
-            Err(error) => return QueuedHeadClaim::PersistenceFailed(error),
+            Some(Ok(marker)) => marker.is_some(),
+            Some(Err(error)) => return QueuedHeadClaim::PersistenceFailed(error),
+            None => false,
         };
         let owned = marker_held
             || state.pending_user_dispatch.is_some()

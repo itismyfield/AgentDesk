@@ -89,7 +89,9 @@ impl<B: BindingEvents> Sources<B> {
         let key = source_key(&batch.source);
         let store = writer.store();
         self.sync_parent(&key, |parent| {
-            store.cursor(parent).map(|c| c.captured_through)
+            store
+                .cursor(parent)
+                .map(|c| (c.captured_through, c.prefix_hash.clone()))
         });
         for record in &batch.records {
             self.owe(deriver, owed, &batch.source, record);

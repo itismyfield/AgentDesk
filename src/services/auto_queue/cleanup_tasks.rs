@@ -418,7 +418,7 @@ async fn claim_run_cleanup_task_pg(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .bind(claim_owner_tag())
         .bind(CLAIM_LEASE_SECONDS)
@@ -460,7 +460,7 @@ async fn claim_run_cleanup_task_batch_pg(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(claim_owner_tag())
         .bind(CLAIM_LEASE_SECONDS)
         .bind(REPLAY_BATCH_LIMIT)

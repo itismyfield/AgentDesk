@@ -2,7 +2,7 @@
 //! its project directory.
 #![cfg(unix)]
 
-use super::claude_idle_runtime::{claude_tui_launch_context, other_session_claimed_transcripts};
+use super::claude_source::{claude_tui_launch_context, other_session_claimed_transcripts};
 use super::launch_script::claude_tui_rehydrated_binding;
 use super::*;
 

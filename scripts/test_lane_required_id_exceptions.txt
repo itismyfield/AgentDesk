@@ -1,5 +1,6 @@
 # exact-test-id (helper-module: exact module path) | mode | #issue | expires=YYYY-MM-DD | reason; sorted.
 # Modes: intentional-nonrequired, model-unresolved, platform-unavailable, helper-module; stale rows fail.
+db::session_transcripts::native_clear_seed | helper-module | #6995 | expires=2027-10-16 | seeds the native clear boundary an earlier build left unresolved for the admission tests; it holds no test of its own
 server::routes::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts the transition route's sends and runs a probe between reply and consumption for the route tests; it holds no test of its own
 services::claude_tui::host_input::guarded_submission::test_support | helper-module | #6325 | expires=2026-10-26 | Scoped request and result fixtures used by executor_tests; this helper declares no test id.
 services::discord::health::o_transition::test_hooks | helper-module | #5340 | expires=2027-10-12 | counts transition context resolutions for the route admission tests; it holds no test of its own
@@ -8,9 +9,9 @@ services::discord::inflight::save_store::coordinate_replay | helper-module | #59
 services::discord::recovery_engine::legacy_restart_replay | helper-module | #5925 | expires=2026-11-13 | dormant classifier, proof and claim contract exercised by legacy_restart_replay_tests; no owned test id
 services::discord::router::message_handler::provider_dispatch::producer_error_test_support | helper-module | #5340 | expires=2027-10-12 | hands the turn-bridge cold-error tests intake's own producer_error frame; it holds no test of its own
 services::discord::runtime_store::rename_fault | helper-module | #5340 | expires=2027-10-13 | makes the atomic writer's real rename fail for receipt fault tests; it holds no test of its own
+services::discord::tui_prompt_relay::relay_e2e::n1a_turn_mode::claude_idle_o_transition::fixture | helper-module | #6864 | expires=2026-11-15 | Shared idle discovery and production GatewayPort HTTP fixture for boundary acceptance tests; no own test id.
 services::discord::turn_bridge::stream_loop::types::terminal_prepare_test | helper-module | #6903 | expires=2026-11-14 | Pauses actual terminal preparation for parked-custody boundary tests; declares no test id.
 services::tui_o::writer::actor::transition::test_hooks | helper-module | #5340 | expires=2027-10-14 | lets the transition actor tests wait for probe workers, count snapshots and look in before a retirement; it holds no test of its own
 services::tui_o::writer::host::transition::test_support | helper-module | #5340 | expires=2027-10-12 | hosts a transition port for the route tests without starting an actor host; it holds no test of its own
-services::turn_orchestrator::dispatch_reservation::marker_remove_fault | helper-module | #6995 | expires=2027-10-15 | fails a clear's dispatch marker removal before or after it for the reclaim tests; it holds no test of its own
 services::turn_orchestrator::pending_queue_persistence::queued_recovery::scan_fault | helper-module | #6813 | expires=2027-10-12 | injects read_dir and entry failures for queued recovery acceptance tests; owns no test function
 services::turn_orchestrator::policy_close::test_hooks | helper-module | #5340 | expires=2027-10-12 | lets the before-start policy close tests observe and panic at each mailbox step stage; it holds no test of its own

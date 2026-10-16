@@ -1,7 +1,7 @@
 //! One mailbox/token admission boundary shared by chat, headless and routine turns.
 use super::*;
 use crate::services::turn_orchestrator::{
-    ClaimObservation, EnqueueRefusalReason, TryStartTurnResult, TurnAdmissionOrder,
+    ClaimObservation, TryStartTurnResult, TurnAdmissionOrder,
 };
 
 pub(in crate::services::discord) async fn mailbox_try_start_turn_kinded_with_feedback(
@@ -280,16 +280,6 @@ pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
     intervention: Intervention,
     observed: Option<ClaimObservation>,
 ) -> MailboxEnqueueOutcome {
-    let mut sources: Vec<u64> = intervention
-        .source_message_ids
-        .iter()
-        .map(|id| id.get())
-        .collect();
-    if !sources.contains(&intervention.message_id.get()) {
-        sources.push(intervention.message_id.get());
-    }
-    sources.sort_unstable();
-    sources.dedup();
     // Tombstone refusal ⇒ retry on a fresh registered actor
     // instead of orphaning the queue on a purged one.
     let result = shared
@@ -309,17 +299,6 @@ pub(in crate::services::discord) async fn mailbox_enqueue_observed_intervention(
             error = %error,
             "mailbox enqueue failed durable pending-queue persistence"
         );
-    }
-    use crate::services::discord::input_runtime::fence::{self, Failure};
-    let failure = match result.refusal_reason {
-        Some(EnqueueRefusalReason::InputModeFenced(mode)) => Some(Failure::Mode(mode)),
-        Some(EnqueueRefusalReason::LockTimeout) => Some(Failure::LockTimeout),
-        Some(EnqueueRefusalReason::InputPersistence) => Some(Failure::Persistence),
-        _ => None,
-    };
-    if let Some(failure) = failure {
-        fence::record_failure(provider, channel_id.get(), &sources, failure);
-        input_refusal_notice(shared, channel_id, &sources, failure).await;
     }
     if result.enqueued && result.persistence_error.is_none() {
         schedule_post_enqueue_idle_queue_kick(shared.clone(), provider.clone(), channel_id);

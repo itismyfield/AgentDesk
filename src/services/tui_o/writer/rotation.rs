@@ -42,6 +42,8 @@ const DORMANT_POLL: Duration = Duration::from_secs(60);
 pub const LINEAGE_SCAN_CAP_BYTES: u64 = 256 << 20;
 const PENDING_BIND_ALARM_SECS: i64 = 60;
 
+#[path = "rotation/claude_boundary.rs"]
+mod claude_boundary;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
@@ -131,6 +133,8 @@ pub struct Sources<B> {
     lineage: HashMap<String, Lineage>,
     /// Undecided sources that have shown at least one inherited row.
     prefix_seen: HashSet<String>,
+    /// Retained Pending bytes to derive once after an explicit hot refinement; resume replays them normally.
+    refined: Vec<SourceId>,
     /// Boundary decisions and alarms made while deriving, flushed before delivery.
     dirty: bool,
     raised: Vec<WriterAlarm>,
@@ -293,6 +297,7 @@ impl<B: BindingEvents> Sources<B> {
             readers: Vec::new(),
             lineage: HashMap::new(),
             prefix_seen: HashSet::new(),
+            refined: Vec::new(),
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
@@ -617,24 +622,38 @@ impl<B: BindingEvents> Sources<B> {
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
             let unread = past_bind::unread_before(log, event.seq, &new, attached);
-            let boundary = if verified {
+            // A verified source an adoption left unread holds old records; it is not owed from 0.
+            let boundary = if verified && !unread {
                 Boundary::Owed { from: 0 }
             } else {
                 past_bind::first_boundary(cause, parent.is_some(), unread)
             };
-            if matches!(boundary, Boundary::Pending { .. }) {
-                let source = new.clone();
-                writer.alarm(WriterAlarm::BoundaryPending { source });
-            }
             let link = SourceLink {
                 source: new.clone(),
                 seq: event.seq,
                 parent: parent.cloned(),
                 committed_at: event.committed_at,
+                hot_candidate: (self.provider == ShadowProvider::Claude
+                    && cause == BindingCause::Unknown
+                    && !unread
+                    && parent.is_none()
+                    && event.channel_id == self.channel
+                    && event.provider == self.provider
+                    && !event.tmux_session.is_empty()
+                    && !event.execution_nonce.is_empty())
+                .then(|| old.filter(|old| **old != new && store.cursor(old).is_some()))
+                .flatten()
+                .map(|old| claude_boundary::candidate(event, old)),
                 boundary,
             };
+            if matches!(link.boundary, Boundary::Pending { .. }) {
+                writer.alarm(WriterAlarm::BoundaryPending {
+                    source: new.clone(),
+                });
+            }
             self.rotation.links.insert(key.clone(), link);
         }
+        self.refine_provisional(writer, event, &new, parent_hint)?;
         self.rotation.successors.remove(&key);
         // A source bound again leaves its old rotation, so a next one measures its own quiet.
         if let Some(r) = self.readers.iter_mut().find(|r| r.source == new) {
@@ -698,40 +717,6 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Spools each read source once. A successor waits while a predecessor is still short of its
-    /// rotation-time length, so that backlog is owed first whatever the reader order.
-    pub fn capture<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        deriver: &mut UnitDeriver,
-        owed: &mut impl Owe,
-    ) -> Result<(), WriterAlarm> {
-        if self.checkpoint.is_none() {
-            return Ok(());
-        }
-        let mut left: Vec<usize> = (0..self.readers.len()).collect();
-        while let Some(at) = left.iter().position(|&index| !self.held(index)) {
-            let index = left.remove(at);
-            self.capture_one(writer, deriver, owed, index)?;
-        }
-        self.flush(writer)?;
-        if let Some(source) = self.stalled(deriver) {
-            return Err(WriterAlarm::RotationStalled { source });
-        }
-        Ok(())
-    }
-
-    /// A reading predecessor of this reader has not yet spooled through its rotation-time length.
-    fn held(&self, index: usize) -> bool {
-        let source = &self.readers[index].source;
-        self.readers.iter().any(|reader| {
-            reader.drain_to.is_some()
-                && (reader.reading() || self.reader_config.is_some())
-                && (self.rotation.successors.get(&source_key(&reader.source)))
-                    .is_some_and(|next| next.source == *source)
-        })
-    }
-
     /// An old source the full spool refuses while it holds a successor, with an announced unit
     /// keeping GC off: its sealing record may sit behind the barrier, so no step frees the spool.
     fn stalled(&self, deriver: &UnitDeriver) -> Option<SourceId> {
@@ -752,7 +737,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     /// Brings the parent identities a source is judged against to the parent's durable cursor.
-    fn sync_parent(&mut self, key: &str, consumed: impl Fn(&SourceId) -> Option<u64>) {
+    fn sync_parent(&mut self, key: &str, consumed: impl Fn(&SourceId) -> Option<(u64, String)>) {
         let Some(link) = self.rotation.links.get(key) else {
             return;
         };
@@ -773,7 +758,18 @@ impl<B: BindingEvents> Sources<B> {
         let parent_key = source_key(&parent);
         let cached = self.lineage.remove(&parent_key);
         let through = consumed(&parent);
-        let synced = through.and_then(|t| fork_lineage::sync(cached, self.provider, &parent, t));
+        let automatic = link.hot_candidate.is_some();
+        let synced = through.and_then(|(t, hash)| {
+            if automatic && SourceCapture::reopen(parent.clone(), t, &hash).is_err() {
+                return None;
+            }
+            fork_lineage::sync(
+                if automatic { None } else { cached },
+                self.provider,
+                &parent,
+                t,
+            )
+        });
         if let Some(lineage) = synced {
             self.lineage.insert(parent_key, lineage);
         }

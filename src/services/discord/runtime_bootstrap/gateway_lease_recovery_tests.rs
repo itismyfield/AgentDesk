@@ -1173,7 +1173,7 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
     std::fs::write(pending.join("claude_6470011_1.json"), record.to_string()).unwrap();
     assert_eq!(
         host.local_custody(own, Claude),
-        Ok(Custody::Active),
+        Ok(Custody::PendingStart),
         "a durable pending start holds over the row"
     );
 
@@ -1189,3 +1189,60 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
     pool.close().await;
     fixture.drop().await;
 }
+
+/// A cancelled promotion's preflight and a deferred rollback leave the runtime's writer as it was:
+/// the same generation runs and still takes work.
+#[tokio::test]
+async fn promotion_cancel_keeps_the_writer_incarnation_pg() {
+    use super::shutdown::home_lifecycle_tests::{eventually, hosted};
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
+    const CH: u64 = 9_300_000_000_000_111;
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    let label = "promotion cancel keeps the writer pg";
+    let Some(fixture) = PromotionFixture::new(label).await else {
+        return;
+    };
+    let _candidates =
+        crate::services::tui_o::cutover::test_override::force_candidates(&[(CH, ClaudeTui)]);
+    let hosted = hosted(&[CH], &[]);
+    let homes = super::o_writer_host::home_writers(&ProviderKind::Claude, true);
+    homes.arm(None, hosted.handles);
+    assert!(
+        eventually(20, || hosted.ready.accepts(CH)).await,
+        "the writer takes work"
+    );
+    let incarnation = || (homes.phase(CH), hosted.ready.accepts(CH));
+    let before = incarnation();
+    let existing_nonce = "deploy-cancelled-writer";
+    let marker = format!("nonce={existing_nonce}\nsource=deploy\n");
+    std::fs::write(fixture.root.path().join("restart_pending"), &marker).unwrap();
+    let cancelled = format!("restart_cancelled.{existing_nonce}");
+    std::fs::write(fixture.root.path().join(cancelled), &marker).unwrap();
+
+    let promoted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attempt_clean_standby_promotion(
+            &fixture.shared(),
+            &ProviderKind::Claude,
+            fixture.lease(label).await,
+        ),
+    )
+    .await
+    .expect("cancelled promotion handoff resolves");
+    assert!(!promoted);
+    fixture.assert_recovered();
+    assert_eq!(
+        incarnation(),
+        before,
+        "a cancelled promotion keeps the writer"
+    );
+    super::deferred_restart::rollback_deferred_restart(&fixture.shared());
+    assert_eq!(incarnation(), before, "a deferred rollback keeps it too");
+    homes.stop_and_join(StopReason::Sigterm).await;
+    fixture.close(label).await;
+}
+
+#[path = "o_writer_host_custody_tests.rs"]
+mod codex_custody;

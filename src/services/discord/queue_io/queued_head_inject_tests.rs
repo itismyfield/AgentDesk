@@ -1063,53 +1063,6 @@ async fn s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn s2b_closing_waits_for_the_queued_owner_and_its_inherited_permit_pg() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let fixture = Fixture::new(6_813_413, "all").await;
-    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
-    let fence = crate::services::discord::input_runtime::fence::Gate::protect(
-        ProviderKind::Claude,
-        fixture.channel.get(),
-    )
-    .unwrap();
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&fence);
-    let head = fixture.queue().await.remove(0);
-    let (at_may, resume) = inject_hook::park_queued(fixture.channel.get(), "may_have_sent");
-    let caller = fixture.spawn_kick();
-    reached(&at_may).await;
-    assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
-    let closing = fence.close().unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), closing.drain())
-            .await
-            .is_err(),
-        "Closing must wait for the owner holding the admitted input effect"
-    );
-    assert!(fence.admit().is_err(), "Closing refuses new input effects");
-    resume.notify_one();
-    caller.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), closing.drain())
-        .await
-        .expect("the owner must release its permit after durable settlement");
-    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-    assert_eq!(
-        fixture.disk()["terminal_identities"][0]["primary"],
-        head.message_id.get()
-    );
-    assert!(fixture.disk()["head_injection"].is_null());
-    let calls = fixture.pane.tmux_calls();
-    let before = fixture.bytes();
-    fixture.kick().await;
-    assert_eq!(
-        fixture.pane.tmux_calls(),
-        calls,
-        "new KICKOFF is refused while Closing"
-    );
-    assert_eq!(fixture.bytes(), before);
-    fixture.assert_holder_kept().await;
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     for (channel, phase, field) in [

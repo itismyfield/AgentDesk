@@ -236,27 +236,10 @@ impl ChannelMailboxRegistry {
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
     ) -> EnqueueInterventionResult {
-        let input_permit = match crate::services::discord::input_runtime::fence::effect::admit(
-            &persistence.provider,
-            channel_id.get(),
-        ) {
-            Ok(permit) => permit,
-            Err(reason) => {
-                return EnqueueInterventionResult::refused(
-                    super::input_fence::enqueue_reason(reason),
-                    Vec::new(),
-                );
-            }
-        };
         for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
             let result = self
                 .handle(channel_id)
-                .enqueue_observed_with_permit(
-                    intervention.clone(),
-                    persistence.clone(),
-                    observed,
-                    input_permit.clone(),
-                )
+                .enqueue_observed(intervention.clone(), persistence.clone(), observed)
                 .await;
             if result.refusal_reason != Some(EnqueueRefusalReason::MailboxClosed) {
                 return result;

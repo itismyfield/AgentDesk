@@ -2,7 +2,7 @@
 //! sessions owned by another node.
 
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool, Postgres, Transaction};
 
 /// Keeps intake writers behind the facts until the channel's init has been published.
 pub struct IntakeFence {
@@ -36,10 +36,10 @@ pub(crate) async fn activation_rows(
     channel_id: &str,
     local_instance: &str,
 ) -> Result<ActivationRows, sqlx::Error> {
-    let open_intake: i64 = sqlx::query_scalar(&format!(
+    let open_intake: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM intake_outbox
           WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
-    ))
+    )))
     .bind(channel_id)
     .fetch_one(pool)
     .await?;
@@ -65,10 +65,10 @@ async fn read_activation_rows(
     channel_id: &str,
     local_instance: &str,
 ) -> Result<ActivationRows, sqlx::Error> {
-    let open_intake: i64 = sqlx::query_scalar(&format!(
+    let open_intake: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
         "SELECT COUNT(*) FROM intake_outbox
           WHERE channel_id = $1 AND status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL})"
-    ))
+    )))
     .bind(channel_id)
     .fetch_one(&mut *connection)
     .await?;

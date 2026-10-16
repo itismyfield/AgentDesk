@@ -38,6 +38,7 @@ fn a_decided_boundary_is_never_rewritten_and_an_unowed_source_keeps_its_spool() 
         source: source.clone(),
         seq: 2,
         parent: None,
+        hot_candidate: None,
         committed_at: Utc::now(),
         boundary,
     };

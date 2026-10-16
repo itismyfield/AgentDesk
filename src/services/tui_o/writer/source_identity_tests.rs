@@ -66,6 +66,7 @@ fn stored_apart(harness: &Harness, w: &SourceId, d: &SourceId, ahead: bool) -> S
         source: d.clone(),
         seq: 2,
         parent: ahead.then(|| w.clone()),
+        hot_candidate: None,
         committed_at: Utc::now(),
         boundary: Boundary::Pending {
             candidates: vec![0],

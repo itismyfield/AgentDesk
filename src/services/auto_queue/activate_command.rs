@@ -760,7 +760,7 @@ async fn resolve_activate_target_run_id(
          ORDER BY created_at DESC
          LIMIT 1"
     );
-    match sqlx::query_scalar::<_, String>(&query)
+    match sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(query))
         .bind(repo)
         .bind(agent_id)
         .fetch_optional(pool)

@@ -87,12 +87,6 @@ pub(crate) enum MendMsg {
 }
 
 impl MendMsg {
-    pub(super) fn persistence(&self) -> &QueuePersistenceContext {
-        match self {
-            Self::Inspect { persistence, .. } | Self::Consume { persistence, .. } => persistence,
-        }
-    }
-
     pub(super) fn refuse(self, error: String) {
         match self {
             Self::Inspect { reply, .. } => drop(reply.send(None)),
