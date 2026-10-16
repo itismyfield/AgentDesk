@@ -247,6 +247,7 @@ src/
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
 │   ├── session_transcripts_native_clear_record.rs
+│   ├── session_transcripts_native_clear_seed.rs
 │   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
@@ -885,14 +886,17 @@ src/
 │   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── clear_end_tests.rs
+│   │   │   │   ├── clear_entry_tests.rs
+│   │   │   │   ├── clear_persist_failure_tests.rs
+│   │   │   │   ├── clear_report.rs
+│   │   │   │   ├── clear_teardown.rs
 │   │   │   │   ├── clear_wait_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   ├── native_herdr_e2e_tests.rs
-│   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   ├── native_policy_tests.rs
 │   │   │   │   ├── native_tests.rs
 │   │   │   │   └── provider_reset.rs
@@ -3023,6 +3027,7 @@ src/
 │   │   ├── active_source_dedup.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
+│   │   ├── clear_trust_tests.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs
