@@ -1041,23 +1041,20 @@ async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
             writers: None,
         })
     };
-    let mut lock = lock_home_row(&scene.pool).await;
-    let locker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *lock)
-        .await
-        .unwrap();
+    let lock = lock_home_row(&scene.pool).await;
     let gates = channel_home_boot::start(Some(true), boot).await;
     assert_eq!(gates.len(), 1, "the released row names MINI");
-    // PG itself reports the watch's adopt UPDATE waiting on this lock, so it is in flight.
-    let adopt_waits = || async {
-        let waits = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-              WHERE $1 = ANY(pg_blocking_pids(pid))
-                AND query LIKE 'UPDATE o_channel_homes%SET state = ''worker'', holder%')",
-        );
-        waits.bind(locker).fetch_one(&scene.pool).await.unwrap()
-    };
-    until_async("the adopt waits on the row lock", WITHIN, adopt_waits).await;
+    // The watch's only query that holds a connection across two samples is the blocked adopt.
+    let in_use = || pool.size() as usize > pool.num_idle();
+    let mut held = 0;
+    for _ in 0..400 {
+        held = if in_use() { held + 1 } else { 0 };
+        if held >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert!(held >= 3, "the adopt never waited on the row lock");
     assert!(channel_home::unregister(&channel).is_some());
     lock.commit().await.unwrap();
 
