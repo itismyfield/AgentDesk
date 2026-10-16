@@ -1647,7 +1647,6 @@ services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickof
 services::discord::queue_io::queued_head_inject::tests::s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_restart_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_cancelled_kickoff_caller_leaves_the_reserved_owner_to_finish_pg
-services::discord::queue_io::queued_head_inject::tests::s2b_closing_waits_for_the_queued_owner_and_its_inherited_permit_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_may_have_sent_save_failure_keeps_unknown_before_any_executor_call_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_reserved_and_may_owners_detect_same_path_binding_replacement_before_pane_io_pg
