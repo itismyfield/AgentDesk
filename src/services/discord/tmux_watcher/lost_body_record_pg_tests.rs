@@ -4,20 +4,19 @@ use super::soft_terminal_direct_send_authority_tests::{
     FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_under_root,
 };
 use super::*;
+use crate::db::relay_dead_letter::{
+    ClaimedDeadLetter, KIND_TERMINAL_NO_DELIVERY_OWNER, claim_pending_redeliveries,
+};
 
 /// A channel of its own for the process-global admission counter.
 const ROW_CHANNEL: u64 = 1_479_671_298_497_183_838;
 
-/// The seam's INSERT runs on a detached task, so poll until it lands.
-async fn terminal_rows(pool: &sqlx::PgPool) -> Vec<(String, String, String)> {
+/// Claims the rows the way the redelivery sweep does; the seam's INSERT is detached, so poll.
+async fn terminal_rows(pool: &sqlx::PgPool) -> Vec<ClaimedDeadLetter> {
     for _ in 0..200 {
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT channel_id, content, reason FROM relay_dead_letter WHERE kind = $1",
-        )
-        .bind(crate::db::relay_dead_letter::KIND_TERMINAL_NO_DELIVERY_OWNER)
-        .fetch_all(pool)
-        .await
-        .expect("read terminal dead-letter rows");
+        let rows = claim_pending_redeliveries(pool, KIND_TERMINAL_NO_DELIVERY_OWNER, 0, 3600, 10)
+            .await
+            .expect("claim terminal dead-letter rows");
         if !rows.is_empty() {
             return rows;
         }
@@ -45,9 +44,10 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     );
     let rows = terminal_rows(&pool).await;
     assert_eq!(rows.len(), 1, "one plan pass writes one row: {rows:?}");
-    let (channel_id, content, reason) = &rows[0];
-    assert_eq!(content, LOST_BODY, "the row must carry the unsent body");
-    assert_eq!(channel_id, &ROW_CHANNEL.to_string());
+    let row = &rows[0];
+    assert_eq!(row.content, LOST_BODY, "the row must carry the unsent body");
+    assert_eq!(row.channel_id, ROW_CHANNEL.to_string());
+    let reason = &row.reason;
     let fields: Vec<&str> = reason.split_whitespace().collect();
     for field in [
         format!("jsonl_end={FRAME_END}"),
