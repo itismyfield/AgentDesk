@@ -162,7 +162,6 @@ pub(crate) mod tui_o {
     pub(crate) mod ownership;
     pub(crate) mod repost;
     pub(crate) mod shadow;
-    pub(crate) mod shadow_host;
     pub(crate) mod store;
     pub(crate) mod topology;
     pub(crate) mod turn_mode;
