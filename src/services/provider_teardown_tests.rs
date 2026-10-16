@@ -72,9 +72,12 @@ pub(crate) mod test_support {
                 file,
                 "#!/bin/sh\n[ \"$1\" = -u ] && shift\nd=\"$(dirname \"$0\")\"\n\
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
-                 has-session) [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
+                 has-session) [ -f \"$d/probe_fails\" ] && {{ echo \"error connecting to $d/socket (Permission denied)\" >&2; exit 1; }}\n\
+                 [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
                  capture-pane) echo pane; exit 0 ;;\n\
-                 kill-session) [ -f \"$(cat \"$d/reason_path\")\" ] && echo reason-before-kill >> \"$d/calls\"; exit 0 ;;\n\
+                 kill-session) [ -f \"$(cat \"$d/reason_path\")\" ] && echo reason-before-kill >> \"$d/calls\"\n\
+                 [ -f \"$d/hold\" ] && {{ : > \"$d/killing\"; n=0; while [ ! -f \"$d/release\" ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done; }}\n\
+                 [ -f \"$d/kill_fails\" ] && exit 1; exit 0 ;;\n\
                  esac\necho \"can't find session: $3\" >&2; exit 1"
             )
             .expect("fake tmux body");
@@ -98,6 +101,29 @@ pub(crate) mod test_support {
 
         pub(crate) fn mark_missing(&self) {
             std::fs::write(self.dir.path().join("missing"), "").unwrap();
+        }
+
+        /// Every later presence probe fails with a socket error, neither present nor missing.
+        pub(crate) fn fail_probes(&self) {
+            std::fs::write(self.dir.path().join("probe_fails"), "").unwrap();
+        }
+
+        /// Every later kill fails and leaves the session in place.
+        pub(crate) fn fail_kills(&self) {
+            std::fs::write(self.dir.path().join("kill_fails"), "").unwrap();
+        }
+
+        /// Later kills wait (up to 10s) until `release_kills`; `killing` says one is waiting.
+        pub(crate) fn hold_kills(&self) {
+            std::fs::write(self.dir.path().join("hold"), "").unwrap();
+        }
+
+        pub(crate) fn killing(&self) -> bool {
+            self.dir.path().join("killing").exists()
+        }
+
+        pub(crate) fn release_kills(&self) {
+            std::fs::write(self.dir.path().join("release"), "").unwrap();
         }
 
         /// The logged calls, oldest first, and clears the log.

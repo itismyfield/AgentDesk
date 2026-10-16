@@ -465,8 +465,6 @@ pub(crate) mod test_hooks {
         SendFailed,
         /// The finalizer dequeued and dropped it; no mailbox step or finalize ran.
         Lost,
-        /// The input fence refused the step before it began.
-        Fenced,
         /// The mailbox did not commit, so the finalize is skipped.
         NotCommitted,
         /// The commit is in and the finalize has not been entered yet.
@@ -491,7 +489,6 @@ pub(crate) mod test_hooks {
                     FinalizeEntered,
                     FinalizeReturned,
                 ],
-                Self::Fenced => &[MailboxCommitted],
                 Self::NotCommitted | Self::BeforeFinalize => &[FinalizeEntered, FinalizeReturned],
             }
         }
@@ -511,7 +508,6 @@ pub(crate) mod test_hooks {
     /// One request's observations; it travels with the request to whatever thread runs it.
     pub(crate) struct Probe {
         pub(crate) channel: u64,
-        pub(crate) episode: String,
         pub(crate) request: u64,
         settlement: bool,
         stages: Mutex<Vec<(Stage, ThreadId)>>,
@@ -521,7 +517,6 @@ pub(crate) mod test_hooks {
         started: Mutex<Option<Instant>>,
         hook: Mutex<Option<Hook>>,
         loss: Mutex<Option<Loss>>,
-        mailbox: Mutex<Option<super::super::input_fence::PolicyMailboxView>>,
         tail: Mutex<Option<super::tail::PolicyTailDecision>>,
         ticket: Mutex<Option<std::sync::Weak<super::tail::PolicyCommitTicket>>>,
     }
@@ -543,7 +538,6 @@ pub(crate) mod test_hooks {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         request.trace.probe = Some(Arc::new(Probe {
             channel: request.receipt.channel(),
-            episode: request.turn_nonce.clone(),
             request: NEXT.fetch_add(1, Ordering::Relaxed),
             settlement: settlement_now(),
             stages: Mutex::default(),
@@ -553,7 +547,6 @@ pub(crate) mod test_hooks {
             started: Mutex::default(),
             hook: Mutex::new(ARMED.with(|slot| slot.borrow_mut().take())),
             loss: Mutex::default(),
-            mailbox: Mutex::default(),
             tail: Mutex::default(),
             ticket: Mutex::default(),
         }));
@@ -583,14 +576,6 @@ pub(crate) mod test_hooks {
             lock(&self.stages).iter().map(|(stage, _)| *stage).collect()
         }
 
-        /// The threads the stages ran on.
-        pub(crate) fn threads(&self) -> Vec<ThreadId> {
-            lock(&self.stages)
-                .iter()
-                .map(|(_, thread)| *thread)
-                .collect()
-        }
-
         /// The slot's start instant this request's step compared its cutoff with.
         pub(crate) fn started(&self) -> Option<Instant> {
             *lock(&self.started)
@@ -604,11 +589,6 @@ pub(crate) mod test_hooks {
         /// The ledger ticket this request ran under, held weakly so its release is observable.
         pub(crate) fn ticket(&self) -> Option<std::sync::Weak<super::tail::PolicyCommitTicket>> {
             lock(&self.ticket).clone()
-        }
-
-        /// What the mailbox held as this request reached its input fence.
-        pub(crate) fn mailbox(&self) -> Option<super::super::input_fence::PolicyMailboxView> {
-            lock(&self.mailbox).clone()
         }
 
         /// This request's own readings: its counts, the points it reached, and the ones a
@@ -651,12 +631,6 @@ pub(crate) mod test_hooks {
             if let Some(probe) = &self.probe {
                 let mask = branch.rules_out().iter().fold(0, |mask, p| mask | bit(*p));
                 probe.not_run.fetch_or(mask, Ordering::Relaxed);
-            }
-        }
-
-        pub(crate) fn note_mailbox(&self, view: super::super::input_fence::PolicyMailboxView) {
-            if let Some(probe) = &self.probe {
-                *lock(&probe.mailbox) = Some(view);
             }
         }
 

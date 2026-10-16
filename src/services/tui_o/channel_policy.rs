@@ -30,6 +30,8 @@ pub(crate) struct BootChannels {
     dormant_channels: BTreeSet<u64>,
     /// Initial reservations can only be installed before this snapshot is published.
     late_adopt_capable: bool,
+    /// The boot turn selection, which live reloads never change.
+    turn: crate::services::tui_o::turn_mode::TurnConfig,
     kinds: BTreeMap<u64, RuntimeHandoffKind>,
     site: Site,
     configured_id: Option<String>,
@@ -227,6 +229,7 @@ impl BootChannels {
             selected: channels.clone(),
             dormant_channels,
             late_adopt_capable: config.tui_o.as_ref().is_some_and(|c| c.writer.late_adopt),
+            turn: (config.tui_o.as_ref()).map_or_else(Default::default, |c| c.turn.clone()),
             channels,
             kinds,
             site,
@@ -288,7 +291,7 @@ impl BootChannels {
     fn seed_candidate(&self, channel: u64, state: Adoption) -> Candidate {
         let reserve = self.late_adopt_capable
             && self.selected.contains(&channel)
-            && self.kind(channel) == Some(RuntimeHandoffKind::ClaudeTui)
+            && self.kind(channel).is_some()
             && state == Adoption::Pending;
         if reserve {
             Candidate::reserved_late()
@@ -314,6 +317,10 @@ impl BootChannels {
 
     pub(crate) fn late_adopt_capable(&self) -> bool {
         self.late_adopt_capable
+    }
+
+    pub(crate) fn turn(&self) -> &crate::services::tui_o::turn_mode::TurnConfig {
+        &self.turn
     }
 
     pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {

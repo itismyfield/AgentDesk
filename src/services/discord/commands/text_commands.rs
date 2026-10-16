@@ -452,7 +452,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
         TextCommandId::Clear => {
             let cleared = async {
-                super::clear_channel_session_state(
+                let report = super::clear_channel_session_state(
                     &ctx.http,
                     &data.shared,
                     &data.provider,
@@ -461,7 +461,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     super::SoftClearNotifyMode::Suppress,
                 )
                 .await?;
-                let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
+                let _ = msg.reply(&ctx.http, report.reply()).await;
                 anyhow::Ok(())
             };
             // A failed clear answers with its reason, as `/clear` does: an error returned from

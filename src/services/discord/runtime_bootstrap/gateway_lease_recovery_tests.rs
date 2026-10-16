@@ -1173,7 +1173,7 @@ async fn activation_facts_use_the_configured_home_id_and_local_starts_hold_pg() 
     std::fs::write(pending.join("claude_6470011_1.json"), record.to_string()).unwrap();
     assert_eq!(
         host.local_custody(own, Claude),
-        Ok(Custody::Active),
+        Ok(Custody::PendingStart),
         "a durable pending start holds over the row"
     );
 
@@ -1243,3 +1243,6 @@ async fn promotion_cancel_keeps_the_writer_incarnation_pg() {
     homes.stop_and_join(StopReason::Sigterm).await;
     fixture.close(label).await;
 }
+
+#[path = "o_writer_host_custody_tests.rs"]
+mod codex_custody;

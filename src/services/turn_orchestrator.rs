@@ -344,10 +344,8 @@ pub(crate) struct ClearChannelResult {
     pub(crate) queue_exit_events: Vec<QueueExitEvent>,
     /// #6035: every inbound id this clear discarded (active, reservation, queue), read in-actor.
     pub(crate) discarded_message_ids: Vec<MessageId>,
-    // Uniform queue-mutation persistence-result surface; written on the
-    // clear-channel path, no consumer yet. See `FinishTurnResult`.
-    #[allow(dead_code)]
-    pub(crate) persistence_error: Option<String>,
+    /// The writes that needed their retry or never landed; the clear itself always commits.
+    pub(crate) persistence: clear_channel::ClearPersistence,
 }
 
 pub(crate) struct CancelActiveTurnResult {
@@ -386,9 +384,6 @@ pub(crate) enum EnqueueRefusalReason {
     /// #3297 r3 — the resolved actor is purge-tombstoned (`closed`). The
     /// registry's `enqueue_with_closed_retry` re-resolves a fresh actor.
     MailboxClosed,
-    InputModeFenced(crate::services::discord::input_runtime::fence::Mode),
-    LockTimeout,
-    InputPersistence,
 }
 
 impl EnqueueRefusalReason {
@@ -402,9 +397,6 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
-            EnqueueRefusalReason::InputModeFenced(_) => "input_mode_fenced",
-            EnqueueRefusalReason::LockTimeout => "lock_timeout",
-            EnqueueRefusalReason::InputPersistence => "input_persistence",
         }
     }
 }
@@ -453,10 +445,7 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
-    sender: mpsc::UnboundedSender<(
-        ChannelMailboxMsg,
-        Option<crate::services::discord::input_runtime::fence::Permit>,
-    )>,
+    sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
     /// This incarnation's own signal, so follow-up to an accepted request never
     /// reaches a successor minted by a purge.
     recovery_done: Arc<RecoveryDoneSignal>,
@@ -473,10 +462,7 @@ impl ChannelMailboxHandle {
     ) -> Result<T, MailboxUnreachable> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send((
-                build(reply_tx),
-                crate::services::discord::input_runtime::fence::effect::current(),
-            ))
+            .send(build(reply_tx))
             .map_err(|_| MailboxUnreachable)?;
         reply_rx.await.map_err(|_| MailboxUnreachable)
     }
@@ -872,19 +858,7 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
     ) -> RequeueInterventionResult {
-        self.requeue_front_with_permit(intervention, persistence, dispatch_lease, None)
-            .await
-    }
-
-    pub(crate) async fn requeue_front_with_permit(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-        dispatch_lease: Option<Arc<DispatchLease>>,
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-    ) -> RequeueInterventionResult {
         self.request(|reply| ChannelMailboxMsg::RequeueFront {
-            input_permit,
             intervention,
             persistence,
             dispatch_lease,
@@ -964,7 +938,7 @@ impl ChannelMailboxHandle {
                 removed_token: None,
                 queue_exit_events: Vec::new(),
                 discarded_message_ids: Vec::new(),
-                persistence_error: None,
+                persistence: Default::default(),
             })
     }
 
@@ -1349,7 +1323,6 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<()>,
     },
     Enqueue {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
@@ -1366,7 +1339,6 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
@@ -1757,28 +1729,20 @@ fn spawn_channel_mailbox(
             remint_fence: fence,
             ..Default::default()
         };
-        while let Some((msg, input_permit)) = rx.recv().await {
+        while let Some(msg) = rx.recv().await {
             if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
                 .is_some()
             {
                 let signal = own_recovery_done.clone();
                 state = tokio::task::spawn_blocking(move || {
-                    crate::services::discord::input_runtime::fence::effect::synchronous(
-                        input_permit,
-                        || {
-                            crate::services::discord::input_runtime::fence::blocking(|| {
-                                input_mailbox_step(state, channel_id, msg, &signal)
-                            })
-                        },
-                    )
+                    crate::services::discord::input_runtime::fence::blocking(|| {
+                        input_mailbox_step(state, channel_id, msg, &signal)
+                    })
                 })
                 .await
                 .expect("input mailbox step panicked");
             } else {
-                state = crate::services::discord::input_runtime::fence::effect::synchronous(
-                    input_permit,
-                    || input_mailbox_step(state, channel_id, msg, &own_recovery_done),
-                );
+                state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
             }
         }
     });
@@ -1797,14 +1761,6 @@ fn input_mailbox_step(
     // A tombstoned actor serves only reads (enum docs).
     let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
         return state;
-    };
-    let mut msg = msg;
-    let _step = match input_fence::enter(channel_id, &state, &mut msg) {
-        Ok(guard) => guard,
-        Err(failure) => {
-            input_fence::refuse(&state, msg, failure);
-            return state;
-        }
     };
     match msg {
         ChannelMailboxMsg::FreezeInput {
@@ -2116,7 +2072,6 @@ fn input_mailbox_step(
             let _ = reply.send(());
         }
         ChannelMailboxMsg::Enqueue {
-            input_permit: _,
             mut intervention,
             persistence,
             observed,
@@ -2339,7 +2294,6 @@ fn input_mailbox_step(
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::RequeueFront {
-            input_permit: _,
             intervention,
             persistence,
             dispatch_lease,
@@ -2560,7 +2514,8 @@ fn input_mailbox_step(
             }
         }
         msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
-            policy_close::answer(&mut state, channel_id, msg, (&_step, own_recovery_done));
+            let step = input_fence::StepGuard::unscoped();
+            policy_close::answer(&mut state, channel_id, msg, (&step, own_recovery_done));
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();
@@ -2601,9 +2556,7 @@ fn input_mailbox_step(
         }
         ChannelMailboxMsg::Clear { persistence, reply } => {
             let result = clear_channel_state(&mut state, channel_id, persistence);
-            if result.persistence_error.is_none() || result.removed_token.is_some() {
-                mark_turn_finished_signal_done(channel_id);
-            }
+            mark_turn_finished_signal_done(channel_id);
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::PurgeQueue {
@@ -3479,10 +3432,8 @@ mod actor_hydrate_regression_tests {
         });
     }
 
-    /// #5937 — a window an active turn occupied was never a window the drain
-    /// could have used. `Clear` releases the same anchor `FinishTurn` does, and
-    /// when its persist fails the queue comes back and the drain has to retry —
-    /// against a discounted clock, not one that expired under the turn.
+    /// `Clear` releases the same anchor `FinishTurn` does; a persist that fails once still
+    /// commits the clear, reports the retry, and leaves no drain waiting behind it.
     #[test]
     fn a_cleared_turn_that_held_the_slot_discounts_the_window_it_occupied() {
         let (_lock, _tmp, _env_guard) = locked_root();
@@ -3502,31 +3453,25 @@ mod actor_hydrate_regression_tests {
             f.handle.age_active_turn_for_test(PAST_STALL_WINDOW).await;
             f.handle.age_inbound_waits_for_test(PAST_STALL_WINDOW).await;
 
-            // Fail the save after checked preflight so the original rollback contract is exercised.
+            // The clear's empty-snapshot write fails once and lands on its retry.
             pending_queue_persistence::save_fault::fail_next(channel_id);
             let cleared = f.handle.clear(f.persistence.clone()).await;
 
-            assert!(
-                cleared.persistence_error.is_some(),
-                "the clear must fail to persist"
-            );
+            assert_eq!(cleared.persistence.retried, ["queue_publish"]);
+            assert!(cleared.persistence.failed.is_empty());
             assert!(
                 cleared.removed_token.is_some(),
                 "the anchor is released anyway"
             );
             assert_eq!(
                 cleared.discarded_message_ids,
-                [holder],
-                "only the released turn is discarded; the restored queue is not"
+                [holder, MessageId::new(5_937_271), MessageId::new(5_937_271)],
+                "the released turn and the queued input are discarded"
             );
-            assert_eq!(
-                f.queue_len().await,
-                1,
-                "the failed clear restores the queue"
-            );
+            assert_eq!(f.queue_len().await, 0, "a failed write restores nothing");
             assert!(
-                !f.claim(latecomer).await,
-                "the held window is not drain stall"
+                f.claim(latecomer).await,
+                "nothing queued is left ahead of it"
             );
         });
     }

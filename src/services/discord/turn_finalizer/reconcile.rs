@@ -343,12 +343,29 @@ pub(super) async fn reconcile(
         }
     }
 
-    // GC admission authority only after the longest bounded late-edge window.
+    // A Codex completion whose turn confirmation was refused retries here until it is confirmed.
+    for entry in ledger.values_mut() {
+        let channel = entry.turn_key.channel_id.get();
+        if entry.provider == ProviderKind::Codex
+            && entry.completion_admission.claimable()
+            && crate::services::tui_o::cutover::codex_turn_awaited(channel).is_some()
+        {
+            publish_claimed_queue_eligible(shared, entry);
+        }
+    }
+
+    // GC admission authority only after the longest bounded late-edge window, and never while it
+    // still waits to confirm a Codex channel's turn mode.
     ledger.retain(|_, entry| {
         !(entry.phase == Phase::Finalized
             && entry
                 .finalized_at
-                .is_some_and(|t| now.duration_since(t) >= COMPLETION_ADMISSION_TTL))
+                .is_some_and(|t| now.duration_since(t) >= COMPLETION_ADMISSION_TTL)
+            && !(entry.provider == ProviderKind::Codex
+                && crate::services::tui_o::cutover::codex_turn_awaited(
+                    entry.turn_key.channel_id.get(),
+                )
+                .is_some()))
     });
     pending_admission
         .retain(|_, pending| now.duration_since(pending.updated_at) < COMPLETION_ADMISSION_TTL);

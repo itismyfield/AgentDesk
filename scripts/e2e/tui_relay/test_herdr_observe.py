@@ -578,13 +578,15 @@ class HerdrTextClear(unittest.TestCase):
                     self.assertIn(reason, result["reason"])
                     self.assertEqual(self.client.send.call_count, 1)
 
-    def test_refusal_prefixes_match_the_server_wording(self):
-        # The server answers a refused text !clear with these error strings; keep them in step.
+    def test_clear_wording_matches_the_server(self):
+        # `/clear` no longer refuses; the prefixes only catch servers from older builds and must not match today's replies.
         root = Path(__file__).resolve().parents[3] / "src/services/discord/commands"
-        native, control = ((root / name).read_text(encoding="utf-8") for name in ("control/native.rs", "control.rs"))
+        self.assertIn(f'SESSION_CLEARED_RESPONSE: &str = "{CLEARED}"', (root / "mod.rs").read_text(encoding="utf-8"))
+        sources = [(root / name).read_text(encoding="utf-8") for name in ("control.rs", "control/native.rs", "control/clear_report.rs")]
         for prefix in herdr.CLEAR_REFUSAL_PREFIXES:
-            self.assertIn(f'"{prefix} {{reason}}"', native)
-            self.assertIn(f'"{prefix} ', control)
+            self.assertFalse(CLEARED.startswith(prefix))
+            for source in sources:
+                self.assertNotIn(f'"{prefix}', source)
 
 
 class RestartObserveOnly(unittest.TestCase):

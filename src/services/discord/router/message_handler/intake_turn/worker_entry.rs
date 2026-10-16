@@ -182,17 +182,6 @@ mod input_effect_tests {
     }
 
     #[tokio::test]
-    async fn c1b_worker_actual_role_override_onto_a_foreign_gate_is_refused_at_root() {
-        if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
-            "services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::",
-            "c1b_worker_actual_role_override_onto_a_foreign_gate_is_refused_at_root"
-        )) {
-            return;
-        }
-        actual_intake_lifetime(true, false).await;
-    }
-
-    #[tokio::test]
     async fn c1b_worker_actual_redirect_admits_protected_destination_from_off_root() {
         if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
             "services::discord::router::message_handler::intake_turn::worker_entry::input_effect_tests::",

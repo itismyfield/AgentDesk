@@ -8,6 +8,9 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::turn_mode::TurnConfig;
 use std::path::{Path, PathBuf};
 
+#[path = "turn_retirement/codex.rs"]
+pub(in crate::services::discord) mod codex;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct Retirement {
     pub removed: usize,
@@ -176,6 +179,10 @@ pub(in crate::services::discord) fn confirm_turn_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
+    // A Codex turn Legacy still runs, or a takeover turn still open, keeps its Legacy identity.
+    if *provider == ProviderKind::Codex {
+        return codex::confirm_codex_channels(config, owned);
+    }
     let retire = |channel| match retire_channel(provider, channel) {
         Ok(Retirement {
             removed,

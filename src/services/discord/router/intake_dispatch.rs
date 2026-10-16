@@ -117,6 +117,11 @@ pub(crate) enum IntakeAdmission {
     Blocked {
         reason: IntakeBlockedReason,
     },
+    /// A Codex takeover turn still runs on Legacy; the input waits queued for turn mode, with its
+    /// attachments made portable or the reason they could not be.
+    DeferredTurnMode(
+        Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, String>,
+    ),
 }
 
 /// Without an activation supplier the replay check keeps the legacy hold lookup and its outcomes.
@@ -153,6 +158,78 @@ async fn dormant_hold_admission(
     detail.map(|detail| IntakeAdmission::Blocked {
         reason: IntakeBlockedReason::RoutingDependencyFailed { detail },
     })
+}
+
+/// Makes the Discord attachments portable and validates every bundle the input would carry.
+async fn portable_uploads(
+    pool: &sqlx::PgPool,
+    submission: &IntakeSubmission,
+    channel_id: &str,
+) -> Result<
+    (
+        crate::services::cluster::attachment_transfer::uploads::PendingUploads,
+        Vec<crate::services::cluster::attachment_transfer::uploads::BundleRef>,
+    ),
+    IntakeBlockedReason,
+> {
+    let mut prepared_uploads = Vec::new();
+    if !submission.attachments.is_empty() {
+        let identity = crate::services::cluster::attachment_transfer::AttachmentMessageIdentity {
+            provider: submission.provider.as_str().to_string(),
+            channel_id: channel_id.to_string(),
+            user_msg_id: submission.request.user_msg_id.get().to_string(),
+        };
+        prepared_uploads =
+            message_handler::prepare_portable_attachments(pool, identity, &submission.attachments)
+                .await
+                .map_err(|detail| IntakeBlockedReason::AttachmentUnavailable { detail })?;
+    }
+    let attachment_refs: Vec<_> = prepared_uploads
+        .iter()
+        .chain(&submission.preloaded_uploads)
+        .filter_map(|upload| match upload {
+            crate::services::cluster::attachment_transfer::uploads::Upload::Bundle(reference) => {
+                Some(reference.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let validated = crate::services::cluster::attachment_transfer::store::validate_refs(
+        pool,
+        &attachment_refs,
+        submission.provider.as_str(),
+        channel_id,
+    )
+    .await;
+    validated.map_err(|error| match error {
+        crate::services::cluster::attachment_transfer::store::ReadError::Rejected(detail) => {
+            IntakeBlockedReason::AttachmentUnavailable { detail }
+        }
+        error => IntakeBlockedReason::RoutingDependencyFailed {
+            detail: error.to_string(),
+        },
+    })?;
+    Ok((prepared_uploads, attachment_refs))
+}
+
+/// The attachments a turn-mode wait queues; without Postgres they cannot be made portable.
+async fn turn_mode_uploads(
+    deps: &IntakeDeps<'_>,
+    submission: &IntakeSubmission,
+    channel_id: &str,
+) -> Result<crate::services::cluster::attachment_transfer::uploads::PendingUploads, String> {
+    if submission.attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pool = deps
+        .shared
+        .pg_pool
+        .as_ref()
+        .ok_or("no Postgres for portable attachments")?;
+    let prepared = portable_uploads(pool, submission, channel_id).await;
+    prepared
+        .map(|(uploads, _)| uploads)
+        .map_err(|reason| format!("{reason:?}"))
 }
 
 pub(crate) async fn admit_text_intake(
@@ -205,6 +282,11 @@ pub(crate) async fn admit_text_intake(
         && let IntakeRoute::Hold(detail) =
             intake_route::route_for_placement(provider, destination.get())
     {
+        if crate::services::tui_o::cutover::codex_turn_awaited(destination.get()).is_some() {
+            return IntakeAdmission::DeferredTurnMode(
+                turn_mode_uploads(deps, submission, &channel_id).await,
+            );
+        }
         let reason = IntakeBlockedReason::RoutingDependencyFailed { detail };
         return IntakeAdmission::Blocked { reason };
     }
@@ -269,56 +351,11 @@ pub(crate) async fn admit_text_intake(
             };
         }
     };
-    let mut prepared_uploads = Vec::new();
-    if !submission.attachments.is_empty() {
-        let identity = crate::services::cluster::attachment_transfer::AttachmentMessageIdentity {
-            provider: submission.provider.as_str().to_string(),
-            channel_id: channel_id.clone(),
-            user_msg_id: user_msg_id.clone(),
+    let (prepared_uploads, attachment_refs) =
+        match portable_uploads(pool, submission, &channel_id).await {
+            Ok(prepared) => prepared,
+            Err(reason) => return IntakeAdmission::Blocked { reason },
         };
-        prepared_uploads = match message_handler::prepare_portable_attachments(
-            pool,
-            identity,
-            &submission.attachments,
-        )
-        .await
-        {
-            Ok(uploads) => uploads,
-            Err(detail) => {
-                return IntakeAdmission::Blocked {
-                    reason: IntakeBlockedReason::AttachmentUnavailable { detail },
-                };
-            }
-        };
-    }
-    let attachment_refs: Vec<_> = prepared_uploads
-        .iter()
-        .chain(&submission.preloaded_uploads)
-        .filter_map(|upload| match upload {
-            crate::services::cluster::attachment_transfer::uploads::Upload::Bundle(reference) => {
-                Some(reference.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    if let Err(error) = crate::services::cluster::attachment_transfer::store::validate_refs(
-        pool,
-        &attachment_refs,
-        submission.provider.as_str(),
-        &channel_id,
-    )
-    .await
-    {
-        let reason = match error {
-            crate::services::cluster::attachment_transfer::store::ReadError::Rejected(detail) => {
-                IntakeBlockedReason::AttachmentUnavailable { detail }
-            }
-            error => IntakeBlockedReason::RoutingDependencyFailed {
-                detail: error.to_string(),
-            },
-        };
-        return IntakeAdmission::Blocked { reason };
-    }
     let request = &submission.request;
     let self_instance_id =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
@@ -514,8 +551,18 @@ pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) ->
     !replay_starts_dormant(&channel_id.get().to_string())
 }
 
-/// Advances the checkpoint before any effect, except that a replay-deferred input advances it
-/// only once the queue holds it. Boxed so the caller's frame stays the size of a plain dispatch.
+/// A turn-selected Codex channel may queue a live input for turn mode, so its checkpoint waits too.
+pub(crate) fn live_checkpoint_waits(
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) -> bool {
+    checkpoint_waits_for_admission(channel_id)
+        || (*provider == ProviderKind::Codex
+            && crate::services::tui_o::cutover::turn_selected(channel_id.get()))
+}
+
+/// Advances the checkpoint before any effect, except that a deferred input advances it only once
+/// the queue holds it. Boxed so the caller's frame stays the size of a plain dispatch.
 pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
     deps: &'a IntakeDeps<'b>,
     submission: IntakeSubmission,
@@ -523,7 +570,10 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
 ) -> BoxedIntake<'a> {
     Box::pin(async move {
         let admission = admit_text_intake(deps, &submission).await;
-        if !matches!(admission, IntakeAdmission::ReplayDeferred(_)) {
+        if !matches!(
+            admission,
+            IntakeAdmission::ReplayDeferred(_) | IntakeAdmission::DeferredTurnMode(_)
+        ) {
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
         }
@@ -548,16 +598,20 @@ pub(crate) async fn finish_text_intake_admission(
             submission.preloaded_uploads.extend(prepared_uploads);
             defer_live_submission(deps, submission, false).await;
         }
+        IntakeAdmission::DeferredTurnMode(prepared) => {
+            let why = match prepared {
+                Ok(uploads) => {
+                    submission.preloaded_uploads.extend(uploads);
+                    submission.attachments.clear();
+                    "Codex turn mode is awaited".to_string()
+                }
+                Err(detail) => format!("Codex turn mode is awaited; attachments: {detail}"),
+            };
+            hold_in_custody(deps, submission, why).await?;
+        }
         IntakeAdmission::ReplayDeferred(defer) => {
-            let channel_id = submission.request.channel_id.get();
-            // Unprepared Discord attachments cannot ride the queue item; refuse rather than keep text only.
-            let unprepared = !submission.attachments.is_empty();
-            if unprepared || !defer_with_all_sources(deps, submission).await {
-                return Err(format!(
-                    "replay check deferred ({defer:?}); channel {channel_id} refused custody"
-                )
-                .into());
-            }
+            let why = format!("replay check deferred ({defer:?})");
+            hold_in_custody(deps, submission, why).await?;
         }
         IntakeAdmission::Blocked { ref reason }
             if submission.origin.should_notify_blocked(reason) =>
@@ -624,6 +678,21 @@ fn local_turn<'a, 'b: 'a>(
         submission.preloaded_uploads,
         submission.voice_announcement,
     ))
+}
+
+/// Queues a deferred input with every absorbed source; an Err leaves its checkpoint unread.
+async fn hold_in_custody(
+    deps: &IntakeDeps<'_>,
+    submission: IntakeSubmission,
+    why: String,
+) -> Result<(), super::super::Error> {
+    let channel_id = submission.request.channel_id.get();
+    // Unprepared Discord attachments cannot ride the queue item; refuse rather than keep text only.
+    let unprepared = !submission.attachments.is_empty();
+    if unprepared || !defer_with_all_sources(deps, submission).await {
+        return Err(format!("{why}; channel {channel_id} refused custody").into());
+    }
+    Ok(())
 }
 
 /// Boxed inside a plain function: a second inline enqueue future would grow the caller's stack frame.
@@ -737,6 +806,11 @@ fn log_nonlocal_admission(admission: &IntakeAdmission, channel_id: &str, user_ms
             channel_id,
             user_msg_id,
             "[intake_dispatch] unsafe placement blocked; local execution fenced"
+        ),
+        IntakeAdmission::DeferredTurnMode(_) => tracing::info!(
+            channel_id,
+            user_msg_id,
+            "[intake_dispatch] queued until Codex turn mode is confirmed"
         ),
         IntakeAdmission::Local(_) => {}
     }

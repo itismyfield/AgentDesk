@@ -24,13 +24,6 @@ mod final_ready_tests;
 #[cfg(test)]
 mod timeout_draft_tests;
 
-pub(crate) fn submit_native_clear(
-    target: &host_input::InputTarget,
-    gate: &dyn host_input::MutationGate,
-    deadline: tokio::time::Instant,
-) -> host_input::NativeClearSubmission {
-    host_input::submit_native_clear_tmux(target, gate, deadline)
-}
 use crate::services::provider::{CancelToken, cancel_requested};
 
 const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;

@@ -1625,7 +1625,7 @@ pub(in crate::services::discord) async fn handle_event(
             };
             // A replay-deferred direct dispatch checkpoints only once its custody is settled.
             let settle_checkpoint = attachment_local_permit.is_none()
-                && super::checkpoint_waits_for_admission(channel_id);
+                && super::live_checkpoint_waits(&data.provider, channel_id);
             if !settle_checkpoint {
                 checkpoint();
             }
