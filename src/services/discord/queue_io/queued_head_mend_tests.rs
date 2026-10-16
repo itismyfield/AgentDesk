@@ -301,7 +301,7 @@ async fn s3_a_closed_gate_holds_a_proven_unknown_head_until_it_opens_pg() {
 }
 
 /// A clear during the proof read restores nothing, one after the consume supersedes B untyped, and
-/// a file still holding the Unknown head after the actor's own clear is no head to consume.
+/// a file the actor's own clear rewrote back or failed to rewrite holds no head it consumes.
 #[tokio::test(flavor = "current_thread")]
 async fn s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -353,6 +353,30 @@ async fn s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg() {
         assert!(fixture.queue().await.is_empty());
         assert_eq!(fixture.reconciled_rows(), 0);
         assert!(fixture.pane.keys().is_empty());
+    }
+    {
+        let fixture = Fixture::new(6_813_475, "all").await;
+        let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+        let h = fixture.unknown_head().await;
+        let nonce = fixture.recorded_nonce();
+        fixture.append(&absorbed(&fixture.wrapped_head(h, &nonce), &now_stamp()));
+        let stale = fixture.bytes();
+        let fail = crate::services::turn_orchestrator::ChannelMailboxRegistry::fail_clear_removals;
+        fail(fixture.channel, false, 2, false);
+        fail(fixture.channel, true, 2, false);
+        crate::services::turn_orchestrator::test_support::fail_queue_saves(fixture.channel, 2);
+        fixture.clear_mailbox().await;
+        assert_eq!(fixture.bytes(), stale, "the failed clear left the old file");
+        fixture.kick().await;
+        quiet().await;
+        let context = crate::services::discord::queue_persistence_context;
+        let persistence = context(&fixture.shared, &CLAUDE, fixture.channel);
+        let mailbox = fixture.shared.mailbox(fixture.channel);
+        assert!(mailbox.unknown_queued_head(persistence).await.is_none());
+        assert_eq!(fixture.bytes(), stale, "nothing was written over it");
+        assert!(fixture.queue().await.is_empty(), "nothing was restored");
+        assert_eq!(fixture.reconciled_rows(), 0);
+        assert!(fixture.pane.keys().is_empty(), "neither H nor B was typed");
     }
 }
 
