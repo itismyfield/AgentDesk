@@ -421,7 +421,6 @@ fn queued_input(message: u64) -> crate::services::turn_orchestrator::Interventio
 #[test]
 fn b_foreign_provider_lookup_skip_admit_permit() {
     use crate::services::discord::{queue_dispatch, runtime_store};
-    use crate::services::turn_orchestrator::EnqueueRefusalReason;
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let dir = sandbox();
     let _env = Env::set(dir.path());
@@ -441,36 +440,9 @@ fn b_foreign_provider_lookup_skip_admit_permit() {
                 let off = ChannelId::new(channel.get() + 1);
                 let gate = Gate::protect(owner, channel.get()).unwrap();
                 let _health = test_health::Clear::new(&gate);
-                let old_permit = gate.admit().unwrap();
                 let _closing = gate.close().unwrap();
                 let mut shared = crate::services::discord::make_shared_data_for_tests();
                 Arc::get_mut(&mut shared).unwrap().provider = foreign.clone();
-                let persistence = QueuePersistenceContext::new(&foreign, &shared.token_hash, None);
-                let reused = shared
-                    .mailbox(channel)
-                    .requeue_front_with_permit(
-                        queued_input(channel.get() + 11),
-                        persistence,
-                        None,
-                        Some(old_permit),
-                    )
-                    .await;
-                assert!(
-                    !reused.enqueued,
-                    "the owner's permit cannot authorize the foreign queue"
-                );
-                assert_eq!(
-                    reused.refusal_reason,
-                    Some(EnqueueRefusalReason::InputPersistence)
-                );
-                assert!(
-                    shared
-                        .mailbox(channel)
-                        .snapshot()
-                        .await
-                        .intervention_queue
-                        .is_empty()
-                );
                 let pending = runtime_store::runtime_root()
                     .unwrap()
                     .join("discord_pending_queue")

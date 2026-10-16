@@ -695,8 +695,7 @@ impl Owner {
         let persistence = discord(&shared, &provider, channel_id);
         #[cfg(test)]
         test_hook::before_reserve(input.channel).await;
-        let reserve =
-            mailbox.reserve_injection(message, claim, persistence.clone(), permit.clone());
+        let reserve = mailbox.reserve_injection(message, claim, persistence.clone());
         let ticket = match reserve.await {
             ReserveOutcome::Reserved(ticket) => ticket,
             ReserveOutcome::Owned | ReserveOutcome::Consumed => {
@@ -752,8 +751,7 @@ impl Owner {
             }
             InjectAttempt::NotSent(veto) => {
                 let source = [handback.message_id.get()];
-                let handed =
-                    mailbox.hand_back_injected_input(ticket, handback, persistence, permit.clone());
+                let handed = mailbox.hand_back_injected_input(ticket, handback, persistence);
                 #[cfg(test)]
                 let handed = test_hook::hand_back(input.channel, handed);
                 match handed.await {
@@ -783,9 +781,8 @@ impl Owner {
                     _ => InjectionOutcome::Unconfirmed,
                 };
                 let settle = InjectionSettlement::Delivered(outcome);
-                let permit = permit.clone();
                 let _ = mailbox
-                    .settle_injected_input(ticket, settle, persistence, permit)
+                    .settle_injected_input(ticket, settle, persistence)
                     .await;
                 // Recorded whatever the settle answered, so a restart still finds it.
                 if let Some(message) = message {

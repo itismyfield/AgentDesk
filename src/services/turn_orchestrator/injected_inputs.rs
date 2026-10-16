@@ -2,7 +2,6 @@
 //! injection's owner.
 use super::*;
 use crate::services::discord::inject_disposition::{self as disposition, InjectionOutcome};
-use crate::services::discord::input_runtime::fence::{self, Permit};
 
 /// iMessage refusal reasons for a handback that was never written, or whose result never came back.
 pub(crate) const HANDBACK_NOT_WRITTEN: &str = "handback_persistence";
@@ -38,7 +37,7 @@ pub(crate) enum ReserveOutcome {
     Consumed,
     HolderChanged,
     Backlog,
-    /// Closed, fenced or unreachable: nothing was reserved.
+    /// Closed or unreachable: nothing was reserved.
     Unavailable,
 }
 
@@ -62,24 +61,21 @@ pub(crate) enum SettleOutcome {
     Unknown,
 }
 
-/// One injection's actor messages, each carrying the permit its owner was admitted with.
+/// One injection's actor messages.
 pub(crate) enum InjectionMsg {
     Reserve {
-        input_permit: Option<Permit>,
         message_id: Option<MessageId>,
         expected_claim: ExpectedClaim,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<ReserveOutcome>,
     },
     Settle {
-        input_permit: Option<Permit>,
         ticket: InjectionTicket,
         settlement: InjectionSettlement,
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<SettleOutcome>,
     },
     Abandon {
-        input_permit: Option<Permit>,
         ticket: InjectionTicket,
         reply: oneshot::Sender<()>,
     },
@@ -88,26 +84,6 @@ pub(crate) enum InjectionMsg {
 }
 
 impl InjectionMsg {
-    /// The owner's permit: an injection settles under it even while the gate is Closing.
-    pub(super) fn take_permit(&mut self) -> Option<Permit> {
-        match self {
-            Self::Reserve { input_permit, .. }
-            | Self::Settle { input_permit, .. }
-            | Self::Abandon { input_permit, .. } => input_permit.take(),
-            Self::Head(_) => None,
-        }
-    }
-
-    pub(super) fn persistence(&self) -> Option<&QueuePersistenceContext> {
-        match self {
-            Self::Reserve { persistence, .. } | Self::Settle { persistence, .. } => {
-                Some(persistence)
-            }
-            Self::Abandon { .. } => None,
-            Self::Head(msg) => Some(msg.persistence()),
-        }
-    }
-
     /// Answers without the actor: nothing is reserved, a settle gets its ticket back uncommitted,
     /// and an abandon's ticket drops here, orphaning its reservation. Returns the arm name.
     pub(super) fn refuse(self, error: String) -> &'static str {
@@ -419,11 +395,9 @@ impl ChannelMailboxHandle {
         message_id: Option<MessageId>,
         expected_claim: ExpectedClaim,
         persistence: QueuePersistenceContext,
-        input_permit: Option<Permit>,
     ) -> ReserveOutcome {
         self.request(|reply| {
             ChannelMailboxMsg::Injection(InjectionMsg::Reserve {
-                input_permit,
                 message_id,
                 expected_claim,
                 persistence,
@@ -440,19 +414,17 @@ impl ChannelMailboxHandle {
         ticket: InjectionTicket,
         settlement: InjectionSettlement,
         persistence: QueuePersistenceContext,
-        input_permit: Option<Permit>,
     ) -> SettleOutcome {
         let (reply, answer) = oneshot::channel();
         let msg = ChannelMailboxMsg::Injection(InjectionMsg::Settle {
-            input_permit,
             ticket,
             settlement,
             persistence,
             reply,
         });
-        match self.sender.send((msg, fence::effect::current())) {
+        match self.sender.send(msg) {
             Ok(()) => answer.await.unwrap_or(SettleOutcome::Unknown),
-            Err(unsent) => match unsent.0.0 {
+            Err(unsent) => match unsent.0 {
                 ChannelMailboxMsg::Injection(InjectionMsg::Settle { ticket, .. }) => {
                     let error = "mailbox_unreachable".to_string();
                     SettleOutcome::NotCommitted { ticket, error }
@@ -469,14 +441,12 @@ impl ChannelMailboxHandle {
         mut ticket: InjectionTicket,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
-        input_permit: Option<Permit>,
     ) -> Result<Vec<QueueExitEvent>, &'static str> {
         for delay in HANDBACK_DELAYS {
             tokio::time::sleep(delay).await;
             let settlement = InjectionSettlement::HandBack(Box::new(intervention.clone()));
-            let permit = input_permit.clone();
             match self
-                .settle_injected_input(ticket, settlement, persistence.clone(), permit)
+                .settle_injected_input(ticket, settlement, persistence.clone())
                 .await
             {
                 SettleOutcome::Committed { queue_exit_events } => return Ok(queue_exit_events),
@@ -491,13 +461,7 @@ impl ChannelMailboxHandle {
             }
         }
         let _ = self
-            .request(|reply| {
-                ChannelMailboxMsg::Injection(InjectionMsg::Abandon {
-                    input_permit,
-                    ticket,
-                    reply,
-                })
-            })
+            .request(|reply| ChannelMailboxMsg::Injection(InjectionMsg::Abandon { ticket, reply }))
             .await;
         Err(HANDBACK_NOT_WRITTEN)
     }

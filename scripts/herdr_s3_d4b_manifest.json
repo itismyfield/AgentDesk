@@ -15,7 +15,8 @@
     "return_starts_writer_before_old_join", "return_read_error_as_absence", "running_slot_counts_as_alive",
     "first_spawn_ignores_boot_rows", "first_spawn_reads_error_as_absence",
     "promotion_preflight_stops_writer", "committed_restart_skips_writer_join",
-    "shutdown_stops_only_last_provider", "old_cleanup_stops_replacement", "writer_stuck_as_joined"
+    "shutdown_stops_only_last_provider", "old_cleanup_stops_replacement", "writer_stuck_as_joined", "target_skips_adopt",
+    "adopt_ignores_restored", "reading_drops_restored", "bootstrap_port_ignores_role_flag"
   ],
   "cases": [
     {"id": "H6-1", "profile": "now", "piece": 4, "status": "implemented",
@@ -131,10 +132,10 @@
     {"name": "running_slot_counts_as_alive", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs ensure counts a running slot whose host ended as alive"},
     {"name": "first_spawn_ignores_boot_rows", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs start_boot starts every boot channel, another node's row or not"},
     {"name": "first_spawn_reads_error_as_absence", "cases": ["H6-3b"], "at": "cluster/channel_home_boot.rs start reads unreadable boot rows as no row for the first spawn"},
-    {"name": "target_skips_adopt", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch released-target adopt branch removed"},
-    {"name": "adopt_ignores_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch restored condition inverted"},
-    {"name": "reading_drops_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs BootPort::reading without restored_by"},
-    {"name": "bootstrap_port_ignores_role_flag", "cases": ["H6-3a"], "at": "discord/runtime_bootstrap.rs start_channel_homes port given a fresh flag"},
+    {"name": "target_skips_adopt", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch released-target adopt branch removed; guards that a released target adopts through its own watch"},
+    {"name": "adopt_ignores_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs watch restored condition inverted; guards that an unrestored target leaves the row released"},
+    {"name": "reading_drops_restored", "cases": ["H6-3a"], "at": "cluster/channel_home_boot.rs BootPort::reading without restored_by; guards that the runtime's reading port carries the channel's restore"},
+    {"name": "bootstrap_port_ignores_role_flag", "cases": ["H6-3a"], "at": "discord/runtime_bootstrap.rs start_channel_homes port given a fresh flag; guards that start_channel_homes passes its own role's restored flag"},
     {"name": "promotion_preflight_stops_writer", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/gateway_lease_recovery.rs the promotion preflight ends every runtime's homes"},
     {"name": "committed_restart_skips_writer_join", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/spawns.rs the committed restart exits without joining any home"},
     {"name": "shutdown_stops_only_last_provider", "cases": ["H6-6b"], "at": "discord/runtime_bootstrap/spawns.rs the committed restart joins only the final provider's homes"},

@@ -887,10 +887,10 @@ async fn t9b_clear_during_a_synthetic_active_turn_keeps_later_messages_visible()
     assert_eq!(api.enqueue_log(), [(n.get(), true, None)]);
 }
 
-/// A `/clear` whose persist fails restores the queue, so it keeps the retry and
-/// the checkpoint: advancing past the released turn would leap queued M.
+/// A `/clear` whose writes fail twice still discarded queued M with the released
+/// turn, so it drops the retry and lifts the checkpoint past both: no sweep reruns them.
 #[tokio::test(flavor = "current_thread")]
-async fn t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint() {
+async fn t9c_clear_that_fails_to_persist_drops_the_retry_and_advances_the_checkpoint() {
     let fx = Fixture::new().await;
     let channel_id = ChannelId::new(4_603_525);
     let (checkpoint, m, active) = (id(1, 600), id(2, 120), id(3, 60));
@@ -901,7 +901,7 @@ async fn t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint() {
     assert!(discord::mailbox_try_start_turn(&fx.shared, channel_id, token, owner, active).await);
     let retry = CatchUpRetryState::new(checkpoint.get());
     fx.shared.catch_up_retry_pending.insert(channel_id, retry);
-    // A directory in the queue file's place makes the emptied queue's removal fail.
+    // A directory in the queue file's place fails both the removal and the publish, twice.
     let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
         .expect("queue root")
         .join(fx.provider.as_str())
@@ -913,13 +913,18 @@ async fn t9c_clear_that_fails_to_persist_keeps_the_retry_and_checkpoint() {
     let discard = super::super::retry_state::clear_channel_discarding_catch_up_backlog;
     let cleared = discard(&fx.shared, &fx.provider, channel_id).await;
 
-    assert!(cleared.persistence_error.is_some(), "the clear must fail");
-    let held = (Some(checkpoint.get()), Some(checkpoint.get()));
-    assert_eq!(fx.surfaces(channel_id), held, "checkpoint leapt queued M");
     assert_eq!(
-        fx.pending(channel_id).map(|p| p.checkpoint),
-        Some(checkpoint.get())
+        cleared.persistence.failed,
+        ["queue_unlink", "queue_publish"]
     );
+    let newest = m.get().max(active.get());
+    let lifted = (Some(newest), Some(newest));
+    assert_eq!(
+        fx.surfaces(channel_id),
+        lifted,
+        "the checkpoint passes M and the turn"
+    );
+    assert_eq!(fx.pending(channel_id), None, "the retry is dropped");
 }
 
 /// T10: without an earlier barrier, active-turn and terminal messages advance.
