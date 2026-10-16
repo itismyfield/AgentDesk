@@ -71,6 +71,10 @@ async fn mutations_are_refused_before_any_database_access_while_the_switch_is_of
             delegate_to("claude", "mini"),
             ChannelHomeCommand::Reclaim { channel: C },
             ChannelHomeCommand::Force { channel: C },
+            ChannelHomeCommand::AbortRelease {
+                channel: C,
+                expected_epoch: 1,
+            },
         ];
         for command in commands {
             let refused = run(&config, command, &pg_db, &connected).await;
@@ -228,6 +232,57 @@ async fn reclaim_and_force_run_from_the_cli_and_show_the_node_they_ran_on_pg() {
     );
     let orphaned = (HomeState::Orphaned, None, Some("gw".into()));
     assert_eq!(held(rows(&pool).await), orphaned);
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// abort-release drops the row from the CLI and names the gateway restart that follows; a stale
+/// epoch or an open intake row is refused with what the row now shows, and the row is kept.
+#[tokio::test]
+async fn abort_release_runs_from_the_cli_and_says_why_it_refused_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let (on, connected) = (config(Some(true)), Cell::new(0));
+    run(&on, delegate_to("claude", "mini"), &pg_db, &connected)
+        .await
+        .expect("delegate");
+    let (channel, first) = (C.to_string(), rows(&pool).await[0].epoch);
+    let released = o_channel_homes::finish_release(&pool, &channel, "gw", first).await;
+    let HomeWrite::Applied(released) = released.expect("release") else {
+        panic!("released");
+    };
+    let abort = |expected_epoch| ChannelHomeCommand::AbortRelease {
+        channel: C,
+        expected_epoch,
+    };
+    let before = rows(&pool).await;
+    let stale = run(&on, abort(first), &pg_db, &connected).await;
+    let reason = format!(
+        "row is now released at epoch {}, not {first}",
+        released.epoch
+    );
+    assert!(
+        stale.as_ref().is_err_and(|e| e.contains(&reason)),
+        "{stale:?}"
+    );
+    intake(&pool, "open", None, "pending").await;
+    let open = run(&on, abort(released.epoch), &pg_db, &connected).await;
+    let reason = "open intake current/other_epoch/unrouted = 0/0/1";
+    assert!(open.as_ref().is_err_and(|e| e.contains(reason)), "{open:?}");
+    assert_eq!(rows(&pool).await, before, "refusals keep the row");
+
+    sqlx::query("UPDATE intake_outbox SET status = 'done'")
+        .execute(&pool)
+        .await
+        .expect("settle intake");
+    let shown = run(&on, abort(released.epoch), &pg_db, &connected).await;
+    let shown: Value = serde_json::from_str(&shown.expect("abort")).expect("json");
+    let aborted = json!({"state": "released", "epoch": released.epoch, "target": "mini"});
+    assert_eq!(
+        (&shown["run_on"], &shown["aborted"], &shown["next"]),
+        (&json!("gw"), &aborted, &json!("restart this gateway"))
+    );
+    assert_eq!(rows(&pool).await, vec![]);
     pool.close().await;
     pg_db.drop().await;
 }
