@@ -159,7 +159,6 @@ async fn consume(
         PolicyCloseOutcome::Settled | PolicyCloseOutcome::DuplicateConfirmed => return true,
         PolicyCloseOutcome::Superseded => return false,
         PolicyCloseOutcome::Retained(PolicyRetain::Clear(clear)) => clear,
-        PolicyCloseOutcome::Retained(PolicyRetain::InputFence(failure)) => failure,
         PolicyCloseOutcome::Retained(retain) => retain,
         PolicyCloseOutcome::Unconfirmed(stage) => stage,
     };

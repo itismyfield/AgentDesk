@@ -1,4 +1,3 @@
-use super::super::super::codex_adoption_runtime::boot::LiveSource;
 use super::*;
 
 pub(super) fn normalize_existing(
@@ -226,7 +225,7 @@ pub(crate) fn run_codex_rehydrate_pass_for_tests(
         }
     }
     let _view = RestoreView(CODEX_PASS_TMUX_VIEW.replace(Some(vec![tmux_session_name.to_owned()])));
-    let _ = rehydrate_existing_codex_tui_bindings(shared, None);
+    rehydrate_existing_codex_tui_bindings(shared);
     shared
         .tmux_watchers
         .owner_channel_for_tmux_session(tmux_session_name)
@@ -314,42 +313,6 @@ pub(super) fn codex_tui_launch_modified_since(tmux_session_name: &str) -> std::t
                 .ok()
         })
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-}
-
-/// A live pane of `channel` as discovery evidence: bound only on what the pass left registered.
-pub(super) fn live_source(
-    shared: &Arc<SharedData>,
-    tmux: &str,
-    channel: u64,
-    observe: bool,
-) -> LiveSource {
-    LiveSource {
-        key: tmux.to_owned(),
-        channel: Some(channel),
-        bound: observe && source_bound(shared, tmux, channel),
-    }
-}
-
-/// An unplaced live pane may be any channel's source; off, its liveness is not even probed.
-pub(super) fn unplaced_live_source(tmux: String, observe: bool) -> Option<LiveSource> {
-    (observe && codex_pass_pane_is_live(&tmux)).then_some(LiveSource {
-        key: tmux,
-        channel: None,
-        bound: false,
-    })
-}
-
-/// Whether the pass left `tmux` routed to `channel` by the watcher registry, the relay's
-/// authority, with a Codex binding on an existing rollout.
-fn source_bound(shared: &Arc<SharedData>, tmux: &str, channel: u64) -> bool {
-    let routed = shared.tmux_watchers.owner_channel_for_tmux_session(tmux);
-    routed == Some(ChannelId::new(channel))
-        && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).is_some_and(
-            |binding| {
-                binding.runtime_kind == RuntimeHandoffKind::CodexTui
-                    && Path::new(&binding.output_path).exists()
-            },
-        )
 }
 
 /// Only an exact native receipt can classify an already delivered span.

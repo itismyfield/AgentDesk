@@ -269,18 +269,7 @@ fn create(
         build_digest: env!("CARGO_PKG_VERSION").into(),
         at: Utc::now(),
     };
-    let era = store
-        .read_era()
-        .map_err(|error| format!("era: {error:?}"))?;
-    let seal = || store.begin_era(&[channel], init.at, |_| Ok(init.clone()));
-    let created = match era {
-        Some(_) => store.init_channel_as(&init, origin),
-        None if origin == InitOrigin::Fresh => seal().map(drop),
-        // The era skips a channel already initialized, so a recorded origin is written first.
-        None => store
-            .init_channel_as(&init, origin)
-            .and_then(|()| seal().map(drop)),
-    };
+    let created = store.begin_era_as(&init, origin);
     created.map_err(|error| format!("init: {error:?}"))?;
     let count = init.sources.len();
     tracing::info!(

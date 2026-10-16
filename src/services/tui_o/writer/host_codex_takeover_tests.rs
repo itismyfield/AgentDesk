@@ -7,6 +7,30 @@ use std::collections::BTreeMap;
 
 /// The boot snapshot of `channel` reserved for late adoption and selected for turn mode.
 fn reserve(channel: u64) -> test_override::ChannelsGuard {
+    let pending = |_: &_, _| Ok(BTreeMap::from([(channel, Adoption::Pending)]));
+    let boot = booted(channel, pending);
+    assert!(boot.candidate(channel).unwrap().late_adopt_origin());
+    test_override::force_boot(boot)
+}
+
+/// The boot snapshot of `channel` seeded from the store under `root` as a process start reads it.
+fn rebooted(channel: u64, root: &std::path::Path) -> test_override::ChannelsGuard {
+    let stored = |channels: &_, _| {
+        Ok(crate::services::tui_o::channel_policy::stored(
+            Some(root),
+            channels,
+        ))
+    };
+    test_override::force_boot(booted(channel, stored))
+}
+
+fn booted(
+    channel: u64,
+    stored: impl FnOnce(
+        &std::collections::BTreeSet<u64>,
+        bool,
+    ) -> std::io::Result<BTreeMap<u64, Adoption>>,
+) -> BootChannels {
     let config: Config = serde_json::from_value(serde_json::json!({
         "server": {},
         "agents": [{"id": "w", "name": "W",
@@ -15,11 +39,8 @@ fn reserve(channel: u64) -> test_override::ChannelsGuard {
             "turn": {"channels": [channel]}}
     }))
     .unwrap();
-    let pending = |_: &_, _| Ok(BTreeMap::from([(channel, Adoption::Pending)]));
     let boot = BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(true, &config, pending).unwrap();
-    assert!(boot.candidate(channel).unwrap().late_adopt_origin());
-    test_override::force_boot(boot)
+    boot.seeded(true, &config, stored).unwrap()
 }
 
 /// A first turn's opener and prompt.
@@ -281,4 +302,58 @@ async fn the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
         assert_eq!(adoption(channel), Adoption::Committed, "{race}");
         assert_eq!(init_sources(&harness, channel), [(next_source, 0)]);
     }
+}
+
+/// A takeover cut off between its init and the era seal is held; the next process start seeds the
+/// init committed, the host seals the era over it, recovers its store and O posts the answer once.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_start() {
+    use crate::services::tui_o::store::{InitOrigin, fault};
+    const CODEX: u64 = 61_823;
+    let Takeover {
+        harness,
+        io,
+        tasks,
+        _reserved,
+    } = hosted_over_old(CODEX).await;
+    let era_file = harness._runtime.path().join("o_store").join("o_era");
+    let cut = fault::plant(
+        &era_file,
+        fault::Step::Write,
+        std::io::ErrorKind::Other,
+        None,
+    );
+    let (path, source) = rollout(&harness, "rollout-new.jsonl", &prompted("s-codex"));
+    bind_late(CODEX, &path);
+    polls(3).await;
+    drop(cut);
+    assert_eq!(adoption(CODEX), Adoption::Held, "{:?}", io.alarms.halted());
+    assert!(harness.store.read_era().unwrap().is_none());
+    let origin = harness.store.read_init_origin(CODEX).unwrap();
+    assert_eq!(origin, InitOrigin::LateCodexTakeover);
+    abort(tasks);
+    drop(_reserved);
+    polls(1).await;
+
+    let _rebooted = rebooted(CODEX, harness._runtime.path());
+    assert_eq!(adoption(CODEX), Adoption::Committed);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let _tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert!(ready.is_ready(CODEX), "{:?}", io.alarms.halted());
+    let era = harness.store.read_era().unwrap().unwrap();
+    assert_eq!(era.initial_channels, [CODEX]);
+    assert_eq!(init_sources(&harness, CODEX), [(source, 0)]);
+    assert!(
+        !io.calls().contains(&("facts", CODEX)) && !io.calls().contains(&("adopted", CODEX)),
+        "the start recovers the store, it does not activate again"
+    );
+    append(&path, &answer("msg_1", "the answer"));
+    polls(3).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["the answer"],
+        "{:?}",
+        io.alarms.halted()
+    );
 }

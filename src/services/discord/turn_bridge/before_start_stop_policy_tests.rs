@@ -1195,7 +1195,7 @@ async fn p10_fin_delivered_reentry_skips_the_notice_but_not_the_message_check() 
         .clone()
         .into_policy_receipt(close.shared.restart.current_generation);
     assert_eq!(
-        step::with_authority(None, |legacy| receipt.try_clear(legacy)),
+        receipt.try_clear(),
         PolicyClear::Mismatch,
         "a delivered receipt without its message is never cleared"
     );

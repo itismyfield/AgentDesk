@@ -20,7 +20,7 @@ ENTRIES = {}
 # "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
-    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'eb11a170ba7bf7d135a352e69f4a1d8a3810a28284615e651383923a427baccd'},
+    'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'b0f17747ee1fe1368ce49cc89efedcce1d77fd6d4dd738774244afbd30fb8293'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {
         'run_once': '6364c6e13da83bbf08092a6460de03dda10281c0af81b5f1293ab51b3ace9858',
         'prepare_before_reap': '9de0e7d478987fc0464a1753bee32171dc54a76cbebd4f8db4a7df6b47068f3e',

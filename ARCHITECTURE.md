@@ -626,6 +626,7 @@ src/
 │   │   ├── busy_inject/
 │   │   │   ├── stash_tests/
 │   │   │   │   └── hold_tests.rs
+│   │   │   ├── receipt.rs
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
@@ -881,9 +882,6 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
-│   │   ├── codex_adoption_runtime/
-│   │   │   ├── boot.rs
-│   │   │   └── boot_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_end_tests.rs
@@ -1023,6 +1021,9 @@ src/
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
+│   │   │   │   │   ├── queued_owner.rs
+│   │   │   │   │   ├── queued_reconcile.rs
+│   │   │   │   │   ├── queued_reconcile_tests.rs
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   └── test_hook.rs
 │   │   │   │   ├── inject.rs
@@ -1346,6 +1347,7 @@ src/
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
+│   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -2224,7 +2226,6 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
-│   │   ├── codex_adoption_runtime.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs
@@ -3012,6 +3013,8 @@ src/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
+│   │   │   ├── mend.rs
+│   │   │   ├── mend_tests.rs
 │   │   │   └── prefix.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs
