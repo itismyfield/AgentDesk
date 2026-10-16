@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -73,6 +73,7 @@ fn route_429(retry_after: &str) -> Reply {
 struct Mock {
     base: String,
     seen: Seen,
+    probes: Arc<AtomicUsize>,
 }
 
 impl Mock {
@@ -82,11 +83,19 @@ impl Mock {
         let seen: Seen = Arc::default();
         let mut replies = VecDeque::from(replies);
         let log = Arc::clone(&seen);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let ignored = Arc::clone(&probes);
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let Some(request) = read_request(&mut socket).await else {
                     continue;
                 };
+                // Local port probes must not consume scripted Discord replies.
+                if request.0 == "/" {
+                    ignored.fetch_add(1, Ordering::SeqCst);
+                    let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                    continue;
+                }
                 log.lock().unwrap().push(request);
                 match replies
                     .pop_front()
@@ -105,7 +114,7 @@ impl Mock {
                 }
             }
         });
-        Self { base, seen }
+        Self { base, seen, probes }
     }
 
     fn requests(&self) -> Vec<(String, Vec<u8>)> {
@@ -623,3 +632,319 @@ async fn f6_hookable_overflow_on_success_never_reclassifies_or_reposts() {
         assert_eq!(mock.requests().len(), 1, "{huge}");
     }
 }
+
+/// The writer settling a POST whose reply was lost, through Serenity's client to loopback.
+#[cfg(unix)]
+mod settle_over_http {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::services::discord::outbound::o_writer_io::GatewayPort;
+    use crate::services::tui_o::ownership::OwnershipGate;
+    use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
+    use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
+    use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
+    use crate::services::tui_o::writer::confirm::LAST_LOOK;
+    use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
+    use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
+    use crate::services::tui_o::writer::{AlarmSink, DeliveryLease, WriterAlarm};
+
+    pub(super) const BOT: u64 = 42;
+    pub(super) const OTHER: u64 = 77;
+    pub(super) const PAYLOAD: &str = "transcript unit";
+    const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+    pub(super) struct Lease;
+
+    impl DeliveryLease for Lease {
+        type Held = ();
+
+        fn try_acquire(&self, _: u64, _: u64) -> Option<()> {
+            Some(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub(super) struct Alarms(Arc<StdMutex<Vec<WriterAlarm>>>);
+
+    impl AlarmSink for Alarms {
+        fn raise(&self, _: u64, alarm: WriterAlarm) {
+            self.0.lock().unwrap().push(alarm);
+        }
+    }
+
+    /// A message as Discord returns it, complete enough for Serenity to decode.
+    pub(super) fn message(channel: u64, id: u64, author: u64, content: &str) -> Value {
+        json!({
+            "id": id.to_string(), "channel_id": channel.to_string(), "content": content,
+            "author": {"id": author.to_string(), "username": "bot", "discriminator": "0",
+                "global_name": null, "avatar": null, "bot": true},
+            "timestamp": "2026-10-15T00:00:00.000000+00:00", "edited_timestamp": null,
+            "tts": false, "mention_everyone": false, "mentions": [], "mention_roles": [],
+            "attachments": [], "embeds": [], "pinned": false, "type": 0, "flags": 0
+        })
+    }
+
+    pub(super) fn ok(body: Value) -> Reply {
+        reply("200 OK", &[], &body.to_string())
+    }
+
+    pub(super) fn status(line: &str) -> Reply {
+        reply(line, &[], r#"{"message":"refused","code":0}"#)
+    }
+
+    pub(super) fn unit(channel: u64, native: u64) -> UnitKey {
+        UnitKey {
+            channel_id: channel,
+            provider: ShadowProvider::Claude,
+            native_key: format!("msg_{native}"),
+            kind: UnitKind::Body,
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Expect {
+        NotFound,
+        Unresolved(&'static str),
+    }
+
+    struct Row {
+        name: &'static str,
+        /// Ids the ledger already records as this bot's posts, oldest first.
+        posted: Vec<u64>,
+        /// Replies after the lost POST's, in request order.
+        replies: Vec<Reply>,
+        expect: Expect,
+        /// History pages and reads by id the settlement made.
+        lists: usize,
+        proofs: Vec<u64>,
+    }
+
+    struct Settled {
+        outcome: Option<PieceOutcome>,
+        alarms: Vec<WriterAlarm>,
+        requests: Vec<(String, Vec<u8>)>,
+        elapsed: Duration,
+    }
+
+    /// Delivers one piece whose POST connection drops, on a channel whose replayed ledger already
+    /// holds `posted`.
+    async fn settle_lost_post(channel: u64, posted: &[u64], replies: Vec<Reply>) -> Settled {
+        let mock = Mock::start(std::iter::once(Reply::Drop).chain(replies).collect()).await;
+        let runtime = tempfile::tempdir().unwrap();
+        let config = StoreConfig { enabled: true };
+        let store = OStore::open_if_enabled(&config, runtime.path())
+            .unwrap()
+            .unwrap();
+        let init = |channel| {
+            let (sources, build_digest, at) = (Vec::new(), "b".to_owned(), Utc::now());
+            let initial_anchor = 100;
+            Ok(Initialized {
+                channel,
+                sources,
+                initial_anchor,
+                build_digest,
+                at,
+            })
+        };
+        let era = store.begin_era(&[channel], Utc::now(), init).unwrap();
+        let mut recorded = store.open_channel(&era, channel).unwrap().unwrap();
+        for (serial, &msg_id) in (0u64..).zip(posted) {
+            let anchor_id = recorded.ledger().anchor();
+            let (unit_key, payload) = (unit(channel, serial), format!("earlier {serial}"));
+            let prepared = LedgerEntry::Prepared {
+                local_retry: None,
+                serial,
+                unit_key,
+                piece_index: 0,
+                payload,
+                anchor_id,
+                epoch: 1,
+            };
+            recorded.append_ledger(prepared).unwrap();
+            recorded
+                .append_ledger(LedgerEntry::Posted { serial, msg_id })
+                .unwrap();
+        }
+        drop(recorded);
+        let gate = Arc::new(OwnershipGate::default());
+        gate.acquired();
+        let http = serenity::HttpBuilder::new("test-token")
+            .proxy(mock.base.clone())
+            .ratelimiter_disabled(true)
+            .build();
+        let port = Arc::new(GatewayPort::new(Arc::new(http), BOT));
+        let alarms = Alarms::default();
+        let replayed = store.open_channel(&era, channel).unwrap().unwrap();
+        let mut writer = ChannelWriter::new(replayed, gate, port, Lease, alarms.clone());
+        let unit_key = unit(channel, 99);
+        let payload = PAYLOAD.to_owned();
+        let piece = Derived::Piece(PieceWork {
+            unit_key: unit_key.clone(),
+            index: 0,
+            payload,
+        });
+        let started = Instant::now();
+        assert_eq!(writer.deliver(&piece).await, Step::Done);
+        let elapsed = started.elapsed();
+        let ledger = writer.store().ledger();
+        let outcome = ledger
+            .latest_piece(&unit_key, 0)
+            .and_then(|(_, piece)| piece.outcome.clone());
+        let alarms = alarms.0.lock().unwrap().clone();
+        let requests = mock.requests();
+        Settled {
+            outcome,
+            alarms,
+            requests,
+            elapsed,
+        }
+    }
+
+    /// Every way `settled` departs from `row`, empty when it matches.
+    fn mismatches(row: &Row, channel: u64, settled: &Settled) -> Vec<String> {
+        let serial = row.posted.len() as u64;
+        let mut wrong = Vec::new();
+        match (&row.expect, &settled.outcome, settled.alarms.as_slice()) {
+            (
+                Expect::NotFound,
+                Some(PieceOutcome::NotFound),
+                [WriterAlarm::NotFound { serial: s }],
+            ) if *s == serial => {}
+            (
+                Expect::Unresolved(why),
+                Some(PieceOutcome::Unresolved(reason)),
+                [WriterAlarm::Unresolved { serial: s, .. }],
+            ) if *s == serial && reason.contains(why) => {}
+            (expect, outcome, alarms) => {
+                wrong.push(format!(
+                    "expected {expect:?}, got {outcome:?} with {alarms:?}"
+                ));
+            }
+        }
+        let messages = format!("/api/v10/channels/{channel}/messages");
+        let posts = (settled.requests.iter())
+            .filter(|(path, body)| path == &messages && !body.is_empty())
+            .count();
+        let lists = (settled.requests.iter())
+            .filter(|(path, _)| path.starts_with(&format!("{messages}?")))
+            .count();
+        let proofs: Vec<u64> = (settled.requests.iter())
+            .filter_map(|(path, _)| path.strip_prefix(&format!("{messages}/"))?.parse().ok())
+            .collect();
+        let requests = settled.requests.len();
+        let expected = 1 + row.lists + row.proofs.len();
+        if (posts, lists, &proofs, requests) != (1, row.lists, &row.proofs, expected) {
+            wrong.push(format!(
+                "POSTs {posts}, pages {lists}, reads by id {proofs:?}, requests {requests}"
+            ));
+        }
+        // Two looks of one stalled read each stay well inside the settlement.
+        let bound = LAST_LOOK + READ_TIMEOUT * 2 + Duration::from_secs(3);
+        if settled.elapsed >= bound {
+            wrong.push(format!("took {:?}", settled.elapsed));
+        }
+        wrong
+    }
+
+    /// Absence needs a history read Discord could not have answered without permission: a
+    /// non-empty page, or an empty one with a known own message read back by id.
+    #[tokio::test]
+    async fn a_lost_post_is_absent_only_when_a_real_read_proves_history_readable() {
+        let proof = |channel| ok(message(channel, 5000, BOT, "earlier 0"));
+        let other = |channel| ok(json!([message(channel, 6000, OTHER, "chatter")]));
+        let altered = |channel| ok(json!([message(channel, 6000, BOT, "Discord가 바꾼 본문")]));
+        let empty = || ok(json!([]));
+        let base = 63_250_200;
+        let rows = |channel: u64| -> Vec<Row> {
+            vec![
+                Row {
+                    name: "empty pages, proof read refused",
+                    posted: vec![5000],
+                    replies: vec![empty(), empty(), status("403 Forbidden")],
+                    expect: Expect::Unresolved("permission proof read failed"),
+                    lists: 2,
+                    proofs: vec![5000],
+                },
+                Row {
+                    name: "empty pages, proof read back",
+                    posted: vec![5000],
+                    replies: vec![empty(), empty(), proof(channel)],
+                    expect: Expect::NotFound,
+                    lists: 2,
+                    proofs: vec![5000],
+                },
+                Row {
+                    name: "empty pages, no own post to prove with",
+                    posted: vec![],
+                    replies: vec![empty(), empty()],
+                    expect: Expect::Unresolved("without read permission proof"),
+                    lists: 2,
+                    proofs: vec![],
+                },
+                Row {
+                    name: "first page 500, last empty with proof",
+                    posted: vec![5000],
+                    replies: vec![status("500 Internal Server Error"), empty(), proof(channel)],
+                    expect: Expect::NotFound,
+                    lists: 2,
+                    proofs: vec![5000],
+                },
+                Row {
+                    name: "only another author listed",
+                    posted: vec![],
+                    replies: vec![other(channel), other(channel)],
+                    expect: Expect::NotFound,
+                    lists: 2,
+                    proofs: vec![],
+                },
+                Row {
+                    name: "newest proof id 404, the next proves",
+                    posted: vec![5000, 5001],
+                    replies: vec![empty(), empty(), status("404 Not Found"), proof(channel)],
+                    expect: Expect::NotFound,
+                    lists: 2,
+                    proofs: vec![5001, 5000],
+                },
+                Row {
+                    name: "history reads stall",
+                    posted: vec![5000],
+                    replies: vec![Reply::Stall, Reply::Stall],
+                    expect: Expect::Unresolved("history read failed"),
+                    lists: 2,
+                    proofs: vec![],
+                },
+                Row {
+                    name: "this bot's message with other content",
+                    posted: vec![],
+                    replies: vec![altered(channel), altered(channel)],
+                    expect: Expect::Unresolved("same-author non-exact message observed"),
+                    lists: 2,
+                    proofs: vec![],
+                },
+            ]
+        };
+        let count = rows(base).len() as u64;
+        let runs = (0..count).map(|index| async move {
+            let channel = base + index;
+            let mut row = rows(channel).swap_remove(index as usize);
+            let replies = std::mem::take(&mut row.replies);
+            let settled = settle_lost_post(channel, &row.posted, replies).await;
+            (row, channel, settled)
+        });
+        let settled = futures::future::join_all(runs).await;
+        let wrong: Vec<String> = (settled.iter())
+            .flat_map(|(row, channel, settled)| {
+                let found = mismatches(row, *channel, settled);
+                found
+                    .into_iter()
+                    .map(|wrong| format!("{}: {wrong}", row.name))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+}
+
+#[cfg(unix)]
+#[path = "local_retry_io_tests.rs"]
+mod local_retry_io_tests;

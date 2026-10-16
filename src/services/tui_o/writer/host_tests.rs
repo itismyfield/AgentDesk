@@ -109,7 +109,7 @@ impl<W> RepostHook<W> for CountedTurn {
     }
 
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
-        Box::pin(std::future::ready(OriginalGate::Send))
+        Box::pin(std::future::ready(OriginalGate::SendLocal))
     }
 
     fn receipts(

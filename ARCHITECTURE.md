@@ -847,6 +847,7 @@ src/
 │   │   ├── rollout_index.rs
 │   │   ├── rollout_tail.rs
 │   │   ├── session.rs
+│   │   ├── tail_launch.rs
 │   │   ├── verified_hold.rs
 │   │   ├── verified_tail.rs
 │   │   └── warm_followup.rs
@@ -1263,6 +1264,7 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
 │   │   │   ├── mod.rs
@@ -2763,6 +2765,7 @@ src/
 │   │   │   ├── durable.rs
 │   │   │   ├── ledger.rs
 │   │   │   ├── ledger_lock_tests.rs
+│   │   │   ├── local_retry_ledger_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume.rs
 │   │   │   ├── operator_resume_ledger_tests.rs
@@ -2820,6 +2823,7 @@ src/
 │   │   │   ├── deliver.rs
 │   │   │   ├── deliver_home_tests.rs
 │   │   │   ├── drain_projection_tests.rs
+│   │   │   ├── executed_resume_tests.rs
 │   │   │   ├── fork_lineage.rs
 │   │   │   ├── fork_lineage_tests.rs
 │   │   │   ├── fork_mask_tests.rs
@@ -2841,6 +2845,11 @@ src/
 │   │   │   ├── late_adopt_host_tests.rs
 │   │   │   ├── late_pin_tests.rs
 │   │   │   ├── legacy_hop_retry_tests.rs
+│   │   │   ├── local_retry.rs
+│   │   │   ├── local_retry_actor_tests.rs
+│   │   │   ├── local_retry_host_tests.rs
+│   │   │   ├── local_retry_repost_tests.rs
+│   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs
@@ -2905,6 +2914,8 @@ src/
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
+│   │   │   ├── codex/
+│   │   │   │   └── commit.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
@@ -2935,6 +2946,7 @@ src/
 │   │   │   ├── codex_legacy_lock_tests.rs
 │   │   │   ├── codex_policy.rs
 │   │   │   ├── codex_verified.rs
+│   │   │   ├── codex_verified_executed_resume_tests.rs
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs

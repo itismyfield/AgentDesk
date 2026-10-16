@@ -12,6 +12,7 @@ fn key() -> UnitKey {
 
 fn prepared(serial: u64) -> LedgerEntry {
     LedgerEntry::Prepared {
+        local_retry: None,
         serial,
         unit_key: key(),
         piece_index: 0,

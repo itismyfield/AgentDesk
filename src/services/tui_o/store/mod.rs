@@ -454,6 +454,7 @@ mod tests {
     fn prepared(serial: u64, anchor_id: u64) -> LedgerEntry {
         let (unit_key, payload) = (unit(&format!("m{serial}")), format!("piece {serial}"));
         LedgerEntry::Prepared {
+            local_retry: None,
             serial,
             unit_key,
             piece_index: 0,

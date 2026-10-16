@@ -302,6 +302,7 @@ src/services/tui_o/repost/runtime_host_activation_tests.rs
 src/services/tui_o/repost/writer_activation_tests.rs
 src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/tui_o/writer/late_adopt_delegated_tests.rs
+src/services/tui_o/writer/local_retry_repost_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
 src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
@@ -630,6 +631,7 @@ services::tui_o::writer::tests::actor::host_start::receipt_projection
 services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
+services::tui_o::writer::tests::actor::repost_turn::local_retry
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
@@ -2318,7 +2320,7 @@ services::tui_o::repost::runner::activation_tests::d4act_identity_conflict_block
 services::tui_o::repost::runner::activation_tests::d4act_missing_pending_record_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::d4act_resume_error_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::d4act_source_revoked_after_tick_never_grants_pg
-services::tui_o::repost::runner::activation_tests::d4act_unsupported_original_remains_single_shot_when_sidecar_is_unavailable_pg
+services::tui_o::repost::runner::activation_tests::d4act_unsupported_original_uses_local_owner_when_sidecar_is_unavailable_pg
 services::tui_o::repost::runner::activation_tests::f6_admission_error_blocks_other_ready_repost_pg
 services::tui_o::repost::runner::activation_tests::f6_original_intent_failure_holds_until_durable_intent_pg
 services::tui_o::repost::runner::activation_tests::f6_sidecar_failure_blocks_ready_repost_pg
@@ -2377,6 +2379,8 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t07_all_writer_guards_blo
 services::tui_o::writer::tests::actor::repost_turn::f6_t09_open_prepared_blocks_every_sender_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_piece_never_becomes_new_original_pg
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
+services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
+services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg
