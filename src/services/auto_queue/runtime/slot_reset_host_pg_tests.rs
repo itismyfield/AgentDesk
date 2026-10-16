@@ -143,7 +143,7 @@ mod host {
         }
     }
 
-    async fn exec(pool: &PgPool, sql: &str, binds: &[Option<&str>]) {
+    async fn exec(pool: &PgPool, sql: &'static str, binds: &[Option<&str>]) {
         let query = binds
             .iter()
             .fold(sqlx::query(sql), |query, bind| query.bind(*bind));
@@ -151,7 +151,7 @@ mod host {
     }
 
     /// One text value per row of `sql`.
-    async fn rows(pool: &PgPool, sql: &str, bind: &str) -> Vec<String> {
+    async fn rows(pool: &PgPool, sql: &'static str, bind: &str) -> Vec<String> {
         let query = sqlx::query_scalar::<_, String>(sql).bind(bind);
         query.fetch_all(pool).await.unwrap()
     }

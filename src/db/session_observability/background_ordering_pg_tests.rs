@@ -4,7 +4,7 @@ use crate::db::dispatched_session_canonical_identity::upsert_hook_session_with_i
 use crate::db::dispatched_sessions::HookSessionUpsert;
 use crate::db::session_status::{AWAITING_BG, IDLE, normalize_session_status};
 use crate::services::tmux_turn_liveness::idle_cleanup_session_is_unoccupied;
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use std::time::Duration;
 
 async fn setup() -> (TestPostgresDb, PgPool) {
@@ -102,10 +102,10 @@ async fn install_parent_update_gate(pool: &PgPool, parent_id: i64, old_count: i3
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "CREATE TRIGGER background_parent_gate BEFORE UPDATE ON sessions
          FOR EACH ROW EXECUTE FUNCTION background_parent_gate('{parent_id}', '{old_count}')"
-    ))
+    )))
     .execute(pool)
     .await
     .unwrap();
@@ -124,10 +124,10 @@ async fn install_child_insert_gate(pool: &PgPool, parent_id: i64) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "CREATE TRIGGER background_insert_gate BEFORE INSERT ON sessions
          FOR EACH ROW EXECUTE FUNCTION background_insert_gate('{parent_id}')"
-    ))
+    )))
     .execute(pool)
     .await
     .unwrap();
@@ -147,10 +147,10 @@ async fn install_terminal_update_gate(pool: &PgPool, parent_id: i64) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "CREATE TRIGGER background_terminal_gate BEFORE UPDATE ON sessions
          FOR EACH ROW EXECUTE FUNCTION background_terminal_gate('{parent_id}')"
-    ))
+    )))
     .execute(pool)
     .await
     .unwrap();

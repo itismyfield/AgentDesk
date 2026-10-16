@@ -489,7 +489,14 @@ mod a0_characterization_tests {
             "reply builders must not enter the delayed multi-chunk path"
         );
         assert_eq!(
-            replies[0].content.as_deref(),
+            serde_json::to_value(
+                replies[0]
+                    .1
+                    .clone()
+                    .to_slash_initial_response(Default::default())
+            )
+            .unwrap()["content"]
+                .as_str(),
             Some(body.as_str()),
             "single reply preserves the original Korean body"
         );
@@ -600,8 +607,22 @@ mod a0_characterization_tests {
         let body = "a".repeat(2500);
         let replies = long_message_reply_builders(&body);
         assert_eq!(replies.len(), 2);
-        let first = replies[0].content.as_ref().expect("first content");
-        let second = replies[1].content.as_ref().expect("second content");
+        let first = serde_json::to_value(
+            replies[0]
+                .1
+                .clone()
+                .to_slash_initial_response(Default::default()),
+        )
+        .unwrap();
+        let second = serde_json::to_value(
+            replies[1]
+                .1
+                .clone()
+                .to_slash_initial_response(Default::default()),
+        )
+        .unwrap();
+        let first = first["content"].as_str().expect("first content");
+        let second = second["content"].as_str().expect("second content");
 
         // Continuation markers ([n/m]) were removed per operator request:
         // the relay must not prepend chunk-index prefixes.

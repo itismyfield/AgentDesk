@@ -1023,7 +1023,7 @@ mod resumable_keep_set_query_pg_tests {
               last_heartbeat, created_at) \
              VALUES ($1, 'claude', 'idle', $2, $3, $4, {heartbeat_sql}, {created_sql})"
         );
-        sqlx::query(&query)
+        sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(session_key)
             .bind(cwd)
             .bind(channel_id)

@@ -364,7 +364,7 @@ fn bridge_child_completion_before_insert_commit_reconciles_both_cursors_pg() {
                     .bind(sibling).fetch_one(&mut *locked).await.unwrap();
                 sibling_blocker = Some(locked);
             }
-            sqlx::query(&format!("CREATE FUNCTION pause_child_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.parent_session_id IS NOT NULL THEN PERFORM pg_advisory_xact_lock({INSERT_GATE}); END IF; RETURN NEW; END $$"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("CREATE FUNCTION pause_child_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.parent_session_id IS NOT NULL THEN PERFORM pg_advisory_xact_lock({INSERT_GATE}); END IF; RETURN NEW; END $$")))
                 .execute(&pool).await.unwrap();
             sqlx::query("CREATE TRIGGER pause_child_insert BEFORE INSERT ON sessions FOR EACH ROW EXECUTE FUNCTION pause_child_insert()")
                 .execute(&pool).await.unwrap();

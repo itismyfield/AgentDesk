@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "6b38f91810773c3406264cf8c1943dfae5047378685bd3bb1396215702c260a6"
+    "5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -652,7 +652,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
-        self.assertEqual(writer["timeout-minutes"], 45)
+        self.assertEqual(writer["timeout-minutes"], 60)
         self.assertEqual(writer["shell"], "bash")
         for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets"):
             self.assertNotIn("continue-on-error", jobs[job_id])

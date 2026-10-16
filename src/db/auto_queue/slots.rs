@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use super::run_status::live_run_statuses_sql;
 use super::slot_predicate::{
@@ -61,7 +61,7 @@ pub async fn clear_inactive_slot_assignments_pg(pool: &PgPool) -> Result<u64, sq
                WHERE status IN ({live_statuses})
            )"
     );
-    let result = sqlx::query(&query).execute(pool).await?;
+    let result = sqlx::query(AssertSqlSafe(query)).execute(pool).await?;
     Ok(result.rows_affected())
 }
 
@@ -101,7 +101,7 @@ pub async fn slot_has_recent_terminal_auto_queue_dispatch_pg(
                    >= NOW() - make_interval(secs => $3::INT)
          )"
     );
-    sqlx::query_scalar::<_, bool>(&query)
+    sqlx::query_scalar::<_, bool>(AssertSqlSafe(query))
         .bind(agent_id)
         .bind(slot_index)
         .bind(SLOT_TERMINAL_DISPATCH_COOLDOWN_SECONDS)
@@ -154,7 +154,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         Some("d.id != $3"),
     );
     let query = format!("SELECT {active_dispatch_exists}");
-    sqlx::query_scalar::<_, bool>(&query)
+    sqlx::query_scalar::<_, bool>(AssertSqlSafe(query))
         .bind(agent_id)
         .bind(slot_index)
         .bind(exclude_id)

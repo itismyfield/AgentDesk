@@ -131,6 +131,10 @@ class DiscriminationTests(unittest.TestCase):
             root / "scripts/test_only_module_skip_pin.py",
         )
         shutil.copy2(
+            ROOT / "scripts/test_only_module_skip_pin_paths.py",
+            root / "scripts/test_only_module_skip_pin_paths.py",
+        )
+        shutil.copy2(
             ROOT / "scripts/generate_inventory_docs.py",
             root / "scripts/generate_inventory_docs.py",
         )

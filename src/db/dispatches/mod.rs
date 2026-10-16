@@ -11,7 +11,7 @@ pub(crate) use metadata::{
     load_dispatch_delivery_metadata_pg, resolve_dispatch_delivery_channel_pg,
     resolve_review_followup_channel_pg,
 };
-use sqlx::{PgPool, Row as SqlxRow};
+use sqlx::{AssertSqlSafe, PgPool, Row as SqlxRow};
 
 use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
@@ -346,7 +346,7 @@ async fn slot_has_active_dispatch_excluding_pg_tx(
         Some("d.id != $3"),
     );
     let dispatch_query = format!("SELECT {active_dispatch_exists}");
-    sqlx::query_scalar::<_, bool>(&dispatch_query)
+    sqlx::query_scalar::<_, bool>(AssertSqlSafe(dispatch_query))
         .bind(agent_id)
         .bind(slot_index)
         .bind(exclude_id)

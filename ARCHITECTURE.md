@@ -1766,6 +1766,7 @@ src/
 │   │   │   ├── legacy_state.rs
 │   │   │   ├── liveness.rs
 │   │   │   ├── loop_poll_prologue.rs
+│   │   │   ├── lost_body_record_pg_tests.rs
 │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   ├── no_result_exits.rs
 │   │   │   ├── o_capsule_origin_tests.rs
@@ -1866,6 +1867,10 @@ src/
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
 │   │   │   │   ├── cancel_backstop_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
+│   │   │   │   ├── claude_idle_o_host_fixture_tests.rs
+│   │   │   │   ├── claude_idle_o_late_hook_tests.rs
+│   │   │   │   ├── claude_idle_o_transition_tests.rs
+│   │   │   │   ├── codex_o_handoff_replay_tests.rs
 │   │   │   │   ├── cold_start_incident_e2e_tests.rs
 │   │   │   │   ├── consumed_command_guard_e2e.rs
 │   │   │   │   ├── discord_mock.rs
@@ -1874,6 +1879,7 @@ src/
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
+│   │   │   │   ├── idle_phase_split_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
 │   │   │   │   ├── pending_admission_e2e_tests.rs
@@ -1923,6 +1929,9 @@ src/
 │   │   │   ├── claude_idle_runtime.rs
 │   │   │   ├── claude_idle_tail.rs
 │   │   │   ├── claude_idle_tail_host_tests.rs
+│   │   │   ├── claude_source.rs
+│   │   │   ├── claude_source_idle_tests.rs
+│   │   │   ├── claude_source_tests.rs
 │   │   │   ├── codex_idle_rollout.rs
 │   │   │   ├── headless.rs
 │   │   │   ├── headless_tests.rs
@@ -1940,6 +1949,7 @@ src/
 │   │   │   ├── rehydration_pending_tests.rs
 │   │   │   ├── relay_ownership.rs
 │   │   │   ├── session_rotation_settle.rs
+│   │   │   ├── source_tick.rs
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
@@ -2833,6 +2843,7 @@ src/
 │   │   │   │   │   └── prefix_tests.rs
 │   │   │   │   └── codex.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs

@@ -171,6 +171,7 @@ impl ReaderHost {
                     source: old.clone(),
                     seq: 1,
                     parent: None,
+                    hot_candidate: None,
                     committed_at: Utc::now(),
                     boundary: Boundary::Undecided,
                 },

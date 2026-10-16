@@ -854,11 +854,11 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    "job_sha256" => "315ad84a0f81d05183968a40b1be5b0c8d739be1fa111a47b0a2eb50798c3c34",
+    "job_sha256" => "e2c2439d9eeeaf058608a9fbd26a44f5ce4d966a4c91e92123cbb1be2ba58cca",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
-        "timeout_minutes" => 45,
+        "timeout_minutes" => 60,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
