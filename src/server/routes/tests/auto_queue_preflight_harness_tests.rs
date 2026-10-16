@@ -4,7 +4,7 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use serde_json::{Value, json};
-use sqlx::{Column, Row};
+use sqlx::{Column, PgPool, Row};
 use std::{
     collections::BTreeSet,
     env, fs,
@@ -3042,7 +3042,7 @@ fn is_execution_target_json_key(key: &str) -> bool {
         || normalized.ends_with("_branch")
 }
 
-async fn load_limited_json_rows(pool: &sqlx::PgPool, sql: &str) -> Result<Vec<Value>, String> {
+async fn load_limited_json_rows(pool: &PgPool, sql: &'static str) -> Result<Vec<Value>, String> {
     let rows = sqlx::query(sql)
         .fetch_all(pool)
         .await
@@ -3070,7 +3070,7 @@ fn decode_row_value(row: &sqlx::postgres::PgRow, name: &str) -> Result<Value, St
     Ok(Value::Null)
 }
 
-async fn scalar_i64(pool: &sqlx::PgPool, sql: &str) -> Result<i64, String> {
+async fn scalar_i64(pool: &sqlx::PgPool, sql: &'static str) -> Result<i64, String> {
     sqlx::query_scalar::<_, i64>(sql)
         .fetch_one(pool)
         .await

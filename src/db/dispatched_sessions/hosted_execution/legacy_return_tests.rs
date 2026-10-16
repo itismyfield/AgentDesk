@@ -208,11 +208,13 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
         "returned_hosted_execution = '{\"occupied\":true}'",
     ] {
         let mut tx = pool.begin().await.unwrap();
-        sqlx::query(&format!("UPDATE sessions SET {assignment} WHERE id = $1"))
-            .bind(observed.session_id)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE sessions SET {assignment} WHERE id = $1"
+        )))
+        .bind(observed.session_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         let changed = snapshot(&pool, observed.session_id).await;
         assert_eq!(

@@ -17,7 +17,7 @@ use crate::db::dispatched_sessions::{
 };
 use crate::services::platform::tmux::SessionPresence;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 struct CanonicalIdentityPgDatabase {
     _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
@@ -1790,7 +1790,7 @@ async fn canonical_identity_migration_backfills_only_unique_legacy_tuple_pg() {
         .split("WITH eligible AS (")
         .nth(1)
         .expect("0100 migration contains backfill");
-    sqlx::raw_sql(&format!("WITH eligible AS ({backfill}"))
+    sqlx::raw_sql(AssertSqlSafe(format!("WITH eligible AS ({backfill}")))
         .execute(&pool)
         .await
         .expect("rerun idempotent migration backfill");

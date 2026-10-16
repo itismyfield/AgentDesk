@@ -6899,6 +6899,7 @@ services::discord::router::message_handler::intake_turn::adk_thread::route_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_transition_busy_intake_replays_its_resolved_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_claimed_route_survives_a_later_tail
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_route_resolved_before_the_tail_is_published_by_its_claim
+services::discord::router::message_handler::intake_turn::adk_thread::tests::a_refused_queued_redirect_returns_its_uploads_and_clear_flag
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_refusal_preserves_existing_thread_role_override
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping
@@ -8279,6 +8280,7 @@ services::discord::tmux::tmux_watcher::terminal_readiness::tests::terminal_relay
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::terminal_relay_does_not_adopt_synthetic_status_panel_message_id
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::watcher_direct_terminal_idle_commit_keeps_later_token_update_idle
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::watcher_direct_terminal_idle_commit_requires_delivery_without_inflight
+services::discord::tmux::tmux_watcher::terminal_relay_plan::lost_body_record_pg_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_body_the_sink_already_put_on_screen_requires_no_record_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_dropped_body_with_no_durable_record_violates_i17_5941
@@ -8318,10 +8320,10 @@ services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::rowless_soft_terminal_stays_a_delivery_candidate_on_a_delivery_lease_5464_c1
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::rowless_soft_terminal_stays_a_delivery_candidate_on_a_ledger_obligation_5464_c1
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::soft_terminal_authority_reads_the_pre_relay_row_not_the_startup_snapshot_5175
+services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_dead_letter_kind_survives_a_non_unix_build_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_plan_itself_admits_the_lost_body_to_the_record_5941
-services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_production_call_site_hands_the_seam_the_lost_body_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::the_record_reason_carries_both_coordinate_systems_5941
 services::discord::tmux::tmux_watcher::terminal_send::tests::watcher_long_chunk_delivery_none_anchor_is_noop_3610d
 services::discord::tmux::tmux_watcher::terminal_send::tests::watcher_long_chunk_delivery_off_is_noop_3610d
@@ -8984,6 +8986,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_aborted_intake_leaves_the_owner_to_record_the_injection_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::postgres_runtime_helpers_keep_bootstrap_futures_off_the_test_stack
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::startup_recovery_and_a_restart_drain_keep_text_from_the_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_parent_arrival_after_the_thread_took_the_message_does_not_paste_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg

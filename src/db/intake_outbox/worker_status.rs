@@ -52,7 +52,7 @@ async fn lock_owner(
 }
 
 // Bind Rust's normalized identity; SQL btrim/lower do not have identical Unicode semantics.
-fn push_fence(sql: &mut QueryBuilder<'_, Postgres>, row: &WorkerSnapshot, stamp: &Stamp) {
+fn push_fence(sql: &mut QueryBuilder<Postgres>, row: &WorkerSnapshot, stamp: &Stamp) {
     sql.push(" AND io.provider = ")
         .push_bind(row.provider.clone())
         .push(" AND io.channel_id = ")

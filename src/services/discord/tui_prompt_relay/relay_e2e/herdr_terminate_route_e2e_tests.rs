@@ -16,7 +16,6 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::herdr_terminate::test_turn;
 use crate::services::discord::queue_io::cancel_backstop_test_support as observed;
-use crate::services::discord::router;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::herdr_termination_rig as herdr;
 
@@ -163,7 +162,7 @@ async fn scenario(rig: herdr::P11TerminationRig) {
     let event = serenity::FullEvent::Message {
         new_message: user_message(queued.get(), QUEUED),
     };
-    let intake = router::handle_event(&harness.ctx, &event, &harness.clone_data()).await;
+    let intake = super::boxed_intake(&harness.ctx, &event, &harness.clone_data()).await;
     assert!(intake.is_ok(), "{intake:?}");
     let waiting = wait_until(Duration::from_secs(15), || {
         let shared = shared.clone();

@@ -64,9 +64,9 @@ impl fmt::Debug for super::ScheduledMessagePatch {
     }
 }
 
-pub(super) fn apply_definition_patch<'args>(
-    builder: &mut QueryBuilder<'args, Postgres>,
-    patch: &'args ScheduledMessagePatch,
+pub(super) fn apply_definition_patch(
+    builder: &mut QueryBuilder<Postgres>,
+    patch: &ScheduledMessagePatch,
 ) {
     if let Some(provider_targets) = &patch.provider_targets {
         builder

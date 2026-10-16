@@ -585,7 +585,7 @@ async fn bump_by_provider_channel(
            AND {column_predicate}
            AND lower(COALESCE(s.provider, '')) = $2"
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(channel_text)
         .bind(provider.as_str().to_lowercase())
         .execute(pool)

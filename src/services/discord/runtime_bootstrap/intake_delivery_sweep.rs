@@ -90,7 +90,7 @@ async fn live_signal(
            JOIN public.sessions s ON {session_scope}
           WHERE io.id = $1"
     );
-    let signal: i16 = sqlx::query_scalar(&statement)
+    let signal: i16 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .bind(outbox_id)
         .bind(heartbeat_fresh)
         .bind(absence_cutoff)

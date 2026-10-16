@@ -84,6 +84,23 @@ async fn busy() -> Busy {
     }
 }
 
+#[test]
+fn postgres_runtime_helpers_keep_bootstrap_futures_off_the_test_stack() {
+    fn future_size<F>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let (runtime, busy, announce) = (
+        future_size(runtime),
+        future_size(busy),
+        future_size(busy_with_announce),
+    );
+    eprintln!("bootstrap future bytes: runtime={runtime}, busy={busy}, announce={announce}");
+    assert!(
+        runtime <= 16_384 && busy <= 16_384 && announce <= 16_384,
+        "bootstrap helpers must hold a pinned future: runtime={runtime}, busy={busy}, announce={announce}"
+    );
+}
+
 impl Runtime {
     /// Empties the channel's mailbox and disarms leftover save faults, so no task this scenario
     /// left writes its queue into the next harness's root, which reuses the channel.
@@ -659,7 +676,13 @@ async fn busy_with_announce() -> Busy {
         db = Some(fixture);
         Some(pool)
     };
-    let h = RelayE2eHarness::start_inner(ProviderStub::Success, true, storage, true).await;
+    let h = Box::pin(RelayE2eHarness::start_inner(
+        ProviderStub::Success,
+        true,
+        storage,
+        true,
+    ))
+    .await;
     let registry = h.health_registry.clone().expect("a health registry");
     registry
         .set_utility_bot_user_id_for_tests(UtilityBotRole::Announce, ANNOUNCE_ID)
