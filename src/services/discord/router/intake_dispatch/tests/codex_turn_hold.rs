@@ -4,6 +4,7 @@
 use super::*;
 use crate::services::cluster::attachment_transfer::{store, uploads::Upload};
 use crate::services::discord::router::message_handler::{AttachmentDescriptor, TEST_DOWNLOADS};
+#[cfg(unix)]
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
@@ -227,6 +228,7 @@ async fn a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_
 }
 
 /// A Discord message carrying `attachments` to the selected Codex channel.
+#[cfg(unix)]
 fn gateway_message(message_id: u64, attachments: &[(&str, &str)]) -> serenity::Message {
     let mut message = discord_mock::user_message(message_id, "read the report");
     message.channel_id = ChannelId::new(CHANNEL);
@@ -243,6 +245,7 @@ fn gateway_message(message_id: u64, attachments: &[(&str, &str)]) -> serenity::M
 }
 
 /// Production gateway intake of `message`, on its own task so the intake future leaves this stack.
+#[cfg(unix)]
 async fn through_gateway(
     ctx: &serenity::Context,
     data: &Arc<crate::services::discord::Data>,
@@ -261,6 +264,7 @@ async fn through_gateway(
 
 /// The gateway's own attachment branch: a download that fails for one file or a queue that cannot
 /// hold the input leaves the checkpoint behind; a held input moves it to its own message.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg() {
     let _env = intake_env();
