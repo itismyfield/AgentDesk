@@ -144,9 +144,10 @@ class NonPgModuleSelectors(FixtureCase):
         skips, replay = membership.non_pg_selection(self.root)
         self.assertEqual(skips, globals + ("pure",))
         self.assertEqual(replay, ("suite::plain_pg_name",))
-        shard_0, shard_1 = membership.pg_include_shards(skips, membership.load_lib_test_inventory(self.root))
-        self.assertEqual(set(shard_0[1:]) | set(shard_1[1:]), {"pure::database", "suite::plain_pg_name"})
-        self.assertFalse(set(shard_0[1:]) & set(shard_1[1:]))
+        shards = membership.pg_include_shards(skips, membership.load_lib_test_inventory(self.root))
+        selected = [test for shard in shards for test in shard[1:]]
+        self.assertEqual(len(shards), membership.PG_SHARD_COUNT)
+        self.assertEqual(sorted(selected), ["pure::database", "suite::plain_pg_name"])
 
     def test_existing_and_new_names_keep_selection_replay_and_both_shards(self) -> None:
         modules = (
@@ -385,8 +386,8 @@ class NonPgFilterContract(unittest.TestCase):
         from unittest.mock import patch
         shards = membership.load_pg_include_shards(self.root)
         self.assertTrue(all(len(args) > 1 for args in shards))
-        missing = (shards[0][:-1], shards[1])
-        overlap = (shards[0], (*shards[1], shards[0][-1]))
+        missing = (shards[0][:-1], *shards[1:])
+        overlap = (shards[0], (*shards[1], shards[0][-1]), *shards[2:])
         for bad, message in ((missing, "PG shards [] select"), (overlap, "PG shards [0, 1] select")):
             with self.subTest(message=message), patch.object(membership, "load_pg_include_shards", return_value=bad):
                 errors = membership.pg_shard_contract_errors(self.root, self.jobs())
