@@ -183,6 +183,7 @@ impl HostIo for GatewayHost {
     }
 
     /// Legacy inflight, delivery custody and pending starts, durable or in memory: all local files.
+    /// A pending start alone is told apart from one beside a terminal delivery Legacy holds.
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
         let kind = match provider {
             ShadowProvider::Claude => ProviderKind::Claude,
@@ -198,11 +199,24 @@ impl HostIo for GatewayHost {
                 kind.as_str(),
                 channel,
             );
-        if pending_start || super::super::terminal_delivery_custody::retains_channel(channel)? {
-            return Ok(Custody::Active);
+        #[cfg(test)]
+        {
+            use crate::services::tui_o::writer::activation::test_hook;
+            test_hook::run(channel, test_hook::Step::CustodyRead)?;
         }
-        let row = super::super::inflight::inflight_state_file_exists(&kind, channel);
-        Ok(if row { Custody::Row } else { Custody::Free })
+        // Beside a pending start, delivery custody that cannot be read still counts as held.
+        match (
+            pending_start,
+            super::super::terminal_delivery_custody::retains_channel(channel),
+        ) {
+            (true, Ok(false)) => Ok(Custody::PendingStart),
+            (true, _) | (false, Ok(true)) => Ok(Custody::Active),
+            (false, Err(error)) => Err(error),
+            (false, Ok(false)) => {
+                let row = super::super::inflight::inflight_state_file_exists(&kind, channel);
+                Ok(if row { Custody::Row } else { Custody::Free })
+            }
+        }
     }
 
     fn legacy(&self) -> Arc<dyn LegacyView> {

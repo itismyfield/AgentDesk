@@ -11,6 +11,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
+mod codex;
+
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
 pub(super) struct Wake {
     binding: watch::Receiver<u64>,
@@ -52,7 +54,7 @@ pub(super) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
     })
 }
 
-pub(super) async fn activate<I: HostIo>(
+pub(crate) async fn activate<I: HostIo>(
     io: &I,
     channel: u64,
     provider: ShadowProvider,
@@ -61,6 +63,9 @@ pub(super) async fn activate<I: HostIo>(
     candidate: &Candidate,
     gate: &OwnershipGate,
 ) -> bool {
+    if provider == ShadowProvider::Codex {
+        return codex::activate(io, channel, store, log, candidate, gate).await;
+    }
     let alarms = io.alarms();
     let mut wake = Wake::new(log, channel);
     let mut checked = false;
