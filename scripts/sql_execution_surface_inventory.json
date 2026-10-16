@@ -33863,24 +33863,6 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:86c0608e8b36180b4a49f74d803718a7018bbb72ce799798472f235032608fd4"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/tmux_watcher/inherited_fixture_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:9d8ee29016d3c73bf9cf56d33dc4f136f720cdd79323aacc5fe65bc0286159ee"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
       "path": "src/services/discord/tmux_watcher/path_b_record_tests.rs",
       "api": "sqlx::query_as",
       "symbol": "query_as",

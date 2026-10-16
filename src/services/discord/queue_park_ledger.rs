@@ -138,9 +138,6 @@ fn classify(
         ("live_turn_active".to_string(), "active_turn_completion")
     } else if residue {
         ("residual_held".to_string(), "turn_finalizer_reconcile")
-    } else if super::health::legacy_supervision::is_retired(provider.as_str(), channel.get()) {
-        result.recovery_state = Some("no_periodic_caller");
-        ("legacy_retired".to_string(), "none")
     } else if cancelled(snapshot) {
         let evidence = super::zombie_foreground_release::collect_zombie_foreground_evidence(
             provider,

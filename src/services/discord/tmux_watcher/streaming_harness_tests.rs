@@ -38,12 +38,6 @@ mod n1a_turn_mode_tests;
 #[path = "o_seed_install_tests.rs"]
 mod o_seed_install_tests;
 
-#[path = "retired_host_tick_tests.rs"]
-mod retired_host_tick_tests;
-
-#[path = "retired_o_boundary_tests.rs"]
-mod retired_o_boundary_tests;
-
 #[path = "o_capsule_origin_tests.rs"]
 mod o_capsule_origin_tests;
 

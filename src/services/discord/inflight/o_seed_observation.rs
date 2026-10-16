@@ -257,10 +257,4 @@ pub(in crate::services::discord) fn retired_terminal_consumed(
 
 #[path = "o_seed_observation/terminal_barrier_test.rs"]
 mod terminal_barrier;
-pub(in crate::services::discord) use terminal_barrier::{TerminalBarrier, terminal_checkpoint};
-
-#[path = "o_seed_observation/initial_parse_barrier_test.rs"]
-mod initial_parse_barrier;
-pub(in crate::services::discord) use initial_parse_barrier::{
-    InitialParseBarrier, initial_parse_checkpoint,
-};
+pub(in crate::services::discord) use terminal_barrier::terminal_checkpoint;

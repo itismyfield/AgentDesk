@@ -171,7 +171,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tmux::tmux_watcher::path_b_record::tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::herdr_entry_host_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests
-  --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests
   --skip services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
   --skip services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
@@ -685,9 +684,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::collector_death_keeps_a_turn_bound_to_another_host
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::retired_host_probe_keeps_unanswered_and_preserves_legacy_liveness
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::retired_host_probe_requires_independent_tmux_and_native_source_evidence
-  services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::retired_host_tick_tests::t6_f_installer_keeps_changed_herdr_unknown_runtime_and_missing_marker_through_both_eofs
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
   services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::rewound_read_below_a_live_row_baseline
