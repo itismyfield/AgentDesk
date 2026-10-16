@@ -2335,6 +2335,7 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
     const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
+    const CLEAR: &str = "a user clear of a channel with no Herdr endpoint";
     const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
@@ -2399,9 +2400,24 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             ],
         ),
         (
+            "end_managed_process_session",
+            &[
+                (
+                    "src/services/discord/commands/control/managed_reset.rs",
+                    1,
+                    ENTRY,
+                ),
+                (
+                    "src/services/discord/commands/control/clear_teardown.rs",
+                    1,
+                    CLEAR,
+                ),
+            ],
+        ),
+        (
             "reset_managed_process_session",
             &[
-                ("src/services/discord/commands/control.rs", 1, MISSING),
+                ("src/services/discord/commands/control.rs", 0, ENTRY),
                 (
                     "src/services/discord/commands/control/provider_reset.rs",
                     1,
@@ -3186,7 +3202,13 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
         sources,
         &[
             ("terminate_registered_herdr", &[(TERMINATE_ROUTE, 1)]),
-            ("terminate_explicit_herdr", &[(TERMINATE_SERVICE, 1)]),
+            (
+                "terminate_explicit_herdr",
+                &[
+                    (TERMINATE_SERVICE, 1),
+                    ("src/services/discord/commands/control/clear_teardown.rs", 1),
+                ],
+            ),
             ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
             ("retire_pg", &[(HERDR_CLI, 1), (TERMINATE_SERVICE, 1)]),
             (
