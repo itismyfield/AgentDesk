@@ -33,6 +33,16 @@ from pathlib import Path
 
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset({
+        "src/services/discord/router/message_handler/s1_entry_tests.rs",
+        "src/services/discord/turn_presence/activity/tail_switch_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/live_review_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/live_tests.rs",
+        "src/services/discord/turn_presence/activity/unbound/unit_tests.rs",
+        "src/services/discord/turn_presence/activity_tests/effect_tests.rs",
+        "src/services/discord/turn_presence/activity_tests/large_tests.rs",
+        "src/services/platform/tmux/session_inventory/real_tests.rs",
+        "src/services/platform/tmux/session_inventory/unit_tests.rs",
         "src/services/discord/outbound/local_retry_io_tests.rs",
         "src/services/tui_o/store/local_retry_ledger_tests.rs",
         "src/services/tui_o/writer/local_retry_actor_tests.rs",
@@ -816,7 +826,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset({
         "src/services/discord/health/recovery/self_watchdog/policy/tests/mod.rs",
         "src/services/discord/health/recovery/self_watchdog/tests/mod.rs",
         "src/services/hang_forensics/tests/mod.rs",
-        "src/services/discord/turn_presence/activity/tail.rs",
         "src/services/discord/inflight/save_store/coordinate_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay.rs",
         "src/services/discord/recovery_engine/legacy_restart_replay/proof.rs",
