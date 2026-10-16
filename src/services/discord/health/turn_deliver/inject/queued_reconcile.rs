@@ -2,7 +2,7 @@
 //! one exact enqueue of its frame, the absorbed removal of it and the human queued command both name.
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::queued_support::RECONCILED;
@@ -86,7 +86,7 @@ struct Bound {
     session: String,
     path: PathBuf,
     file: FileId,
-    session_id: Option<String>,
+    session_id: String,
 }
 
 async fn bound_transcript(shared: &SharedData, request: &HumanInputRequest) -> Option<Bound> {
@@ -96,21 +96,33 @@ async fn bound_transcript(shared: &SharedData, request: &HumanInputRequest) -> O
     let runtime = RuntimeHandoffKind::ClaudeTui;
     let (session, path) = live_tui_session(shared, request, runtime, row.as_ref(), named)?;
     let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session)?;
+    let session_id = transcript_session(&path, binding.session_id.as_deref())?;
     let file = file_id(&std::fs::metadata(&path).ok()?)?;
     Some(Bound {
         session,
         path,
         file,
-        session_id: binding.session_id,
+        session_id,
     })
+}
+
+/// The Claude session a transcript is named for, `<uuid>.jsonl`; a binding that names a session
+/// must name the same one.
+pub(super) fn transcript_session(path: &Path, bound: Option<&str>) -> Option<String> {
+    let jsonl = path.extension().is_some_and(|ext| ext == "jsonl");
+    let stem = path.file_stem()?.to_str().filter(|_| jsonl)?;
+    uuid::Uuid::parse_str(stem).ok()?;
+    bound
+        .is_none_or(|bound| bound == stem)
+        .then(|| stem.to_string())
 }
 
 /// The paste a head recorded before it could start.
 struct Recorded {
     nonce: String,
     transcript: String,
-    session_id: Option<String>,
-    file: Option<FileId>,
+    session_id: String,
+    file: FileId,
     offset: u64,
 }
 
@@ -129,7 +141,7 @@ struct Want {
     author: String,
     text: String,
     nonce: Option<String>,
-    session_id: Option<String>,
+    session_id: String,
     after_us: Option<i64>,
 }
 
@@ -169,7 +181,7 @@ impl Want {
             // Only the paste's own transcript file and session can hold its record.
             Some(recorded) => {
                 if recorded.transcript != bound.path.display().to_string()
-                    || recorded.file != Some(bound.file)
+                    || recorded.file != bound.file
                     || recorded.session_id != bound.session_id
                 {
                     return None;
@@ -293,8 +305,8 @@ impl Want {
         (hex && busy_inject::exact_receipt(body, &frame)).then(|| nonce.to_string())
     }
 
-    /// One enqueue under the nonce, then an absorbed removal and a human command naming the same
-    /// ids, each with the enqueue's body and session.
+    /// One enqueue under the nonce in the bound session, then an absorbed removal and, after it, a
+    /// human command naming the same ids, each with the enqueue's body and session.
     fn decide(&self, seen: &[Seen]) -> Option<Proof> {
         let paste = |seen: &Seen| {
             let after = |after: i64| seen.stamp_us.is_some_and(|at| at >= after);
@@ -318,22 +330,21 @@ impl Want {
         let [enqueue] = enqueues[..] else {
             return None;
         };
-        let session = self.session_id.as_ref();
-        let bound_session = session.is_none_or(|id| *id == enqueue.session);
+        let bound_session = self.session_id == enqueue.session;
         let after = mine.iter().copied().filter(|seen| {
             seen.offset > enqueue.offset
                 && seen.body == enqueue.body
                 && seen.session == enqueue.session
         });
-        let removed: Vec<&Kind> = (after.clone())
-            .map(|seen| &seen.kind)
-            .filter(|kind| matches!(kind, Kind::Removed(..)))
-            .collect();
+        // In file order: a command counts only once its removal has been seen.
+        let mut removed: Vec<(&str, &str)> = Vec::new();
         let linked = after.into_iter().any(|seen| match &seen.kind {
-            Kind::Command(command, delivery) => {
-                removed.contains(&&Kind::Removed(command.clone(), delivery.clone()))
+            Kind::Removed(command, delivery) => {
+                removed.push((command, delivery));
+                false
             }
-            _ => false,
+            Kind::Command(command, delivery) => removed.contains(&(command, delivery)),
+            Kind::Enqueue => false,
         });
         (paste(enqueue) && bound_session && linked).then(|| Proof {
             nonce,

@@ -4,7 +4,9 @@
 use super::*;
 use crate::services::claude_tui::busy_inject::frame;
 
-const SESSION: &str = "s2b-native";
+const SESSION: &str = InjectPane::SESSION;
+/// A Claude session other than the one the pane's transcript file is named for.
+const OTHER: &str = "7d3e9a10-2c4b-4f6e-8a1d-5b9c0e2f4a6d";
 const NONCE: &str = "0a1b2c3d";
 /// Older than every queue clock here, as the fake pane stamps its own records.
 const OLD_STAMP: &str = "2026-10-06T00:00:00.000Z";
@@ -12,14 +14,19 @@ const OLD_STAMP: &str = "2026-10-06T00:00:00.000Z";
 /// Claude's records of a queued paste it absorbed mid-turn: the enqueue, its removal, and the human
 /// prompt command naming the removal's ids.
 fn absorbed(prompt: &str, stamp: &str) -> String {
+    absorbed_in(prompt, stamp, SESSION)
+}
+
+/// As `absorbed`, recorded under `session`.
+fn absorbed_in(prompt: &str, stamp: &str, session: &str) -> String {
     let (command, delivery) = ("s2b-command", "s2b-delivery");
     [
         json!({"type": "queue-operation", "operation": "enqueue", "timestamp": stamp,
-            "sessionId": SESSION, "content": prompt}),
+            "sessionId": session, "content": prompt}),
         json!({"type": "queue-operation", "operation": "remove", "timestamp": stamp,
-            "sessionId": SESSION, "content": prompt, "reason": "absorbed_mid_turn",
+            "sessionId": session, "content": prompt, "reason": "absorbed_mid_turn",
             "commandUuid": command, "deliveryId": delivery}),
-        json!({"type": "attachment", "timestamp": stamp, "sessionId": SESSION,
+        json!({"type": "attachment", "timestamp": stamp, "sessionId": session,
             "attachment": {"type": "queued_command", "prompt": prompt, "source_uuid": command,
             "delivery_id": delivery, "commandMode": "prompt", "origin": {"kind": "human"},
             "humanTurn": true}}),
@@ -41,7 +48,7 @@ impl Fixture {
 
     fn append(&self, lines: &str) {
         use std::io::Write;
-        let path = self.pane.path("transcript.jsonl");
+        let path = self.pane.path(InjectPane::TRANSCRIPT);
         let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         writeln!(file, "{lines}").unwrap();
     }
@@ -83,6 +90,31 @@ impl Fixture {
         reconciled
             .filter(|row| row.head_state == "terminal")
             .count()
+    }
+
+    /// Binds the pane to `file` in its directory, the binding naming `session` or none.
+    fn bind(&self, file: &str, session: Option<&str>) {
+        let binding = crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+            runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+            output_path: self.pane.path(file).display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: session.map(str::to_string),
+            last_offset: 0,
+            relay_last_offset: None,
+        };
+        let register = crate::services::tui_prompt_dedupe::register_tmux_runtime_binding;
+        register(&self.pane.session(), binding);
+    }
+
+    /// A kick that leaves the Unknown head, its queue file and the pane as they were.
+    async fn assert_kept(&self, case: &str) {
+        let bytes = self.bytes();
+        self.kick().await;
+        assert_eq!(self.bytes(), bytes, "{case}: the queue file is untouched");
+        assert!(self.terminal().is_empty(), "{case}");
+        assert_eq!(self.reconciled_rows(), 0, "{case}");
+        assert!(self.pane.keys().is_empty(), "{case}: nothing was typed");
     }
 
     async fn clear_mailbox(&self) {
@@ -359,4 +391,78 @@ async fn s3_an_overlapping_kick_or_a_failed_write_never_consumes_twice_or_types_
     assert_eq!(fixture.queue().await[0].message_id, b);
     assert_eq!(fixture.reconciled_rows(), 1);
     assert!(fixture.pane.keys().is_empty());
+}
+
+/// Proof counts only in the Claude session the bound transcript file is named for: records of
+/// another session or a binding naming another session consume nothing; a binding naming it does.
+#[tokio::test(flavor = "current_thread")]
+async fn s3_a_proof_counts_only_in_the_session_its_bound_file_is_named_for_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, recorded_in, bound) in
+        [(6_813_471, OTHER, None), (6_813_474, SESSION, Some(OTHER))]
+    {
+        let fixture = Fixture::new(channel, "all").await;
+        let _gate = router::busy_inject_support::open_gate(channel);
+        let h = fixture.unknown_head().await;
+        let head = fixture.wrapped_head(h, &fixture.recorded_nonce());
+        fixture.append(&absorbed_in(&head, &now_stamp(), recorded_in));
+        fixture.bind(InjectPane::TRANSCRIPT, bound);
+        let case = format!("records of {recorded_in}, binding {bound:?}");
+        fixture.assert_kept(&case).await;
+        if bound.is_some() {
+            fixture.bind(InjectPane::TRANSCRIPT, Some(SESSION));
+            fixture.kick().await;
+            assert_eq!(fixture.terminal(), [h.get()]);
+            assert_eq!(fixture.reconciled_rows(), 1);
+            assert!(fixture.pane.keys().is_empty(), "H was not typed");
+        }
+    }
+}
+
+/// A paste that cannot be named in its transcript before it starts, the file unreadable or not
+/// named for a session, is handed back untyped, and typed once at the next kick that can name it.
+#[tokio::test(flavor = "current_thread")]
+async fn s3_an_unnamed_paste_is_handed_back_untyped_and_typed_once_named_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (channel, unnamed) in [(6_813_472, "unreadable"), (6_813_473, "unnamed")] {
+        let fixture = Fixture::new(channel, "all").await;
+        let _gate = router::busy_inject_support::open_gate(channel);
+        let queue = fixture.queue().await;
+        let (h, b) = (queue[0].message_id, queue[1].message_id);
+        let transcript = fixture.pane.path(InjectPane::TRANSCRIPT);
+        if unnamed == "unreadable" {
+            let moved = fixture.pane.path("moved");
+            let (at_name, resume) = inject_hook::park_queued(channel, "name_paste");
+            let caller = fixture.spawn_kick();
+            reached(&at_name).await;
+            std::fs::rename(&transcript, &moved).unwrap();
+            resume.notify_one();
+            caller.await.unwrap();
+            std::fs::rename(&moved, &transcript).unwrap();
+        } else {
+            std::fs::copy(&transcript, fixture.pane.path("legacy.jsonl")).unwrap();
+            fixture.bind("legacy.jsonl", None);
+            fixture.kick().await;
+            fixture.bind(InjectPane::TRANSCRIPT, None);
+        }
+        let rows = fixture.rows();
+        let row = rows.last().unwrap();
+        assert_eq!(
+            (row.outcome, row.reason, row.head_state),
+            ("not_sent", "queued_paste_unnamed", "queued"),
+            "{unnamed}"
+        );
+        assert!(fixture.pane.keys().is_empty(), "{unnamed}: nothing typed");
+        assert!(fixture.disk()["head_injection"].is_null(), "{unnamed}");
+        let ids = |queue: Vec<Intervention>| queue.iter().map(|i| i.message_id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(fixture.queue().await),
+            [h, b],
+            "{unnamed}: the queue is kept"
+        );
+
+        fixture.kick().await;
+        assert_eq!(fixture.terminal(), [h.get()], "{unnamed}");
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    }
 }

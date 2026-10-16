@@ -7,29 +7,42 @@ use super::*;
 pub(crate) struct HeadAttempt {
     pub(crate) nonce: String,
     pub(crate) transcript: String,
-    pub(crate) session_id: Option<String>,
+    /// The Claude session the transcript file is named for.
+    pub(crate) session_id: String,
     /// Device and inode of the transcript, so a replaced file is never read as this one.
-    pub(crate) file: Option<(u64, u64)>,
+    pub(crate) file: (u64, u64),
     /// The transcript length before the paste; its record can only come after.
     pub(crate) offset: u64,
 }
 
+/// Why a paste could not be named before it started; it is then never typed.
+#[derive(Debug)]
+pub(crate) enum AttemptUnavailable {
+    Session,
+    Metadata(std::io::Error),
+    FileId,
+}
+
+impl std::fmt::Display for AttemptUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session => f.write_str("transcript names no Claude session"),
+            Self::Metadata(error) => write!(f, "transcript metadata: {error}"),
+            Self::FileId => f.write_str("transcript file identity unavailable"),
+        }
+    }
+}
+
 impl HeadAttempt {
-    /// The paste about to start under `nonce`; `None` when the transcript cannot be read.
-    pub(super) fn before_paste(
+    /// The paste about to start under `nonce` in `session_id`'s transcript.
+    pub(crate) fn before_paste(
         nonce: &str,
         transcript: &Path,
-        session_id: Option<String>,
-    ) -> Option<Self> {
-        let meta = std::fs::metadata(transcript).ok()?;
-        #[cfg(unix)]
-        let file = {
-            use std::os::unix::fs::MetadataExt;
-            Some((meta.dev(), meta.ino()))
-        };
-        #[cfg(not(unix))]
-        let file = None;
-        Some(Self {
+        session_id: String,
+    ) -> Result<Self, AttemptUnavailable> {
+        let meta = std::fs::metadata(transcript).map_err(AttemptUnavailable::Metadata)?;
+        let file = file_id(&meta).ok_or(AttemptUnavailable::FileId)?;
+        Ok(Self {
             nonce: nonce.to_string(),
             transcript: transcript.display().to_string(),
             session_id,
@@ -37,6 +50,17 @@ impl HeadAttempt {
             offset: meta.len(),
         })
     }
+}
+
+#[cfg(unix)]
+fn file_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 /// The actor's Unknown head as the proof search reads it; consuming it needs all of it unchanged.

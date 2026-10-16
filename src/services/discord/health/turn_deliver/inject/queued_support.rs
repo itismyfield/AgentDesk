@@ -13,6 +13,8 @@ use crate::services::discord::SharedData;
 pub(super) const HEAD_UNKNOWN: &str = "queued_head_unknown";
 /// The Unknown head was consumed on transcript proof alone; nothing was typed for it.
 pub(super) const RECONCILED: &str = "queued_head_reconciled";
+/// The paste could not be named in its transcript before it started, so it was not typed.
+pub(super) const ATTEMPT_UNNAMED: &str = "queued_paste_unnamed";
 
 pub(super) async fn queued_target_matches(
     shared: &SharedData,

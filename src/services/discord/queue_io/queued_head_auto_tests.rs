@@ -132,7 +132,7 @@ impl Fixture {
         self.assert_holder_kept().await;
         let snapshot = self.shared.mailbox(self.channel).snapshot().await;
         assert!(snapshot.pending_user_dispatch.is_none());
-        let transcript = self.pane.path("transcript.jsonl");
+        let transcript = self.pane.path(InjectPane::TRANSCRIPT);
         let state = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&transcript);
         assert!(state.is_busy(), "the pane stayed busy throughout");
     }
@@ -577,9 +577,9 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
 
     let idle = Fixture::new(6_813_532, "all").await;
     let _idle_gate = router::busy_inject_support::open_gate(idle.channel.get());
-    let transcript = std::fs::read_to_string(idle.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(idle.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let ended = format!("{transcript}{{\"type\":\"result\"}}\n");
-    idle.pane.set("transcript.jsonl", &ended);
+    idle.pane.set(InjectPane::TRANSCRIPT, &ended);
     idle.pane.idle();
     queue_io::schedule_post_enqueue_idle_queue_kick(idle.shared.clone(), CLAUDE, idle.channel);
     until("the idle attempt was reported", || !idle.rows().is_empty()).await;

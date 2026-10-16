@@ -7,7 +7,8 @@ use std::io::Write;
 const CHANNEL: u64 = 6_813_460;
 const HEAD: u64 = 9_100_094_081_725_135_881;
 const NONCE: &str = "d286a43b";
-const SESSION: &str = "47d7dbe8";
+const SESSION: &str = "47d7dbe8-0c1a-4b2e-9f3d-6a5b4c3d2e1f";
+const OTHER: &str = "7d3e9a10-2c4b-4f6e-8a1d-5b9c0e2f4a6d";
 /// The source's enqueue clock: 2026-10-14T19:42:03Z.
 const CLOCK_US: i64 = 1_792_006_923_000_000;
 const AFTER: &str = "2026-10-14T20:31:14.363Z";
@@ -80,18 +81,18 @@ impl Transcript {
         file.write_all(text.as_bytes()).unwrap();
     }
 
-    fn bound(&self, session_id: Option<&str>) -> Bound {
+    fn bound(&self, session_id: &str) -> Bound {
         Bound {
             session: "AgentDesk-claude-test".into(),
             path: self.path.clone(),
             file: file_id(&std::fs::metadata(&self.path).unwrap()).unwrap(),
-            session_id: session_id.map(str::to_string),
+            session_id: session_id.to_string(),
         }
     }
 
     fn want(&self, sources: &[u64], text: &str, recorded: Option<Recorded>) -> Option<Want> {
         let channel = ChannelId::new(CHANNEL);
-        let bound = self.bound(None);
+        let bound = self.bound(SESSION);
         Want::of(
             channel,
             &identity(sources),
@@ -108,12 +109,12 @@ impl Transcript {
 }
 
 fn recorded(transcript: &Transcript, nonce: &str, offset: u64) -> Recorded {
-    let bound = transcript.bound(None);
+    let bound = transcript.bound(SESSION);
     Recorded {
         nonce: nonce.into(),
         transcript: bound.path.display().to_string(),
-        session_id: None,
-        file: Some(bound.file),
+        session_id: SESSION.into(),
+        file: bound.file,
         offset,
     }
 }
@@ -338,7 +339,7 @@ fn a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock() {
     let other_text = transcript.want(&[HEAD], "status!", None).unwrap();
     assert!(other_text.search().is_none(), "another body");
     let channel = ChannelId::new(CHANNEL);
-    let bound = transcript.bound(None);
+    let bound = transcript.bound(SESSION);
     let other_author = Want::of(
         channel,
         &identity(&[HEAD]),
@@ -350,7 +351,7 @@ fn a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock() {
     let mut unclocked = original("status?", 200);
     unclocked.source_message_queued_generations[0].enqueued_at_epoch_us = None;
     assert!(Want::of(channel, &identity(&[HEAD]), &unclocked, None, &bound).is_none());
-    let named = transcript.bound(Some("another-session"));
+    let named = transcript.bound(OTHER);
     let wrong = Want::of(
         channel,
         &identity(&[HEAD]),
@@ -360,9 +361,9 @@ fn a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock() {
     );
     assert!(
         wrong.unwrap().search().is_none(),
-        "the binding names another native session"
+        "the transcript is bound for another native session"
     );
-    let named = transcript.bound(Some(SESSION));
+    let named = transcript.bound(SESSION);
     let right = Want::of(
         channel,
         &identity(&[HEAD]),
@@ -408,14 +409,14 @@ fn a_recorded_paste_is_proven_by_its_own_nonce_after_its_offset_in_its_own_file(
             .is_none()
     );
     let mut replaced = recorded(&transcript, NONCE, offset);
-    replaced.file = Some((0, 0));
+    replaced.file = (0, 0);
     assert!(
         transcript
             .want(&[HEAD], "status?", Some(replaced))
             .is_none()
     );
     let mut other_session = recorded(&transcript, NONCE, offset);
-    other_session.session_id = Some("another-session".into());
+    other_session.session_id = OTHER.into();
     assert!(
         transcript
             .want(&[HEAD], "status?", Some(other_session))
@@ -450,4 +451,71 @@ fn a_record_still_being_written_or_a_replaced_file_proves_nothing_yet() {
     assert!(replaced.search().is_none(), "another file at the same path");
     std::fs::remove_file(&transcript.path).unwrap();
     assert!(missing.search().is_none(), "no file");
+}
+
+#[test]
+fn a_command_counts_only_after_its_removal_in_file_order() {
+    let [enqueue, remove, command] = chain(NONCE, AFTER);
+    let ok = |records: Vec<Value>| Transcript::new(&records).legacy();
+    let id = |key: &str| {
+        edit(
+            command.clone(),
+            &["attachment", key],
+            Some(json!("other-id")),
+        )
+    };
+    assert_eq!(
+        ok(vec![enqueue.clone(), command.clone(), remove.clone()]),
+        None,
+        "the command came before its removal"
+    );
+    assert_eq!(
+        ok(vec![enqueue.clone(), remove.clone(), command.clone()]).as_deref(),
+        Some(NONCE)
+    );
+    let stray_first = vec![
+        enqueue.clone(),
+        command.clone(),
+        remove.clone(),
+        command.clone(),
+    ];
+    assert_eq!(
+        ok(stray_first).as_deref(),
+        Some(NONCE),
+        "a later removal and command still prove it"
+    );
+    for key in ["source_uuid", "delivery_id"] {
+        let records = vec![enqueue.clone(), remove.clone(), id(key)];
+        assert_eq!(ok(records), None, "the command names another {key}");
+    }
+}
+
+#[test]
+fn the_proof_session_is_the_one_the_transcript_file_is_named_for() {
+    let named = |name: &str, bound: Option<&str>| {
+        transcript_session(&std::path::Path::new("/p").join(name), bound)
+    };
+    let file = format!("{SESSION}.jsonl");
+    assert_eq!(named(&file, None).as_deref(), Some(SESSION));
+    assert_eq!(named(&file, Some(SESSION)).as_deref(), Some(SESSION));
+    assert_eq!(named(&file, Some(OTHER)), None, "the binding names another");
+    assert_eq!(
+        named("transcript.jsonl", None),
+        None,
+        "not named for a session"
+    );
+    assert_eq!(
+        named(&format!("{SESSION}.json"), None),
+        None,
+        "not a transcript"
+    );
+
+    let other: Vec<Value> = (chain(NONCE, AFTER).into_iter())
+        .map(|record| edit(record, &["sessionId"], Some(json!(OTHER))))
+        .collect();
+    assert_eq!(
+        Transcript::new(&other).legacy(),
+        None,
+        "records of another session in this session's file"
+    );
 }

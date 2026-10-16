@@ -1,7 +1,8 @@
 //! The queued-head owner: a head already proven taken is consumed first, otherwise the first ready
 //! input is reserved, its paste recorded before it can start, typed once and settled by the actor.
+use super::queued_reconcile::transcript_session;
+use super::queued_support::ATTEMPT_UNNAMED;
 use super::*;
-use crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
 
 pub(super) async fn queued_attempt(
     shared: &Arc<SharedData>,
@@ -75,16 +76,20 @@ pub(super) async fn queued_attempt(
             }
             #[cfg(test)]
             test_hook::owner_crash(input.channel);
+            #[cfg(test)]
+            test_hook::before_queued(input.channel, "name_paste").await;
             // The paste is named before it can start, so a later Unknown can still be proven.
-            let binding = runtime_binding_for_tmux_session(&target.session);
-            let session_id = binding.and_then(|binding| binding.session_id);
+            let bound = target.binding.as_ref().map(|binding| binding.4.as_deref());
+            let session = bound.and_then(|bound| transcript_session(&target.transcript, bound));
+            let held = ticket.as_mut().unwrap();
+            if let Err(error) = held.name_paste(&input.nonce, &target.transcript, session) {
+                let channel_id = input.channel;
+                tracing::warn!(channel_id, %error, "queued paste not named; not typed");
+                return InjectAttempt::NotSent(ATTEMPT_UNNAMED);
+            }
             let held = ticket.take().unwrap();
             let marked = mailbox
-                .settle_queued_head(
-                    held.with_attempt(&input.nonce, &target.transcript, session_id),
-                    HeadOutcome::MayHaveSent,
-                    persistence.clone(),
-                )
+                .settle_queued_head(held, HeadOutcome::MayHaveSent, persistence.clone())
                 .await;
             match marked {
                 HeadSettle::Committed(Some(kept)) => ticket = Some(kept),

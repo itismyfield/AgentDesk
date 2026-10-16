@@ -64,7 +64,8 @@ pub(crate) struct PersistedHeadInjection {
     pub(crate) identity: QueueIdentity,
     pub(crate) original: PendingQueueItem,
     pub(crate) phase: HeadPhase,
-    /// The paste this head may have become, recorded before it could start; absent before it.
+    /// The paste this head may have become, named before it could start; only an older binary's
+    /// record lacks it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) attempt: Option<mend::HeadAttempt>,
 }
@@ -500,15 +501,18 @@ mod claim {
             &self.item
         }
 
-        /// Names the paste about to start, so the MayHaveSent settle records it with the head.
-        pub(crate) fn with_attempt(
-            mut self,
+        /// Names the paste about to start in `session_id`'s transcript, so the MayHaveSent settle
+        /// records it with the head; a paste that cannot be named must not be typed.
+        pub(crate) fn name_paste(
+            &mut self,
             nonce: &str,
             transcript: &Path,
             session_id: Option<String>,
-        ) -> Self {
-            self.attempt = mend::HeadAttempt::before_paste(nonce, transcript, session_id);
-            self
+        ) -> Result<(), mend::AttemptUnavailable> {
+            let session_id = session_id.ok_or(mend::AttemptUnavailable::Session)?;
+            let attempt = mend::HeadAttempt::before_paste(nonce, transcript, session_id)?;
+            self.attempt = Some(attempt);
+            Ok(())
         }
     }
 

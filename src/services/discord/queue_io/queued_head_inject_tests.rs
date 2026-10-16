@@ -530,7 +530,7 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     );
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -598,7 +598,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
         fixture.channel, before[0].message_id
     )));
     assert!(!buffer.contains("distinct tail B"));
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -892,14 +892,14 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         assert_eq!(fixture.disk()["head_injection"]["phase"], phase);
         assert_eq!(fixture.pane.tmux_calls(), 0);
         if idle {
-            let transcript_path = fixture.pane.path("transcript.jsonl");
+            let transcript_path = fixture.pane.path(InjectPane::TRANSCRIPT);
             assert!(
                 crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&transcript_path)
                     .is_busy()
             );
             let transcript = std::fs::read_to_string(&transcript_path).unwrap();
             fixture.pane.set(
-                "transcript.jsonl",
+                InjectPane::TRANSCRIPT,
                 &format!("{transcript}{{\"type\":\"result\"}}\n"),
             );
             fixture.pane.idle();
@@ -1038,14 +1038,14 @@ async fn s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_
     assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
     assert!(fixture.pane.transcript_recorded_the_paste());
     fixture.pane.idle();
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     fixture.pane.set(
-        "transcript.jsonl",
+        InjectPane::TRANSCRIPT,
         &format!("{transcript}{{\"type\":\"result\"}}\n"),
     );
     assert_eq!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
-            &fixture.pane.path("transcript.jsonl")
+            &fixture.pane.path(InjectPane::TRANSCRIPT)
         ),
         crate::services::tui_turn_state::TuiTurnState::Idle
     );
