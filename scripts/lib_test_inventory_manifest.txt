@@ -6766,6 +6766,8 @@ services::discord::router::intake_dispatch::replay_admission_tests::prepare_comm
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
 services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
 services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_pg
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::final_guards::c2b_legacy_guard_keeps_a_small_caller_future
@@ -9128,6 +9130,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_ro
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_session_key_mismatch_preserves_newer_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
+services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_begun_before_the_takeover_persists_no_start_after_confirmation
 services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_resumed_after_confirmation_persists_no_start
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
@@ -10241,6 +10244,8 @@ services::discord::turn_finalizer::cleanup::tests::standby_relay_completion_fina
 services::discord::turn_finalizer::cleanup::tests::synthetic_message_ids_skip_backstop_reaction_cleanup
 services::discord::turn_finalizer::cleanup::tests::watcher_context_skips_extra_reaction_calls
 services::discord::turn_finalizer::completion_admission::codex_tests::a_refused_codex_confirmation_keeps_the_claim_for_one_reconcile_wake
+services::discord::turn_finalizer::completion_admission::codex_tests::a_restarted_takeover_confirms_on_its_init_source
+services::discord::turn_finalizer::completion_admission::codex_tests::a_takeover_confirms_on_its_committed_source_after_the_binding_rotates
 services::discord::turn_finalizer::completion_admission::tests::capped_or_failed_retry_settles_without_queue_admission_4888
 services::discord::turn_finalizer::completion_admission::tests::deferred_candidate_releases_without_busy_outcome_after_projection_settles_4888
 services::discord::turn_finalizer::completion_admission::tests::deferred_resume_failure_settle_first_releases_when_mailbox_arrives_4888
@@ -12838,6 +12843,7 @@ services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_sou
 services::tui_o::writer::tests::actor::host_start::first_init::a_legacy_claim_before_the_activation_lock_leaves_no_init_and_legacy_sends
 services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_channel_commits_an_empty_init_and_posts_a_late_source_once
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once

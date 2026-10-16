@@ -180,6 +180,7 @@ src/services/discord/replay_policy/policy_tests.rs
 src/services/discord/router/intake_dispatch/home_order_tests.rs
 src/services/discord/router/intake_dispatch/replay_admission_tests.rs
 src/services/discord/router/intake_dispatch/tests.rs
+src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
@@ -501,6 +502,7 @@ services::discord::router::intake_dispatch::home_order_tests
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests
 services::discord::router::intake_dispatch::replay_admission_tests
 services::discord::router::intake_dispatch::tests
+services::discord::router::intake_dispatch::tests::codex_turn_hold
 services::discord::router::intake_dispatch::tests::replay_hold
 services::discord::router::intake_gate::stale_turn::host_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
@@ -1699,6 +1701,7 @@ services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_
 services::discord::router::intake_dispatch::replay_admission_tests::preflight_sends_every_blocking_state_to_protected_consumption_pg
 services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_pg
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::live_and_skill_producers_forward_to_foreign_owner_pg
