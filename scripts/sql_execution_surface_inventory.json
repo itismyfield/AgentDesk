@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "62b52104576518e17c01ef78ec0078a0bb902ca6",
+  "measured_at_sha": "590b77461994b567f4036bb20b142898163c2b6e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2440,6 +2440,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:230de70d04fdc42bb8f5bb3901823f818f03007f14c5b42d584a1a64e01aee14"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/cli/channel_home_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:23bc9e3f5abbf72e6c65da0aa31a8cd52dab23f3f169b6044b584658b80db873"
     },
     {
       "root": "src",
@@ -12006,6 +12015,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "UNRESOLVED",
+      "fingerprint": "sha256:b2ec3ee4c2a7d359954c6452618a8780af8e1efffcdbc3cdc93858189119b888"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
       "fingerprint": "sha256:c95cba0a7795543d07f93478e124b0dafb2e9be100ef626bfba894a2a248266a"
     },
     {
@@ -12042,7 +12060,43 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:247b222031b59cdb482823df7c530c1523d7d7575c2fd91f8b5013380d8d575b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:523a0bcde84f81bf15ae02ed51857e3961c0e2684e55e29814d249cc09b2ae47"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:652d9e216a33b11ca54bdb4b22e9aaf02411cc9f2bd485daa2c058db5bb39962"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a77f97bb376783945310b083b2c3ed4f29093498e0011920b5574856773b98b1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/o_channel_homes_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b400961265a081d71d55a7919f9c1beb159f81b9615a0d6c41eb14534a7d9b36"
     },
     {
       "root": "src",
