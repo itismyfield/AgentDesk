@@ -369,6 +369,7 @@ fn only_posted_or_legitimate_excluded_anchor_and_all_pieces_count() {
                         payload: p.payload.clone(),
                         anchor_id: 100,
                         epoch: 1,
+                        local_retry: None,
                     })
                     .unwrap();
                 let entry = match state {
@@ -609,6 +610,7 @@ fn multipart_anchor_needs_every_piece_posted() {
                     payload: p.payload.clone(),
                     anchor_id: 100 + i as u64,
                     epoch: 1,
+                    local_retry: None,
                 })
                 .unwrap();
             e.writer
@@ -634,6 +636,7 @@ fn multipart_anchor_needs_every_piece_posted() {
                 payload: last.payload.clone(),
                 anchor_id: 100 + serial,
                 epoch: 1,
+                local_retry: None,
             })
             .unwrap();
         e.writer
