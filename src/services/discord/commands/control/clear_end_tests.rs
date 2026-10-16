@@ -52,6 +52,26 @@ impl Managed {
         provider: &ProviderKind,
         (channel, name): (ChannelId, &str),
     ) -> Self {
+        let managed = Self::launch(shared, provider, (channel, name)).await;
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, claude_session_id)
+             VALUES ($1, $2, 'idle', $3)",
+        )
+        .bind(&managed.key)
+        .bind(provider.as_str())
+        .bind(OLD_SESSION)
+        .execute(pool)
+        .await
+        .expect("stored provider session");
+        managed
+    }
+
+    /// As `start`, leaving the channel's stored session row to the caller.
+    async fn launch(
+        shared: &Arc<SharedData>,
+        provider: &ProviderKind,
+        (channel, name): (ChannelId, &str),
+    ) -> Self {
         let tmux = provider.build_tmux_session_name(name);
         let fake = FakeTmux::install(&tmux);
         let alive = Arc::new(AtomicBool::new(true));
@@ -68,16 +88,6 @@ impl Managed {
         let key = key(shared, channel, provider, None)
             .await
             .expect("session key");
-        sqlx::query(
-            "INSERT INTO sessions (session_key, provider, status, claude_session_id)
-             VALUES ($1, $2, 'idle', $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(&key)
-        .bind(provider.as_str())
-        .bind(OLD_SESSION)
-        .execute(pool)
-        .await
-        .expect("stored provider session");
         Self {
             tmux,
             fake,
@@ -323,7 +333,7 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
         let _switches = rig
             .bind(&pool, &shared.token_hash, &key, herdr::HostedState::Retired)
             .await;
-        let managed = Managed::start(&shared, &pool, &provider, (channel, "p11-clear")).await;
+        let managed = Managed::launch(&shared, &provider, (channel, "p11-clear")).await;
 
         let reply = clear(&shared, &provider, channel).await;
 
