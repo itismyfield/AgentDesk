@@ -938,7 +938,7 @@ async fn auto_row_gone_before_the_grant_lock_is_observe_only_pg() {
     lock_waiters(&pool, 1).await;
     for table in ["o_piece_attempts", "o_piece_delivery"] {
         let sql = format!("DELETE FROM {table} WHERE channel_id = $1 AND native_key = $2");
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&piece.0)
             .bind(&piece.1)
             .execute(&mut *blocker)

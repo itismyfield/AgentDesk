@@ -151,7 +151,7 @@ fn card_get_raw_pg(pool: &PgPool, card_id: &str) -> String {
         pool,
         move |bridge_pool| async move {
             let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
-            let card = sqlx::query(&sql)
+            let card = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(&card_id)
                 .fetch_optional(&bridge_pool)
                 .await
@@ -299,7 +299,7 @@ fn card_assign_raw_pg(pool: &PgPool, card_id: &str, agent_id: &str) -> String {
             }
 
             let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
-            let card = sqlx::query(&sql)
+            let card = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(&card_id)
                 .fetch_one(&bridge_pool)
                 .await
@@ -353,7 +353,7 @@ fn card_set_priority_raw_pg(pool: &PgPool, card_id: &str, priority: &str) -> Str
             }
 
             let sql = format!("{} WHERE kc.id = $1", card_select_sql_pg());
-            let card = sqlx::query(&sql)
+            let card = sqlx::query(sqlx::AssertSqlSafe(sql))
                 .bind(&card_id)
                 .fetch_one(&bridge_pool)
                 .await

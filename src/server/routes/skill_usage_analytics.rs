@@ -371,8 +371,8 @@ pub(super) async fn collect_direct_agent_skill_usage_summary_pg(
 async fn load_skill_usage_summary_rows(
     pool: &PgPool,
     days: Option<i64>,
-    sql_all: &str,
-    sql_window: &str,
+    sql_all: &'static str,
+    sql_window: &'static str,
 ) -> Result<Vec<SkillUsageSummary>, sqlx::Error> {
     let rows = if let Some(days) = days {
         sqlx::query(sql_window).bind(days).fetch_all(pool).await?

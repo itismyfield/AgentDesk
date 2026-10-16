@@ -83,7 +83,7 @@ pub(super) async fn activate_preflight_with_pg(
              ORDER BY created_at DESC
              LIMIT 1"
         );
-        match sqlx::query(&query)
+        match sqlx::query(sqlx::AssertSqlSafe(query))
             .bind(repo)
             .bind(agent_id)
             .fetch_optional(pool)

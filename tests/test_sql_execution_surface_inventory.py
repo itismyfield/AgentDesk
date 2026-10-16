@@ -181,6 +181,78 @@ let _m = rewrite_insert_conflict("INSERT OR REPLACE INTO cards (id) VALUES (?)",
             raw_sql_classes = [r.classification for r in records if r.api == "sqlx::raw_sql"]
             self.assertEqual(raw_sql_classes, ["STATIC", "UNRESOLVED"])
 
+    def test_rust_assert_sql_safe_preserves_sql_classification_and_fingerprints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            imports = """
+use sqlx::AssertSqlSafe;
+use sqlx::AssertSqlSafe as DirectSafe;
+use sqlx::{AssertSqlSafe as GroupedSafe, Postgres};
+"""
+            calls = [
+                ('sqlx::query', '"SELECT id FROM cards"', 'sqlx::AssertSqlSafe'),
+                ('sqlx::query', 'format!("SELECT * FROM {}", table)', 'AssertSqlSafe'),
+                ('sqlx::query', '&format!("SELECT * FROM {}", table)', 'DirectSafe'),
+                ('sqlx::query', 'sql', 'GroupedSafe'),
+                ('sqlx::query_as::<_, Row>', 'r#"UPDATE cards SET seen = 1"#', 'AssertSqlSafe'),
+                ('sqlx::query_scalar::<_, i64>', '"SELECT count(*) FROM cards"', 'DirectSafe'),
+                ('sqlx::raw_sql', '"DELETE FROM cards"', 'GroupedSafe'),
+                ('sqlx::query', 'make_sql(nested(1, (2, 3)), [4, 5])', 'sqlx::AssertSqlSafe'),
+                ('QueryBuilder::new', '"SELECT id FROM cards"', 'AssertSqlSafe'),
+            ]
+            path = self.write(root, "src/sql.rs", imports + "\n".join(
+                f"let _q{index} = {api}({sql});" for index, (api, sql, _) in enumerate(calls)
+            ))
+            before = scanner.scan_rust_calls(path, root)
+            path.write_text(imports + "\n".join(
+                f"let _q{index} = {api}({wrapper}({sql}));"
+                for index, (api, sql, wrapper) in enumerate(calls)
+            ), encoding="utf-8")
+            after = scanner.scan_rust_calls(path, root)
+            self.assertEqual(len(after), 9)
+            self.assertEqual([record.stable_key() for record in after],
+                             [record.stable_key() for record in before])
+            self.assertEqual([record.table_tokens for record in after],
+                             [record.table_tokens for record in before])
+            self.assertEqual([record.classification for record in after], [
+                "STATIC", "UNRESOLVED", "UNRESOLVED", "UNRESOLVED",
+                "STATIC", "STATIC", "STATIC", "UNRESOLVED", "UNRESOLVED",
+            ])
+
+    def test_rust_assert_sql_safe_nested_and_trailing_comma_are_transparent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self.write(root, "src/sql.rs", 'sqlx::query("SELECT id FROM cards");')
+            before = scanner.scan_rust_calls(path, root)[0]
+            path.write_text('''
+use sqlx::{AssertSqlSafe as Safe, Row};
+sqlx::query(sqlx :: AssertSqlSafe(Safe("SELECT id FROM cards",)));
+''', encoding="utf-8")
+            after = scanner.scan_rust_calls(path, root)[0]
+            self.assertEqual(after.stable_key(), before.stable_key())
+            self.assertEqual(after.table_tokens, ("cards",))
+
+    def test_rust_other_wrappers_and_unimported_names_remain_unresolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self.write(root, "src/sql.rs", '''
+use other::AssertSqlSafe as OtherSafe;
+use sqlx::{other::{Row, AssertSqlSafe as NestedSafe}, Postgres};
+// use sqlx::AssertSqlSafe as CommentSafe;
+use sqlx::*;
+sqlx::query(OtherSafe("SELECT id FROM cards"));
+sqlx::query(NestedSafe("SELECT id FROM cards"));
+sqlx::query(CommentSafe("SELECT id FROM cards"));
+sqlx::query(AssertSqlSafe("SELECT id FROM cards"));
+sqlx::query(make_sql("SELECT id FROM cards"));
+sqlx::query(sqlx::AssertSqlSafe("SELECT id FROM cards").map(transform));
+sqlx::query(sqlx::AssertSqlSafe("SELECT id FROM cards", extra));
+''')
+            records = scanner.scan_rust_calls(path, root)
+            self.assertEqual(len(records), 7)
+            self.assertTrue(all(record.classification == "UNRESOLVED" for record in records))
+            self.assertTrue(all(record.table_tokens == () for record in records))
+
     def test_migration_fingerprint_is_deterministic_and_distinguishes_rename_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

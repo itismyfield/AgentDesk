@@ -68,9 +68,9 @@ pub(super) async fn consume_dispatched_origin_ghost_if_current(
     // Step 1 — judge before destroying. The ghost verdict lives in `sessions`,
     // and reading it costs nothing: with no marker for this turn there is
     // nothing to consume and the inflight row belongs to a live turn.
-    match sqlx::query_scalar::<_, i32>(&format!(
+    match sqlx::query_scalar::<_, i32>(sqlx::AssertSqlSafe(format!(
         "SELECT 1 FROM sessions WHERE {DISPATCHED_ORIGIN_GHOST_PREDICATE} LIMIT 1"
-    ))
+    )))
     .bind(session_key)
     .bind(channel_id.as_str())
     .bind(turn_nonce)
@@ -113,7 +113,7 @@ pub(super) async fn consume_dispatched_origin_ghost_if_current(
 
     // Step 3 — the marker is still required here, so a concurrent newer
     // interactive turn can neither lose its inflight nor be marked idle.
-    match sqlx::query(&format!(
+    match sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE sessions
             SET status = 'idle',
                 active_dispatch_id = NULL,
@@ -121,7 +121,7 @@ pub(super) async fn consume_dispatched_origin_ghost_if_current(
                 session_info = 'Cleared orphaned dispatched-origin turn',
                 last_heartbeat = NOW()
           WHERE {DISPATCHED_ORIGIN_GHOST_PREDICATE}"
-    ))
+    )))
     .bind(session_key)
     .bind(channel_id.as_str())
     .bind(turn_nonce)

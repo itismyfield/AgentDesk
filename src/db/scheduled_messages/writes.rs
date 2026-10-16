@@ -3,7 +3,7 @@
 //! create path uses `insert_scheduled_message_tx` so the snapshot capture and
 //! the definition insert share one transaction.
 
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{DEFINITION_COLUMNS, NewScheduledMessage, ScheduledMessageRow};
@@ -27,7 +27,7 @@ pub async fn insert_scheduled_message_tx(
     new: &NewScheduledMessage,
 ) -> Result<ScheduledMessageRow, sqlx::Error> {
     let id = format!("smsg_{}", Uuid::new_v4());
-    sqlx::query_as::<_, ScheduledMessageRow>(&format!(
+    sqlx::query_as::<_, ScheduledMessageRow>(AssertSqlSafe(format!(
         "INSERT INTO scheduled_messages
             (id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, agent_id,
              agent_instruction, on_agent_failure, scheduled_at, schedule, timezone,
@@ -37,7 +37,7 @@ pub async fn insert_scheduled_message_tx(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                  $17, $18, $19, $20, $21, $22)
          RETURNING {DEFINITION_COLUMNS}"
-    ))
+    )))
     .bind(&id)
     .bind(&new.content)
     .bind(&new.discord_mention_user_ids)

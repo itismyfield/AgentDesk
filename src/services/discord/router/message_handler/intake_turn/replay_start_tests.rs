@@ -747,7 +747,7 @@ mod kickoff_tests {
         .key();
         let quoted = |value: &str| value.replace('\'', "''");
         let mode = if cas { "cas" } else { "storage" };
-        let sql = format!(
+        let sql = sqlx::AssertSqlSafe(format!(
             r#"
             CREATE SEQUENCE b_input_begin_refusals;
             CREATE FUNCTION b_input_save_prior_projection() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -784,8 +784,8 @@ mod kickoff_tests {
         "#,
             key = quoted(&key),
             target = quoted(&target)
-        );
-        sqlx::raw_sql(&sql).execute(&host.pool).await.unwrap();
+        ));
+        sqlx::raw_sql(sql).execute(&host.pool).await.unwrap();
     }
 
     fn begin_failure_case(test: &str, cas: bool) {
