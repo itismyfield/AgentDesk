@@ -3524,6 +3524,7 @@ services::discord::commands::config::session_override_cluster_characterization_t
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
 services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transition_until_the_session_has_ended_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
+services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_probe_fails_kills_and_warns_only_if_the_kill_fails_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg
 services::discord::commands::control::clear_end_tests::a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg

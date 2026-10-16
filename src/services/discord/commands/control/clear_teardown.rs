@@ -65,9 +65,9 @@ pub(super) async fn end_session(
     let _ = (shared, channel_id, session_key, &mut transition);
     let managed = managed_session_clear_behavior(provider);
     if let (ManagedSessionClearBehavior::ResetManagedProcess, Some(name)) = (managed, tmux)
-        && super::managed_reset::end_managed_process_session(name).tmux_survived
+        && super::managed_reset::end_managed_process_session(name).tmux_unconfirmed
     {
-        tracing::warn!(tmux_session = name, "clear could not end its tmux session");
+        tracing::warn!(tmux_session = name, "clear could not confirm its tmux end");
         report.end_unconfirmed = true;
     }
     drop(transition);

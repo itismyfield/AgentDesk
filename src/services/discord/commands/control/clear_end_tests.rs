@@ -181,6 +181,45 @@ async fn a_clear_whose_tmux_kill_fails_commits_and_warns_pg() {
     db.drop().await;
 }
 
+// A tmux probe that fails with a socket error cannot rule the session out: the clear still kills
+// it, and warns exactly once only when that kill also fails.
+#[tokio::test]
+async fn a_clear_whose_tmux_probe_fails_kills_and_warns_only_if_the_kill_fails_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let provider = ProviderKind::Claude;
+    let warned = format!("{SESSION_CLEARED_RESPONSE}\n⚠️ {END_UNCONFIRMED}");
+    for (n, (kill_fails, reply)) in [(true, warned.as_str()), (false, SESSION_CLEARED_RESPONSE)]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = ChannelId::new(1_479_671_305_341_100_020 + n as u64);
+        let name = format!(
+            "adk-clear-probe-fails-{n}-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+        managed.fake.fail_probes();
+        if kill_fails {
+            managed.fake.fail_kills();
+        }
+
+        assert_eq!(
+            clear(&shared, &provider, channel).await,
+            reply,
+            "kill fails: {kill_fails}"
+        );
+        assert!(
+            managed.ended(),
+            "kill fails: {kill_fails}: the kill is tried"
+        );
+        assert_eq!(session_state(&shared, channel).await, (None, true));
+    }
+    pool.close().await;
+    db.drop().await;
+}
+
 // A Herdr endpoint with no live execution behind it is no Herdr session: the channel's managed
 // tmux and process still end, without a warning.
 #[tokio::test]

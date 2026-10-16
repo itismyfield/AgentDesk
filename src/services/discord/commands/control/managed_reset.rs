@@ -62,10 +62,10 @@ pub(in crate::services::discord) fn reset_managed_process_session(session_name: 
 }
 
 /// What ending a managed session did: whether anything ended, and whether a tmux session that
-/// existed outlived its kill.
+/// existed, or could not be ruled out, was not confirmed killed.
 pub(super) struct ManagedEnd {
     pub(super) reset: bool,
-    pub(super) tmux_survived: bool,
+    pub(super) tmux_unconfirmed: bool,
 }
 
 /// Kills the session's process tree and tmux session and removes its launch files; a verified
@@ -85,24 +85,30 @@ pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
     }
 
     #[cfg(unix)]
-    let tmux_survived = crate::services::platform::tmux::has_session(session_name) && {
-        crate::services::tmux_diagnostics::record_tmux_exit_reason(
-            session_name,
-            "managed session reset",
-        );
-        let killed =
-            crate::services::platform::tmux::kill_session(session_name, "managed session reset");
-        if killed {
-            crate::services::tmux_common::cleanup_session_temp_files(session_name);
-            reset = true;
+    let tmux_unconfirmed = {
+        use crate::services::platform::tmux::{self, SessionPresence};
+        match tmux::session_presence(session_name) {
+            SessionPresence::Missing => false,
+            // A failed probe may hide a live session: kill it too, confirmed only if the kill lands.
+            SessionPresence::Present | SessionPresence::ProbeFailed => {
+                crate::services::tmux_diagnostics::record_tmux_exit_reason(
+                    session_name,
+                    "managed session reset",
+                );
+                let killed = tmux::kill_session(session_name, "managed session reset");
+                if killed {
+                    crate::services::tmux_common::cleanup_session_temp_files(session_name);
+                    reset = true;
+                }
+                !killed
+            }
         }
-        !killed
     };
     #[cfg(not(unix))]
-    let tmux_survived = false;
+    let tmux_unconfirmed = false;
 
     ManagedEnd {
         reset,
-        tmux_survived,
+        tmux_unconfirmed,
     }
 }
