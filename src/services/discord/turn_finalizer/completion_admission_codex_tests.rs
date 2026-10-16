@@ -44,6 +44,8 @@ fn finished_turn() -> LedgerEntry {
         watcher_backstop_deadline_pulled: false,
         completion_admission,
         finalized_at: Some(Instant::now()),
+        pending_policy_commit: None,
+        exact_release_confirmed: false,
     }
 }
 
