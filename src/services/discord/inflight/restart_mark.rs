@@ -2,8 +2,9 @@
 
 use super::{
     InflightRestartMode, inflight_runtime_root, inflight_state_path,
-    load_inflight_states_for_probe_from_root, set_inflight_restart_mode_under_lock,
+    load_inflight_probe_from_root_excluding, set_inflight_restart_mode_under_lock,
 };
+use crate::services::discord::input_runtime::fence;
 use crate::services::provider::ProviderKind;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -32,6 +33,7 @@ pub(super) fn mark_restart_mode_report(
     provider: &ProviderKind,
     restart_mode: InflightRestartMode,
 ) -> RestartMarkReport {
+    let held = |channel| crate::services::turn_orchestrator::input_fence::held(provider, channel);
     let Some(root) = inflight_runtime_root() else {
         return RestartMarkReport {
             incomplete: true,
@@ -40,12 +42,16 @@ pub(super) fn mark_restart_mode_report(
     };
     // The scan only discovers rows; each marker re-reads its row under the lock and changes only
     // the restart fields, so a frontier a draining watcher advanced meanwhile is kept.
-    let load = load_inflight_states_for_probe_from_root(&root, provider);
+    let load = load_inflight_probe_from_root_excluding(&root, provider, held);
     let mut report = RestartMarkReport {
         incomplete: !load.complete,
         ..RestartMarkReport::default()
     };
     for state in load.states {
+        // A held input channel's row stays as its transition left it.
+        if held(state.channel_id) {
+            continue;
+        }
         let path = inflight_state_path(&root, provider, state.channel_id);
         match set_inflight_restart_mode_under_lock(&path, restart_mode) {
             MarkOutcome::Marked => report.marked += 1,
@@ -56,20 +62,19 @@ pub(super) fn mark_restart_mode_report(
     report
 }
 
-/// Runs the filesystem marking pass on a blocking worker.
+/// Runs the marking pass on a blocking worker, where a protected channel's row writer is allowed.
 pub(in crate::services::discord) async fn mark_restart_mode_blocking(
     provider: ProviderKind,
     restart_mode: InflightRestartMode,
 ) -> RestartMarkReport {
-    let owned = provider.clone();
-    let report =
-        match tokio::task::spawn_blocking(move || mark_restart_mode_report(&owned, restart_mode))
-            .await
-        {
-            Ok(report) => report,
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => panic!("restart marking worker cancelled: {error}"),
-        };
+    let report = fence::effect::io({
+        let provider = provider.clone();
+        move || mark_restart_mode_report(&provider, restart_mode)
+    })
+    .await;
+    for channel in &report.failed {
+        fence::record_failure(&provider, *channel, &[], fence::Failure::Persistence);
+    }
     if !report.skipped_receipt.is_empty() {
         tracing::info!(
             provider = provider.as_str(),

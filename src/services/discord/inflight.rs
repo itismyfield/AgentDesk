@@ -129,7 +129,10 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
-use self::removal::{load_inflight_states_from_root, load_inflight_states_from_root_excluding};
+use self::removal::{
+    load_inflight_probe_from_root_excluding, load_inflight_states_from_root,
+    load_inflight_states_from_root_excluding,
+};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
@@ -864,6 +867,11 @@ pub(super) fn load_inflight_states_excluding(
         return Vec::new();
     };
     load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {

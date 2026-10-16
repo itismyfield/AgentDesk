@@ -96,7 +96,8 @@ pub(in crate::services::discord) fn inflight_state_path(
 }
 
 pub(crate) struct InflightStateFileLock {
-    file: fs::File,
+    file: Option<fs::File>,
+    _population: Option<crate::services::discord::input_runtime::fence::PopulationWriter>,
     state_path: PathBuf,
 }
 
@@ -110,7 +111,9 @@ impl Drop for InflightStateFileLock {
     fn drop(&mut self) {
         // Ignore explicit-unlock failure: closing the handle immediately after
         // this remains the advisory lock's release fallback.
-        let _ = self.file.unlock();
+        if let Some(file) = &self.file {
+            let _ = file.unlock();
+        }
     }
 }
 
@@ -141,10 +144,20 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
     #[cfg(test)]
     boot_observation::attempt(path, boot_observation::Attempt::Lock);
+    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
+        .map_err(|failure| format!("input fence: {failure:?}"))?
+    {
+        return Ok(InflightStateFileLock {
+            file: None,
+            _population: Some(population),
+            state_path: path.to_owned(),
+        });
+    }
     let file = open_inflight_lock_file(path)?;
     file.lock().map_err(|e| e.to_string())?;
     Ok(InflightStateFileLock {
-        file,
+        file: Some(file),
+        _population: None,
         state_path: path.to_path_buf(),
     })
 }
@@ -183,7 +196,8 @@ pub(crate) fn try_lock_inflight_state_path_typed(
         Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
     }
     Ok(InflightStateFileLock {
-        file,
+        file: Some(file),
+        _population: None,
         state_path: path.to_path_buf(),
     })
 }
@@ -207,7 +221,8 @@ pub(crate) fn try_lock_unfenced_inflight_state_path(
     match file.try_lock() {
         Ok(()) if fenced() => Err(TryLockRefusal::Fenced),
         Ok(()) => Ok(InflightStateFileLock {
-            file,
+            file: Some(file),
+            _population: None,
             state_path: path.to_path_buf(),
         }),
         Err(fs::TryLockError::WouldBlock) => Err(TryLockRefusal::Contended),

@@ -1,10 +1,12 @@
-//! Restart marking reports failed and unseen rows while marking every readable sibling.
+//! Restart marking from async shutdown code marks every row it can, a protected open row
+//! included, and reports failed and unseen rows instead of stopping at the first.
 
 use super::super::*;
 use super::{
     RestartMarkReport, WriteFaultForTest, mark_restart_mode_blocking, short_pass_event_for_test,
     short_passes,
 };
+use crate::services::discord::input_runtime::{self, fence::Gate};
 
 fn row(channel_id: u64) -> InflightTurnState {
     InflightTurnState::new(
@@ -31,7 +33,7 @@ fn make_old_format(path: &std::path::Path) {
 }
 
 #[tokio::test]
-async fn async_marking_marks_readable_rows_and_reports_failed_and_unseen_rows() {
+async fn c2b_async_marking_marks_protected_open_rows_and_reports_failed_and_unseen_rows() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -40,14 +42,14 @@ async fn async_marking_marks_readable_rows_and_reports_failed_and_unseen_rows() 
     );
     let provider = ProviderKind::Codex;
     let root = inflight_runtime_root().unwrap();
-    let (plain, old_a, old_b) = (6_325_940, 6_325_941, 6_325_942);
+    let (plain, open, held) = (6_325_940, 6_325_941, 6_325_942);
     let (failed_a, failed_b, unreadable) = (6_325_943, 6_325_944, 6_325_945);
     let path = |channel| inflight_state_path(&root, &provider, channel);
-    for channel in [plain, old_a, old_b, failed_a, failed_b] {
+    for channel in [plain, open, held, failed_a, failed_b] {
         save_inflight_state_in_root(&root, &row(channel)).unwrap();
     }
-    make_old_format(&path(old_a));
-    make_old_format(&path(old_b));
+    make_old_format(&path(open));
+    make_old_format(&path(held));
     // A directory where the row lock file belongs makes that row's marker write fail.
     for channel in [failed_a, failed_b] {
         let lock = path(channel).with_extension("json.lock");
@@ -55,6 +57,13 @@ async fn async_marking_marks_readable_rows_and_reports_failed_and_unseen_rows() 
         std::fs::create_dir(&lock).unwrap();
     }
     std::fs::write(path(unreadable), [0xff, 0xfe, 0xfd]).unwrap();
+    let held_before = std::fs::read(path(held)).unwrap();
+    let open_gate = Gate::protect(provider.clone(), open).unwrap();
+    let _open_health = input_runtime::fence::test_health::Clear::new(&open_gate);
+    let held_gate = Gate::protect(provider.clone(), held).unwrap();
+    let _held_health = input_runtime::fence::test_health::Clear::new(&held_gate);
+    let _closing = held_gate.close().unwrap();
+
     let mut report =
         mark_restart_mode_blocking(provider.clone(), InflightRestartMode::DrainRestart).await;
     report.failed.sort_unstable();
@@ -62,33 +71,45 @@ async fn async_marking_marks_readable_rows_and_reports_failed_and_unseen_rows() 
     assert_eq!(
         report,
         RestartMarkReport {
-            marked: 3,
+            marked: 2,
             failed: vec![failed_a, failed_b],
             skipped_receipt: Vec::new(),
             incomplete: true,
         }
     );
-    for channel in [plain, old_a, old_b] {
+    for channel in [plain, open] {
         let marked = read_inflight_state_content(&path(channel)).expect("marked row");
         assert_eq!(
             marked.restart_mode,
             Some(InflightRestartMode::DrainRestart),
             "channel {channel} left unmarked"
         );
-        let raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path(channel)).unwrap()).unwrap();
-        assert_eq!(raw["finalizer_turn_id"].as_u64(), Some(channel + 1));
     }
+    assert_eq!(
+        std::fs::read(path(held)).unwrap(),
+        held_before,
+        "held row untouched"
+    );
     let event = short_pass_event_for_test().expect("short pass reported as an error event");
     let mut event_failed: Vec<u64> = serde_json::from_value(event["failed"].clone()).unwrap();
     event_failed.sort_unstable();
     assert_eq!(event_failed, vec![failed_a, failed_b]);
     assert_eq!(event["incomplete"], true);
+    let reasons = input_runtime::health_reasons();
+    for channel in [open, held] {
+        assert!(
+            !reasons
+                .iter()
+                .any(|reason| reason.contains(&format!("channel={channel}"))),
+            "channel {channel} saw a refused writer: {reasons:?}"
+        );
+    }
 }
 
-/// A failed marker leaves siblings marked; the next complete pass clears the short pass.
+/// A protected row whose marker write fails after its lock is held records Persistence on its gate
+/// while its sibling is marked; the provider's next complete pass clears its short pass.
 #[tokio::test]
-async fn failed_marker_write_reports_short_pass_until_a_complete_pass() {
+async fn c2b_failed_protected_marker_write_records_gate_health_until_a_complete_pass() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -102,6 +123,8 @@ async fn failed_marker_write_reports_short_pass_until_a_complete_pass() {
     for channel in [plain, open] {
         save_inflight_state_in_root(&root, &row(channel)).unwrap();
     }
+    let gate = Gate::protect(provider.clone(), open).unwrap();
+    let _health = input_runtime::fence::test_health::Clear::new(&gate);
     let codex_pass = || {
         short_passes()
             .into_iter()
@@ -127,6 +150,9 @@ async fn failed_marker_write_reports_short_pass_until_a_complete_pass() {
         Some(InflightRestartMode::DrainRestart),
         "the sibling row left unmarked"
     );
+    let reasons = input_runtime::health_reasons();
+    let persistence = format!("input_fence channel={open} sources=[] reason=Persistence");
+    assert!(reasons.contains(&persistence), "{reasons:?}");
     assert_eq!(
         codex_pass(),
         Some(serde_json::json!({

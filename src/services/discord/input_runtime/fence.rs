@@ -461,8 +461,10 @@ pub(crate) fn require_worker() -> Result<(), Failure> {
         Err(Failure::Busy)
     }
 }
+thread_local! { static INFLIGHT_WRITER: RefCell<std::sync::Weak<()>> = const { RefCell::new(std::sync::Weak::new()) }; }
 pub(crate) fn scope_held() -> bool {
     POPULATION.with(|held| held.borrow().is_some())
+        || INFLIGHT_WRITER.with(|held| held.borrow().upgrade().is_some())
 }
 pub(crate) struct ClosedPopulationGuard(PopulationGuard);
 impl ClosedPopulationGuard {
@@ -475,6 +477,56 @@ impl ClosedPopulationGuard {
     ) -> io::Result<T> {
         self.0.borrowed(root, provider, channel, work)
     }
+}
+pub(crate) struct PopulationWriter {
+    _guard: PopulationGuard,
+    _scope: Arc<()>,
+    _permit: Permit,
+}
+pub(crate) fn inflight_writer(path: &Path) -> Result<Option<PopulationWriter>, Failure> {
+    let Some(provider_dir) = path.parent() else {
+        return Ok(None);
+    };
+    let channel = path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.parse().ok());
+    let Some(gate) = find(|gate| {
+        Some(gate.channel) == channel
+            && provider_dir.file_name().and_then(|n| n.to_str()) == Some(gate.provider.as_str())
+    }) else {
+        return Ok(None);
+    };
+    let failed = |failure| {
+        gate.record_failure(&[], failure);
+        failure
+    };
+    if scope_held() {
+        return Err(failed(Failure::Busy));
+    }
+    let permit = effect::admit(&gate.provider, gate.channel)
+        .map_err(failed)?
+        .ok_or_else(|| failed(Failure::StalePermit))?;
+    require_worker().map_err(failed)?;
+    let inflight = provider_dir
+        .parent()
+        .ok_or_else(|| failed(Failure::Persistence))?;
+    if inflight.file_name().and_then(|n| n.to_str()) != Some("discord_inflight") {
+        return Err(failed(Failure::StalePermit));
+    }
+    let root = inflight
+        .parent()
+        .ok_or_else(|| failed(Failure::Persistence))?;
+    let guard =
+        PopulationGuard::writer(root, &gate.provider, gate.channel, &permit).map_err(failed)?;
+    // Weak origin-thread marker expires even when an owned guard is dropped on another worker.
+    let scope = Arc::new(());
+    INFLIGHT_WRITER.with(|held| *held.borrow_mut() = Arc::downgrade(&scope));
+    Ok(Some(PopulationWriter {
+        _guard: guard,
+        _scope: scope,
+        _permit: permit,
+    }))
 }
 pub(crate) struct PopulationGuard {
     _file: std::fs::File,
