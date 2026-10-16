@@ -652,7 +652,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         writer = targets["steps"][len(setup)]
         self.assertEqual(writer["name"], "Writer namespace exact Windows targets")
         self.assertEqual(writer["if"], "runner.os == 'Windows'")
-        self.assertEqual(writer["timeout-minutes"], 45)
+        self.assertEqual(writer["timeout-minutes"], 60)
         self.assertEqual(writer["shell"], "bash")
         for job_id in ("check_fast_cross_os", "check_fast_cross_os_targets"):
             self.assertNotIn("continue-on-error", jobs[job_id])
