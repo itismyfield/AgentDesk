@@ -6899,6 +6899,7 @@ services::discord::router::message_handler::intake_turn::adk_thread::route_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_transition_busy_intake_replays_its_resolved_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_claimed_route_survives_a_later_tail
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::s2f_route_resolved_before_the_tail_is_published_by_its_claim
+services::discord::router::message_handler::intake_turn::adk_thread::tests::a_refused_queued_redirect_returns_its_uploads_and_clear_flag
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_identity_separates_original_and_execution_provider
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_final_refusal_preserves_existing_thread_role_override
 services::discord::router::message_handler::intake_turn::adk_thread::tests::c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping
