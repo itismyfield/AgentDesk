@@ -549,7 +549,7 @@ async fn terminalize_selected_runs_with_pg(
          WHERE id = ANY($1)
            AND {lock_status_filter}"
     );
-    let lock_candidates = sqlx::query_scalar::<_, String>(&lock_runs_sql)
+    let lock_candidates = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(lock_runs_sql))
         .bind(target_run_ids)
         .fetch_all(&mut *tx)
         .await
@@ -614,7 +614,7 @@ async fn terminalize_selected_runs_with_pg(
          WHERE id = ANY($1)
            AND {run_status_filter}"
     );
-    let terminalized_runs = sqlx::query(&update_runs_sql)
+    let terminalized_runs = sqlx::query(sqlx::AssertSqlSafe(update_runs_sql))
         .bind(&locked_run_ids)
         .bind(terminal_status)
         .execute(&mut *tx)

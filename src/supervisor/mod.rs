@@ -481,7 +481,7 @@ impl RuntimeSupervisor {
                        AND status = $3
                        AND latest_dispatch_id = $4"
                 );
-                let update = sqlx::query(&update_sql)
+                let update = sqlx::query(sqlx::AssertSqlSafe(update_sql))
                     .bind(&ready_target)
                     .bind(&card_id)
                     .bind(&expected_status)

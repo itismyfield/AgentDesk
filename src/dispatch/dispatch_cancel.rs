@@ -245,7 +245,7 @@ pub(crate) async fn cancel_dispatches_for_runs_on_pg_tx_with_meta(
            )
          ORDER BY td.id"
     );
-    let dispatch_ids = sqlx::query_scalar::<_, String>(&candidate_sql)
+    let dispatch_ids = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(candidate_sql))
         .bind(run_ids)
         .fetch_all(&mut **tx)
         .await
@@ -329,7 +329,7 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
                )
            )"
     );
-    let changed = sqlx::query(&update_sql)
+    let changed = sqlx::query(sqlx::AssertSqlSafe(update_sql))
         .bind(cancel_payload.as_ref().map(ToString::to_string))
         .bind(dispatch_id)
         .bind(&current_status)

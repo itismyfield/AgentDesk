@@ -587,12 +587,12 @@ async fn invoke(case: Case, run: Run, root: &Path, shared: Arc<SharedData>) -> O
         // Its own task, as the gateway runs each dispatch, so the handler's frames start fresh.
         let dispatched = tokio::spawn(async move {
             let framework = poise::FrameworkContext {
-                bot_id: serenity::UserId::new(BOT),
+                serenity_context: &ctx,
                 options: &options,
                 user_data: &*data,
                 shard_manager: &manager,
             };
-            poise::dispatch_event(framework, &ctx, event).await;
+            poise::dispatch_event(framework, event).await;
         });
         let finished = tokio::time::timeout(Duration::from_secs(20), dispatched).await;
         results.push(format!("{finished:?}"));
