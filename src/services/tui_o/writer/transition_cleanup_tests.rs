@@ -821,6 +821,7 @@ mod operations_shape {
                 parent: None,
                 committed_at: now,
                 boundary: Boundary::Owed { from: 0 },
+                hot_candidate: None,
             };
             rotation.links.insert(source_key(&sources[n + 1]), link);
         }
@@ -847,7 +848,6 @@ mod operations_shape {
         let file_of = |source: &SourceId| cursor_files.join(format!("{}.json", source_key(source)));
         assert!(!file_of(&sources[0]).exists());
         assert!(sources[1..].iter().all(|source| file_of(source).exists()));
-
         let cursors: Vec<Cursor> = channel.cursors().cloned().collect();
         assert_eq!(cursors.len(), 60);
         let mut facts = BTreeMap::new();

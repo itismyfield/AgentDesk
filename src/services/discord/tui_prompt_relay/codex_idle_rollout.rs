@@ -9,6 +9,8 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
     rollout_path: &std::path::Path,
     offset: u64,
 ) {
+    #[cfg(test)]
+    note_poll(tmux_session_name, PollNote::SharedOffset);
     crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
         tmux_session_name,
         rollout_path,
@@ -66,357 +68,151 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
     }
     #[cfg(test)]
     RELAY_SPAWNS.fetch_add(1, Ordering::AcqRel);
-    task_supervisor::spawn_observed("codex_idle_rollout_relay", async move {
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut active_tails: HashSet<String> = HashSet::new();
-        let mut next_rehydrate = tokio::time::Instant::now();
+    task_supervisor::spawn_observed(
+        "codex_idle_rollout_relay",
+        async move {
+            let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let mut active_tails: HashSet<String> = HashSet::new();
+            let mut next_rehydrate = tokio::time::Instant::now();
 
-        loop {
-            // Each cycle serves the current target; tails already started keep their own runtime.
-            let Some(shared) = codex_relay_target() else {
+            loop {
+                // Each cycle serves the current target; tails already started keep their own runtime.
+                let Some(shared) = codex_relay_target() else {
+                    tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
+                    continue;
+                };
+                while let Ok(tmux_session_name) = done_rx.try_recv() {
+                    active_tails.remove(&tmux_session_name);
+                }
+                #[cfg(test)]
+                RELAY_TICKS.fetch_add(1, Ordering::AcqRel);
+                // A reservation that never settled still relays what it held.
+                crate::services::tui_prompt_dedupe::drain_expired_handoffs();
+
+                let candidates =
+                    super::source_tick::codex_source_phase(&shared, &mut next_rehydrate).await;
+                replay_and_relay_codex_sources(&shared, candidates, &mut active_tails, &done_tx)
+                    .await;
+
+                drop(shared);
                 tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
+            }
+        }
+        .instrument(tracing::info_span!(
+            "codex_idle_rollout_relay",
+            provider = ProviderKind::Codex.as_str(),
+            runtime_kind = RuntimeHandoffKind::CodexTui.as_str(),
+        )),
+    );
+}
+
+async fn replay_and_relay_codex_sources(
+    shared: &Arc<SharedData>,
+    candidates: Vec<super::source_tick::CodexResolvedSource>,
+    active_tails: &mut HashSet<String>,
+    done_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    for super::source_tick::CodexResolvedSource {
+        tmux_session_name,
+        channel_id,
+        binding,
+        rollout_path,
+        legacy_body,
+    } in candidates
+    {
+        if active_tails.contains(&tmux_session_name) {
+            continue;
+        }
+        let Ok(_recovery) =
+            super::super::live_bridge::try_recovery(&ProviderKind::Codex, channel_id.get())
+        else {
+            continue;
+        };
+        if let Some(inflight) =
+            inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
+        {
+            if legacy_body && inflight.requires_pinned_terminal_recovery() {
+                if let Some(http) = shared.serenity_http_or_token_fallback() {
+                    super::super::recovery_engine::recover_idle_partial_response(
+                        &http,
+                        shared,
+                        &inflight,
+                        &rollout_path,
+                    )
+                    .await;
+                }
                 continue;
-            };
-            // #3711: direct Codex TUI tmux sessions survive dcserver restarts,
-            // but their in-memory rollout binding does not.
-            let now = tokio::time::Instant::now();
-            if now >= next_rehydrate {
-                let shared_for_rehydrate = shared.clone();
-                codex_discovery_pass(&shared, move |observer| {
-                    #[cfg(test)]
-                    note_relay_target(RelayUse::Discovery, &shared_for_rehydrate);
-                    crate::services::tui_prompt_dedupe::resolve_codex_claims();
-                    rehydrate_existing_codex_tui_bindings(&shared_for_rehydrate, observer)
-                })
-                .await;
-                next_rehydrate = now + CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL;
             }
-
-            while let Ok(tmux_session_name) = done_rx.try_recv() {
-                active_tails.remove(&tmux_session_name);
-            }
-            // A reservation that never settled still relays what it held.
-            crate::services::tui_prompt_dedupe::drain_expired_handoffs();
-
-            for (tmux_session_name, _) in
-                crate::services::tui_prompt_dedupe::runtime_bindings_for_kind(
-                    RuntimeHandoffKind::CodexTui,
+            if legacy_body
+                && codex_ownerless_external_input_inflight_needs_rollout_recovery(
+                    &inflight,
+                    &tmux_session_name,
                 )
             {
+                // A row naming its native turn resumes only from that turn's record; a
+                // rollout naming no turns keeps the text search.
                 #[cfg(test)]
-                note_poll(&tmux_session_name, PollNote::Visit);
-                if active_tails.contains(&tmux_session_name) {
-                    continue;
-                }
-                #[cfg(test)]
-                note_relay_target(RelayUse::Owner, &shared);
-                let Some(channel_id) =
-                    owner_channel_for_tmux_session(&shared, &ProviderKind::Codex, &tmux_session_name, RelayEmissionKind::Poll)
-                else {
-                    // #3018/#3306/#3656: registry miss ⇒ drop; Codex repair-ineligible.
-                    continue;
+                note_poll(&tmux_session_name, PollNote::BodyScan);
+                let resolved = match inflight.native_turn_id.as_deref() {
+                    Some(turn) => super::idle_transcript_scan::resolve_codex_turn_prompt_end(
+                        &rollout_path,
+                        turn,
+                        &inflight.user_text,
+                    ),
+                    None => Ok(CodexTurnPrompt::Unsupported),
                 };
-                let Ok(_recovery) = super::super::live_bridge::try_recovery(&ProviderKind::Codex, channel_id.get()) else {
-                    continue;
+                let own_turn = matches!(resolved, Ok(CodexTurnPrompt::Found(_)))
+                    .then(|| inflight.native_turn_id.clone())
+                    .flatten();
+                let selected = match resolved {
+                    Ok(CodexTurnPrompt::Found(line_end_offset)) => {
+                        Ok(Some(CodexIdleRolloutScan::Prompt {
+                            prompt: inflight.user_text.clone(),
+                            line_end_offset,
+                            entry_id: None,
+                            evidence: Default::default(),
+                        }))
+                    }
+                    Ok(CodexTurnPrompt::NotYet) => Ok(None),
+                    Ok(CodexTurnPrompt::Unsupported) => {
+                        scan_codex_idle_rollout_for_latest_prompt_matching(
+                            &rollout_path,
+                            &inflight.user_text,
+                        )
+                    }
+                    Err(error) => Err(error),
                 };
-                let Some(binding) =
-                    resolved_codex_idle_relay_binding(&tmux_session_name, channel_id)
-                else {
-                    continue;
-                };
-                let rollout_path = PathBuf::from(&binding.output_path);
-                if !rollout_path.exists() {
-                    tracing::debug!(
-                        tmux_session_name = %tmux_session_name,
-                        rollout_path = %rollout_path.display(),
-                        "codex idle rollout relay skipped missing rollout path"
-                    );
-                    continue;
-                }
-                if let Some(inflight) =
-                    inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
-                {
-                    if inflight.requires_pinned_terminal_recovery() {
-                        if let Some(http) = shared.serenity_http_or_token_fallback() {
-                            super::super::recovery_engine::recover_idle_partial_response(
-                                &http, &shared, &inflight, &rollout_path,
-                            ).await;
-                        }
-                        continue;
-                    }
-                    if codex_ownerless_external_input_inflight_needs_rollout_recovery(
-                        &inflight,
-                        &tmux_session_name,
-                    ) {
-                        // A row naming its native turn resumes only from that turn's record; a
-                        // rollout naming no turns keeps the text search.
-                        let resolved = match inflight.native_turn_id.as_deref() {
-                            Some(turn) => super::idle_transcript_scan::resolve_codex_turn_prompt_end(
-                                &rollout_path,
-                                turn,
-                                &inflight.user_text,
-                            ),
-                            None => Ok(CodexTurnPrompt::Unsupported),
-                        };
-                        let own_turn = matches!(resolved, Ok(CodexTurnPrompt::Found(_)))
-                            .then(|| inflight.native_turn_id.clone())
-                            .flatten();
-                        let selected = match resolved {
-                            Ok(CodexTurnPrompt::Found(line_end_offset)) => {
-                                Ok(Some(CodexIdleRolloutScan::Prompt {
-                                    prompt: inflight.user_text.clone(),
-                                    line_end_offset,
-                                    entry_id: None,
-                                    evidence: Default::default(),
-                                }))
-                            }
-                            Ok(CodexTurnPrompt::NotYet) => Ok(None),
-                            Ok(CodexTurnPrompt::Unsupported) => {
-                                scan_codex_idle_rollout_for_latest_prompt_matching(
-                                    &rollout_path,
-                                    &inflight.user_text,
-                                )
-                            }
-                            Err(error) => Err(error),
-                        };
-                        match selected {
-                            Ok(Some(CodexIdleRolloutScan::Prompt {
-                                prompt,
-                                line_end_offset,
-                                ..
-                            })) => {
-                                let same_path = inflight.output_path.as_deref().map(Path::new)
-                                    == Some(rollout_path.as_path());
-                                // A same-rollout text match before the claim's start is an earlier
-                                // turn's prompt; wait for this turn's prompt and leave the row untouched.
-                                if same_path
-                                    && own_turn.is_none()
-                                    && inflight
-                                        .turn_start_offset
-                                        .is_some_and(|start| line_end_offset < start)
-                                {
-                                    #[cfg(test)]
-                                    note_poll(&tmux_session_name, PollNote::EarlierPrompt);
-                                    continue;
-                                }
-                                if let Some(anchor_id) = inflight.injected_prompt_message_id {
-                                    crate::services::tui_prompt_dedupe::record_prompt_anchor(
-                                        ProviderKind::Codex.as_str(),
-                                        &tmux_session_name,
-                                        channel_id.get(),
-                                        anchor_id,
-                                    );
-                                }
-                                let observed_at = chrono::Utc::now();
-                                let lease = record_external_turn_lease_for_output(
-                                    &shared,
-                                    &ProviderKind::Codex,
-                                    channel_id,
-                                    &tmux_session_name,
-                                    binding.runtime_kind,
-                                    &rollout_path,
-                                    observed_at,
-                                );
-                                let expected = inflight::InflightTurnIdentity::from_state(&inflight);
-                                let mut repaired = inflight;
-                                // A claim on this rollout keeps its start: the bridge witness pins it,
-                                // and the tail below resumes from the prompt end on its own cursor.
-                                let same_source = same_path
-                                    && repaired
-                                        .turn_start_offset
-                                        .is_some_and(|start| start <= line_end_offset);
-                                if !same_source {
-                                    repaired.output_path =
-                                        rollout_path.to_str().map(ToString::to_string);
-                                    repaired.turn_start_offset = Some(line_end_offset);
-                                }
-                                repaired.last_offset = line_end_offset;
-                                repaired.restamp_external_turn_lease(&lease);
-                                repaired.set_relay_owner_kind(RelayOwnerKind::None);
-                                let outcome = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
-                                    &repaired,
-                                    &expected,
-                                    "codex_idle_rollout_repair",
-                                );
-                                if !matches!(outcome, inflight::GuardedSaveOutcome::Saved) {
-                                    tracing::warn!(
-                                        tmux_session_name = %tmux_session_name,
-                                        channel_id = channel_id.get(),
-                                        rollout_path = %rollout_path.display(),
-                                        ?outcome,
-                                        "skipped Codex ownerless external-input inflight repair"
-                                    );
-                                    continue;
-                                }
-                                advance_codex_tui_runtime_binding_and_marker_offset(
-                                    &tmux_session_name,
-                                    &rollout_path,
-                                    line_end_offset,
-                                );
-                                active_tails.insert(tmux_session_name.clone());
-                                let shared_for_tail = shared.clone();
-                                let done_tx_for_tail = done_tx.clone();
-                                let tail_tmux_session_name = tmux_session_name.clone();
-                                let tail_rollout_path = rollout_path.clone();
-                                let tail_lease = lease.clone();
-                                let tail_span = tracing::info_span!(
-                                    "codex_idle_response_tail_repair",
-                                    provider = ProviderKind::Codex.as_str(),
-                                    channel_id = channel_id.get(),
-                                    tmux_session_name = %tmux_session_name,
-                                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                                    session_key = lease.session_key.as_deref().unwrap_or(""),
-                                    relay_owner = lease.relay_owner.as_str(),
-                                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                                );
-                                tracing::warn!(
-                                    tmux_session_name = %tmux_session_name,
-                                    channel_id = channel_id.get(),
-                                    rollout_path = %rollout_path.display(),
-                                    line_end_offset,
-                                    "repaired Codex ownerless external-input inflight and resumed response tail from live rollout"
-                                );
-                                task_supervisor::spawn_observed(
-                                    "codex_idle_response_tail_repair",
-                                    async move {
-                                        let _done_guard = CodexIdleTailDoneGuard {
-                                            tmux_session_name: Some(tail_tmux_session_name.clone()),
-                                            done_tx: done_tx_for_tail,
-                                        };
-                                        run_codex_idle_response_tail(
-                                            shared_for_tail,
-                                            tail_tmux_session_name,
-                                            channel_id,
-                                            tail_rollout_path,
-                                            line_end_offset,
-                                            prompt,
-                                            tail_lease,
-                                            own_turn,
-                                        )
-                                        .await;
-                                    }
-                                    .instrument(tail_span),
-                                );
-                                continue;
-                            }
-                            Ok(Some(CodexIdleRolloutScan::NoPrompt { .. })) => {}
-                            Ok(None) => {
-                                tracing::debug!(
-                                    tmux_session_name = %tmux_session_name,
-                                    channel_id = channel_id.get(),
-                                    rollout_path = %rollout_path.display(),
-                                    "Codex ownerless external-input inflight repair skipped; prompt not found in rollout"
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    tmux_session_name = %tmux_session_name,
-                                    channel_id = channel_id.get(),
-                                    rollout_path = %rollout_path.display(),
-                                    error = %error,
-                                    "Codex ownerless external-input inflight repair scan failed"
-                                );
-                            }
-                        }
-                    }
-                    if !inflight::ownerless_external_input_inflight_is_stale(&inflight) {
-                        continue;
-                    }
-                    tracing::debug!(
-                        channel_id = channel_id.get(),
-                        tmux_session_name = %tmux_session_name,
-                        user_msg_id = inflight.user_msg_id,
-                        updated_at = %inflight.updated_at,
-                        "codex idle rollout relay ignored stale ownerless TUI-direct inflight blocker"
-                    );
-                }
-
-                crate::services::tui_prompt_dedupe::codex_replay_restored_handoff_inputs(
-                    &tmux_session_name, &rollout_path,
-                );
-                let scan =
-                    match super::idle_transcript_scan::scan_codex_records(
-                        match std::fs::File::open(&rollout_path) { Ok(file) => file, Err(_) => continue },
-                        binding.last_offset, None, true,
-                        crate::services::tui_prompt_dedupe::codex_restore_observed_end(&tmux_session_name)
-                            .unwrap_or(binding.last_offset),
-                    ) {
-                        Ok(scan) => scan,
-                        Err(error) => {
-                            tracing::debug!(
-                                tmux_session_name = %tmux_session_name,
-                                rollout_path = %rollout_path.display(),
-                                error = %error,
-                                "codex idle rollout relay scan skipped"
-                            );
-                            continue;
-                        }
-                    };
-
-                let (scan, stats) = scan;
-                match scan {
-                    CodexIdleRolloutScan::NoPrompt { offset } => {
-                        if offset != binding.last_offset {
-                            let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
-                                &tmux_session_name,
-                                &rollout_path,
-                                Some(binding.last_offset), offset,
-                            );
-                            if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
-                                let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
-                                crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
-                            }
-                        }
-                    }
-                    CodexIdleRolloutScan::Prompt {
+                match selected {
+                    Ok(Some(CodexIdleRolloutScan::Prompt {
                         prompt,
                         line_end_offset,
-                        entry_id,
-                        evidence,
-                    } => {
-                        let prompt_start = crate::services::codex_tui::session::checkpoint::at(
-                            &rollout_path, line_end_offset.saturating_sub(1),
-                        ).unwrap_or(line_end_offset);
-                        if prompt_start > binding.last_offset {
-                            let advanced = crate::services::codex_tui::session::advance_codex_tui_checkpoint(
-                                &tmux_session_name, &rollout_path, Some(binding.last_offset), prompt_start,
-                            );
-                            if let crate::services::codex_tui::session::checkpoint::Advance::Advanced { start, end, .. } = advanced {
-                                let kind = super::rehydration::codex_marker::span_delivery_kind(channel_id.get(), &rollout_path, (start, end));
-                                crate::services::tui_prompt_dedupe::record_codex_unknown_span(&tmux_session_name, start, end, stats, kind);
-                            }
-                        }
-                        let observed_at = chrono::Utc::now();
-                        let own_turn = evidence.turn_id.clone().or_else(|| super::idle_transcript_scan::codex_native_turn_at(
-                            &rollout_path,
-                            line_end_offset,
-                        ));
-                        let observation =
-                            crate::services::tui_prompt_dedupe::observe_restored_codex_record_prompt_at(
-                                &tmux_session_name,
-                                (&rollout_path,
-                                    prompt_start,
-                                    &evidence),
-                                (&prompt, entry_id.as_deref(), own_turn.as_deref()),
-                                observed_at,
-                            );
-                        tracing::info!(
-                            tmux_session_name = %tmux_session_name,
-                            channel_id = channel_id.get(),
-                            observation = ?observation,
-                            entry_id = entry_id.as_deref().unwrap_or(""),
-                            "codex idle rollout relay observed prompt"
-                        );
-                        if !codex_idle_prompt_observation_should_tail_response(observation) {
-                            advance_codex_tui_runtime_binding_and_marker_offset(
-                                &tmux_session_name,
-                                &rollout_path,
-                                line_end_offset,
-                            );
+                        ..
+                    })) => {
+                        let same_path = inflight.output_path.as_deref().map(Path::new)
+                            == Some(rollout_path.as_path());
+                        // A same-rollout text match before the claim's start is an earlier
+                        // turn's prompt; wait for this turn's prompt and leave the row untouched.
+                        if same_path
+                            && own_turn.is_none()
+                            && inflight
+                                .turn_start_offset
+                                .is_some_and(|start| line_end_offset < start)
+                        {
+                            #[cfg(test)]
+                            note_poll(&tmux_session_name, PollNote::EarlierPrompt);
                             continue;
                         }
+                        if let Some(anchor_id) = inflight.injected_prompt_message_id {
+                            crate::services::tui_prompt_dedupe::record_prompt_anchor(
+                                ProviderKind::Codex.as_str(),
+                                &tmux_session_name,
+                                channel_id.get(),
+                                anchor_id,
+                            );
+                        }
+                        let observed_at = chrono::Utc::now();
                         let lease = record_external_turn_lease_for_output(
-                            &shared,
+                            shared,
                             &ProviderKind::Codex,
                             channel_id,
                             &tmux_session_name,
@@ -424,57 +220,37 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             &rollout_path,
                             observed_at,
                         );
-                        #[cfg(test)]
-                        super::synthetic_start::bridge_handoff::pause_for_test(&SCAN_LEASE_PAUSE, channel_id).await;
-                        tracing::info!(
-                            tmux_session_name = %tmux_session_name,
-                            channel_id = channel_id.get(),
-                            turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                            session_key = lease.session_key.as_deref().unwrap_or(""),
-                            relay_owner = lease.relay_owner.as_str(),
-                            runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                            "codex idle rollout relay selected external turn owner"
-                        );
-                        if wait_for_tui_direct_synthetic_non_bridge_claim(
-                            &shared.tmux_watchers,
-                            &ProviderKind::Codex,
-                            channel_id,
-                            &tmux_session_name,
-                        )
-                        .await
-                        {
-                            advance_codex_tui_runtime_binding_and_marker_offset(
-                                &tmux_session_name,
-                                &rollout_path,
-                                line_end_offset,
+                        let expected = inflight::InflightTurnIdentity::from_state(&inflight);
+                        let mut repaired = inflight;
+                        // A claim on this rollout keeps its start: the bridge witness pins it,
+                        // and the tail below resumes from the prompt end on its own cursor.
+                        let same_source = same_path
+                            && repaired
+                                .turn_start_offset
+                                .is_some_and(|start| start <= line_end_offset);
+                        if !same_source {
+                            repaired.output_path = rollout_path.to_str().map(ToString::to_string);
+                            repaired.turn_start_offset = Some(line_end_offset);
+                        }
+                        repaired.last_offset = line_end_offset;
+                        repaired.restamp_external_turn_lease(&lease);
+                        repaired.set_relay_owner_kind(RelayOwnerKind::None);
+                        let outcome =
+                            inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+                                &repaired,
+                                &expected,
+                                "codex_idle_rollout_repair",
                             );
-                            tracing::info!(
+                        if !matches!(outcome, inflight::GuardedSaveOutcome::Saved) {
+                            tracing::warn!(
                                 tmux_session_name = %tmux_session_name,
                                 channel_id = channel_id.get(),
-                                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                                session_key = lease.session_key.as_deref().unwrap_or(""),
-                                "codex idle rollout relay yielded to resolved TUI-direct synthetic non-bridge owner"
+                                rollout_path = %rollout_path.display(),
+                                ?outcome,
+                                "skipped Codex ownerless external-input inflight repair"
                             );
                             continue;
                         }
-                        if !bridge_adapter_owns_external_turn(lease.relay_owner) {
-                            advance_codex_tui_runtime_binding_and_marker_offset(
-                                &tmux_session_name,
-                                &rollout_path,
-                                line_end_offset,
-                            );
-                            tracing::debug!(
-                                tmux_session_name = %tmux_session_name,
-                                channel_id = channel_id.get(),
-                                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                                session_key = lease.session_key.as_deref().unwrap_or(""),
-                                relay_owner = lease.relay_owner.as_str(),
-                                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                                "codex idle rollout relay yielded response tail to selected owner"
-                            );
-                            continue;
-                        }
-
                         advance_codex_tui_runtime_binding_and_marker_offset(
                             &tmux_session_name,
                             &rollout_path,
@@ -487,7 +263,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                         let tail_rollout_path = rollout_path.clone();
                         let tail_lease = lease.clone();
                         let tail_span = tracing::info_span!(
-                            "codex_idle_response_tail",
+                            "codex_idle_response_tail_repair",
                             provider = ProviderKind::Codex.as_str(),
                             channel_id = channel_id.get(),
                             tmux_session_name = %tmux_session_name,
@@ -496,8 +272,15 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                             relay_owner = lease.relay_owner.as_str(),
                             runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
                         );
+                        tracing::warn!(
+                            tmux_session_name = %tmux_session_name,
+                            channel_id = channel_id.get(),
+                            rollout_path = %rollout_path.display(),
+                            line_end_offset,
+                            "repaired Codex ownerless external-input inflight and resumed response tail from live rollout"
+                        );
                         task_supervisor::spawn_observed(
-                            "codex_idle_response_tail",
+                            "codex_idle_response_tail_repair",
                             async move {
                                 let _done_guard = CodexIdleTailDoneGuard {
                                     tmux_session_name: Some(tail_tmux_session_name.clone()),
@@ -509,27 +292,295 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     channel_id,
                                     tail_rollout_path,
                                     line_end_offset,
-                                    prompt,
+                                    (prompt, own_turn),
                                     tail_lease,
-                                    own_turn,
                                 )
                                 .await;
                             }
                             .instrument(tail_span),
                         );
+                        continue;
+                    }
+                    Ok(Some(CodexIdleRolloutScan::NoPrompt { .. })) => {}
+                    Ok(None) => {
+                        tracing::debug!(
+                            tmux_session_name = %tmux_session_name,
+                            channel_id = channel_id.get(),
+                            rollout_path = %rollout_path.display(),
+                            "Codex ownerless external-input inflight repair skipped; prompt not found in rollout"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            tmux_session_name = %tmux_session_name,
+                            channel_id = channel_id.get(),
+                            rollout_path = %rollout_path.display(),
+                            error = %error,
+                            "Codex ownerless external-input inflight repair scan failed"
+                        );
                     }
                 }
             }
+            if !inflight::ownerless_external_input_inflight_is_stale(&inflight) {
+                continue;
+            }
+            tracing::debug!(
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                user_msg_id = inflight.user_msg_id,
+                updated_at = %inflight.updated_at,
+                "codex idle rollout relay ignored stale ownerless TUI-direct inflight blocker"
+            );
+        }
 
-            drop(shared);
-            tokio::time::sleep(CODEX_IDLE_ROLLOUT_POLL_INTERVAL).await;
+        crate::services::tui_prompt_dedupe::codex_replay_restored_handoff_inputs(
+            &tmux_session_name,
+            &rollout_path,
+        );
+        if !legacy_body {
+            continue;
+        }
+        #[cfg(test)]
+        if super::source_tick::skip_body_for_test(&tmux_session_name) {
+            continue;
+        }
+        #[cfg(test)]
+        note_poll(&tmux_session_name, PollNote::BodyScan);
+        let scan = match super::idle_transcript_scan::scan_codex_records(
+            match std::fs::File::open(&rollout_path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            },
+            binding.last_offset,
+            None,
+            true,
+            crate::services::tui_prompt_dedupe::codex_restore_observed_end(&tmux_session_name)
+                .unwrap_or(binding.last_offset),
+        ) {
+            Ok(scan) => scan,
+            Err(error) => {
+                tracing::debug!(
+                    tmux_session_name = %tmux_session_name,
+                    rollout_path = %rollout_path.display(),
+                    error = %error,
+                    "codex idle rollout relay scan skipped"
+                );
+                continue;
+            }
+        };
+
+        let (scan, stats) = scan;
+        match scan {
+            CodexIdleRolloutScan::NoPrompt { offset } => {
+                if offset != binding.last_offset {
+                    #[cfg(test)]
+                    note_poll(&tmux_session_name, PollNote::SharedOffset);
+                    let advanced =
+                        crate::services::codex_tui::session::advance_codex_tui_checkpoint(
+                            &tmux_session_name,
+                            &rollout_path,
+                            Some(binding.last_offset),
+                            offset,
+                        );
+                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced {
+                        start,
+                        end,
+                        ..
+                    } = advanced
+                    {
+                        let kind = super::rehydration::codex_marker::span_delivery_kind(
+                            channel_id.get(),
+                            &rollout_path,
+                            (start, end),
+                        );
+                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(
+                            &tmux_session_name,
+                            start,
+                            end,
+                            stats,
+                            kind,
+                        );
+                    }
+                }
+            }
+            CodexIdleRolloutScan::Prompt {
+                prompt,
+                line_end_offset,
+                entry_id,
+                evidence,
+            } => {
+                let prompt_start = crate::services::codex_tui::session::checkpoint::at(
+                    &rollout_path,
+                    line_end_offset.saturating_sub(1),
+                )
+                .unwrap_or(line_end_offset);
+                if prompt_start > binding.last_offset {
+                    #[cfg(test)]
+                    note_poll(&tmux_session_name, PollNote::SharedOffset);
+                    let advanced =
+                        crate::services::codex_tui::session::advance_codex_tui_checkpoint(
+                            &tmux_session_name,
+                            &rollout_path,
+                            Some(binding.last_offset),
+                            prompt_start,
+                        );
+                    if let crate::services::codex_tui::session::checkpoint::Advance::Advanced {
+                        start,
+                        end,
+                        ..
+                    } = advanced
+                    {
+                        let kind = super::rehydration::codex_marker::span_delivery_kind(
+                            channel_id.get(),
+                            &rollout_path,
+                            (start, end),
+                        );
+                        crate::services::tui_prompt_dedupe::record_codex_unknown_span(
+                            &tmux_session_name,
+                            start,
+                            end,
+                            stats,
+                            kind,
+                        );
+                    }
+                }
+                let observed_at = chrono::Utc::now();
+                let own_turn = evidence.turn_id.clone().or_else(|| {
+                    super::idle_transcript_scan::codex_native_turn_at(
+                        &rollout_path,
+                        line_end_offset,
+                    )
+                });
+                let observation =
+                    crate::services::tui_prompt_dedupe::observe_restored_codex_record_prompt_at(
+                        &tmux_session_name,
+                        (&rollout_path, prompt_start, &evidence),
+                        (&prompt, entry_id.as_deref(), own_turn.as_deref()),
+                        observed_at,
+                    );
+                tracing::info!(
+                    tmux_session_name = %tmux_session_name,
+                    channel_id = channel_id.get(),
+                    observation = ?observation,
+                    entry_id = entry_id.as_deref().unwrap_or(""),
+                    "codex idle rollout relay observed prompt"
+                );
+                if !codex_idle_prompt_observation_should_tail_response(observation) {
+                    advance_codex_tui_runtime_binding_and_marker_offset(
+                        &tmux_session_name,
+                        &rollout_path,
+                        line_end_offset,
+                    );
+                    continue;
+                }
+                let lease = record_external_turn_lease_for_output(
+                    shared,
+                    &ProviderKind::Codex,
+                    channel_id,
+                    &tmux_session_name,
+                    binding.runtime_kind,
+                    &rollout_path,
+                    observed_at,
+                );
+                #[cfg(test)]
+                super::synthetic_start::bridge_handoff::pause_for_test(
+                    &SCAN_LEASE_PAUSE,
+                    channel_id,
+                )
+                .await;
+                tracing::info!(
+                    tmux_session_name = %tmux_session_name,
+                    channel_id = channel_id.get(),
+                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                    session_key = lease.session_key.as_deref().unwrap_or(""),
+                    relay_owner = lease.relay_owner.as_str(),
+                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                    "codex idle rollout relay selected external turn owner"
+                );
+                if wait_for_tui_direct_synthetic_non_bridge_claim(
+                    &shared.tmux_watchers,
+                    &ProviderKind::Codex,
+                    channel_id,
+                    &tmux_session_name,
+                )
+                .await
+                {
+                    advance_codex_tui_runtime_binding_and_marker_offset(
+                        &tmux_session_name,
+                        &rollout_path,
+                        line_end_offset,
+                    );
+                    tracing::info!(
+                        tmux_session_name = %tmux_session_name,
+                        channel_id = channel_id.get(),
+                        turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                        session_key = lease.session_key.as_deref().unwrap_or(""),
+                        "codex idle rollout relay yielded to resolved TUI-direct synthetic non-bridge owner"
+                    );
+                    continue;
+                }
+                if !bridge_adapter_owns_external_turn(lease.relay_owner) {
+                    advance_codex_tui_runtime_binding_and_marker_offset(
+                        &tmux_session_name,
+                        &rollout_path,
+                        line_end_offset,
+                    );
+                    tracing::debug!(
+                        tmux_session_name = %tmux_session_name,
+                        channel_id = channel_id.get(),
+                        turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                        session_key = lease.session_key.as_deref().unwrap_or(""),
+                        relay_owner = lease.relay_owner.as_str(),
+                        runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                        "codex idle rollout relay yielded response tail to selected owner"
+                    );
+                    continue;
+                }
+
+                advance_codex_tui_runtime_binding_and_marker_offset(
+                    &tmux_session_name,
+                    &rollout_path,
+                    line_end_offset,
+                );
+                active_tails.insert(tmux_session_name.clone());
+                let shared_for_tail = shared.clone();
+                let done_tx_for_tail = done_tx.clone();
+                let tail_tmux_session_name = tmux_session_name.clone();
+                let tail_rollout_path = rollout_path.clone();
+                let tail_lease = lease.clone();
+                let tail_span = tracing::info_span!(
+                    "codex_idle_response_tail",
+                    provider = ProviderKind::Codex.as_str(),
+                    channel_id = channel_id.get(),
+                    tmux_session_name = %tmux_session_name,
+                    turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                    session_key = lease.session_key.as_deref().unwrap_or(""),
+                    relay_owner = lease.relay_owner.as_str(),
+                    runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
+                );
+                task_supervisor::spawn_observed(
+                    "codex_idle_response_tail",
+                    async move {
+                        let _done_guard = CodexIdleTailDoneGuard {
+                            tmux_session_name: Some(tail_tmux_session_name.clone()),
+                            done_tx: done_tx_for_tail,
+                        };
+                        run_codex_idle_response_tail(
+                            shared_for_tail,
+                            tail_tmux_session_name,
+                            channel_id,
+                            tail_rollout_path,
+                            line_end_offset,
+                            (prompt, own_turn),
+                            tail_lease,
+                        )
+                        .await;
+                    }
+                    .instrument(tail_span),
+                );
+            }
         }
     }
-    .instrument(tracing::info_span!(
-        "codex_idle_rollout_relay",
-        provider = ProviderKind::Codex.as_str(),
-        runtime_kind = RuntimeHandoffKind::CodexTui.as_str(),
-    )));
 }
 
 /// Test hooks: relay tasks actually spawned, and which runtime each relay use served.
@@ -545,7 +596,7 @@ pub(super) enum RelayUse {
 #[cfg(test)]
 pub(super) static RELAY_TARGETS: Mutex<Vec<(RelayUse, usize)>> = Mutex::new(Vec::new());
 #[cfg(test)]
-fn note_relay_target(used: RelayUse, shared: &Arc<SharedData>) {
+pub(super) fn note_relay_target(used: RelayUse, shared: &Arc<SharedData>) {
     RELAY_TARGETS
         .lock()
         .unwrap()
@@ -567,12 +618,14 @@ pub(super) static SCAN_LEASE_PAUSE: Mutex<TestPause> = Mutex::new(None);
 pub(super) enum PollNote {
     Visit,
     EarlierPrompt,
+    BodyScan,
+    SharedOffset,
 }
 #[cfg(test)]
 pub(super) static POLL_NOTES: Mutex<std::collections::BTreeMap<(String, PollNote), usize>> =
     Mutex::new(std::collections::BTreeMap::new());
 #[cfg(test)]
-fn note_poll(tmux_session_name: &str, note: PollNote) {
+pub(super) fn note_poll(tmux_session_name: &str, note: PollNote) {
     *POLL_NOTES
         .lock()
         .unwrap()
@@ -587,10 +640,10 @@ async fn run_codex_idle_response_tail(
     channel_id: ChannelId,
     rollout_path: PathBuf,
     start_offset: u64,
-    prompt_text: String,
+    prompt: (String, Option<String>),
     lease: ExternalInputRelayLease,
-    own_turn: Option<String>,
 ) {
+    let (prompt_text, own_turn) = prompt;
     #[cfg(test)]
     TAIL_STARTS.lock().unwrap().push(channel_id.get());
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
@@ -785,3 +838,7 @@ pub(super) async fn finish_failed_codex_idle_reader(
     )
     .await;
 }
+
+#[cfg(test)]
+pub(super) static RELAY_TICKS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);

@@ -3,7 +3,6 @@
 
 use super::boot_custody::sha;
 use crate::services::discord::bot_role::UtilityBotRole;
-use crate::services::discord::input_runtime::fence::{self, BootTarget};
 use crate::services::discord::outbound::DISCORD_SAFE_LIMIT_CHARS;
 use crate::services::discord::{ProviderKind, runtime_store};
 use crate::services::message_outbox::{
@@ -21,7 +20,6 @@ const FAILED: &str =
 /// One custody episode's notice: its outbox target, session key, sending bot and text.
 #[derive(Debug)]
 pub(super) struct Notice {
-    pub(super) channel: u64,
     pub(super) target: String,
     pub(super) session: String,
     pub(super) bot: String,
@@ -60,9 +58,6 @@ pub(super) async fn enqueue_custody_notices(
     };
     let mut enqueued = 0;
     for notice in &notices {
-        if notice_input_protected(provider, notice.channel) {
-            continue;
-        }
         let (session, dir) = (notice.session.as_str(), notice.dir.display());
         let message = OutboxMessage {
             target: &notice.target,
@@ -82,34 +77,11 @@ pub(super) async fn enqueue_custody_notices(
         };
         enqueued += 1;
         tracing::info!(provider = provider.as_str(), %session, %dir, "custody notice held by the outbox");
-        #[cfg(test)]
-        AFTER_ENQUEUE.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().take() {
-                hook();
-            }
-        });
-        if notice_input_protected(provider, notice.channel) {
-            continue;
-        }
         if notice.bot != UtilityBotRole::Notify.alias() {
             readdress(pool, id, &notice.bot).await;
         }
     }
     enqueued
-}
-
-fn notice_input_protected(provider: &ProviderKind, channel: u64) -> bool {
-    let target = if channel == 0 {
-        BootTarget::Unknown
-    } else {
-        BootTarget::Channel(provider, channel)
-    };
-    fence::boot_skip(target)
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static AFTER_ENQUEUE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Moves a row a copy-less pass staged for the notify bot to the provider bot while no worker has
@@ -185,7 +157,6 @@ fn episode_notice(
     let (bot, dir) = (bot.into_owned(), dir.to_path_buf());
     let text = notice_text(provider.as_str(), &dir);
     Ok(Some(Notice {
-        channel,
         target,
         session,
         bot,

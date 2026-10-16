@@ -90,7 +90,8 @@ pub(crate) fn reevaluate(
         Sidecar::Unavailable(reason) => return Ok(demote(work, Reevaluation::Unavailable(reason))),
     };
     // Sources in the order work first names them, each with its ranges indexed to work.
-    let mut by_source: Vec<(SourceId, HashMap<(u64, u64), Vec<usize>>)> = Vec::new();
+    type WorkByRange = HashMap<(u64, u64), Vec<usize>>;
+    let mut by_source: Vec<(SourceId, WorkByRange)> = Vec::new();
     for (at, item) in work.iter().enumerate() {
         let slot = match by_source
             .iter()
@@ -147,7 +148,7 @@ fn unit_key(derived: &Derived) -> Option<&UnitKey> {
 }
 
 /// Only a recorded Posted or a legitimate Excluded settles work; any other outcome is kept debt.
-fn acked(ledger: &LedgerState, derived: &Derived) -> bool {
+pub(super) fn acked(ledger: &LedgerState, derived: &Derived) -> bool {
     match derived {
         Derived::Piece(piece) => {
             let latest = ledger.latest_piece(&piece.unit_key, piece.index);
