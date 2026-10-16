@@ -703,9 +703,7 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
             complete: false,
         };
     };
-    if channel == 0
-        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    {
+    if channel == 0 {
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
@@ -714,7 +712,7 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
     let mut loaded = if scoped_restore_mutant("scope") {
         load_inflight_probe_with_scope(&root, provider, |_| false, None)
     } else {
-        load_inflight_probe_with_scope(&root, provider, |id| id != channel, Some(channel))
+        load_inflight_probe_with_scope(&root, provider, |_| false, Some(channel))
     };
     if scoped_restore_mutant("complete") {
         loaded.complete = true;
@@ -747,12 +745,7 @@ pub(super) fn load_inflight_probe_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
-    let load = load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel);
-    #[cfg(test)]
-    if let Some(hook) = super::AFTER_EXCLUDING_SCAN.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
-    load
+    load_inflight_probe_with_scope(root, provider, exclude_channel, None)
 }
 
 /// Rows the loader's verdict would retire are hidden, never unlinked or
@@ -761,15 +754,7 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     root: &Path,
     provider: &ProviderKind,
 ) -> InflightProbeLoad {
-    load_inflight_states_for_probe_from_root_excluding(root, provider, |_| false)
-}
-
-fn load_inflight_states_for_probe_from_root_excluding(
-    root: &Path,
-    provider: &ProviderKind,
-    exclude_channel: impl Fn(u64) -> bool,
-) -> InflightProbeLoad {
-    load_inflight_probe_with_scope(root, provider, exclude_channel, None)
+    load_inflight_probe_with_scope(root, provider, |_| false, None)
 }
 
 use scoped_restore::backfill_scoped_restore;

@@ -264,7 +264,7 @@ fn item(id: u64) -> Intervention {
 }
 
 #[tokio::test]
-async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_save_legacy() {
+async fn sigterm_snapshots_preserve_held_queues_and_mark_all_rows() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -316,7 +316,6 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
         serde_json::from_slice(&std::fs::read(&held_row_path).unwrap()).unwrap();
     old.as_object_mut().unwrap().remove("finalizer_turn_id");
     std::fs::write(&held_row_path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    let held_row = std::fs::read(&held_row_path).unwrap();
     let legacy_row_path = inflight::inflight_state_path(&root, &provider, legacy.get());
     let checkpoint = runtime_store::last_message_root()
         .unwrap()
@@ -374,7 +373,10 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
         (legacy.get() + 31).to_string()
     );
     assert_eq!(std::fs::read(queue_path(held)).unwrap(), held_queue);
-    assert_eq!(std::fs::read(held_row_path).unwrap(), held_row);
+    let marked: InflightTurnState =
+        serde_json::from_slice(&std::fs::read(held_row_path).unwrap()).unwrap();
+    assert_eq!(marked.restart_mode, Some(InflightRestartMode::DrainRestart));
+    assert_eq!(marked.finalizer_turn_id, held.get() + 10);
     assert!(
         !input_runtime::health_reasons()
             .iter()
