@@ -9131,6 +9131,7 @@ services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_se
 services::discord::tui_prompt_relay::synthetic_start::tests::witnessless_reclaim_records_the_i20_violation_and_a_witnessed_one_does_not
 services::discord::tui_prompt_relay::synthetic_start::tests::young_rowless_synthetic_owner_is_not_reclaimed
 services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_begun_before_the_takeover_persists_no_start_after_confirmation
+services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_not_yet_awaited_waits_on_the_start_lock_before_persisting
 services::discord::tui_prompt_relay::synthetic_start_wiring::codex_tests::a_codex_observation_resumed_after_confirmation_persists_no_start
 services::discord::tui_prompt_relay::tests::abort_cleanup_records_marker_and_keeps_hourglass
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
@@ -10243,6 +10244,7 @@ services::discord::turn_finalizer::cleanup::tests::standby_relay_cancel_does_not
 services::discord::turn_finalizer::cleanup::tests::standby_relay_completion_finalizer_removes_hourglass_and_marks_complete
 services::discord::turn_finalizer::cleanup::tests::synthetic_message_ids_skip_backstop_reaction_cleanup
 services::discord::turn_finalizer::cleanup::tests::watcher_context_skips_extra_reaction_calls
+services::discord::turn_finalizer::completion_admission::codex_tests::a_fresh_init_of_one_empty_source_confirms_on_a_restarted_late_adopt_boot
 services::discord::turn_finalizer::completion_admission::codex_tests::a_refused_codex_confirmation_keeps_the_claim_for_one_reconcile_wake
 services::discord::turn_finalizer::completion_admission::codex_tests::a_restarted_takeover_confirms_on_its_init_source
 services::discord::turn_finalizer::completion_admission::codex_tests::a_takeover_confirms_on_its_committed_source_after_the_binding_rotates
