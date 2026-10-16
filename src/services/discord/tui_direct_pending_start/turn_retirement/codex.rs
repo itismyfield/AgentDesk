@@ -7,8 +7,8 @@ use crate::services::discord::inflight::{self, InflightTurnState};
 use crate::services::discord::tui_direct_pending_start::channel_lock;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, SourceBinding};
+use crate::services::tui_o::store::OStore;
 use crate::services::tui_o::turn_mode::{self, TurnConfig};
-use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::input_facts::{InputFacts, TurnState};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,8 +43,8 @@ pub(in crate::services::discord) fn confirm_codex_channels(
     owned().into_iter().filter(confirmed).collect()
 }
 
-/// A takeover this process committed waits for its turn in the rollout bound now; any other
-/// committed channel waits only for Legacy's unfinished turn.
+/// A late takeover waits for its turn in the rollout its init committed, before or after a restart;
+/// any other committed channel waits only for Legacy's unfinished turn.
 pub(in crate::services::discord) fn confirm_current(
     channel: u64,
     config: &TurnConfig,
@@ -52,28 +52,37 @@ pub(in crate::services::discord) fn confirm_current(
     if !config.selects(channel) {
         return Confirmation::Unselected;
     }
-    let takeover = crate::services::tui_o::cutover::boot_ownership()
+    let late = crate::services::tui_o::cutover::boot_ownership()
         .into_iter()
         .any(|(c, _, candidate)| c == channel && candidate.is_some_and(|c| c.late_adopt_origin()));
-    if !takeover {
+    // After a restart the candidate is plainly committed; only its init still names a takeover.
+    if !late && !crate::services::tui_o::cutover::late_adopt_boot() {
         return confirm_codex_channel(channel, Some(config), None);
     }
-    match current_source(channel) {
-        Ok(source) => confirm_codex_channel(channel, Some(config), Some(&source)),
+    match takeover_source(channel) {
+        Ok(Some(source)) => confirm_codex_channel(channel, Some(config), Some(&source)),
+        Ok(None) if !late => confirm_codex_channel(channel, Some(config), None),
+        Ok(None) => Confirmation::Retry("the takeover init names no single source".into()),
         Err(detail) => Confirmation::Retry(detail),
     }
 }
 
-fn current_source(channel: u64) -> Result<SourceBinding, String> {
-    let log = ChannelBindingLog::new(channel, ShadowProvider::Codex);
-    let events = log.binding_events_since(channel, 0)?;
-    let (source, _) = crate::services::tui_o::writer::adoption::current(&events)
-        .ok_or("the takeover rollout is not bound now")?;
-    Ok(SourceBinding {
+/// The source a takeover's init committed from its first byte, whatever the binding log binds now;
+/// None when the init holds anything else.
+fn takeover_source(channel: u64) -> Result<Option<SourceBinding>, String> {
+    let store = crate::config::runtime_root().and_then(|root| OStore::existing(&root));
+    let init = store.ok_or("no O store")?.read_init(channel);
+    let sources = init
+        .map_err(|error| format!("{error:?}"))?
+        .map(|init| init.sources);
+    let Some([source]) = sources.as_deref() else {
+        return Ok(None);
+    };
+    Ok((source.delivery_start == 0).then(|| SourceBinding {
         channel_id: channel,
         provider: ShadowProvider::Codex,
-        source,
-    })
+        source: source.source_id.clone(),
+    }))
 }
 
 /// Confirms a selected Codex channel once the turn in `takeover`, when given, ended and Legacy

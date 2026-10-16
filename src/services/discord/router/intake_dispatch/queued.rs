@@ -152,7 +152,7 @@ pub(crate) async fn admit_queued_intake(
             return QueuedAdmissionDisposition::RejectedNonPortableAttachment;
         }
         IntakeAdmission::DeferredOpenRoute { .. }
-        | IntakeAdmission::DeferredTurnMode
+        | IntakeAdmission::DeferredTurnMode(_)
         | IntakeAdmission::ReplayDeferred(_)
         | IntakeAdmission::Blocked { .. } => {
             let Some(dispatch_lease) = dispatch_lease else {

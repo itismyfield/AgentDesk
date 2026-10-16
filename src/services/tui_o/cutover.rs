@@ -107,6 +107,16 @@ pub(crate) fn codex_turn_awaited(
     turn.filter(|turn| turn.selects(channel))
 }
 
+/// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
+pub(crate) fn turn_selected(channel: u64) -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
+}
+
+/// Whether this boot reserves pending channels for late adoption.
+pub(crate) fn late_adopt_boot() -> bool {
+    test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.late_adopt_capable()))
+}
+
 /// A reserved delegated host still needs Legacy to execute its first input and bind a source.
 fn late_legacy_input(provider: &str, channel: u64) -> bool {
     let kind = match provider.trim().to_ascii_lowercase().as_str() {

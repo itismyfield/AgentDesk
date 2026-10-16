@@ -18,7 +18,7 @@ pub(crate) use intake_dispatch::{
     admit_queued_intake, admit_text_intake, checkpoint_waits_for_admission,
     dispatch_live_text_intake, dispatch_skill_intake, dispatch_text_intake,
     finish_admitted_queued_intake, finish_admitted_text_intake, finish_text_intake_admission,
-    prepare_admitted_live_attachments, resolve_attachment_admission,
+    live_checkpoint_waits, prepare_admitted_live_attachments, resolve_attachment_admission,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;

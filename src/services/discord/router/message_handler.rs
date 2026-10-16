@@ -253,6 +253,8 @@ async fn refresh_claimed_runtime_for_launch(
     *state.3 = runtime.3;
 }
 
+#[cfg(test)]
+pub(super) use self::attachments::TEST_DOWNLOADS;
 pub(super) use self::attachments::{
     AttachmentDescriptor, LocalAttachmentPreparationPermit, describe_attachments,
     prepare_admitted_local_attachment, prepare_portable_attachments,
