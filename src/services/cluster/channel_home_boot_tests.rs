@@ -681,6 +681,135 @@ mod writer_return {
         pg_db.drop().await;
     }
 
+    /// Waits until PG reports a backend queued on a lock that backend `holder` keeps.
+    async fn queued_behind(pool: &PgPool, holder: i32) {
+        for _ in 0..400 {
+            let queued: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                  WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if queued {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the return never waited on the row lock");
+    }
+
+    /// A return whose CAS goes stale, the reclaimed row removed and the channel delegated again
+    /// while it waited, removes nothing, starts no gateway writer and leaves the new delegation to
+    /// drain to its target.
+    #[tokio::test]
+    async fn a_stale_return_keeps_the_new_delegation_and_starts_no_writer_pg() {
+        let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
+        let _selected = test_override::force_channels(&[(WID, ClaudeTui)]);
+        let _pending = test_override::force_candidates(&[(WID, ClaudeTui)]);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+        reclaimed(&pool).await;
+        let mut racer = pool.begin().await.unwrap();
+        let racer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *racer)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1 FROM o_channel_homes WHERE channel_id = $1 FOR UPDATE")
+            .bind(WC)
+            .execute(&mut *racer)
+            .await
+            .unwrap();
+        let gw = Gateway::boot(&pool, rows(&pool).await).await;
+        queued_behind(&pool, racer_pid).await;
+        // Another return of the row and the operator's next delegate, committed while it waits.
+        sqlx::query("DELETE FROM o_channel_homes WHERE channel_id = $1")
+            .bind(WC)
+            .execute(&mut *racer)
+            .await
+            .unwrap();
+        let redelegated: i64 = sqlx::query_scalar(
+            "INSERT INTO o_channel_homes (channel_id, provider, state, holder, target, epoch, renewed_at)
+             VALUES ($1, 'claude', 'releasing', 'gw', 'mini', nextval('o_channel_home_epochs'), NOW())
+             RETURNING epoch",
+        )
+        .bind(WC)
+        .fetch_one(&mut *racer)
+        .await
+        .unwrap();
+        racer.commit().await.unwrap();
+
+        let released = || async {
+            let row = o_channel_homes::read_home(&pool, WC).await.unwrap();
+            row.is_some_and(|row| row.state == HomeState::Released)
+        };
+        let mut drained = false;
+        for _ in 0..1500 {
+            if released().await {
+                drained = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(drained, "the new delegation drains to its target");
+        let row = o_channel_homes::read_home(&pool, WC)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.holder, row.target.as_deref()),
+            (None, Some("mini")),
+            "the stale return removed nothing"
+        );
+        assert!(row.epoch > redelegated);
+        assert!(eventually(20, || channel_home::registered(WC).is_none()).await);
+        assert_eq!(
+            *gw.starts.lock().unwrap(),
+            [],
+            "the stale return started no gateway writer"
+        );
+        assert!(!gw.ready.is_hosted(WID));
+        gw.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A return to a gateway that holds no writer candidate for the channel, only a standby store
+    /// off its O home: the row goes and the gate with it, but readiness stays closed.
+    #[tokio::test]
+    async fn a_return_without_a_writer_candidate_keeps_readiness_closed_pg() {
+        use crate::services::tui_o::channel_policy::Adoption;
+        let _hosts = crate::config::session_hosts::force_for_test(Some("gw"), &[(WID, "gw")]);
+        let _standby = test_override::force_standby(&[(WID, ClaudeTui)], "mini", Adoption::Pending);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        reclaimed(&pool).await;
+        let gw = Gateway::boot(&pool, rows(&pool).await).await;
+        let mut returned = false;
+        for _ in 0..1000 {
+            if o_channel_homes::read_home(&pool, WC)
+                .await
+                .unwrap()
+                .is_none()
+            {
+                returned = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(returned, "the return removes the reclaimed row");
+        assert!(eventually(5, || channel_home::registered(WC).is_none()).await);
+        // The return's start and the next round's retry, unless a writer got hosted first.
+        let tried = || gw.starts.lock().unwrap().len() >= 2 || gw.ready.is_hosted(WID);
+        assert!(eventually(20, tried).await, "the watch never tried a start");
+        let open = (gw.ready.is_hosted(WID), gw.ready.accepts(WID));
+        assert_eq!(open, (false, false), "readiness opened without a candidate");
+        gw.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
     /// An unreadable row is not its absence: the reclaimed channel's gate stays and no gateway
     /// writer starts.
     #[tokio::test]

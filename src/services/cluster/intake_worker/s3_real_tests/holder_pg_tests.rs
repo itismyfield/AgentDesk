@@ -1041,20 +1041,15 @@ async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
             writers: None,
         })
     };
-    let lock = lock_home_row(&scene.pool).await;
+    let mut lock = lock_home_row(&scene.pool).await;
+    let locker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
     let gates = channel_home_boot::start(Some(true), boot).await;
     assert_eq!(gates.len(), 1, "the released row names MINI");
-    // The watch's only query that holds a connection across two samples is the blocked adopt.
-    let in_use = || pool.size() as usize > pool.num_idle();
-    let mut held = 0;
-    for _ in 0..400 {
-        held = if in_use() { held + 1 } else { 0 };
-        if held >= 3 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    }
-    assert!(held >= 3, "the adopt never waited on the row lock");
+    // Of the watch's statements only the adopt UPDATE can queue on the row lock.
+    queued_behind(&scene.pool, locker).await;
     assert!(channel_home::unregister(&channel).is_some());
     lock.commit().await.unwrap();
 
@@ -1092,4 +1087,23 @@ async fn th6_unregister_during_the_adopt_leaves_one_holder_pg() {
     channel_home::unregister(&channel);
     pool.close().await;
     scene.drop_db().await;
+}
+
+/// Waits until PG reports a backend queued on a lock that backend `holder` keeps.
+async fn queued_behind(pool: &sqlx::PgPool, holder: i32) {
+    for _ in 0..400 {
+        let queued: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if queued {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the adopt never waited on the row lock");
 }
