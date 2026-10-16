@@ -19,8 +19,14 @@ mod busy_inject_e2e;
 #[path = "cancel_backstop_e2e_tests.rs"]
 mod cancel_backstop_e2e;
 mod catch_up_pagination_e2e;
+#[cfg(unix)]
+#[path = "codex_o_handoff_replay_tests.rs"]
+mod codex_o_handoff_replay;
 mod consumed_command_guard_e2e;
 pub(in crate::services::discord) mod discord_mock;
+#[cfg(unix)]
+#[path = "idle_phase_split_tests.rs"]
+mod idle_phase_split;
 // The literal test gate keeps the source censuses from reading this file as production.
 #[cfg(test)]
 #[cfg(unix)]
@@ -63,6 +69,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 use tokio::sync::broadcast::Receiver;
 
+use crate::config::test_env_lock::{SharedTestEnvLockGuard, acquire_shared_test_env_lock};
 use crate::services::discord::turn_completion_events::{
     TurnCompletionEvent, subscribe_turn_completion_events,
 };
@@ -106,6 +113,16 @@ pub(super) async fn wait_until(
     })
     .await
     .is_ok()
+}
+
+// Construct intake before polling it so its temporary state leaves the caller's stack.
+#[inline(never)]
+pub(super) fn boxed_intake<'a>(
+    ctx: &'a serenity::Context,
+    event: &'a serenity::FullEvent,
+    data: &'a Data,
+) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
+    Box::pin(router::handle_event(ctx, event, data))
 }
 
 fn watcher_handle(tmux_session_name: &str, output_path: &std::path::Path) -> TmuxWatcherHandle {
@@ -187,7 +204,7 @@ pub(super) struct RelayE2eHarness {
     _provider_guard: crate::config::TestEnvVarGuard,
     _config_guard: crate::config::TestEnvVarGuard,
     _root_guard: crate::config::TestEnvVarGuard,
-    _env_lock: std::sync::MutexGuard<'static, ()>,
+    _env_lock: SharedTestEnvLockGuard,
     root: tempfile::TempDir,
 }
 
@@ -214,19 +231,30 @@ impl RelayE2eHarness {
     }
 
     /// A runtime on the pool `storage` opens once the env lock is held; no session is bound.
-    pub(super) async fn start_unbound_on(
+    pub(super) fn start_unbound_on(
         storage: impl std::future::Future<Output = sqlx::PgPool>,
-    ) -> Self {
-        let storage = async { Some(storage.await) };
-        Self::start_inner(ProviderStub::Success, false, storage, false).await
+    ) -> impl std::future::Future<Output = Self> {
+        // Heap-pin bootstrap before an async caller captures its storage state.
+        let storage = Box::pin(async { Some(storage.await) });
+        Box::pin(Self::start_inner(
+            ProviderStub::Success,
+            false,
+            storage,
+            false,
+        ))
     }
 
     /// [`Self::start_unbound_on`] with the channel bound to its session.
-    pub(super) async fn start_bound_on(
+    pub(super) fn start_bound_on(
         storage: impl std::future::Future<Output = sqlx::PgPool>,
-    ) -> Self {
-        let storage = async { Some(storage.await) };
-        Self::start_inner(ProviderStub::Success, false, storage, true).await
+    ) -> impl std::future::Future<Output = Self> {
+        let storage = Box::pin(async { Some(storage.await) });
+        Box::pin(Self::start_inner(
+            ProviderStub::Success,
+            false,
+            storage,
+            true,
+        ))
     }
 
     /// Adds a health registry, the source of the utility bots SSH-direct
@@ -241,9 +269,7 @@ impl RelayE2eHarness {
         storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
         bind_with_pool: bool,
     ) -> Self {
-        let env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let env_lock = acquire_shared_test_env_lock();
         Self::start_inner_with_env_lock(
             stub,
             with_health_registry,
@@ -259,7 +285,7 @@ impl RelayE2eHarness {
         with_health_registry: bool,
         storage: impl std::future::Future<Output = Option<sqlx::PgPool>>,
         bind_with_pool: bool,
-        env_lock: std::sync::MutexGuard<'static, ()>,
+        env_lock: SharedTestEnvLockGuard,
     ) -> Self {
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let root_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -280,10 +306,6 @@ impl RelayE2eHarness {
             "AGENTDESK_CONFIG",
             &root.path().join("config").join("agentdesk.yaml"),
         );
-        let dedupe_guard = dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-
         let mock = discord_mock::DiscordMockState::new();
         let (proxy, gateway_url, server) = discord_mock::start(mock.clone()).await;
         let ctx = discord_mock::serenity_context(proxy.clone(), gateway_url).await;
@@ -326,6 +348,10 @@ impl RelayE2eHarness {
             .await;
         }
 
+        // Async setup touches only this fixture; guard global dedupe before exposing it.
+        let dedupe_guard = dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         Self {
             data,
             shared,
@@ -375,7 +401,7 @@ impl RelayE2eHarness {
     ) -> tokio::task::JoinHandle<Result<(), Error>> {
         let event = serenity::FullEvent::Message { new_message };
         let (ctx, data) = (self.ctx.clone(), self.clone_data());
-        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+        tokio::spawn(async move { boxed_intake(&ctx, &event, &data).await })
     }
 
     /// Answers `thread` as a guild thread of the fixture channel.
@@ -394,7 +420,7 @@ impl RelayE2eHarness {
             new_message: user_message(id, text),
         };
         let (ctx, data) = (self.ctx.clone(), self.clone_data());
-        tokio::spawn(async move { router::handle_event(&ctx, &event, &data).await })
+        tokio::spawn(async move { boxed_intake(&ctx, &event, &data).await })
     }
 
     /// [`Self::run_catch_up`] on its own task.
@@ -428,7 +454,7 @@ impl RelayE2eHarness {
         let mut task = tokio::spawn({
             let ctx = self.ctx.clone();
             let data = self.clone_data();
-            async move { router::handle_event(&ctx, &event, &data).await }
+            async move { boxed_intake(&ctx, &event, &data).await }
         });
         tokio::select! {
             _ = &mut arrived => {}
@@ -877,10 +903,15 @@ mod test_thread_stack_budget {
     #[test]
     fn deliver_user_message_keeps_intake_off_the_test_thread_stack() {
         let intake = future_size(|h, event| router::handle_event(&h.ctx, event, &h.data));
+        let boxed = future_size(|h, event| boxed_intake(&h.ctx, event, &h.data));
         let delivered = future_size(|h, _| h.deliver_user_message(1, "status?"));
         assert!(
             intake > TEST_THREAD_INTAKE_BUDGET,
             "probe must see intake: {intake}"
+        );
+        assert!(
+            boxed <= TEST_THREAD_INTAKE_BUDGET,
+            "boxed_intake future is {boxed} bytes; construction must precede polling"
         );
         assert!(
             delivered <= TEST_THREAD_INTAKE_BUDGET,

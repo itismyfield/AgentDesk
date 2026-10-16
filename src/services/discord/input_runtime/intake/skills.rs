@@ -423,20 +423,17 @@ mod c2b_skill_tests {
             tokio::sync::Mutex::new(Box::new(()));
         let args = interaction.data.options();
         let app = poise::ApplicationContext {
-            serenity_context: ctx,
             interaction,
             interaction_type: poise::CommandInteractionType::Command,
             args: &args,
             has_sent_initial_response: &sent,
             framework: poise::FrameworkContext {
-                bot_id: ctx.cache.current_user().id,
+                serenity_context: ctx,
                 options: &options,
                 user_data: data,
                 shard_manager: &manager,
             },
-            parent_commands: &[],
-            command: &command,
-            data,
+            command_tree: &[&command],
             invocation_data: &invocation_data,
             __non_exhaustive: (),
         };

@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use poise::serenity_prelude::{ChannelId, MessageId};
 use serde::{Deserialize, Serialize};
 
-use crate::services::discord::{input_runtime::fence, runtime_store};
+use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
 
 /// Wire format for a single queued-placeholder mapping. Stored as a JSON
@@ -82,24 +82,6 @@ fn pending_clear_channel_file_path(
 ///
 /// `entries` is `(user_msg_id, placeholder_msg_id)` pairs.
 pub(super) fn save_channel_queued_placeholders(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    entries: &[(MessageId, MessageId)],
-) {
-    if fence::lookup(provider, channel_id.get()).is_none() {
-        return save_channel_queued_placeholders_unfenced(
-            provider, token_hash, channel_id, entries,
-        );
-    }
-    if let Err(error) = fence::write(provider, channel_id.get(), || {
-        save_entries_checked(channel_file_path(provider, token_hash, channel_id), entries)
-    }) {
-        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
-    }
-}
-
-fn save_channel_queued_placeholders_unfenced(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -193,27 +175,6 @@ pub(super) fn save_channel_queue_exit_placeholder_clears(
     channel_id: ChannelId,
     entries: &[(MessageId, MessageId)],
 ) {
-    if fence::lookup(provider, channel_id.get()).is_none() {
-        return save_channel_queue_exit_placeholder_clears_unfenced(
-            provider, token_hash, channel_id, entries,
-        );
-    }
-    if let Err(error) = fence::write(provider, channel_id.get(), || {
-        save_entries_checked(
-            pending_clear_channel_file_path(provider, token_hash, channel_id),
-            entries,
-        )
-    }) {
-        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
-    }
-}
-
-fn save_channel_queue_exit_placeholder_clears_unfenced(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    entries: &[(MessageId, MessageId)],
-) {
     save_channel_entries(
         pending_clear_channel_file_path(provider, token_hash, channel_id),
         entries,
@@ -244,9 +205,6 @@ pub(super) fn load_channel_queued_placeholders_checked(
             .into_iter()
             .filter(|((id, _), _)| *id == channel)
             .collect());
-    }
-    if fence::lookup(provider, channel.get()).is_some() {
-        return Err("input-protected placeholder restore".into());
     }
     let path =
         channel_file_path(provider, token_hash, channel).ok_or("placeholder root unavailable")?;
@@ -280,15 +238,10 @@ pub(super) fn persist_channel_from_map_checked(
     token_hash: &str,
     channel: ChannelId,
 ) -> Result<(), String> {
-    let result = fence::write(provider, channel.get(), || {
-        if fence::lookup(provider, channel.get()).is_some() {
-            return Err("input-protected placeholder restore".into());
-        }
-        save_entries_checked(
-            channel_file_path(provider, token_hash, channel),
-            &snapshot_map(map, channel),
-        )
-    });
+    let result = save_entries_checked(
+        channel_file_path(provider, token_hash, channel),
+        &snapshot_map(map, channel),
+    );
     #[cfg(test)]
     if crate::services::discord::inflight::scoped_restore_mutant("persist-error-complete") {
         return Ok(());
@@ -334,19 +287,7 @@ fn load_entries(
         };
         let Ok(items) = serde_json::from_str::<Vec<QueuedPlaceholderEntry>>(&content) else {
             // Malformed file — drop it so future writes succeed cleanly.
-            if fence::lookup(provider, channel_id.get()).is_none() {
-                let _ = fs::remove_file(&path);
-            } else {
-                let _ = fence::write(provider, channel_id.get(), || {
-                    let latest = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-                    if latest == content {
-                        fs::remove_file(&path).map_err(|error| error.to_string())?;
-                        runtime_store::fsync_parent_dir(&path)
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Ok(())
-                });
-            }
+            let _ = fs::remove_file(&path);
             continue;
         };
         for item in items {
@@ -362,25 +303,6 @@ fn load_entries(
 /// Snapshot every in-memory mapping for `channel_id` from a `DashMap` and
 /// persist it. Used as the write-through helper after each insert/remove.
 pub(super) fn persist_channel_from_map(
-    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-) {
-    if fence::lookup(provider, channel_id.get()).is_none() {
-        return persist_channel_from_map_unfenced(map, provider, token_hash, channel_id);
-    }
-    if let Err(error) = fence::write(provider, channel_id.get(), || {
-        save_entries_checked(
-            channel_file_path(provider, token_hash, channel_id),
-            &snapshot_map(map, channel_id),
-        )
-    }) {
-        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
-    }
-}
-
-fn persist_channel_from_map_unfenced(
     map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     provider: &ProviderKind,
     token_hash: &str,
@@ -407,56 +329,16 @@ pub(super) async fn persist_map_on_worker(
     channel_id: ChannelId,
     pending_clear: bool,
 ) {
-    if fence::lookup(provider, channel_id.get()).is_none() {
-        if pending_clear {
-            persist_queue_exit_placeholder_clears_channel_from_map(
-                map, provider, token_hash, channel_id,
-            );
-        } else {
-            persist_channel_from_map(map, provider, token_hash, channel_id);
-        }
-        return;
+    if pending_clear {
+        persist_queue_exit_placeholder_clears_channel_from_map(
+            map, provider, token_hash, channel_id,
+        );
+    } else {
+        persist_channel_from_map(map, provider, token_hash, channel_id);
     }
-    let entries = snapshot_map(map, channel_id);
-    let provider = provider.clone();
-    let token_hash = token_hash.to_owned();
-    fence::effect::io(move || {
-        if pending_clear {
-            save_channel_queue_exit_placeholder_clears(
-                &provider,
-                &token_hash,
-                channel_id,
-                &entries,
-            );
-        } else {
-            save_channel_queued_placeholders(&provider, &token_hash, channel_id, &entries);
-        }
-    })
-    .await;
 }
 
 pub(super) fn persist_queue_exit_placeholder_clears_channel_from_map(
-    map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-) {
-    if fence::lookup(provider, channel_id.get()).is_none() {
-        return persist_queue_exit_placeholder_clears_channel_from_map_unfenced(
-            map, provider, token_hash, channel_id,
-        );
-    }
-    if let Err(error) = fence::write(provider, channel_id.get(), || {
-        save_entries_checked(
-            pending_clear_channel_file_path(provider, token_hash, channel_id),
-            &snapshot_map(map, channel_id),
-        )
-    }) {
-        tracing::warn!(channel_id = channel_id.get(), %error, "input accessory persistence refused");
-    }
-}
-
-fn persist_queue_exit_placeholder_clears_channel_from_map_unfenced(
     map: &dashmap::DashMap<(ChannelId, MessageId), MessageId>,
     provider: &ProviderKind,
     token_hash: &str,
@@ -536,7 +418,7 @@ mod tests {
         assert!(!path.exists());
     }
     #[test]
-    fn b2_placeholder_off_delta_zero_and_protected_failures_are_observable() {
+    fn placeholder_snapshots_match_and_malformed_or_empty_files_are_removed() {
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
         let root = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -544,68 +426,25 @@ mod tests {
             root.path(),
         );
         let provider = ProviderKind::Claude;
-        let off = ChannelId::new(6_325_307);
+        let channel = ChannelId::new(6_325_307);
         let entries = [(MessageId::new(8), MessageId::new(108))];
-        let path = channel_file_path(&provider, "off", off).unwrap();
-        save_channel_queued_placeholders(&provider, "off", off, &entries);
+        let path = channel_file_path(&provider, "off", channel).unwrap();
+        save_channel_queued_placeholders(&provider, "off", channel, &entries);
         let expected = fs::read(&path).unwrap();
-        fs::remove_file(&path).unwrap();
-        save_channel_queued_placeholders_unfenced(&provider, "off", off, &entries);
-        assert_eq!(fs::read(&path).unwrap(), expected);
         let map = dashmap::DashMap::new();
-        map.insert((off, entries[0].0), entries[0].1);
-        persist_channel_from_map(&map, &provider, "off", off);
+        map.insert((channel, entries[0].0), entries[0].1);
+        persist_channel_from_map(&map, &provider, "off", channel);
         assert_eq!(fs::read(&path).unwrap(), expected);
-        save_channel_queue_exit_placeholder_clears(&provider, "off", off, &entries);
-        let clear = pending_clear_channel_file_path(&provider, "off", off).unwrap();
+        save_channel_queue_exit_placeholder_clears(&provider, "off", channel, &entries);
+        let clear = pending_clear_channel_file_path(&provider, "off", channel).unwrap();
         assert_eq!(fs::read(&clear).unwrap(), expected);
-        persist_queue_exit_placeholder_clears_channel_from_map(&map, &provider, "off", off);
+        persist_queue_exit_placeholder_clears_channel_from_map(&map, &provider, "off", channel);
         assert_eq!(fs::read(&clear).unwrap(), expected);
         fs::write(&path, b"invalid").unwrap();
         assert!(load_queued_placeholders(&provider, "off").is_empty());
         assert!(!path.exists());
-        save_channel_queued_placeholders(&provider, "off", off, &[]);
-        save_channel_queue_exit_placeholder_clears(&provider, "off", off, &[]);
+        save_channel_queued_placeholders(&provider, "off", channel, &[]);
+        save_channel_queue_exit_placeholder_clears(&provider, "off", channel, &[]);
         assert!(!clear.exists());
-        assert!(
-            !root.path().join("runtime/discord_inflight").exists(),
-            "off accessories never add a sidecar"
-        );
-        let channel = ChannelId::new(6_325_308);
-        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
-        let _health =
-            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-        let protected = channel_file_path(&provider, "blocked", channel).unwrap();
-        fs::create_dir_all(protected.parent().unwrap().parent().unwrap()).unwrap();
-        fs::write(protected.parent().unwrap(), b"not a directory").unwrap();
-        save_channel_queued_placeholders(&provider, "valid", channel, &entries);
-        let valid = channel_file_path(&provider, "valid", channel).unwrap();
-        assert_eq!(fs::read(&valid).unwrap(), expected);
-        fs::write(&valid, b"invalid").unwrap();
-        assert!(load_queued_placeholders(&provider, "valid").is_empty());
-        assert!(!valid.exists());
-        save_channel_queue_exit_placeholder_clears(&provider, "valid", channel, &entries);
-        assert_eq!(
-            fs::read(pending_clear_channel_file_path(&provider, "valid", channel).unwrap())
-                .unwrap(),
-            expected
-        );
-        save_channel_queued_placeholders(&provider, "blocked", channel, &entries);
-        assert!(!protected.exists());
-        assert!(
-            fence::health_reasons()
-                .iter()
-                .any(|reason| reason.contains("channel=6325308") && reason.contains("Persistence"))
-        );
-        gate.clear_failure_for_test();
-        let closing = gate.close().unwrap();
-        save_channel_queued_placeholders(&provider, "closed", channel, &entries);
-        assert!(
-            !channel_file_path(&provider, "closed", channel)
-                .unwrap()
-                .exists()
-        );
-        gate.clear_failure_for_test();
-        drop(closing);
     }
 }

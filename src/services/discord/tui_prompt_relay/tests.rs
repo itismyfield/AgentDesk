@@ -4084,8 +4084,7 @@ fn s5833_r2_codex_repair_replaces_stale_durable_key() {
     assert_eq!(
         repair
             .lines()
-            .filter(|line| *line
-                == "                                repaired.restamp_external_turn_lease(&lease);")
+            .filter(|line| line.trim() == "repaired.restamp_external_turn_lease(&lease);")
             .count(),
         1
     );
@@ -5274,7 +5273,7 @@ fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
         .append(true)
         .open(&transcript)
         .expect("open partial transcript")
-        .write_all(prompt[split..].as_bytes())
+        .write_all(&prompt.as_bytes()[split..])
         .expect("finish prompt line");
 
     assert_eq!(

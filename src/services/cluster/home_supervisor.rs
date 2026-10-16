@@ -345,13 +345,29 @@ impl<B: HomeBundle> Supervisor<B> {
         }
     }
 
-    /// Stops every channel's generation and waits for each.
-    pub async fn stop_all(self: &Arc<Self>, reason: StopReason) {
-        let channels: Vec<u64> = self.with_slots(|slots| slots.keys().copied().collect());
-        let stops = channels
+    /// Stops each channel's generation as observed now, only while it is still that one, and waits
+    /// for each: `Joined` only once no channel is left in any phase.
+    pub async fn stop_all(self: &Arc<Self>, reason: StopReason) -> Settled {
+        let observed: Vec<(u64, Generation)> = self.with_slots(|slots| {
+            slots
+                .iter()
+                .map(|(&c, slot)| (c, slot.generation()))
+                .collect()
+        });
+        let stops = observed.into_iter().map(|(channel, generation)| {
+            let stopped = self.stop(channel, Some(generation), reason);
+            async move { stopped.await.map(|phase| format!("{channel}: {phase:?}")) }
+        });
+        let left: Vec<String> = futures::future::join_all(stops)
+            .await
             .into_iter()
-            .map(|channel| self.stop(channel, None, reason));
-        futures::future::join_all(stops).await;
+            .flatten()
+            .collect();
+        if left.is_empty() {
+            Settled::Joined
+        } else {
+            Settled::Stuck(left.join("; "))
+        }
     }
 }
 

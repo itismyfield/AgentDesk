@@ -27,23 +27,14 @@ pub(in crate::services::discord) async fn kickoff_queue_channel(
     channel_id: ChannelId,
     lane: KickoffLane,
 ) -> IdleQueueKickoffChannelOutcome {
-    let permit = match input_runtime::fence::lookup(provider, channel_id.get())
-        .map(|gate| gate.admit())
-        .transpose()
-    {
-        Ok(permit) => permit,
-        Err(_) => return IdleQueueKickoffChannelOutcome::default(),
-    };
-    input_runtime::fence::effect::scope(
-        permit,
-        Box::pin(kickoff_admitted_queue_channel(
-            deps, provider, channel_id, lane,
-        )),
-    )
+    // Boxed so the futures of callers that await a kickoff stay small.
+    Box::pin(kickoff_queue_channel_inner(
+        deps, provider, channel_id, lane,
+    ))
     .await
 }
 
-async fn kickoff_admitted_queue_channel(
+async fn kickoff_queue_channel_inner(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,

@@ -273,7 +273,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         Some("d.id != $3"),
     );
     let dispatch_query = format!("SELECT {active_dispatch_exists}");
-    sqlx::query_scalar::<_, bool>(&dispatch_query)
+    sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(dispatch_query))
         .bind(agent_id)
         .bind(slot_index)
         .bind(exclude_id)

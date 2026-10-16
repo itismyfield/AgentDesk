@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe as Safe, PgPool};
 use tokio::time::Instant;
 
 use super::harness::*;
@@ -598,8 +598,8 @@ async fn refuse_renewals(pool: &PgPool, epoch: i64) {
     let trigger = "CREATE TRIGGER s3_refuse_renewal BEFORE UPDATE OF renewed_at
         ON o_channel_homes FOR EACH ROW EXECUTE FUNCTION s3_refuse_renewal()";
     let mut tx = pool.begin().await.unwrap();
-    for sql in [format!("CREATE SEQUENCE {REFUSED}"), refuse, trigger.into()] {
-        sqlx::query(&sql).execute(&mut *tx).await.unwrap();
+    for sql in [format!("CREATE SEQUENCE {REFUSED}"), refuse, trigger.into()].map(Safe) {
+        sqlx::query(sql).execute(&mut *tx).await.unwrap();
     }
     tx.commit().await.unwrap();
 }
@@ -607,7 +607,7 @@ async fn refuse_renewals(pool: &PgPool, epoch: i64) {
 /// Renewals the trigger refused so far; the sequence keeps its advance though each one raised.
 async fn refusals(pool: &PgPool) -> i64 {
     let sql = format!("SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM {REFUSED}");
-    sqlx::query_scalar(&sql).fetch_one(pool).await.unwrap()
+    sqlx::query_scalar(Safe(sql)).fetch_one(pool).await.unwrap()
 }
 
 /// The row's `renewed_at` and its age by the database clock, read in one short autocommit query.

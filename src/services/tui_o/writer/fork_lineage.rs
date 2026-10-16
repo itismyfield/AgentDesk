@@ -59,11 +59,32 @@ pub(super) enum Class {
 pub(super) struct Lineage {
     through: u64,
     ids: HashMap<Id, u64>,
+    native: HashMap<Id, serde_json::Value>,
     /// Bytes after the last newline before `through`, joined to the next read.
     tail: Vec<u8>,
 }
 
 impl Lineage {
+    /// Automatic boundaries require all identities and native content, including excluded bodies.
+    pub(super) fn native_class(&self, provider: ShadowProvider, line: &[u8], from: u64) -> Class {
+        let Some(row) = RowIds::of(provider, line).filter(|r| !r.is_empty() && r.units.is_some())
+        else {
+            return Class::Unidentified;
+        };
+        match self.class_from(&row, from) {
+            Class::Inherited => {
+                let native = native_content(line);
+                if row.all().all(|id| self.native.get(&id) == native.as_ref()) {
+                    Class::Inherited
+                } else {
+                    Class::Unidentified
+                }
+            }
+            Class::New if self.class(&row) == Class::New => Class::New,
+            _ => Class::Unidentified,
+        }
+    }
+
     pub(super) fn class(&self, row: &RowIds) -> Class {
         self.class_from(row, 0)
     }
@@ -107,6 +128,9 @@ impl Lineage {
         for line in self.tail.split_inclusive(|byte| *byte == b'\n') {
             if let Some(row) = RowIds::of(provider, line) {
                 for id in row.all() {
+                    if let Some(native) = native_content(line) {
+                        self.native.insert(id.clone(), native);
+                    }
                     self.ids
                         .entry(id)
                         .and_modify(|offset| *offset = (*offset).max(start))
@@ -142,6 +166,7 @@ pub(super) fn sync(
         _ => Lineage {
             through: 0,
             ids: HashMap::new(),
+            native: HashMap::new(),
             tail: Vec::new(),
         },
     };
@@ -157,6 +182,23 @@ pub(super) fn sync(
         lineage.through = through;
     }
     Some(lineage)
+}
+
+/// Compare interpretation and raw native content; transport/session metadata is not body identity.
+fn native_content(line: &[u8]) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let message = &value["message"];
+    let native = serde_json::json!([
+        value["type"],
+        value["subtype"],
+        value["isMeta"],
+        value["isApiErrorMessage"],
+        value["apiBlockIndex"],
+        message["role"],
+        message["content"],
+        message["model"].as_str() == Some("<synthetic>")
+    ]);
+    Some(native)
 }
 
 #[cfg(all(test, unix))]

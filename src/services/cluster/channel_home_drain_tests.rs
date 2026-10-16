@@ -614,7 +614,7 @@ async fn the_drain_loop_shows_its_blocker_in_health_until_it_leaves_pg() {
     pg_db.drop().await;
 }
 
-async fn ddl(pool: &PgPool, statement: &str) {
+async fn ddl(pool: &PgPool, statement: &'static str) {
     sqlx::query(statement).execute(pool).await.expect(statement);
 }
 

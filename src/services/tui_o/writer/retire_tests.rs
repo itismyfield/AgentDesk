@@ -56,12 +56,12 @@ fn backlog(first: u32) -> Vec<u8> {
 fn len(path: &Path) -> u64 {
     std::fs::metadata(path).unwrap().len()
 }
-
 fn owed_link(source: &SourceId, seq: u64) -> SourceLink {
     SourceLink {
         source: source.clone(),
         seq,
         parent: None,
+        hot_candidate: None,
         committed_at: Utc::now(),
         boundary: Boundary::Owed { from: 0 },
     }

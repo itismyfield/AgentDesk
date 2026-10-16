@@ -94,7 +94,7 @@ fn queue_status_raw_pg(pool: &PgPool) -> String {
     }
 }
 
-async fn count_pg(pool: &PgPool, sql: &str) -> Result<i64, String> {
+async fn count_pg(pool: &PgPool, sql: &'static str) -> Result<i64, String> {
     sqlx::query_scalar::<_, i64>(sql)
         .fetch_one(pool)
         .await

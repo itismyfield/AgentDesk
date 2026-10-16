@@ -165,6 +165,8 @@ row_fresh := 0 <= age_upper < HOLD_FOR
 | `src/services/discord/router/intake_dispatch.rs` | 라우팅 | `registered` :201. PG가 있고 등록된 채널은 home 경로가 먼저 결정 |
 | `src/services/discord/runtime_bootstrap.rs` | 생성·readiness | 역할별 boot 공급 :503–624(`HomeRole`, `turns_restored`, `HomeSettings`, `install_home_availability`, `start_channel_homes`) |
 | `src/services/discord/runtime_bootstrap/o_writer_host.rs` | admission | `delegated_boot_ownership` :336 |
+| `src/services/discord/runtime_bootstrap/spawns.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `channel_home_boot::s3c_mutant` :213(:215·:220에서 사용). 생산 경로는 home row·gate·availability·fence를 읽지 않고, commit 뒤 `o_writer_host::lifecycles`로 받은 lifecycle의 종료만 기다린다 |
+| `src/services/discord/runtime_bootstrap/gateway_lease_recovery.rs` | 시험 | test 빌드 전용 뮤턴트 스위치 `channel_home_boot::s3c_mutant` :488. 생산 promotion preflight는 home 권위를 읽거나 바꾸지 않는다 |
 | `src/services/discord/runtime_bootstrap/shared_data.rs` | readiness | availability 등록 보관 :7 |
 | `src/services/discord/shared_state.rs` | readiness | availability 등록 보관 :657 |
 | `src/services/discord/mod.rs` | 시험 | 시험 fixture의 `_home_availability: None` :1331 |
