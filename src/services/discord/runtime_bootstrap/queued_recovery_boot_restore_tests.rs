@@ -1,5 +1,5 @@
-//! Boot restore merges a bound channel's persisted queue and dispatch marker, reinstalls its
-//! role override, and judges its queued placeholder.
+//! Boot restore merges bound channels' persisted queues (with or without a dispatch marker),
+//! reinstalls the role override, and judges the queued placeholder.
 
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
@@ -69,6 +69,16 @@ fn boot_restore_installs_a_bound_channels_queue_marker_override_and_placeholder(
         alt,
     )
     .unwrap();
+    // A queue persisted by Enqueue before any TakeNextSoft has no marker to absorb it.
+    let queue_only = ChannelId::new(legacy + 50);
+    crate::services::turn_orchestrator::save_channel_queue(
+        &provider,
+        &token,
+        queue_only,
+        &[item(legacy + 51)],
+        None,
+    )
+    .unwrap();
     super::super::queued_placeholders_store::save_channel_queued_placeholders(
         &provider,
         &token,
@@ -96,6 +106,11 @@ fn boot_restore_installs_a_bound_channels_queue_marker_override_and_placeholder(
         legacy_live,
         [legacy + 1, legacy + 2].into(),
         "legacy queue and marker restored"
+    );
+    assert_eq!(
+        live.get(&queue_only).cloned().unwrap_or_default(),
+        [legacy + 51].into(),
+        "a queue without a dispatch marker is restored"
     );
     let overrides = &shared.dispatch.role_overrides;
     assert!(overrides.contains_key(&ChannelId::new(legacy)));
