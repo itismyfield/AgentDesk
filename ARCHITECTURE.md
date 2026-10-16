@@ -1323,8 +1323,7 @@ src/
 │   │   │   ├── abandon_guard.rs
 │   │   │   ├── panel_shape.rs
 │   │   │   ├── retirement_tests.rs
-│   │   │   ├── tick.rs
-│   │   │   └── tick_cleanup_tests.rs
+│   │   │   └── tick.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── channel_recent_context.rs
 │   │   │   ├── dispatch_contract.rs
@@ -2199,7 +2198,6 @@ src/
 │   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
 │   │   │   │   ├── n4d2_entry_test.rs
-│   │   │   │   ├── n4d2_o_writer_test.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs

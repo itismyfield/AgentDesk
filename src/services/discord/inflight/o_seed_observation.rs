@@ -257,4 +257,4 @@ pub(in crate::services::discord) fn retired_terminal_consumed(
 
 #[path = "o_seed_observation/terminal_barrier_test.rs"]
 mod terminal_barrier;
-pub(in crate::services::discord) use terminal_barrier::{TerminalBarrier, terminal_checkpoint};
+pub(in crate::services::discord) use terminal_barrier::terminal_checkpoint;

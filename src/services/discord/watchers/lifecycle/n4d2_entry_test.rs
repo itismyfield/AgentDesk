@@ -4,10 +4,8 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
-use crate::services::discord::task_supervisor::watcher_completion::{self, Outcome};
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::{self as binding, TuiRuntimeBinding};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 static READER_STARTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, u64>>> =
@@ -93,63 +91,6 @@ impl InstallFixture {
         }
     }
 
-    /// Start the actual watcher through the general claim and task supervision paths.
-    pub async fn spawn_watcher(&self) {
-        let host = watch_host_of(
-            &self.shared,
-            &self.provider,
-            self.channel.get(),
-            &self.session,
-        )
-        .await;
-        let offset = std::fs::metadata(&self.output).unwrap().len();
-        let handle = TmuxWatcherHandle {
-            tmux_session_name: self.session.clone(),
-            output_path: self.output.clone(),
-            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            resume_offset: Arc::new(Mutex::new(None)),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
-                crate::services::discord::tmux_watcher_now_ms(),
-            )),
-        };
-        let claim = claim_or_reuse_watcher_for_host(
-            &self.shared.tmux_watchers,
-            self.channel,
-            handle,
-            &self.provider,
-            "watcher_test_fixture",
-            None,
-            host,
-        )
-        .unwrap();
-        assert!(claim.should_spawn(), "fixture must submit a fresh watcher");
-        let handle = self.handle();
-        self.shared.record_tmux_watcher_reconnect(self.channel);
-        crate::services::discord::task_supervisor::spawn_observed_tmux_watcher(
-            "watcher_test_fixture",
-            self.shared.clone(),
-            self.session.clone(),
-            handle.cancel.clone(),
-            tmux_output_watcher_with_restore(
-                self.channel,
-                self.http.clone(),
-                self.shared.clone(),
-                self.output.clone(),
-                self.session.clone(),
-                offset,
-                handle.cancel.clone(),
-                handle.paused.clone(),
-                handle.resume_offset.clone(),
-                handle.pause_epoch.clone(),
-                handle.turn_delivered.clone(),
-                handle.last_heartbeat_ts_ms.clone(),
-                None,
-            ),
-        );
-    }
     pub fn handle(&self) -> TmuxWatcherHandle {
         let handle = self.shared.tmux_watchers.get(&self.channel).unwrap();
         TmuxWatcherHandle {
@@ -163,24 +104,7 @@ impl InstallFixture {
             last_heartbeat_ts_ms: handle.last_heartbeat_ts_ms.clone(),
         }
     }
-    pub async fn cancel_and_join(&self) {
-        let handle = self.handle();
-        let ticket = watcher_completion::observe(&handle.cancel).expect("observed task registered");
-        crate::services::discord::tmux::tmux_watcher::cancel_for_test(
-            &handle.cancel,
-            Ordering::SeqCst,
-        );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(8), ticket.wait())
-                .await
-                .unwrap(),
-            Outcome::Returned
-        );
-    }
 }
-
-#[path = "n4d2_o_writer_test.rs"]
-mod o_writer;
 
 const CHILD: &str = "ADK_N4D2_ENTRY_CHILD";
 const FAKE_TMUX: &str = r#"#!/bin/sh
@@ -318,15 +242,6 @@ pub(in crate::services::discord) async fn fixture_with_pool(
     (fixture, discord)
 }
 
-pub(in crate::services::discord) fn append(fixture: &InstallFixture, bytes: &[u8]) {
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&fixture.output)
-        .unwrap()
-        .write_all(bytes)
-        .unwrap();
-}
-
 pub(in crate::services::discord) fn observe(fixture: &InstallFixture) -> Guard {
     let observed = Guard::new(&fixture.provider, fixture.channel.get());
     observed.register_source(Path::new(&fixture.output));
@@ -365,56 +280,3 @@ pub(in crate::services::discord) fn assert_zero_loaders(observed: &Guard) {
     }
 }
 
-pub(in crate::services::discord) struct OWriter(o_writer::WriterFixture);
-pub(in crate::services::discord) struct OReceiptPause(Arc<o_writer::PendingPost>);
-impl OReceiptPause {
-    pub(in crate::services::discord) async fn entered(&self) {
-        self.0.entered().await;
-    }
-    pub(in crate::services::discord) fn release(&self) {
-        self.0.release();
-    }
-}
-impl OWriter {
-    pub(in crate::services::discord) fn new(fixture: &InstallFixture) -> Self {
-        use crate::services::tui_o::shadow::ShadowProvider;
-        let provider = if fixture.provider == ProviderKind::Codex {
-            ShadowProvider::Codex
-        } else {
-            ShadowProvider::Claude
-        };
-        let inner = o_writer::WriterFixture::new(
-            &root(),
-            Path::new(&fixture.output),
-            provider,
-            fixture.channel.get(),
-            &fixture.session,
-        );
-        inner.acquired();
-        Self(inner)
-    }
-    pub(in crate::services::discord) fn start(
-        &self,
-    ) -> (
-        tokio::sync::watch::Sender<bool>,
-        tokio::task::JoinHandle<Option<crate::services::tui_o::writer::deliver::StopCause>>,
-    ) {
-        self.0.start()
-    }
-    pub(in crate::services::discord) fn posts(&self) -> Vec<String> {
-        self.0.posts()
-    }
-    pub(in crate::services::discord) fn hold_next_post(&self) -> OReceiptPause {
-        OReceiptPause(self.0.hold_next_post())
-    }
-    pub(in crate::services::discord) fn receipts(&self) -> Vec<String> {
-        use crate::services::tui_o::store::ledger::PieceOutcome;
-        let channel = self.0.channel();
-        let ledger = channel.ledger();
-        (0..ledger.next_serial())
-            .filter_map(|serial| ledger.piece(serial))
-            .filter(|piece| matches!(piece.outcome, Some(PieceOutcome::Posted(_))))
-            .map(|piece| piece.payload.clone())
-            .collect()
-    }
-}

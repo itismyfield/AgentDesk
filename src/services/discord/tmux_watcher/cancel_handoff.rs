@@ -585,12 +585,6 @@ pub(in crate::services::discord) mod capsule_observation {
         pub utf8_state: String,
     }
 
-    impl Summary {
-        pub(in crate::services::discord) fn origin_is_retired(&self) -> bool {
-            !self.origin.is_legacy()
-        }
-    }
-
     pub(in crate::services::discord) async fn pending(
         shared: &SharedData,
         channel: ChannelId,

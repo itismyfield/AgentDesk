@@ -123,10 +123,6 @@ pub(super) async fn run_placeholder_sweeper_tick(
 }
 
 #[cfg(test)]
-#[path = "tick_cleanup_tests.rs"]
-mod cleanup_tests;
-
-#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -139,9 +135,8 @@ mod tests {
     use crate::services::discord::abandon_request_store::{
         self, AbandonEpisodeIdentity, AbandonRecord,
     };
-    use crate::services::discord::health::legacy_supervision::RetiredForTest;
     use crate::services::discord::health::legacy_supervision::test_support::{
-        Answer, MockDiscord, RetireLater, age_file, message_json, seed_backfill_row,
+        Answer, MockDiscord, age_file, message_json, seed_backfill_row,
         tree_fingerprint,
     };
     use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};
@@ -296,48 +291,24 @@ mod tests {
         tree_fingerprint(dir).into_keys().collect()
     }
 
-    /// Two ticks over a retired and a Legacy channel group: the retired group's records keep
-    /// bytes, existence and mtime with zero Discord calls, while the Legacy group converges.
+    /// Two ticks over one Legacy channel group: every durable store converges, and each
+    /// Discord effect lands once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn retired_channels_skip_every_tick_effect_while_legacy_channels_converge() {
+    async fn tick_converges_every_legacy_store() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
         let discord = MockDiscord::start_with(probe_answer()).await;
-        let retired = seed_group(&shared, 6_325_400_100);
-        let legacy = seed_group(&shared, 6_325_400_200);
-        let _marks: Vec<_> = retired
-            .iter()
-            .map(|c| RetiredForTest::new("codex", *c))
-            .collect();
+        let [row, panel, marker, abandon_ch, owner] = seed_group(&shared, 6_325_400_200);
         let runtime = runtime_store::runtime_root().unwrap();
-        let before: Vec<_> = retired
-            .iter()
-            .map(|c| channel_records(&runtime, *c))
-            .collect();
-        assert!(before.iter().all(|records| !records.is_empty()));
 
         let mut tracker = StalledEditTracker::default();
         for _ in 0..2 {
             run_placeholder_sweeper_tick(&discord.http, &shared, &PROVIDER, &mut tracker).await;
         }
 
-        for (channel, before) in retired.iter().zip(&before) {
-            assert_eq!(
-                discord.calls_for(*channel),
-                Vec::<String>::new(),
-                "retired {channel}"
-            );
-            let after = channel_records(&runtime, *channel);
-            assert!(
-                &after == before,
-                "retired {channel} records: {:?}",
-                after.keys()
-            );
-        }
-        let [row, panel, marker, abandon_ch, owner] = legacy;
         let calls = discord.calls_for(row);
         assert!(
             calls.iter().any(|c| c.starts_with("PATCH")),
@@ -389,66 +360,47 @@ mod tests {
         );
     }
 
-    /// A channel retired while a probe awaits Discord is neither edited nor consumed: the
-    /// row pass and the abandon drain both re-judge after their probe.
+    /// A record replaced while its probe awaits Discord is neither edited nor consumed: the
+    /// abandon drain re-checks its queued record after the probe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn tick_rejudges_after_each_probe_await() {
+    async fn abandon_drain_rejudges_its_record_after_the_probe_await() {
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let (row_channel, abandon_channel) = (6_325_400_301u64, 6_325_400_302u64);
-        let retire = RetireLater::default();
-        let on_probe = (retire.clone(), RetireLater::default());
+        let channel = 6_325_400_302u64;
+        let msg = channel * 10 + 1;
+        let token = shared.token_hash.clone();
+        // A newer episode takes the same message while the drain's probe is in flight.
         let discord = MockDiscord::start_with(Arc::new(move |method: &Method, path: &str| {
-            if method == Method::GET && path.contains(&format!("/channels/{row_channel}/")) {
-                on_probe.0.retire("codex", row_channel);
-            }
-            if method == Method::GET && path.contains(&format!("/channels/{abandon_channel}/")) {
-                on_probe.1.retire("codex", abandon_channel);
+            if method == Method::GET && path.contains(&format!("/channels/{channel}/")) {
+                abandon_request_store::enqueue(&PROVIDER, &token, channel, abandon(msg, 78))
+                    .unwrap();
             }
             None
         }))
         .await;
-        save_inflight_state(&placeholder_row(row_channel, row_channel * 10 + 1)).unwrap();
-        let inflight = runtime_store::discord_inflight_root().unwrap();
-        age_file(
-            &crate::services::discord::inflight::inflight_state_path(
-                &inflight,
-                &PROVIDER,
-                row_channel,
-            ),
-            600,
-        );
-        for suffix in [1, 5] {
-            abandon_request_store::enqueue(
-                &PROVIDER,
-                &shared.token_hash,
-                abandon_channel,
-                abandon(abandon_channel * 10 + suffix, 77),
-            )
+        abandon_request_store::enqueue(&PROVIDER, &shared.token_hash, channel, abandon(msg, 77))
             .unwrap();
-        }
         let runtime = runtime_store::runtime_root().unwrap();
         for path in walk(&runtime.join("discord_abandon_requests")) {
             age_file(&path, 3_600);
         }
-        let before = [
-            channel_records(&runtime, row_channel),
-            channel_records(&runtime, abandon_channel),
-        ];
 
         let mut tracker = StalledEditTracker::default();
         run_placeholder_sweeper_tick(&discord.http, &shared, &PROVIDER, &mut tracker).await;
 
-        let probe = |c: u64| format!("GET /api/v10/channels/{c}/messages/{}", c * 10 + 1);
-        for (channel, before) in [row_channel, abandon_channel].into_iter().zip(&before) {
-            assert_eq!(discord.calls_for(channel), vec![probe(channel)]);
-            assert!(
-                &channel_records(&runtime, channel) == before,
-                "{channel} records kept"
-            );
-        }
+        assert_eq!(
+            discord.calls_for(channel),
+            vec![format!("GET /api/v10/channels/{channel}/messages/{msg}")]
+        );
+        let queued = abandon_request_store::load_pending(&PROVIDER, &shared.token_hash);
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(
+            (queued[0].0, queued[0].1.msg_id, queued[0].1.episode.user_msg_id),
+            (channel, msg, 78),
+            "the replacement survives untouched"
+        );
     }
 }
