@@ -413,7 +413,6 @@ async fn clear_channel_session_state_body(
     report.retried = cleared.persistence.retried;
     report.failed = cleared.persistence.failed;
     clear_teardown::write_boundary(shared, channel_id, &mut report).await;
-    drop(transition_guard);
 
     native::clear_session_memory(shared, channel_id).await;
     native::clear_process_reset_pending(shared, channel_id).await;
@@ -452,7 +451,16 @@ async fn clear_channel_session_state_body(
     }
 
     let session = (tmux_name.as_deref(), session_key.as_deref());
-    clear_teardown::end_session(shared, provider, channel_id, session, &mut report).await;
+    let transition = transition_guard.ok();
+    clear_teardown::end_session(
+        shared,
+        provider,
+        channel_id,
+        session,
+        transition,
+        &mut report,
+    )
+    .await;
 
     if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
     {

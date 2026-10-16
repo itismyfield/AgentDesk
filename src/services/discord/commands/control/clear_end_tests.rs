@@ -17,6 +17,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 
 const OLD_SESSION: &str = "provider-session-before-clear";
+const END_UNCONFIRMED: &str = "이전 세션 프로세스의 종료를 확인하지 못했어요.";
 
 async fn clear(shared: &Arc<SharedData>, provider: &ProviderKind, channel: ChannelId) -> String {
     let http = Arc::new(serenity::Http::new(""));
@@ -36,6 +37,68 @@ async fn stored_selector(pool: &sqlx::PgPool, key: &str) -> Option<String> {
     row.flatten()
 }
 
+/// A channel's managed session: its fake tmux, a live process and a stored provider session.
+struct Managed {
+    tmux: String,
+    fake: FakeTmux,
+    alive: Arc<AtomicBool>,
+    key: String,
+}
+
+impl Managed {
+    async fn start(
+        shared: &Arc<SharedData>,
+        pool: &sqlx::PgPool,
+        provider: &ProviderKind,
+        (channel, name): (ChannelId, &str),
+    ) -> Self {
+        let tmux = provider.build_tmux_session_name(name);
+        let fake = FakeTmux::install(&tmux);
+        let alive = Arc::new(AtomicBool::new(true));
+        let handle = crate::services::session_backend::SessionHandle::TestProcess {
+            pid: 6_995_200 + (channel.get() % 100) as u32,
+            alive: alive.clone(),
+        };
+        crate::services::session_backend::insert_process_session(tmux.clone(), handle);
+        map_channel(shared, channel, name).await;
+        let mut data = shared.core.lock().await;
+        data.sessions.get_mut(&channel).unwrap().session_id = Some(OLD_SESSION.into());
+        drop(data);
+        let key = super::super::super::adk_session::build_adk_session_key;
+        let key = key(shared, channel, provider, None)
+            .await
+            .expect("session key");
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, claude_session_id)
+             VALUES ($1, $2, 'idle', $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(&key)
+        .bind(provider.as_str())
+        .bind(OLD_SESSION)
+        .execute(pool)
+        .await
+        .expect("stored provider session");
+        Self {
+            tmux,
+            fake,
+            alive,
+            key,
+        }
+    }
+
+    /// Whether the clear ended the process and asked tmux to kill the session.
+    fn ended(&self) -> bool {
+        let killed = format!("kill-session -t ={}:", self.tmux);
+        !self.alive.load(Ordering::SeqCst) && self.fake.take_calls().contains(&killed)
+    }
+}
+
+impl Drop for Managed {
+    fn drop(&mut self) {
+        crate::services::session_backend::remove_process_session(&self.tmux);
+    }
+}
+
 // Claude and Codex alike: the running turn stops, the queue goes, the tmux session and its
 // process end, and neither memory nor PostgreSQL keeps the session a next launch would resume.
 #[tokio::test]
@@ -49,44 +112,14 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
     {
         let channel = ChannelId::new(1_479_671_305_341_100_000 + n as u64);
         let name = format!("adk-clear-end-{n}-{}", uuid::Uuid::new_v4().simple());
-        let tmux = provider.build_tmux_session_name(&name);
-        let fake = FakeTmux::install(&tmux);
-        let alive = Arc::new(AtomicBool::new(true));
-        let handle = crate::services::session_backend::SessionHandle::TestProcess {
-            pid: 6_995_200 + n as u32,
-            alive: alive.clone(),
-        };
-        crate::services::session_backend::insert_process_session(tmux.clone(), handle);
-        map_channel(&shared, channel, &name).await;
-        shared
-            .core
-            .lock()
-            .await
-            .sessions
-            .get_mut(&channel)
-            .unwrap()
-            .session_id = Some(OLD_SESSION.into());
-        let key = super::super::super::adk_session::build_adk_session_key;
-        let key = key(&shared, channel, &provider, None)
-            .await
-            .expect("session key");
-        sqlx::query(
-            "INSERT INTO sessions (session_key, provider, status, claude_session_id)
-             VALUES ($1, $2, 'idle', $3)",
-        )
-        .bind(&key)
-        .bind(provider.as_str())
-        .bind(OLD_SESSION)
-        .execute(&pool)
-        .await
-        .expect("stored provider session");
+        let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
         let token = Arc::new(CancelToken::new());
         let start = crate::services::discord::mailbox_try_start_turn;
         let turn = MessageId::new(channel.get() + 9);
         assert!(start(&shared, channel, token.clone(), UserId::new(1), turn).await);
         crate::services::discord::increment_global_active(&shared, "cleared turn");
         seed_backlog(&shared, &provider, channel).await;
-        fake.take_calls();
+        managed.fake.take_calls();
 
         let reply = clear(&shared, &provider, channel).await;
 
@@ -102,19 +135,106 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
             "{provider:?}"
         );
         assert_eq!(
-            stored_selector(&pool, &key).await,
+            stored_selector(&pool, &managed.key).await,
             None,
             "{provider:?}: nothing to resume"
         );
-        assert!(
-            !alive.load(Ordering::SeqCst),
-            "{provider:?}: the process ends"
-        );
-        let killed = format!("kill-session -t ={tmux}:");
-        let calls = fake.take_calls();
-        assert!(calls.contains(&killed), "{provider:?}: {calls:?}");
-        crate::services::session_backend::remove_process_session(&tmux);
+        assert!(managed.ended(), "{provider:?}: the process and tmux end");
     }
+    pool.close().await;
+    db.drop().await;
+}
+
+// A tmux session whose kill fails outlives the clear: the clear still commits, and its reply
+// warns that the old session's end was not confirmed.
+#[tokio::test]
+async fn a_clear_whose_tmux_kill_fails_commits_and_warns_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (provider, channel) = (
+        ProviderKind::Claude,
+        ChannelId::new(1_479_671_305_341_100_010),
+    );
+    let name = format!("adk-clear-kill-fails-{}", uuid::Uuid::new_v4().simple());
+    let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+    managed.fake.fail_kills();
+
+    let reply = clear(&shared, &provider, channel).await;
+
+    let warned = format!("{SESSION_CLEARED_RESPONSE}\n⚠️ {END_UNCONFIRMED}");
+    assert_eq!(reply, warned);
+    assert!(managed.ended(), "the process ends and the kill is tried");
+    assert!(crate::services::platform::tmux::has_session(&managed.tmux));
+    assert_eq!(session_state(&shared, channel).await, (None, true));
+    pool.close().await;
+    db.drop().await;
+}
+
+// A Herdr endpoint with no live execution behind it is no Herdr session: the channel's managed
+// tmux and process still end, without a warning.
+#[tokio::test]
+async fn a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (provider, channel) = (
+        ProviderKind::Claude,
+        ChannelId::new(1_479_671_305_341_100_011),
+    );
+    let hosts = [(channel.get(), "mac-mini")];
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &hosts);
+    assert!(crate::config::session_hosts::herdr_endpoint(channel.get()).is_some());
+    let name = format!("adk-clear-endpoint-only-{}", uuid::Uuid::new_v4().simple());
+    let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+
+    let reply = clear(&shared, &provider, channel).await;
+
+    assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+    assert!(managed.ended(), "the managed tmux and process end");
+    pool.close().await;
+    db.drop().await;
+}
+
+// A clear that took the channel transition keeps it until the session has ended, so an input
+// arriving mid-teardown can neither read the old session nor launch one the teardown kills.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clear_keeps_its_transition_until_the_session_has_ended_pg() {
+    use crate::services::discord::try_intake_runtime_transition_after_redirect as intake;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (provider, channel) = (
+        ProviderKind::Claude,
+        ChannelId::new(1_479_671_305_341_100_012),
+    );
+    let name = format!("adk-clear-transition-{}", uuid::Uuid::new_v4().simple());
+    let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+    managed.fake.hold_kills();
+    let task = tokio::spawn({
+        let (shared, provider) = (shared.clone(), provider.clone());
+        async move { clear(&shared, &provider, channel).await }
+    });
+    // The kill blocks a runtime worker, so the wait polls on this thread rather than a timer.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !managed.fake.killing() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clear reaches its kill"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let fallback = (None, false, String::new());
+    let during = intake(&shared, channel, fallback.clone()).await;
+    assert!(during.is_err(), "no input takes the channel mid-teardown");
+    managed.fake.release_kills();
+    assert_eq!(task.await.unwrap(), SESSION_CLEARED_RESPONSE);
+    let after = intake(&shared, channel, fallback).await;
+    let after = after.unwrap_or_else(|_| panic!("the transition is free after the clear"));
+    assert_eq!(after.state.0, None, "the next input reads a fresh session");
+    drop(after);
+    assert!(managed.ended());
     pool.close().await;
     db.drop().await;
 }
@@ -162,6 +282,54 @@ fn a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg() {
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(herdr::row(&pool, &key).await, Some(retired));
         assert_eq!(session_state(&shared, channel).await, (None, true));
+        pool.close().await;
+        db.drop().await;
+    });
+}
+
+const HERDR_RETIRED_CHANNEL: u64 = 1_479_671_305_341_200_002;
+
+// A Herdr channel whose execution already retired still ends the managed tmux and process it
+// left behind, and closes no pane.
+#[test]
+fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
+    use crate::services::session_host::herdr_termination_rig as herdr;
+    let path = concat!(
+        module_path!(),
+        "::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg"
+    );
+    if !herdr::in_child(path, HERDR_RETIRED_CHANNEL) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(HERDR_RETIRED_CHANNEL);
+    let install = rig.thread_installer();
+    install();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool) = postgres().await;
+        let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let (provider, channel) = (ProviderKind::Claude, ChannelId::new(HERDR_RETIRED_CHANNEL));
+        map_channel(&shared, channel, "p11-clear").await;
+        let key = super::super::super::adk_session::build_adk_session_key;
+        let key = key(&shared, channel, &provider, None)
+            .await
+            .expect("session key");
+        let _switches = rig
+            .bind(&pool, &shared.token_hash, &key, herdr::HostedState::Retired)
+            .await;
+        let managed = Managed::start(&shared, &pool, &provider, (channel, "p11-clear")).await;
+
+        let reply = clear(&shared, &provider, channel).await;
+
+        assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+        assert!(rig.writes().is_empty(), "no pane is closed");
+        assert!(managed.ended(), "the managed tmux and process end");
         pool.close().await;
         db.drop().await;
     });

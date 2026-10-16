@@ -3522,7 +3522,11 @@ services::discord::commands::config::session_override_cluster_characterization_t
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_toggle_round_trip_marks_and_clears_provider_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::model_override_round_trip_observed_via_would_change_probe
 services::discord::commands::control::clear_end_tests::a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
+services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transition_until_the_session_has_ended_pg
+services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg
+services::discord::commands::control::clear_end_tests::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg
+services::discord::commands::control::clear_end_tests::a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg
 services::discord::commands::control::clear_entry_tests::a_clear_without_a_pool_commits_and_warns_through_both_entries_pg
 services::discord::commands::control::clear_entry_tests::slash_clear_commits_and_warns_once_whatever_fails_pg
 services::discord::commands::control::clear_entry_tests::text_clear_commits_and_warns_once_whatever_fails_pg

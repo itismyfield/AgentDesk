@@ -58,12 +58,19 @@ pub(in crate::services::discord) fn reset_managed_process_session(session_name: 
     if crate::services::tui_prompt_dedupe::codex_verified_requires_proof(session_name) {
         return false;
     }
-    end_managed_process_session(session_name)
+    end_managed_process_session(session_name).reset
+}
+
+/// What ending a managed session did: whether anything ended, and whether a tmux session that
+/// existed outlived its kill.
+pub(super) struct ManagedEnd {
+    pub(super) reset: bool,
+    pub(super) tmux_survived: bool,
 }
 
 /// Kills the session's process tree and tmux session and removes its launch files; a verified
 /// Codex incarnation's spawn nonce goes with them, so its pin does not hold the next launch.
-pub(super) fn end_managed_process_session(session_name: &str) -> bool {
+pub(super) fn end_managed_process_session(session_name: &str) -> ManagedEnd {
     let mut reset = false;
     let lingering_pid =
         crate::services::session_backend::process_session_pid(session_name).map(|pid| pid as i32);
@@ -78,16 +85,24 @@ pub(super) fn end_managed_process_session(session_name: &str) -> bool {
     }
 
     #[cfg(unix)]
-    if crate::services::platform::tmux::has_session(session_name) {
+    let tmux_survived = crate::services::platform::tmux::has_session(session_name) && {
         crate::services::tmux_diagnostics::record_tmux_exit_reason(
             session_name,
             "managed session reset",
         );
-        if crate::services::platform::tmux::kill_session(session_name, "managed session reset") {
+        let killed =
+            crate::services::platform::tmux::kill_session(session_name, "managed session reset");
+        if killed {
             crate::services::tmux_common::cleanup_session_temp_files(session_name);
             reset = true;
         }
-    }
+        !killed
+    };
+    #[cfg(not(unix))]
+    let tmux_survived = false;
 
-    reset
+    ManagedEnd {
+        reset,
+        tmux_survived,
+    }
 }
