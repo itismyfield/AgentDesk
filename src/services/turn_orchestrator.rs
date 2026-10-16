@@ -386,9 +386,6 @@ pub(crate) enum EnqueueRefusalReason {
     /// #3297 r3 — the resolved actor is purge-tombstoned (`closed`). The
     /// registry's `enqueue_with_closed_retry` re-resolves a fresh actor.
     MailboxClosed,
-    InputModeFenced(crate::services::discord::input_runtime::fence::Mode),
-    LockTimeout,
-    InputPersistence,
 }
 
 impl EnqueueRefusalReason {
@@ -402,9 +399,6 @@ impl EnqueueRefusalReason {
             EnqueueRefusalReason::LastItemDedup => "last_item_dedup",
             EnqueueRefusalReason::ActorUnreachable => "actor_unreachable",
             EnqueueRefusalReason::MailboxClosed => "mailbox_closed",
-            EnqueueRefusalReason::InputModeFenced(_) => "input_mode_fenced",
-            EnqueueRefusalReason::LockTimeout => "lock_timeout",
-            EnqueueRefusalReason::InputPersistence => "input_persistence",
         }
     }
 }
@@ -453,10 +447,7 @@ static GLOBAL_CHANNEL_MAILBOXES: LazyLock<dashmap::DashMap<ChannelId, ChannelMai
 
 #[derive(Clone)]
 pub(crate) struct ChannelMailboxHandle {
-    sender: mpsc::UnboundedSender<(
-        ChannelMailboxMsg,
-        Option<crate::services::discord::input_runtime::fence::Permit>,
-    )>,
+    sender: mpsc::UnboundedSender<ChannelMailboxMsg>,
     /// This incarnation's own signal, so follow-up to an accepted request never
     /// reaches a successor minted by a purge.
     recovery_done: Arc<RecoveryDoneSignal>,
@@ -473,10 +464,7 @@ impl ChannelMailboxHandle {
     ) -> Result<T, MailboxUnreachable> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send((
-                build(reply_tx),
-                crate::services::discord::input_runtime::fence::effect::current(),
-            ))
+            .send(build(reply_tx))
             .map_err(|_| MailboxUnreachable)?;
         reply_rx.await.map_err(|_| MailboxUnreachable)
     }
@@ -872,19 +860,7 @@ impl ChannelMailboxHandle {
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
     ) -> RequeueInterventionResult {
-        self.requeue_front_with_permit(intervention, persistence, dispatch_lease, None)
-            .await
-    }
-
-    pub(crate) async fn requeue_front_with_permit(
-        &self,
-        intervention: Intervention,
-        persistence: QueuePersistenceContext,
-        dispatch_lease: Option<Arc<DispatchLease>>,
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-    ) -> RequeueInterventionResult {
         self.request(|reply| ChannelMailboxMsg::RequeueFront {
-            input_permit,
             intervention,
             persistence,
             dispatch_lease,
@@ -1349,7 +1325,6 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<()>,
     },
     Enqueue {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
@@ -1366,7 +1341,6 @@ enum ChannelMailboxMsg {
         reply: closed_verdict::VerdictReply<TakeNextSoftResult>,
     },
     RequeueFront {
-        input_permit: Option<crate::services::discord::input_runtime::fence::Permit>,
         intervention: Intervention,
         persistence: QueuePersistenceContext,
         dispatch_lease: Option<Arc<DispatchLease>>,
@@ -1757,28 +1731,20 @@ fn spawn_channel_mailbox(
             remint_fence: fence,
             ..Default::default()
         };
-        while let Some((msg, input_permit)) = rx.recv().await {
+        while let Some(msg) = rx.recv().await {
             if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
                 .is_some()
             {
                 let signal = own_recovery_done.clone();
                 state = tokio::task::spawn_blocking(move || {
-                    crate::services::discord::input_runtime::fence::effect::synchronous(
-                        input_permit,
-                        || {
-                            crate::services::discord::input_runtime::fence::blocking(|| {
-                                input_mailbox_step(state, channel_id, msg, &signal)
-                            })
-                        },
-                    )
+                    crate::services::discord::input_runtime::fence::blocking(|| {
+                        input_mailbox_step(state, channel_id, msg, &signal)
+                    })
                 })
                 .await
                 .expect("input mailbox step panicked");
             } else {
-                state = crate::services::discord::input_runtime::fence::effect::synchronous(
-                    input_permit,
-                    || input_mailbox_step(state, channel_id, msg, &own_recovery_done),
-                );
+                state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
             }
         }
     });
@@ -1797,14 +1763,6 @@ fn input_mailbox_step(
     // A tombstoned actor serves only reads (enum docs).
     let Some(msg) = registry_purge::gate_closed_arm(&state, channel_id, msg) else {
         return state;
-    };
-    let mut msg = msg;
-    let _step = match input_fence::enter(channel_id, &state, &mut msg) {
-        Ok(guard) => guard,
-        Err(failure) => {
-            input_fence::refuse(&state, msg, failure);
-            return state;
-        }
     };
     match msg {
         ChannelMailboxMsg::FreezeInput {
@@ -2116,7 +2074,6 @@ fn input_mailbox_step(
             let _ = reply.send(());
         }
         ChannelMailboxMsg::Enqueue {
-            input_permit: _,
             mut intervention,
             persistence,
             observed,
@@ -2339,7 +2296,6 @@ fn input_mailbox_step(
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::RequeueFront {
-            input_permit: _,
             intervention,
             persistence,
             dispatch_lease,
@@ -2560,7 +2516,8 @@ fn input_mailbox_step(
             }
         }
         msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
-            policy_close::answer(&mut state, channel_id, msg, (&_step, own_recovery_done));
+            let step = input_fence::StepGuard::unscoped();
+            policy_close::answer(&mut state, channel_id, msg, (&step, own_recovery_done));
         }
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();

@@ -21,10 +21,7 @@ fn race_loss_persistence_failure(
 
 fn input_refusal(reason: Option<crate::services::turn_orchestrator::EnqueueRefusalReason>) -> bool {
     use crate::services::turn_orchestrator::EnqueueRefusalReason as R;
-    matches!(
-        reason,
-        Some(R::InputModeFenced(_) | R::InputPersistence | R::LockTimeout | R::ActorUnreachable)
-    )
+    matches!(reason, Some(R::ActorUnreachable))
 }
 
 fn race_loss_input_failure(
