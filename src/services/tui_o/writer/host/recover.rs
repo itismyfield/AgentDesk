@@ -1,6 +1,10 @@
 //! Store recovery for a hosted channel: a recovered store, a fresh one, or why not.
 
 use std::path::Path;
+use tokio::sync::watch;
+
+use super::unless_stopped;
+use crate::services::tui_o::writer::resume::Backoff;
 
 use crate::services::tui_o::store::ledger::Unsent;
 use crate::services::tui_o::store::{ChannelStore, OStore, StoreConfig, StoreError, transient_io};
@@ -70,5 +74,29 @@ pub(super) fn recover(
             None,
         )),
         _ => Ok(Recovered::Store(opened)),
+    }
+}
+
+/// Retry only passing I/O refusals during boot, until recovery succeeds or hosting stops.
+pub(super) async fn recover_boot(
+    runtime_root: &Path,
+    channel: u64,
+    stopping: &watch::Receiver<bool>,
+) -> Option<Result<Recovered, Unrecovered>> {
+    let mut backoff = Backoff::default();
+    loop {
+        match recover(runtime_root, channel, None) {
+            Err(error) if error.transient => {
+                let wait = backoff.next_wait();
+                tracing::warn!(
+                    channel,
+                    detail = error.detail,
+                    ?wait,
+                    "[tui_o] boot store recovery failed transiently; waiting again"
+                );
+                unless_stopped(stopping, tokio::time::sleep(wait)).await?;
+            }
+            result => return Some(result),
+        }
     }
 }
