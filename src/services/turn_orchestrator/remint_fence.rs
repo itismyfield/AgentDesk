@@ -27,9 +27,8 @@ pub(super) fn namespace(persistence: &QueuePersistenceContext) -> Namespace {
     (persistence.provider.clone(), persistence.token_hash.clone())
 }
 
-/// Until the first clear every file is trusted; a clear distrusts them all, and only a write of its
-/// epoch trusts one namespace again. One slot per file kind: a registry serves one bot
-/// (`SharedData::mailboxes`), so a channel has one live namespace and nothing is evicted.
+/// A clear distrusts every file until a write of its epoch trusts that namespace again; one slot
+/// per file kind suffices because a registry serves one bot, so nothing is evicted.
 #[derive(Clone, Debug, Default)]
 struct ClearTrust {
     epoch: u64,

@@ -1,7 +1,5 @@
-//! `/clear` through its real slash action and `!clear` through the text dispatcher, each with a
-//! queue file, dispatch marker, transcript boundary or stop that fails: every one answers the
-//! cleared notice once with the single warning line its failure calls for, and leaves the channel
-//! cleared for the live actor, its successor and the catch-up sweep alike.
+//! `/clear` and `!clear` with a failing queue file, marker, boundary or stop still answer the
+//! cleared notice once with one warning, and leave the channel cleared for every later reader.
 #![cfg(unix)]
 
 use std::sync::Arc;

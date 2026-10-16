@@ -3483,9 +3483,8 @@ mod actor_hydrate_regression_tests {
         });
     }
 
-    /// #5937 — `Clear` releases the same anchor `FinishTurn` does. A persist that
-    /// fails once still commits the clear: the queue is discarded with the turn,
-    /// the retried write is reported, and no drain is left to wait behind.
+    /// `Clear` releases the same anchor `FinishTurn` does; a persist that fails once still
+    /// commits the clear, reports the retry, and leaves no drain waiting behind it.
     #[test]
     fn a_cleared_turn_that_held_the_slot_discounts_the_window_it_occupied() {
         let (_lock, _tmp, _env_guard) = locked_root();

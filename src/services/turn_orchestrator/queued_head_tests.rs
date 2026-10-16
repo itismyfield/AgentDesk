@@ -307,9 +307,8 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_purge() {
     });
 }
 
-/// A clear discards an Unknown head a restart read from disk together with its queue, even when
-/// its writes fail twice: the head left on disk then holds nothing, and only a restart reads it.
-/// A clear that lands republishes the submitted sources the snapshot recorded.
+/// A clear discards a restart-read Unknown head with its queue even when its writes fail twice;
+/// a landed clear republishes the submitted sources the snapshot recorded.
 #[test]
 fn a_clear_discards_an_unknown_head_from_disk_even_when_its_writes_fail() {
     let _root = root();
@@ -374,9 +373,8 @@ async fn restarted(channel: ChannelId) -> Vec<u64> {
     ids(queued(&fresh).await)
 }
 
-/// A clear discards a dequeued input's dispatch marker instead of returning it to the queue. A
-/// removal that fails once, before or after the file goes, lands on its retry and leaves the input
-/// nowhere; one that fails twice leaves the marker only for a restart, never for the live actor.
+/// A clear discards a dequeued input's marker instead of requeueing it; a failed removal lands on
+/// retry, and a twice-failed one is left only for a restart, never for the live actor.
 #[test]
 fn a_clear_discards_a_dequeued_input_and_retries_a_failed_marker_removal() {
     let _root = root();

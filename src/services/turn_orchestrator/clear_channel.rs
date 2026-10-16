@@ -123,9 +123,8 @@ fn dequeued_input(
     Some(marker)
 }
 
-/// Removes the old queue file, then the dispatch marker, then publishes the empty snapshot, each
-/// independent of the others, so the files a restart reads hold as little of the old state as
-/// possible. A namespace whose file was removed or rewritten is read again; others stay distrusted.
+/// Removes the queue file and dispatch marker and publishes the empty snapshot, each on its own, so
+/// a restart reads as little old state as possible; only rewritten namespaces are trusted again.
 fn write_cleared_files(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
