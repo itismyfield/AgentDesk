@@ -1030,11 +1030,11 @@ const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midwa
 
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
-    use crate::services::turn_orchestrator::policy_close::{PolicyClear, test_hooks};
+    use crate::services::turn_orchestrator::policy_close::PolicyClear;
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
     let clear = |row: &InflightTurnState, generation| {
         let receipt = row.clone().into_policy_receipt(generation);
-        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
+        receipt.try_clear()
     };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;

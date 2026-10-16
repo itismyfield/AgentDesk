@@ -3,8 +3,6 @@ use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::InflightTurnState;
-#[cfg(test)]
-use crate::services::discord::inflight::o_seed_observation::initial_parse_checkpoint;
 use crate::services::discord::task_notification_delivery::merge_context;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -571,8 +569,6 @@ async fn collect_turn_stream_body(
         let mut streaming_suppressed_by_missing_inflight = false;
         let mut fresh_ready_for_input_idle = false;
 
-        #[cfg(test)]
-        initial_parse_checkpoint(&watcher_provider, channel_id.get()).await;
         while !found_result {
             // Loop can wait minutes for a long tool/test; keep the registry heartbeat
             // fresh so the sweeper does not cancel relay on a healthy streaming watcher.

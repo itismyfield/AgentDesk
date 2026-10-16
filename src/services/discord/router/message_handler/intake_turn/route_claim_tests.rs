@@ -4,7 +4,7 @@ use super::*;
 use crate::services::discord::turn_finalizer::{PolicyCloseIntent, PolicyCloseOutcome, TurnKey};
 use crate::services::turn_orchestrator::policy_close::tail::{PolicyTailDecision, PolicyTailSkip};
 use crate::services::turn_orchestrator::policy_close::{
-    PolicyAuthority, PolicyClear, PolicyCloseRequest, PolicyReceipt, test_hooks,
+    PolicyClear, PolicyCloseRequest, PolicyReceipt, test_hooks,
 };
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ impl PolicyReceipt for Cleared {
         self.0
     }
 
-    fn try_clear(&self, _: &PolicyAuthority<'_>) -> PolicyClear {
+    fn try_clear(&self) -> PolicyClear {
         PolicyClear::Cleared
     }
 }

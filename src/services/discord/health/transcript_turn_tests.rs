@@ -236,6 +236,53 @@ fn residue_changes_only_on_a_confirmed_observation() {
     assert_eq!(health.legacy_cleanup_pending[&ResidueKind::BusyRetry], 1);
 }
 
+/// Token-scoped cleanup records stay visible until every runtime freshly confirms its own
+/// store empty; one runtime's absence never releases another runtime's records.
+#[test]
+fn per_token_cleanup_detail_needs_every_runtime_to_confirm_absence() {
+    let t0 = Instant::now();
+    let tokens = ["a".to_string(), "b".to_string()];
+    let mut state = ChannelState::default();
+    let observe = |state: &mut ChannelState, token: &str, presence, at| {
+        for kind in [ResidueKind::OrphanPanel, ResidueKind::AbandonRequest] {
+            state.record(kind, token, presence, at);
+        }
+    };
+    let detail = |state: &mut ChannelState, at| {
+        let (reasons, health) = state.project("codex", 1, &tokens, at);
+        assert!(
+            reasons.iter().all(|r| !r.contains("legacy_residue:")),
+            "{reasons:?}"
+        );
+        serde_json::to_value(health).unwrap()
+    };
+    let pending = serde_json::json!({"orphan_panel": 1, "abandon_request": 1});
+
+    observe(&mut state, "a", Presence::Present(1), t0);
+    observe(&mut state, "b", Presence::Absent, t0);
+    let health = detail(&mut state, t0);
+    assert_eq!(health["legacy_cleanup_pending"], pending);
+    assert!(!health["unobserved"].to_string().contains("orphan_panel"));
+
+    observe(&mut state, "b", Presence::Absent, t0 + SECS(1));
+    let health = detail(&mut state, t0 + SECS(1));
+    assert_eq!(
+        health["legacy_cleanup_pending"], pending,
+        "b cannot release a's records"
+    );
+
+    observe(&mut state, "a", Presence::Absent, t0 + SECS(2));
+    let health = detail(&mut state, t0 + SECS(2));
+    assert_eq!(health["legacy_cleanup_pending"], serde_json::json!({}));
+    assert!(!health["unobserved"].to_string().contains("orphan_panel"));
+    // b's confirmation is the oldest; past its 90 s freshness both kinds are unobserved again.
+    let stale = detail(&mut state, t0 + SECS(92))["unobserved"].to_string();
+    assert!(
+        stale.contains("orphan_panel") && stale.contains("abandon_request"),
+        "{stale}"
+    );
+}
+
 /// (b) An active message id alone, in any runtime of the provider, is mailbox residue; with no
 /// runtime registered the mailbox is unknown, not empty.
 #[test]

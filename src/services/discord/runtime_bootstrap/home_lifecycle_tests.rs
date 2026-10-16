@@ -326,7 +326,8 @@ fn every_slot_holding_runtime_registers_one_sigterm_handler() {
         1,
         "standby"
     );
-    let gateway = "record_role(adoption.as_ref(), BootRole::Gateway);";
+    // The lease match's last arm closes it; everything after belongs to the gateway branch.
+    let gateway = "GatewayLeaseOutcome::Failed => {";
     assert_eq!(
         branch(gateway, "run_bot_start_gateway_runtime("),
         1,

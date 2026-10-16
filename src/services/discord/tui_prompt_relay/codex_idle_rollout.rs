@@ -1,5 +1,3 @@
-use super::super::codex_adoption_runtime::ObservationRuntimeId;
-use super::super::codex_adoption_runtime::boot::DiscoveryPass;
 use super::super::{inflight, task_supervisor};
 use super::idle_transcript_scan::CodexTurnPrompt;
 use super::*;
@@ -18,28 +16,14 @@ fn advance_codex_tui_runtime_binding_and_marker_offset(
     );
 }
 
-/// Runs one discovery pass off the async runtime. Only the adoption runtime installed when it
-/// began gets its result, after it returned; a failed join is recorded as a failed pass.
+/// Runs one discovery pass off the async runtime; a panicked or cancelled pass is only logged.
 #[cfg(unix)]
-pub(super) async fn codex_discovery_pass(
-    shared: &Arc<SharedData>,
-    pass: impl FnOnce(Option<ObservationRuntimeId>) -> DiscoveryPass + Send + 'static,
-) {
-    let adoption = super::super::codex_adoption_runtime::installed(shared);
-    let observer = adoption
-        .as_ref()
-        .map(|adoption| adoption.observation_runtime_id());
-    let pass = tokio::task::spawn_blocking(move || pass(observer))
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                error = %error,
-                "Codex TUI binding rehydrate task panicked or was cancelled"
-            );
-            Err(format!("rehydrate task: {error}"))
-        });
-    if let Some(adoption) = adoption {
-        adoption.record_discovery(pass);
+pub(super) async fn codex_discovery_pass(pass: impl FnOnce() + Send + 'static) {
+    if let Err(error) = tokio::task::spawn_blocking(pass).await {
+        tracing::warn!(
+            error = %error,
+            "Codex TUI binding rehydrate task panicked or was cancelled"
+        );
     }
 }
 

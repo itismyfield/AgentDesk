@@ -6,8 +6,6 @@ use std::collections::BTreeMap;
 use sqlx::PgPool;
 use tokio::runtime::Handle;
 
-use super::super::codex_adoption_runtime::ObservationRuntimeId;
-use super::super::codex_adoption_runtime::boot::{DiscoveryPass, LiveSource};
 use super::host_reconcile::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, HostReconcile,
     NoHerdrEndpoint,
@@ -74,9 +72,8 @@ impl HerdrExecutionReader for SocketHerdrReader {
 /// One row's result in the restart pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reconnect {
-    /// The source was restored, or the execution's own clear admits input; `true` only when the
-    /// pane's latest logged source is this execution's.
-    Published(bool),
+    /// The source was restored, or the execution's own clear admits input.
+    Published,
     /// Refused on what was read; tried again only for a new execution.
     Refused,
     /// Refused for now; read again on the next pass.
@@ -90,8 +87,9 @@ impl Reconnect {
     fn of(attach: &HerdrSourceAttach) -> Self {
         use HerdrExecutionMatch::{Mismatch, Unknown};
         match attach {
-            HerdrSourceAttach::Published { bound, .. } => Self::Published(*bound),
-            HerdrSourceAttach::AwaitingClear => Self::Published(false),
+            HerdrSourceAttach::Published { .. } | HerdrSourceAttach::AwaitingClear => {
+                Self::Published
+            }
             HerdrSourceAttach::Refused(HostReconcile::Herdr(Mismatch(_)))
             | HerdrSourceAttach::Refused(HostReconcile::Missing) => Self::Refused,
             HerdrSourceAttach::Refused(HostReconcile::Herdr(Unknown(_)))
@@ -101,27 +99,16 @@ impl Reconnect {
     }
 
     fn settled(self) -> bool {
-        matches!(self, Self::Published(_) | Self::Refused)
+        matches!(self, Self::Published | Self::Refused)
     }
 }
 
-/// One sessions row: whether a Codex pass read it, the execution it read, its result and, for a
-/// bound source, the observation runtime whose pass saw it bound.
+/// One sessions row: whether a Codex pass read it, the execution it read and its result.
 #[derive(Clone)]
 struct RowResult {
     read_by_codex: bool,
     nonce: String,
     reconnect: Reconnect,
-    bound_by: Option<ObservationRuntimeId>,
-}
-
-impl RowResult {
-    /// A bound result is `observer`'s evidence only when that same runtime saw it bound; a
-    /// flag-off or earlier runtime's stamp never counts.
-    fn bound_for(&self, observer: Option<ObservationRuntimeId>) -> bool {
-        self.reconnect == Reconnect::Published(true)
-            && observer.is_some_and(|current| self.bound_by == Some(current))
-    }
 }
 
 type Results = BTreeMap<i64, RowResult>;
@@ -177,18 +164,16 @@ fn codex_row(row: &HostedRecord) -> bool {
 
 /// After a restart, reconnects this node's Bound Herdr rows of `provider`'s pass; a settled one is
 /// not read again. Without a local endpoint, or in the Codex pass off Herdr, it reads nothing.
-/// Returns the rows it read as live sources, or why the rows were unread.
 pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
     pool: Option<&PgPool>,
     provider: &ProviderKind,
-    observer: Option<ObservationRuntimeId>,
-) -> DiscoveryPass {
+) {
     let codex = *provider == ProviderKind::Codex;
     if codex && !crate::services::turn_host::herdr_turn_switched_on_for(provider) {
-        return Ok(Vec::new());
+        return;
     }
     if herdr_endpoints().is_empty() {
-        return Ok(Vec::new());
+        return;
     }
     #[cfg(test)]
     PASSES.with(|passes| passes.set(passes.get() + 1));
@@ -200,18 +185,17 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
         crate::config::session_hosts::local_node(),
         Handle::try_current(),
     ) else {
-        return Err("herdr rows: no pool, node or runtime".into());
+        return;
     };
     let rows = match runtime.block_on(list_local_herdr_rows_pg(pool, &node, LIVE)) {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(%error, "herdr reconnect: rows unreadable");
-            return Err(format!("herdr rows: {error}"));
+            return;
         }
     };
     let before = with_pass(|pass| pass.results.clone());
     let mut after = BTreeMap::new();
-    let mut sources = Vec::new();
     for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
         let record = match &row.record {
             HostedRecord::Known(record) => record,
@@ -220,33 +204,19 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
                     read_by_codex: codex,
                     nonce: String::new(),
                     reconnect: Reconnect::Unknown,
-                    bound_by: None,
                 };
                 after.insert(row.session_id(), unknown);
-                let key = row.session_id().to_string();
-                sources.push(LiveSource {
-                    key,
-                    channel: None,
-                    bound: false,
-                });
                 continue;
             }
         };
         let nonce = record.execution_nonce.clone();
-        let source = |bound| LiveSource {
-            key: format!("{}#{nonce}", record.owner.logical_key),
-            channel: record.owner.channel_id.parse().ok(),
-            bound,
-        };
         let seen = before
             .get(&row.session_id())
             .filter(|seen| seen.nonce == nonce);
-        // A fresh bound result is stamped with this pass's runtime; a settled one keeps its stamp.
         let fresh = |reconnect| RowResult {
             read_by_codex: codex,
             nonce: nonce.clone(),
             reconnect,
-            bound_by: observer.filter(|_| reconnect == Reconnect::Published(true)),
         };
         let result = match seen {
             Some(seen) if seen.reconnect.settled() => seen.clone(),
@@ -255,13 +225,9 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
                 fresh(reconnect_unless_pending(&runtime, pool, record))
             }
             // Listed by this process: no restart attach proves its source here.
-            _ if herdr_execution_listed(&record.owner.logical_key) => {
-                sources.push(source(false));
-                continue;
-            }
+            _ if herdr_execution_listed(&record.owner.logical_key) => continue,
             _ => fresh(reconnect_unless_pending(&runtime, pool, record)),
         };
-        sources.push(source(result.bound_for(observer)));
         after.insert(row.session_id(), result);
     }
     with_pass(|pass| {
@@ -271,7 +237,6 @@ pub(in crate::services::discord) fn reconnect_restarted_herdr_panes(
             .retain(|id, result| result.read_by_codex != codex && listed(id));
         pass.results.extend(after);
     });
-    Ok(sources)
 }
 
 /// A Pending execution is left to its next turn: nothing is launched or attached for it here.
@@ -347,7 +312,7 @@ pub(crate) fn reconnect_counts() -> ReconnectCounts {
     };
     for result in results {
         match result {
-            Reconnect::Published(_) => counts.published += 1,
+            Reconnect::Published => counts.published += 1,
             Reconnect::Refused | Reconnect::Withheld => counts.withheld += 1,
             Reconnect::Unknown => counts.unknown += 1,
             Reconnect::Pending => counts.pending += 1,
