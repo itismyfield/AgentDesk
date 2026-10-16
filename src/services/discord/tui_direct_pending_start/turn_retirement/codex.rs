@@ -7,7 +7,7 @@ use crate::services::discord::inflight::{self, InflightTurnState};
 use crate::services::discord::tui_direct_pending_start::channel_lock;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, SourceBinding};
-use crate::services::tui_o::store::OStore;
+use crate::services::tui_o::store::{InitOrigin, OStore};
 use crate::services::tui_o::turn_mode::{self, TurnConfig};
 use crate::services::tui_o::writer::input_facts::{InputFacts, TurnState};
 
@@ -55,30 +55,35 @@ pub(in crate::services::discord) fn confirm_current(
     let late = crate::services::tui_o::cutover::boot_ownership()
         .into_iter()
         .any(|(c, _, candidate)| c == channel && candidate.is_some_and(|c| c.late_adopt_origin()));
-    // After a restart the candidate is plainly committed; only its init still names a takeover.
-    if !late && !crate::services::tui_o::cutover::late_adopt_boot() {
-        return confirm_codex_channel(channel, Some(config), None);
-    }
-    match takeover_source(channel) {
-        Ok(Some(source)) => confirm_codex_channel(channel, Some(config), Some(&source)),
-        Ok(None) if !late => confirm_codex_channel(channel, Some(config), None),
-        Ok(None) => Confirmation::Retry("the takeover init names no single source".into()),
+    match takeover_source(channel, late) {
+        Ok(takeover) => confirm_codex_channel(channel, Some(config), takeover.as_ref()),
         Err(detail) => Confirmation::Retry(detail),
     }
 }
 
-/// The source a takeover's init committed from its first byte, whatever the binding log binds now;
-/// None when the init holds anything else.
-fn takeover_source(channel: u64) -> Result<Option<SourceBinding>, String> {
+/// The one source a late takeover's init committed, whatever the binding log binds now; None for
+/// an init of another origin. After a restart only the init still records the takeover.
+fn takeover_source(channel: u64, late: bool) -> Result<Option<SourceBinding>, String> {
     let store = crate::config::runtime_root().and_then(|root| OStore::existing(&root));
-    let init = store.ok_or("no O store")?.read_init(channel);
-    let sources = init
-        .map_err(|error| format!("{error:?}"))?
-        .map(|init| init.sources);
-    let Some([source]) = sources.as_deref() else {
-        return Ok(None);
+    let Some(store) = store else {
+        return if late {
+            Err("no O store".into())
+        } else {
+            Ok(None)
+        };
     };
-    Ok((source.delivery_start == 0).then(|| SourceBinding {
+    let origin = store.read_init_origin(channel);
+    if !late && origin.map_err(|error| format!("{error:?}"))? != InitOrigin::LateCodexTakeover {
+        return Ok(None);
+    }
+    let init = store
+        .read_init(channel)
+        .map_err(|error| format!("{error:?}"))?;
+    let sources = init.map(|init| init.sources).unwrap_or_default();
+    let [source] = sources.as_slice() else {
+        return Err(format!("the takeover init holds {} sources", sources.len()));
+    };
+    Ok(Some(SourceBinding {
         channel_id: channel,
         provider: ShadowProvider::Codex,
         source: source.source_id.clone(),

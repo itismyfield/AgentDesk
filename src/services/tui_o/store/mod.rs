@@ -56,6 +56,16 @@ pub struct Initialized {
     pub at: DateTime<Utc>,
 }
 
+/// How a channel's `init` came to be, kept beside its fields; one written without it is `Fresh`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitOrigin {
+    #[default]
+    Fresh,
+    /// A Codex takeover of the rollout Legacy was running, whose turn turn mode waits for.
+    LateCodexTakeover,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OEra {
     pub switch_at: DateTime<Utc>,
@@ -215,9 +225,30 @@ impl OStore {
         }
     }
 
+    /// The origin `init` records; `Fresh` when it records none or there is no `init`.
+    pub fn read_init_origin(&self, channel: u64) -> Result<InitOrigin, StoreError> {
+        #[derive(Deserialize)]
+        struct Recorded {
+            #[serde(default)]
+            origin: InitOrigin,
+        }
+        let init: Option<Recorded> =
+            durable::read_json(&self.channel_dir(channel).join(INIT_FILE))?;
+        Ok(init.map(|init| init.origin).unwrap_or_default())
+    }
+
     /// Lays out the channel and an empty ledger, then publishes `init` exactly once.
     /// An era channel is never initialized again, even when its `init` is gone.
     pub fn init_channel(&self, init: &Initialized) -> Result<(), StoreError> {
+        self.init_channel_as(init, InitOrigin::Fresh)
+    }
+
+    /// As `init_channel`, recording `origin`; a `Fresh` init keeps its old bytes.
+    pub fn init_channel_as(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+    ) -> Result<(), StoreError> {
         let sealed = self.read_era()?.map(|era| era.initial_channels);
         if sealed.is_some_and(|channels| channels.contains(&init.channel)) {
             return Err(damage("era channel cannot be initialized again"));
@@ -227,10 +258,15 @@ impl OStore {
         durable::ensure_dir(&dir.join(SPOOL_DIR))?;
         durable::ensure_dir(&dir.join(CURSOR_DIR))?;
         ledger::create_empty(&dir.join(LEDGER_FILE))?;
-        Ok(durable::create_once(
-            &dir.join(INIT_FILE),
-            &serde_json::to_vec(init)?,
-        )?)
+        let bytes = match origin {
+            InitOrigin::Fresh => serde_json::to_vec(init)?,
+            origin => {
+                let mut recorded = serde_json::to_value(init)?;
+                recorded["origin"] = serde_json::to_value(origin)?;
+                serde_json::to_vec(&recorded)?
+            }
+        };
+        Ok(durable::create_once(&dir.join(INIT_FILE), &bytes)?)
     }
 
     /// First writer start: initializes only channels still lacking `init`, then seals `o_era` once.

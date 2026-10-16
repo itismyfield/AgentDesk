@@ -117,6 +117,11 @@ async fn a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once() {
         io.alarms.halted()
     );
     assert_eq!(init_sources(&harness, CODEX), [(source.clone(), 0)]);
+    let origin = harness.store.read_init_origin(CODEX).unwrap();
+    assert_eq!(
+        origin,
+        crate::services::tui_o::store::InitOrigin::LateCodexTakeover
+    );
     assert!(io.calls().contains(&("fence", CODEX)) && io.calls().contains(&("adopted", CODEX)));
     assert!(
         !legacy_sends(CODEX),

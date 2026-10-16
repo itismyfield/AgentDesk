@@ -13,7 +13,7 @@ use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::same_file;
-use crate::services::tui_o::store::{InitSource, Initialized, OStore};
+use crate::services::tui_o::store::{InitOrigin, InitSource, Initialized, OStore};
 
 /// What the gateway reports about a channel before its first activation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,6 +71,27 @@ pub fn activate_with(
     candidate: &Candidate,
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
 ) -> Result<(), String> {
+    let origin = InitOrigin::Fresh;
+    activate_as(
+        store,
+        channel,
+        facts,
+        local_custody,
+        candidate,
+        sources,
+        origin,
+    )
+}
+
+fn activate_as(
+    store: &OStore,
+    channel: u64,
+    facts: Result<ActivationFacts, String>,
+    local_custody: impl FnOnce() -> Result<bool, String>,
+    candidate: &Candidate,
+    sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
+    origin: InitOrigin,
+) -> Result<(), String> {
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeLock)?;
     let asked = Instant::now();
@@ -85,7 +106,7 @@ pub fn activate_with(
         (channel, facts),
         local_custody,
         sources,
-        &mut spent,
+        (origin, &mut spent),
     );
     tracing::info!(
         channel,
@@ -119,7 +140,16 @@ pub fn activate_codex_takeover(
         0 => sources(),
         queued => Err(format!("{queued} queued Legacy bodies")),
     };
-    activate_with(store, channel, Ok(facts), local_custody, candidate, sources)
+    let origin = InitOrigin::LateCodexTakeover;
+    activate_as(
+        store,
+        channel,
+        Ok(facts),
+        local_custody,
+        candidate,
+        sources,
+        origin,
+    )
 }
 
 /// Microseconds spent under the lock on the checks, the store write and a failed write's settling.
@@ -146,7 +176,7 @@ fn adopt(
     (channel, facts): (u64, Result<ActivationFacts, String>),
     local_custody: impl FnOnce() -> Result<bool, String>,
     sources: impl FnOnce() -> Result<Vec<InitSource>, String>,
-    spent: &mut Spent,
+    (origin, spent): (InitOrigin, &mut Spent),
 ) -> Result<(), String> {
     if !matches!(*adoption, Adoption::Pending | Adoption::Deferred) {
         return Err(format!("adoption is already {adoption:?}"));
@@ -177,7 +207,7 @@ fn adopt(
     #[cfg(test)]
     test_hook::run(channel, test_hook::Step::BeforeWrite)?;
     let at = Instant::now();
-    let created = create(store, channel, sources);
+    let created = create(store, channel, sources, origin);
     #[cfg(test)]
     let created = created.and_then(|()| test_hook::run(channel, test_hook::Step::AfterWrite));
     spent.write = since(at);
@@ -223,7 +253,12 @@ pub(crate) fn settled(store: &OStore, channel: u64) -> Adoption {
     }
 }
 
-fn create(store: &OStore, channel: u64, sources: Vec<InitSource>) -> Result<(), String> {
+fn create(
+    store: &OStore,
+    channel: u64,
+    sources: Vec<InitSource>,
+    origin: InitOrigin,
+) -> Result<(), String> {
     if store.has_channel_dir(channel) {
         return Err("the channel has store files but no init".into());
     }
@@ -237,11 +272,14 @@ fn create(store: &OStore, channel: u64, sources: Vec<InitSource>) -> Result<(), 
     let era = store
         .read_era()
         .map_err(|error| format!("era: {error:?}"))?;
+    let seal = || store.begin_era(&[channel], init.at, |_| Ok(init.clone()));
     let created = match era {
-        Some(_) => store.init_channel(&init),
+        Some(_) => store.init_channel_as(&init, origin),
+        None if origin == InitOrigin::Fresh => seal().map(drop),
+        // The era skips a channel already initialized, so a recorded origin is written first.
         None => store
-            .begin_era(&[channel], init.at, |_| Ok(init.clone()))
-            .map(drop),
+            .init_channel_as(&init, origin)
+            .and_then(|()| seal().map(drop)),
     };
     created.map_err(|error| format!("init: {error:?}"))?;
     let count = init.sources.len();

@@ -10,6 +10,7 @@ use crate::services::discord::turn_completion_events::{
 };
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::test_override;
+use crate::services::tui_o::store::InitOrigin;
 use crate::services::tui_o::turn_mode::{TestConfirmation, transcript_turns};
 
 const CHANNEL: u64 = 64_700_601;
@@ -182,17 +183,18 @@ fn end_turn(source: &crate::services::tui_o::shadow::SourceId) {
     .unwrap();
 }
 
-/// O took over rollout A, whose turn still runs, and the binding log then rotated to a
-/// metadata-only B.
-fn committed_a_then_b(root: &std::path::Path) -> crate::services::tui_o::shadow::SourceId {
+/// Writes the channel's init of `source` from its first byte, recording `origin`.
+fn init_from_start(
+    root: &std::path::Path,
+    source: &crate::services::tui_o::shadow::SourceId,
+    origin: InitOrigin,
+) {
     use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
-    crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(root));
-    let a = bound(root, "rollout-a.jsonl", true);
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root);
     let init = Initialized {
         channel: CHANNEL,
         sources: vec![InitSource {
-            source_id: a.clone(),
+            source_id: source.clone(),
             delivery_start: 0,
             prefix_hash: String::new(),
         }],
@@ -200,7 +202,17 @@ fn committed_a_then_b(root: &std::path::Path) -> crate::services::tui_o::shadow:
         build_digest: "test".into(),
         at: chrono::Utc::now(),
     };
-    store.unwrap().unwrap().init_channel(&init).unwrap();
+    let store = store.unwrap().unwrap();
+    store.init_channel_as(&init, origin).unwrap();
+    assert_eq!(store.read_init_origin(CHANNEL).unwrap(), origin);
+}
+
+/// O took over rollout A, whose turn still runs, and the binding log then rotated to a
+/// metadata-only B.
+fn committed_a_then_b(root: &std::path::Path) -> crate::services::tui_o::shadow::SourceId {
+    crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(root));
+    let a = bound(root, "rollout-a.jsonl", true);
+    init_from_start(root, &a, InitOrigin::LateCodexTakeover);
     bound(root, "rollout-b.jsonl", false);
     a
 }
@@ -281,4 +293,24 @@ fn a_restarted_takeover_confirms_on_its_init_source() {
     );
     let _confirmed = TestConfirmation::confirmed(CHANNEL);
     crate::services::tui_prompt_dedupe::binding_events::set_test_root(None);
+}
+
+/// A Fresh init that holds one empty source from its first byte, as a non-late activation over an
+/// empty rollout leaves it, confirms on a restarted late-adopt boot by the boot rule alone.
+#[test]
+fn a_fresh_init_of_one_empty_source_confirms_on_a_restarted_late_adopt_boot() {
+    use super::super::super::tui_direct_pending_start::turn_retirement::codex;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let runtime_root = crate::config::runtime_root().unwrap();
+    let _boot = taken_over(true);
+    let path = runtime_root.join("rollout-empty.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let source = crate::services::tui_o::shadow::binding_reader::source_id_for("parent", &path);
+    init_from_start(&runtime_root, &source.unwrap(), InitOrigin::Fresh);
+    let turn = crate::services::tui_o::cutover::codex_turn_awaited(CHANNEL).unwrap();
+    assert_eq!(
+        codex::confirm_current(CHANNEL, &turn),
+        codex::Confirmation::Confirmed
+    );
+    let _confirmed = TestConfirmation::confirmed(CHANNEL);
 }
