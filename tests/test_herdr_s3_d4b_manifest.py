@@ -35,7 +35,8 @@ REQUIRED_MUTANTS = {
     "running_slot_counts_as_alive", "first_spawn_ignores_boot_rows",
     "first_spawn_reads_error_as_absence", "promotion_preflight_stops_writer",
     "committed_restart_skips_writer_join", "shutdown_stops_only_last_provider",
-    "old_cleanup_stops_replacement", "writer_stuck_as_joined",
+    "old_cleanup_stops_replacement", "writer_stuck_as_joined", "target_skips_adopt",
+    "adopt_ignores_restored", "reading_drops_restored", "bootstrap_port_ignores_role_flag",
 }
 S3 = "services::cluster::intake_worker::home_route_tests::s3_real::"
 # The release-reset rows piece 6 made `now`, the mutants that must kill them and the rows still blocked.
