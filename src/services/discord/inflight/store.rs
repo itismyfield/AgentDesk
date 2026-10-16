@@ -189,15 +189,6 @@ impl TryLockRefusal {
 pub(crate) fn try_lock_inflight_state_path_typed(
     path: &Path,
 ) -> Result<InflightStateFileLock, TryLockRefusal> {
-    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
-    {
-        return Ok(InflightStateFileLock {
-            file: None,
-            _population: Some(population),
-            state_path: path.to_owned(),
-        });
-    }
     let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
     match file.try_lock() {
         Ok(()) => {}

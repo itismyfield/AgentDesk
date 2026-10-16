@@ -382,7 +382,7 @@ def _mask_rust(text: str) -> str:
 
 def _rust_expression(
     text: str, masked: str, start: int, symbol_end: int, argument_index: int
-) -> tuple[str, str] | None:
+) -> tuple[str, str, int] | None:
     index = symbol_end
     while index < len(masked) and masked[index].isspace():
         index += 1
@@ -419,7 +419,9 @@ def _rust_expression(
                 ends = commas + [index]
                 if argument_index >= len(starts):
                     raise InventoryError("registered SQL argument is absent")
-                return text[start : index + 1], text[starts[argument_index] : ends[argument_index]]
+                argument_start = starts[argument_index]
+                return (text[start : index + 1], text[argument_start : ends[argument_index]],
+                        argument_start - start)
         elif char == "[":
             brackets += 1
         elif char == "]":
@@ -434,6 +436,46 @@ def _rust_expression(
     raise InventoryError(f"unterminated Rust call near byte {open_paren}")
 
 
+def _sqlx_safe_wrapper_names(masked: str) -> set[str]:
+    names: set[str] = set()
+    for match in re.finditer(r"\buse\s+sqlx\s*::\s*(\{[^;]*\}|[^;{}]+)\s*;", masked):
+        imports = match.group(1).strip()
+        if imports.startswith("{"):
+            imports = imports[1:-1]
+        brace_depth = 0
+        for item in imports.split(","):
+            nested = brace_depth != 0
+            brace_depth += item.count("{") - item.count("}")
+            if nested or brace_depth:
+                continue
+            imported = re.fullmatch(r"\s*AssertSqlSafe(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*", item)
+            if imported and imported.group(1) != "_":
+                names.add(imported.group(1) or "AssertSqlSafe")
+    return names
+
+
+def _unwrap_sqlx_safe_argument(argument: str, imported_names: set[str]) -> str:
+    wrapper_pattern = r"(?:sqlx\s*::\s*AssertSqlSafe"
+    wrapper_pattern += "".join("|" + re.escape(name) for name in sorted(imported_names))
+    wrapper_pattern += r")(?![A-Za-z0-9_])"
+    while True:
+        stripped = argument.strip()
+        masked = _mask_rust(stripped)
+        match = re.match(wrapper_pattern, masked)
+        if match is None:
+            return argument
+        found = _rust_expression(stripped, masked, 0, match.end(), 0)
+        if found is None:
+            return argument
+        expression, inner, inner_start = found
+        tail = expression[inner_start + len(inner) : -1].strip()
+        if len(expression) != len(stripped) or tail not in {"", ","}:
+            return argument
+        leading = argument[:len(argument) - len(argument.lstrip())]
+        trailing = argument[len(argument.rstrip()):]
+        argument = leading + inner.strip() + trailing
+
+
 def scan_rust_calls(path: Path | str, repo_root: Path = REPO_ROOT) -> list[SurfaceRecord]:
     repo_root = Path(repo_root).resolve()
     path = Path(path).resolve()
@@ -442,6 +484,7 @@ def scan_rust_calls(path: Path | str, repo_root: Path = REPO_ROOT) -> list[Surfa
     if not any(("QueryBuilder" if api == "QueryBuilder::new" else api) in text for api in RUST_APIS):
         return []
     masked = _mask_rust(text)
+    safe_wrapper_names = _sqlx_safe_wrapper_names(masked)
     records: list[SurfaceRecord] = []
     occurrences: dict[tuple[str, str], int] = {}
     for match in RUST_API_RE.finditer(masked):
@@ -454,14 +497,16 @@ def scan_rust_calls(path: Path | str, repo_root: Path = REPO_ROOT) -> list[Surfa
         )
         if found is None:
             continue
-        expression, argument = found
-        static_sql = _static_sql(argument.strip(), "rust")
+        expression, argument, argument_start = found
+        sql_argument = _unwrap_sqlx_safe_argument(argument, safe_wrapper_names)
+        static_sql = _static_sql(sql_argument.strip(), "rust")
         # QueryBuilder grows through later push calls; its first literal is not
         # a complete statement and therefore cannot establish STATIC.
         if api == "QueryBuilder::new":
             static_sql = None
         classification = "STATIC" if static_sql is not None else "UNRESOLVED"
-        canonical = expression.strip()
+        canonical = (expression[:argument_start] + sql_argument
+                     + expression[argument_start + len(argument):]).strip()
         key = api, canonical
         ordinal = occurrences.get(key, 0)
         occurrences[key] = ordinal + 1

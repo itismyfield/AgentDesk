@@ -2,15 +2,14 @@ use super::*;
 
 /// Start the leader gateway runtime after health registration, restart-marker
 /// fencing, and optional intake-worker startup. This final `run_bot` tail owns
-/// framework/client construction, gateway-lease keepalive, the SIGTERM handler,
-/// and the gateway backend event loop, in that order.
+/// framework/client construction, gateway-lease keepalive and the gateway
+/// backend event loop, in that order.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_start_gateway_runtime(
     token: &str,
     provider: ProviderKind,
     provider_for_error: ProviderKind,
     provider_for_framework: ProviderKind,
-    provider_for_shutdown: ProviderKind,
     startup_reconcile_remaining: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     health_registry: Arc<health::HealthRegistry>,
@@ -109,13 +108,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
         )
     });
 
-    // Graceful shutdown: on SIGTERM, persist queue/inflight/last_message state
-    // and quick-exit. tmux/TUI processes survive — the next dcserver instance
-    // rehydrates the channel bindings (see rehydrate_existing_claude_tui_bindings;
-    // polled every CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL ≈ 5s) and resumes transcript
-    // tailing from the persisted last_offset.
-    run_bot_spawn_sigterm_handler(&shared, provider_for_shutdown);
-
     run_bot_run_gateway_backend(
         client,
         &provider_for_error,
@@ -158,10 +150,17 @@ pub(in crate::services::discord) fn run_bot_framework_options(
                 Ok(allowed)
             })
         }),
-        event_handler: |ctx, event, _framework, data| {
+        event_handler: |framework, event| {
             // handle_event's only production caller, so every gateway event is observed before any branch.
-            super::super::ingress_shadow::observe(data.ingress_shadow.as_ref(), event);
-            Box::pin(handle_event(ctx, event, data))
+            super::super::ingress_shadow::observe(
+                framework.user_data.ingress_shadow.as_ref(),
+                event,
+            );
+            Box::pin(handle_event(
+                framework.serenity_context,
+                event,
+                framework.user_data,
+            ))
         },
         ..Default::default()
     }

@@ -583,7 +583,7 @@ fn reopen_raw_pg(pool: &PgPool, card_id: &str, new_status: &str) -> String {
             "UPDATE kanban_cards SET status = $1, completed_at = NULL, updated_at = NOW(){} WHERE id = $2",
             clock_extra
         );
-        sqlx::query(&sql)
+        sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&new_status)
             .bind(&card_id)
             .execute(&mut *tx)

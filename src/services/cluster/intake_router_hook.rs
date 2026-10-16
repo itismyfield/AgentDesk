@@ -663,7 +663,7 @@ async fn existing_open_route(
           ORDER BY created_at ASC
           LIMIT 1"
     );
-    sqlx::query_as(&query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(channel_id)
         .fetch_optional(pool)
         .await
