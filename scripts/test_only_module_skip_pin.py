@@ -749,6 +749,7 @@ PINNED_BASENAME_TEST_FILES = frozenset({
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
         "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
         "src/services/session_host/herdr_gate/legacy_return_tests.rs",
+        "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
 })
 
 # Production-looking basenames classified as test-only by the shared resolver.

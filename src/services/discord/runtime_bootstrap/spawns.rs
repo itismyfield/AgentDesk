@@ -205,6 +205,27 @@ async fn deferred_restart_marked(provider: &ProviderKind) -> bool {
     true
 }
 
+/// Past the commit, every provider runtime's delegated homes end before the exit: the final
+/// provider joins all of them, and a writer whose end is unconfirmed is logged, never undone.
+async fn join_every_home(final_provider: &ProviderKind) {
+    use crate::services::cluster::home_supervisor::StopReason;
+    #[cfg(test)]
+    let mutant = crate::services::cluster::channel_home_boot::s3c_mutant;
+    #[cfg(test)]
+    if mutant("committed_restart_skips_writer_join") {
+        return;
+    }
+    let only = None;
+    #[cfg(test)]
+    let only = only.or(mutant("shutdown_stops_only_last_provider").then_some(final_provider));
+    tracing::info!(
+        provider = final_provider.as_str(),
+        "committed restart joins every home"
+    );
+    let homes = super::o_writer_host::lifecycles(only);
+    super::shutdown::end_homes(homes, StopReason::CommittedRestart).await;
+}
+
 /// Background: poll for the deferred restart marker for gateway and standby
 /// runtimes. The marker first fences admissions and cancels intake polling;
 /// health counters then provide the drain proof before the wrapper boots out.
@@ -320,6 +341,7 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         // newer request wants, the next process reads its
                         // marker, and disposal is identity-scoped.
                         cancellation_guard.disarm();
+                        join_every_home(&provider_for_deferred).await;
                         identity_safe_dispose_restart_marker(&root, &nonce);
                         std::process::exit(0);
                     }
