@@ -12672,6 +12672,7 @@ services::tui_o::store::tests::a_torn_ledger_append_is_cut_so_the_channel_reopen
 services::tui_o::store::tests::enabling_the_store_is_refused_where_directory_fsync_is_a_no_op
 services::tui_o::store::tests::init_and_ledger_round_trip_the_anchor_serials_and_outcomes
 services::tui_o::store::tests::missing_or_damaged_state_of_an_era_channel_halts_instead_of_reinitializing
+services::tui_o::store::tests::opening_seals_the_era_only_over_a_sole_takeover_init_that_recovers
 services::tui_o::store::tests::the_store_is_dormant_unless_its_flag_is_set
 services::tui_o::store::windows_tests::enabling_the_store_is_refused_without_directory_fsync
 services::tui_o::topology::tests::only_a_non_gateway_role_leaves_writer_channels_to_the_gateway
@@ -12916,6 +12917,7 @@ services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_new_rollout_before_any_output_commits_and_o_posts_its_answer_once
+services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_takeover_cut_off_before_its_era_seal_recovers_its_store_on_the_next_start
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::the_locked_recheck_refuses_a_send_or_output_that_landed_after_the_fence
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_released_boot_holds_the_herdr_store_and_the_next_adoption_posts_its_result_once
 services::tui_o::writer::tests::actor::host_start::herdr_resume::a_restarted_host_takes_a_herdr_launch_back_from_its_store_and_posts_each_result_once
