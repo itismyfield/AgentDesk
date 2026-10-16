@@ -504,6 +504,8 @@ async fn queued_attempt(
         metadata: request.metadata.clone(),
         channel_name_hint: request.channel_name_hint.clone(),
     };
+    let permit = target.input.clone();
+    // The detached owner keeps the admitted effect through claim, pane I/O and durable settle.
     let owner = async move {
         let mailbox = shared.mailbox(request.channel_id);
         let persistence = crate::services::discord::queue_persistence_context(
@@ -579,21 +581,24 @@ async fn queued_attempt(
                 return InjectAttempt::NotSent(HOLDER_CHANGED);
             }
             let effect = tokio::task::spawn_blocking({
-                let (input, session, transcript, turn_id) = (
+                let (input, session, transcript, turn_id, permit) = (
                     input.clone(),
                     target.session.clone(),
                     target.transcript.clone(),
                     turn_id.clone(),
+                    target.input.clone(),
                 );
                 let herdr = target.herdr.clone();
                 move || {
-                    run(
-                        (&pane(input.channel, &session), herdr.as_ref()),
-                        &session,
-                        &transcript,
-                        turn_id,
-                        &input,
-                    )
+                    fence::effect::synchronous(permit, || {
+                        run(
+                            (&pane(input.channel, &session), herdr.as_ref()),
+                            &session,
+                            &transcript,
+                            turn_id,
+                            &input,
+                        )
+                    })
                 }
             });
             let attempt = effect.await.unwrap_or(InjectAttempt::OwnerFailed {
@@ -642,7 +647,7 @@ async fn queued_attempt(
         }
         attempt
     };
-    match tokio::spawn(owner).await {
+    match tokio::spawn(fence::effect::scope(permit, owner)).await {
         Ok(attempt) => attempt,
         Err(_) => InjectAttempt::OwnerFailed { turn_id: None },
     }

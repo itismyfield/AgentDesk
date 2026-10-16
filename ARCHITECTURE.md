@@ -1029,7 +1029,6 @@ src/
 │   │   │   │   ├── absence_state.rs
 │   │   │   │   ├── claude_original_tests.rs
 │   │   │   │   ├── idle_relay_absence.rs
-│   │   │   │   ├── input_fence_tests.rs
 │   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   └── live_bridge_guard_tests.rs
 │   │   │   ├── headless_turn.rs
@@ -1606,8 +1605,8 @@ src/
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
 │   │   │   ├── queued_recovery.rs
+│   │   │   ├── queued_recovery_boot_restore_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
-│   │   │   ├── queued_recovery_fence_tests.rs
 │   │   │   ├── queued_recovery_s2a_tests.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
@@ -1689,7 +1688,7 @@ src/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── terminal_ui_obligation/
-│   │   │   └── input_fence_tests.rs
+│   │   │   └── sweep_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -1712,7 +1711,7 @@ src/
 │   │   │   ├── retirement_await_tests.rs
 │   │   │   └── stale_busy_identity.rs
 │   │   ├── tmux_session_files/
-│   │   │   └── input_fence_tests.rs
+│   │   │   └── orphan_sweep_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── cancel_handoff/
 │   │   │   │   ├── completion.rs
@@ -1837,7 +1836,6 @@ src/
 │   │   ├── tui_direct_pending_start/
 │   │   │   ├── tests/
 │   │   │   │   ├── headless_row_tests.rs
-│   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
 │   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
@@ -1904,7 +1902,7 @@ src/
 │   │   │   │   ├── compact_summary_tests.rs
 │   │   │   │   ├── fenced_admission_tests.rs
 │   │   │   │   ├── o_tool_first_panel_tests.rs
-│   │   │   │   ├── pending_start_input_fence_tests.rs
+│   │   │   │   ├── pending_start_worker_claim_tests.rs
 │   │   │   │   ├── retired_pending_start_claim_tests.rs
 │   │   │   │   ├── scenario_census_e2e.rs
 │   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
