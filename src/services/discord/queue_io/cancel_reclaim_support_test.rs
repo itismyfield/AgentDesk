@@ -131,20 +131,6 @@ impl ShutdownRace {
     }
 }
 
-pub(in crate::services::discord) struct BeforeAdmitRace(InstalledBarrier);
-
-impl BeforeAdmitRace {
-    pub(in crate::services::discord) fn install(channel: ChannelId) -> Self {
-        Self(InstalledBarrier::install("before_admit", channel))
-    }
-    pub(in crate::services::discord) async fn wait(&self, budget: Duration) -> bool {
-        self.0.wait(budget).await
-    }
-    pub(in crate::services::discord) fn release(&self) {
-        self.0.release();
-    }
-}
-
 async fn pause(site: &'static str, channel: ChannelId) {
     let barrier = BARRIERS
         .lock()
@@ -165,8 +151,4 @@ async fn pause(site: &'static str, channel: ChannelId) {
 
 pub(super) async fn pause_before_shutdown(channel: ChannelId) {
     pause("before_shutdown", channel).await;
-}
-
-pub(super) async fn pause_before_admit(channel: ChannelId) {
-    pause("before_admit", channel).await;
 }
