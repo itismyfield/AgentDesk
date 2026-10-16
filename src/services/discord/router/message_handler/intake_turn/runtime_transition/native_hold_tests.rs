@@ -239,8 +239,8 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
 
         assert!(handled);
         assert!(
-            effects.calls().iter().any(|call| call == "submit"),
-            "the text command executed native clear"
+            !effects.calls().iter().any(|call| call == "submit"),
+            "the clear ends the session without typing a native /clear"
         );
         assert_eq!(
             crate::db::session_transcripts::native_channel_clear_state(
@@ -249,7 +249,7 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
             )
             .await
             .unwrap(),
-            NativeClearBoundary::Resolved
+            NativeClearBoundary::Superseded
         );
         assert!(
             acquire(&fixture, &http, 6_577_813, &[]).await.is_some(),
