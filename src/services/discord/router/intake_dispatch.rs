@@ -577,10 +577,43 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
             checkpoint();
             return finish_text_intake_admission(deps, admission, submission).await;
         }
-        finish_text_intake_admission(deps, admission, submission).await?;
-        checkpoint();
-        Ok(())
+        finish_deferred(deps, admission, submission, checkpoint).await
     })
+}
+
+/// An attachment the gateway did not admit locally. Only a turn-mode deferral moves the checkpoint,
+/// once the queue holds it; every other outcome leaves the checkpoint where it was.
+pub(crate) async fn finish_nonlocal_attachment_admission(
+    deps: &IntakeDeps<'_>,
+    admission: IntakeAdmission,
+    submission: IntakeSubmission,
+) -> Result<(), super::super::Error> {
+    if !matches!(admission, IntakeAdmission::DeferredTurnMode(_)) {
+        return finish_text_intake_admission(deps, admission, submission).await;
+    }
+    let (provider, request) = (submission.provider.clone(), &submission.request);
+    let (channel_id, message_id) = (request.channel_id, request.user_msg_id);
+    let checkpoint = move || {
+        super::super::advance_last_message_checkpoint(
+            deps.shared,
+            &provider,
+            channel_id,
+            message_id,
+        );
+    };
+    finish_deferred(deps, admission, submission, checkpoint).await
+}
+
+/// A deferred input advances its checkpoint only after the queue durably holds it.
+async fn finish_deferred(
+    deps: &IntakeDeps<'_>,
+    admission: IntakeAdmission,
+    submission: IntakeSubmission,
+    checkpoint: impl FnOnce(),
+) -> Result<(), super::super::Error> {
+    finish_text_intake_admission(deps, admission, submission).await?;
+    checkpoint();
+    Ok(())
 }
 
 pub(crate) async fn finish_text_intake_admission(

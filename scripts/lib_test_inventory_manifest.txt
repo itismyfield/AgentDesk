@@ -6739,6 +6739,7 @@ services::discord::router::intake_dispatch::replay_admission_tests::preflight_se
 services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
 services::discord::router::intake_dispatch::tests::an_o_channel_is_admitted_locally_only_on_its_ready_gateway_without_postgres
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg
 services::discord::router::intake_dispatch::tests::codex_turn_hold::a_message_during_the_codex_takeover_turn_waits_queued_until_turn_mode
 services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_pg
 services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_the_queue_cannot_hold_fails_before_its_checkpoint
