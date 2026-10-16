@@ -177,3 +177,33 @@ async fn a_codex_observation_not_yet_awaited_waits_on_the_start_lock_before_pers
     assert!(wiring.await, "the observer stands down without a tail");
     assert_no_legacy_start();
 }
+
+/// A Codex channel boot never selected for turn mode defers its start without the start lock a
+/// waiting worker may hold, so the observer does not stall behind that worker.
+#[tokio::test(flavor = "current_thread")]
+async fn an_unselected_codex_observation_defers_without_waiting_on_the_start_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let _env = crate::config::set_agentdesk_root_for_test(temp.path());
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (prompt, decision, mut lease) = observed(&shared).await;
+    let lock = channel_lock("codex", CHANNEL);
+    let _worker = lock.try_lock().unwrap();
+    let anchor = MessageId::new(940_000_000_005_304);
+    let wiring = wire_tui_direct_synthetic_turn_start(
+        &shared,
+        "codex",
+        ChannelId::new(CHANNEL),
+        &prompt,
+        anchor,
+        false,
+        &decision,
+        &mut lease,
+    );
+    let deferred = tokio::time::timeout(std::time::Duration::from_secs(5), wiring).await;
+    assert!(deferred.expect("the observer is not held by the lock"));
+    assert!(
+        load_all()
+            .into_iter()
+            .any(|record| record.channel_id == CHANNEL)
+    );
+}

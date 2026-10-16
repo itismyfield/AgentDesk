@@ -250,15 +250,17 @@ pub(super) fn failed_synthetic_placeholder_cleanup_target(
     anchor_is_owned_placeholder.then_some(anchor_message_id)
 }
 
-/// For Codex, whether turn mode is confirmed, read under the start lock a confirmation takes; the
-/// lock stays in `guard` through the persist or the claim that follows.
+/// For a Codex channel boot selected for turn mode, whether it is confirmed, read under the start
+/// lock a confirmation takes; the lock stays in `guard` through the persist or claim that follows.
 async fn codex_confirmed(
     lock: &Arc<tokio::sync::Mutex<()>>,
     guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
     provider: &ProviderKind,
     channel: u64,
 ) -> bool {
-    if *provider != ProviderKind::Codex {
+    // No confirmation reaches an unselected channel, and a waiting worker holds this lock for long.
+    if *provider != ProviderKind::Codex || !crate::services::tui_o::cutover::turn_selected(channel)
+    {
         return false;
     }
     *guard = Some(Arc::clone(lock).lock_owned().await);
