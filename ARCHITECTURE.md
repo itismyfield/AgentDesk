@@ -247,6 +247,7 @@ src/
 │   ├── session_status.rs
 │   ├── session_transcripts.rs
 │   ├── session_transcripts_native_clear_record.rs
+│   ├── session_transcripts_native_clear_seed.rs
 │   ├── session_transcripts_native_clear_tests.rs
 │   └── turns.rs
 ├── dispatch/
@@ -882,14 +883,17 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── clear_end_tests.rs
+│   │   │   │   ├── clear_entry_tests.rs
+│   │   │   │   ├── clear_persist_failure_tests.rs
+│   │   │   │   ├── clear_report.rs
+│   │   │   │   ├── clear_teardown.rs
 │   │   │   │   ├── clear_wait_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
 │   │   │   │   ├── managed_reset.rs
 │   │   │   │   ├── native.rs
-│   │   │   │   ├── native_herdr_e2e_tests.rs
-│   │   │   │   ├── native_herdr_tests.rs
 │   │   │   │   ├── native_policy_tests.rs
 │   │   │   │   ├── native_tests.rs
 │   │   │   │   └── provider_reset.rs
@@ -1468,6 +1472,7 @@ src/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
+│   │   │   │   │   ├── codex_turn_hold.rs
 │   │   │   │   │   ├── final_guards.rs
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
@@ -1599,6 +1604,8 @@ src/
 │   │   │   ├── intake_delivery_reconciler.rs
 │   │   │   ├── intake_delivery_sweep.rs
 │   │   │   ├── o_writer_host.rs
+│   │   │   ├── o_writer_host_custody_tests.rs
+│   │   │   ├── o_writer_host_takeover_tests.rs
 │   │   │   ├── orphan_recovery.rs
 │   │   │   ├── orphan_recovery_fence_tests.rs
 │   │   │   ├── queued_placeholders.rs
@@ -1837,6 +1844,9 @@ src/
 │   │   │   │   ├── headless_row_tests.rs
 │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   └── retire_tests.rs
+│   │   │   ├── turn_retirement/
+│   │   │   │   ├── codex.rs
+│   │   │   │   └── codex_tests.rs
 │   │   │   ├── foreign_recovery.rs
 │   │   │   ├── restore_gate.rs
 │   │   │   ├── retirement_recheck_tests.rs
@@ -1944,6 +1954,7 @@ src/
 │   │   │   ├── synthetic_orphan_reclaim.rs
 │   │   │   ├── synthetic_start.rs
 │   │   │   ├── synthetic_start_wiring.rs
+│   │   │   ├── synthetic_start_wiring_codex_tests.rs
 │   │   │   ├── task_notification_prompt.rs
 │   │   │   └── tests.rs
 │   │   ├── turn_bridge/
@@ -2123,6 +2134,7 @@ src/
 │   │   │   ├── cleanup.rs
 │   │   │   ├── completion_admission.rs
 │   │   │   ├── completion_admission_actor.rs
+│   │   │   ├── completion_admission_codex_tests.rs
 │   │   │   ├── completion_signal.rs
 │   │   │   ├── delivery_lease.rs
 │   │   │   ├── episode.rs
@@ -2816,6 +2828,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── host/
+│   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -2824,6 +2837,11 @@ src/
 │   │   │   │   ├── reactions.rs
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
+│   │   │   ├── late_adopt/
+│   │   │   │   ├── codex/
+│   │   │   │   │   ├── prefix.rs
+│   │   │   │   │   └── prefix_tests.rs
+│   │   │   │   └── codex.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── claude_boundary.rs
 │   │   │   │   ├── owe.rs
@@ -2858,6 +2876,7 @@ src/
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
+│   │   │   ├── host_codex_takeover_tests.rs
 │   │   │   ├── host_first_init_tests.rs
 │   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs
@@ -3012,6 +3031,7 @@ src/
 │   │   ├── active_source_dedup.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
+│   │   ├── clear_trust_tests.rs
 │   │   ├── closed_verdict.rs
 │   │   ├── dispatch_cleanup.rs
 │   │   ├── dispatch_reservation.rs

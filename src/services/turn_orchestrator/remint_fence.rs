@@ -1,9 +1,10 @@
-//! Which persisted episodes a recovery re-mint may still re-open.
+//! Which persisted episodes a recovery re-mint may still re-open, and which queue files a live
+//! actor may still read after a clear could not remove them.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::ChannelMailboxRegistry;
-use crate::services::provider::CancelToken;
+use super::{ChannelMailboxRegistry, QueuePersistenceContext};
+use crate::services::provider::{CancelToken, ProviderKind};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 /// The mailbox holds one episode at a time, so an episode that did not start
@@ -16,6 +17,29 @@ pub(super) struct RemintFence {
     raised: bool,
     /// The latest episode this mailbox started, until its own exact release.
     latest_started: Option<(Option<MessageId>, Option<String>)>,
+    clear: ClearTrust,
+}
+
+/// A queue-file namespace: the provider and the bot token hash.
+pub(super) type Namespace = (ProviderKind, String);
+
+pub(super) fn namespace(persistence: &QueuePersistenceContext) -> Namespace {
+    (persistence.provider.clone(), persistence.token_hash.clone())
+}
+
+/// A clear distrusts every file until a write of its epoch trusts that namespace again; one slot
+/// per file kind suffices because a registry serves one bot, so nothing is evicted.
+#[derive(Clone, Debug, Default)]
+struct ClearTrust {
+    epoch: u64,
+    queue: Option<(Namespace, u64)>,
+    marker: Option<(Namespace, u64)>,
+}
+
+impl ClearTrust {
+    fn trusts(&self, slot: &Option<(Namespace, u64)>, namespace: &Namespace) -> bool {
+        self.epoch == 0 || slot.as_ref() == Some(&(namespace.clone(), self.epoch))
+    }
 }
 
 impl RemintFence {
@@ -97,6 +121,29 @@ impl FenceCell {
 
     pub(super) fn refuses(&self, user_message_id: MessageId, turn_nonce: Option<&str>) -> bool {
         self.with(|fence| fence.refuses(user_message_id, turn_nonce))
+    }
+
+    /// A clear committed in memory: no file written before it is read back.
+    pub(super) fn begin_clear(&self) {
+        self.with(|fence| fence.clear.epoch += 1);
+    }
+
+    /// The namespace's queue file now holds what this actor wrote.
+    pub(super) fn trust_queue(&self, namespace: &Namespace) {
+        self.with(|fence| fence.clear.queue = Some((namespace.clone(), fence.clear.epoch)));
+    }
+
+    /// The namespace's dispatch marker is absent or one this actor wrote since the last clear.
+    pub(super) fn trust_marker(&self, namespace: &Namespace) {
+        self.with(|fence| fence.clear.marker = Some((namespace.clone(), fence.clear.epoch)));
+    }
+
+    pub(super) fn trusts_queue(&self, namespace: &Namespace) -> bool {
+        self.with(|fence| fence.clear.trusts(&fence.clear.queue, namespace))
+    }
+
+    pub(super) fn trusts_marker(&self, namespace: &Namespace) -> bool {
+        self.with(|fence| fence.clear.trusts(&fence.clear.marker, namespace))
     }
 
     /// Whether the fence is raised and which episode it last saw start.

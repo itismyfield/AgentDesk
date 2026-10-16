@@ -143,14 +143,12 @@ async fn phase1_skips_a_message_the_process_table_holds() {
     write_checkpoint(root.path(), &provider, channel_id, message.get() - 1);
     let context = discord::queue_persistence_context(&shared, &provider, channel_id);
     let handle = shared.mailboxes.handle(channel_id);
-    let reserve = handle.reserve_injection(Some(message), None, context.clone(), None);
+    let reserve = handle.reserve_injection(Some(message), None, context.clone());
     let ReserveOutcome::Reserved(ticket) = reserve.await else {
         panic!("an idle mailbox reserves");
     };
     let settle = InjectionSettlement::Delivered(InjectionOutcome::Observed);
-    let _ = handle
-        .settle_injected_input(ticket, settle, context, None)
-        .await;
+    let _ = handle.settle_injected_input(ticket, settle, context).await;
     let api = TestCatchUpApi::new(vec![discord_message(
         channel_id,
         message,

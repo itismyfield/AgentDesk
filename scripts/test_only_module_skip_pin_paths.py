@@ -3,6 +3,11 @@
 # Mechanical ``tests.rs`` / ``*_tests.rs`` basename exclusions.
 PINNED_BASENAME_TEST_FILES = frozenset(
     {
+        "src/db/session_transcripts_native_clear_seed.rs",
+        "src/services/discord/commands/control/clear_end_tests.rs",
+        "src/services/discord/commands/control/clear_entry_tests.rs",
+        "src/services/discord/commands/control/clear_persist_failure_tests.rs",
+        "src/services/turn_orchestrator/clear_trust_tests.rs",
         "src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs",
         "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
         "src/services/discord/router/message_handler/intake_turn/route_claim_tests.rs",
@@ -628,14 +633,12 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs",
         "src/services/session_host/herdr_clear_adapter_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_tests.rs",
-        "src/services/discord/commands/control/native_herdr_tests.rs",
         "src/services/cluster/channel_home_drain_tests.rs",
         "src/cli/channel_home_tests.rs",
         "src/services/cluster/channel_home_port_tests.rs",
         "src/services/cluster/channel_home_boot_tests.rs",
         "src/services/discord/runtime_bootstrap/channel_homes_tests.rs",
         "src/services/tui_o/writer/drain_projection_tests.rs",
-        "src/services/discord/commands/control/native_herdr_e2e_tests.rs",
         "src/services/tui_o/writer/rotation_unsettled_resume_tests.rs",
         "src/services/codex_tui/rollout_tail/parser/herdr_terminal_tests.rs",
         "src/services/claude/herdr_turn/provider_terminal_tests.rs",
@@ -727,6 +730,14 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/ingress_shadow/compat_tests.rs",
         "src/services/session_host/herdr_gate/legacy_return_tests.rs",
         "src/services/tui_o/writer/rotation/transition_tests.rs",
+        "src/services/tui_o/writer/late_adopt/codex/prefix_tests.rs",
+        "src/services/discord/tui_direct_pending_start/turn_retirement/codex_tests.rs",
+        "src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs",
+        "src/services/tui_o/writer/host_codex_takeover_tests.rs",
+        "src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs",
+        "src/services/discord/turn_finalizer/completion_admission_codex_tests.rs",
+        "src/services/discord/tui_prompt_relay/synthetic_start_wiring_codex_tests.rs",
+        "src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs",
     }
 )
 
