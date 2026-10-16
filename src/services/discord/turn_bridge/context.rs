@@ -75,12 +75,20 @@ mod tests {
     fn intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error() {
         let source = include_str!("../router/message_handler/intake_turn.rs");
         let start = source
-            .find("    if let Some(rx) = completion_rx {")
+            .find("if let Some(rx) = completion_rx {")
             .expect("intake completion wait remains present");
-        let waiter = source[start..].split("#[cfg(test)]").next().unwrap();
+        let waiter = source[start..]
+            .split_once("Ok(IntakeExecution::Executed)")
+            .expect("intake still returns the executed disposition")
+            .0;
         assert_eq!(
-            waiter.trim(),
-            "if let Some(rx) = completion_rx {\n        rx.await\n            .map_err(|_| \"queued turn completion wait failed\".to_string())?;\n    }\n\n    Ok(IntakeExecution::Executed)\n    }).await\n    }).await\n}"
+            waiter.trim().lines().map(str::trim).collect::<Vec<_>>(),
+            [
+                "if let Some(rx) = completion_rx {",
+                "rx.await",
+                ".map_err(|_| \"queued turn completion wait failed\".to_string())?;",
+                "}",
+            ]
         );
     }
 }

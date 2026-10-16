@@ -329,7 +329,7 @@ class Census(unittest.TestCase):
         expected = {"router/message_handler/intake_turn/adk_thread.rs": {"get": 1, "insert": 1, "remove": 1}}
         self.assertEqual(actual, {path: Counter(ops) for path, ops in expected.items()})
 
-    def test_writer_target_admission_and_root_permit_lifetime_remain(self):
+    def test_writer_target_admission_and_claimed_route_order_remain(self):
         writer = self.sources[D + "router/message_handler/intake_turn/adk_thread.rs"]
         compact = re.sub(r"\s+", "", writer)
         # The one writer publishes a resolved route; each route names its parent only after its
@@ -355,36 +355,12 @@ class Census(unittest.TestCase):
         claim = root.index(".complete_mailbox_claim(")
         self.assertEqual(root.count("route.publish(shared,&provider);"), 1)
         self.assertLess(claim, root.index("ifstarted{route.publish(shared,&provider);}"))
-        helper = re.sub(r"\s+", "", self.sources[D + "router/intake_gate/ledger.rs"])
-        helper_start = helper.index("asyncfnlegacy_effect(")
-        helper_end = helper.index("pub(incrate::services::discord)asyncfntry_text_reply(", helper_start)
-        helper = helper[helper_start:helper_end]
-        policy = "legacy_allowed(deps.shared,deps.http,&deps.shared.provider,channel).await?;"
-        fence_admit = "runtime::fence::effect::admit(&deps.shared.provider,channel.get())"
-        self.assertEqual(helper.count(policy), 1)
-        self.assertEqual(helper.count(fence_admit), 1)
-        self.assertEqual(helper.count("letpermit="), 1)
-        self.assertIn(
-            ")->Result<Option<runtime::fence::Permit>,Error>{letpermit=" + fence_admit + ".map_err(",
-            helper,
-        )
-        self.assertIn(")?;" + policy + "Ok(permit)}", helper)
-        self.assertIn("usesuper::super::intake_gate::ledgeraslive;", root)
-        caller = "letpermit=live::legacy_effect(deps,request.channel_id).await?;"
-        self.assertEqual(root.count(caller), 1)
-        admit = root.index(caller)
-        run_call = "effect::run(permit,"
-        self.assertEqual(root.count(run_call), 1)
-        run = root.index(run_call, admit)
-        body = root.index("handle_text_message_admitted", run)
+        body = root.index("pub(super)asyncfnhandle_text_message(")
         redirect = root.index("adk_thread::redirect_dispatch(", body)
-        self.assertLess(admit, run)
-        self.assertEqual(root[admit:run].count("letpermit="), 1)
-        self.assertNotIn("drop(permit", root[admit:run])
-        self.assertIn("ifpermit.is_none()&&effect::current().is_none(){", root[admit:run])
-        self.assertLess(body, redirect)
         self.assertIn("letIntakeRequest{intake_outbox_id,channel_id,", root[body:redirect])
         self.assertIn("letoriginal_channel_id=channel_id;", root[body:redirect])
+        self.assertNotIn("handle_text_message_" + "admitted", root)
+        self.assertNotIn("intake_gate::" + "ledger", root)
 
     def test_scanner_rejects_new_mutators_aliases_and_field_replacement(self):
         for operation in ["entry", "get_mut", "iter_mut", "extend", "clear", "insert"]:
