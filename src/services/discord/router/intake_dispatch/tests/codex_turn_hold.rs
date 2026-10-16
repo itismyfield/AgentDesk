@@ -4,6 +4,7 @@
 use super::*;
 use crate::services::cluster::attachment_transfer::{store, uploads::Upload};
 use crate::services::discord::router::message_handler::{AttachmentDescriptor, TEST_DOWNLOADS};
+use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::{intake_route::test_probe, test_override};
 use crate::services::tui_o::turn_mode::{self, TestConfirmation};
@@ -221,6 +222,111 @@ async fn a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_
     .await;
     assert!(matches!(admitted, QueuedAdmissionDisposition::Admitted(_)));
     assert_eq!(queued_ids(&shared).await, [4_370_032], "admitted once");
+    pool.close().await;
+    fixture.drop().await;
+}
+
+/// A Discord message carrying `attachments` to the selected Codex channel.
+fn gateway_message(message_id: u64, attachments: &[(&str, &str)]) -> serenity::Message {
+    let mut message = discord_mock::user_message(message_id, "read the report");
+    message.channel_id = ChannelId::new(CHANNEL);
+    message.attachments = attachments
+        .iter()
+        .enumerate()
+        .map(|(index, (filename, url))| {
+            let attachment = serde_json::json!({"id": (message_id + 100 + index as u64).to_string(),
+                "filename": filename, "size": 12, "url": url, "proxy_url": url});
+            serde_json::from_value(attachment).unwrap()
+        })
+        .collect();
+    message
+}
+
+/// Production gateway intake of `message`, on its own task so the intake future leaves this stack.
+async fn through_gateway(
+    ctx: &serenity::Context,
+    data: &Arc<crate::services::discord::Data>,
+    message: serenity::Message,
+) -> bool {
+    let (ctx, data) = (ctx.clone(), Arc::clone(data));
+    let event = serenity::FullEvent::Message {
+        new_message: message,
+    };
+    let intake = tokio::spawn(async move {
+        let handled = crate::services::discord::router::handle_event(&ctx, &event, &data);
+        Box::pin(handled).await.is_ok()
+    });
+    intake.await.unwrap()
+}
+
+/// The gateway's own attachment branch: a download that fails for one file or a queue that cannot
+/// hold the input leaves the checkpoint behind; a held input moves it to its own message.
+#[tokio::test(flavor = "current_thread")]
+async fn a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg() {
+    let _env = intake_env();
+    let fixture = TestPostgresDb::create().await;
+    let pool = fixture.connect_and_migrate().await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let owner = discord_mock::user_message(1, "").author.id.get();
+    {
+        let mut settings = shared.settings.write().await;
+        settings.owner_user_id = Some(owner);
+        settings.allow_all_users = true;
+    }
+    let _boot = committed_and_selected();
+    let _ready = test_probe::answer_with(|_| true);
+    let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(CHANNEL);
+    let (proxy, gateway_url, server) = discord_mock::start(mock).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway_url).await;
+    let voice_config = crate::voice::VoiceConfig::default();
+    let data = Arc::new(crate::services::discord::Data {
+        shared: shared.clone(),
+        token: "test-token".to_string(),
+        provider: ProviderKind::Codex,
+        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+        voice_config,
+        ingress_shadow: None,
+    });
+    let channel = ChannelId::new(CHANNEL);
+    let checkpoint = || shared.last_message_ids.get(&channel).map(|id| *id);
+    let body = b"the report the takeover turn must not lose".to_vec();
+    TEST_DOWNLOADS.with(|served| served.borrow_mut().insert(URL.to_string(), body.clone()));
+
+    let unreachable = "https://files.invalid/report-2.txt";
+    let partial = gateway_message(4_370_041, &[("report.txt", URL), ("two.txt", unreachable)]);
+    assert!(!through_gateway(&ctx, &data, partial).await, "partial");
+    let queue_file = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .expect("queue root")
+        .join("codex")
+        .join(&shared.token_hash)
+        .join(format!("{CHANNEL}.json"));
+    std::fs::create_dir_all(&queue_file).unwrap();
+    let unwritten = gateway_message(4_370_042, &[("report.txt", URL)]);
+    assert!(!through_gateway(&ctx, &data, unwritten).await, "unwritten");
+    assert_eq!((checkpoint(), queued_ids(&shared).await), (None, vec![]));
+
+    std::fs::remove_dir(&queue_file).unwrap();
+    let held = gateway_message(4_370_043, &[("report.txt", URL)]);
+    assert!(through_gateway(&ctx, &data, held).await, "held");
+    let mailbox = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+    let queue = mailbox.intervention_queue;
+    assert_eq!(queued_ids(&shared).await, [4_370_043]);
+    assert_eq!(
+        queue[0].pending_uploads.len(),
+        1,
+        "the file rides the queue"
+    );
+    assert_eq!(checkpoint(), Some(4_370_043), "the held input moves it");
+    let saved = crate::services::discord::runtime_store::last_message_root().unwrap();
+    let saved = std::fs::read_to_string(saved.join("codex").join(format!("{CHANNEL}.txt")));
+    assert_eq!(
+        saved.unwrap().trim(),
+        "4370043",
+        "the checkpoint is persisted"
+    );
+    server.abort();
     pool.close().await;
     fixture.drop().await;
 }
