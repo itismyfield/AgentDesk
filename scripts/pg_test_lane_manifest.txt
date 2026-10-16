@@ -535,7 +535,7 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::runtime_bootstrap::o_writer_host::activation_tests
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::allowlist
 services::discord::runtime_bootstrap::o_writer_host::fence_tests
-services::discord::runtime_bootstrap::orphan_recovery::fence_tests
+services::discord::runtime_bootstrap::orphan_recovery::tests
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
 services::discord::session_idle_cleanup::tests
@@ -1344,7 +1344,9 @@ services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_abo
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
+services::cluster::channel_home_boot::tests::writer_return::a_return_without_a_writer_candidate_keeps_readiness_closed_pg
 services::cluster::channel_home_boot::tests::writer_return::a_returned_writer_that_ends_after_its_start_is_started_again_pg
+services::cluster::channel_home_boot::tests::writer_return::a_stale_return_keeps_the_new_delegation_and_starts_no_writer_pg
 services::cluster::channel_home_drain::tests::a_piece_owed_after_the_last_check_is_found_after_the_final_close_pg
 services::cluster::channel_home_drain::tests::a_reclaim_ends_with_the_row_gone_and_the_channel_on_the_gateway_rules_pg
 services::cluster::channel_home_drain::tests::a_releasing_holder_posts_its_owed_tail_then_leaves_after_the_final_close_pg
@@ -1706,6 +1708,7 @@ services::discord::router::intake_dispatch::replay_admission_tests::exact_retry_
 services::discord::router::intake_dispatch::replay_admission_tests::preflight_sends_every_blocking_state_to_protected_consumption_pg
 services::discord::router::intake_dispatch::replay_admission_tests::prepare_commits_the_receipt_before_the_permit_and_never_reissues_pg
 services::discord::router::intake_dispatch::replay_admission_tests::provider_begin_remains_single_update_pg
+services::discord::router::intake_dispatch::tests::codex_turn_hold::a_gateway_attachment_moves_the_checkpoint_once_turn_mode_holds_it_pg
 services::discord::router::intake_dispatch::tests::codex_turn_hold::a_turn_mode_input_keeps_its_attachment_queued_in_order_until_turn_mode_pg
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
@@ -1859,7 +1862,7 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act2_ga
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::d4act_host_stop_during_pending_finish_prevents_retry_pg
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::f6_off_host_has_zero_pg_statements_with_on_positive_control_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
-services::discord::runtime_bootstrap::orphan_recovery::fence_tests::c2b_orphan_recovery_leaves_a_protected_channel_pg
+services::discord::runtime_bootstrap::orphan_recovery::tests::orphan_recovery_clears_stale_links_and_requeues_pending_dispatches_pg
 services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_invalidation_preserves_replay_and_foreign_rows_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::shutdown_ends_watches_before_writers_pg
 services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::standby_sigterm_joins_its_homes_before_the_barrier_pg

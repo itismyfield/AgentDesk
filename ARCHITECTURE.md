@@ -2772,7 +2772,6 @@ src/
 │   │   │   │   └── observation.rs
 │   │   │   ├── binding_reader.rs
 │   │   │   ├── capture.rs
-│   │   │   ├── derive.rs
 │   │   │   ├── identity.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── seal.rs
@@ -2945,7 +2944,6 @@ src/
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
-│   │   ├── shadow_host.rs
 │   │   ├── topology.rs
 │   │   └── turn_mode.rs
 │   ├── tui_prompt_dedupe/

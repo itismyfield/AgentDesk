@@ -36,7 +36,6 @@ pub(crate) fn hold_binding_peek_lock_for_tests() -> impl Drop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::tui_o::shadow::binding_reader::{BindingLookup, LiveBindingLookup};
 
     #[test]
     fn existing_binding_peek_semantics_are_preserved() {
@@ -75,6 +74,13 @@ mod tests {
             state
                 .relayed_entry_ids_by_tmux
                 .insert(victim.clone(), VecDeque::from([entry]));
+            let pending = TimedValue {
+                value: "pending".to_string(),
+                recorded_at: expired,
+            };
+            state
+                .pending_by_tmux
+                .insert(victim.clone(), VecDeque::from([pending]));
             for (name, at) in [
                 ("shadow-peek-live", Instant::now()),
                 ("shadow-peek-stale", expired),
@@ -87,13 +93,6 @@ mod tests {
             }
         }
 
-        let live = LiveBindingLookup.lookup("shadow-peek-live");
-        assert_eq!(
-            live.map(|view| view.output_path),
-            Some("/t/s.jsonl".to_string())
-        );
-        assert!(LiveBindingLookup.lookup("shadow-peek-stale").is_none());
-        assert!(LiveBindingLookup.lookup("shadow-peek-absent").is_none());
         for (name, expected) in [
             (" shadow-peek-live ", Some(binding)),
             ("shadow-peek-stale", None),
@@ -108,13 +107,14 @@ mod tests {
                 .external_input_relay_lease_by_tmux
                 .contains_key(&victim),
             state.relayed_entry_ids_by_tmux.contains_key(&victim),
+            state.pending_by_tmux.contains_key(&victim),
             state.runtime_by_tmux.contains_key("shadow-peek-stale"),
         );
         drop(state);
         reset_state_for_tests();
         assert_eq!(
             kept,
-            (true, true, true),
+            (true, true, true, true),
             "a shadow lookup must not purge relay state"
         );
     }

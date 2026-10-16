@@ -865,8 +865,8 @@ pub(in crate::services::discord) async fn handle_event(
                         admitted_attachment_submission = Some(submission);
                     }
                     Err(nonlocal) => {
-                        super::finish_text_intake_admission(&deps, nonlocal, submission).await?;
-                        return Ok(());
+                        let finish = super::finish_nonlocal_attachment_admission;
+                        return finish(&deps, nonlocal, submission).await;
                     }
                 }
 
