@@ -183,7 +183,7 @@ fn off_lookup_never_waits_for_gate_state_and_handback_can_release_and_restore() 
 }
 
 #[test]
-fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
+fn b2_scope_raw_reentry_keeps_blocking_refusal_and_try_contention() {
     use crate::services::discord::inflight::{
         lock_inflight_state_path, try_lock_inflight_state_path,
     };
@@ -197,16 +197,16 @@ fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
     let path = root
         .path()
         .join(format!("discord_inflight/claude/{channel}.json"));
-    for result in [
-        lock_inflight_state_path(&path),
-        try_lock_inflight_state_path(&path),
-    ] {
-        assert_eq!(
-            result.err().as_deref(),
-            Some("input fence: Busy"),
-            "scope reentry must refuse rather than flock a second fd"
-        );
-    }
+    assert_eq!(
+        lock_inflight_state_path(&path).err().as_deref(),
+        Some("input fence: Busy"),
+        "blocking scope reentry must not wait on a second handle"
+    );
+    assert_eq!(
+        try_lock_inflight_state_path(&path).err().unwrap(),
+        std::fs::TryLockError::WouldBlock.to_string(),
+        "the try path reports sidecar contention"
+    );
     assert!(matches!(
         PopulationScope::writer(root.path(), &ProviderKind::Claude, channel, &permit),
         Err(Failure::Busy)
@@ -215,8 +215,8 @@ fn b2_scope_raw_inflight_reentry_is_busy_without_second_fd_wait() {
     drop(scope);
     let owned = lock_inflight_state_path(&path).unwrap();
     assert_eq!(
-        try_lock_inflight_state_path(&path).err().as_deref(),
-        Some("input fence: Busy")
+        try_lock_inflight_state_path(&path).err().unwrap(),
+        std::fs::TryLockError::WouldBlock.to_string()
     );
     assert_eq!(
         lock_inflight_state_path(&path).err().as_deref(),

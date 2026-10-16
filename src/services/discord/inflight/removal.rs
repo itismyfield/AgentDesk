@@ -703,9 +703,7 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
             complete: false,
         };
     };
-    if channel == 0
-        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    {
+    if channel == 0 {
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,

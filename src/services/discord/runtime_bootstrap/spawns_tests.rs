@@ -7,8 +7,7 @@
 use super::*;
 
 #[tokio::test]
-async fn c2_deferred_marking_skips_old_format_held_rows_before_backfill() {
-    use crate::services::discord::input_runtime::{self, fence};
+async fn deferred_marking_backfills_old_rows_and_marks_siblings() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -40,22 +39,17 @@ async fn c2_deferred_marking_skips_old_format_held_rows_before_backfill() {
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     old.as_object_mut().unwrap().remove("finalizer_turn_id");
     std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let gate = fence::Gate::protect(provider.clone(), held).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
-    let _closing = gate.close().unwrap();
     assert!(deferred_restart_marked(&provider).await);
     let legacy_row = inflight::load_inflight_state(&provider, legacy).unwrap();
     assert_eq!(
         legacy_row.restart_mode,
         Some(crate::services::discord::InflightRestartMode::DrainRestart)
     );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={held}"))),
-        "deferred marking must not attempt a compatibility writer"
+    let marked: InflightTurnState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(marked.finalizer_turn_id, held + 1);
+    assert_eq!(
+        marked.restart_mode,
+        Some(crate::services::discord::InflightRestartMode::DrainRestart)
     );
 }
 

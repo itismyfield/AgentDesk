@@ -1608,10 +1608,8 @@ services::discord::inflight::removal::custody_notice_tests::an_episode_is_one_ro
 services::discord::inflight::removal::custody_notice_tests::anchorless_turns_started_in_the_same_second_are_two_rows_pg
 services::discord::inflight::removal::custody_notice_tests::custody_without_a_tui_direct_turn_enqueues_nothing_pg
 services::discord::inflight::removal::custody_notice_tests::earlier_build_turns_sharing_a_start_time_are_two_rows_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_custody_with_protection_zero_keeps_existing_enqueue_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_old_custody_episodes_hold_all_modes_and_keep_siblings_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_pending_notify_is_held_and_unprotected_bot_readdresses_pg
-services::discord::inflight::removal::custody_notice_tests::n3bc_protection_after_enqueue_keeps_the_pending_notify_bot_pg
+services::discord::inflight::removal::custody_notice_tests::old_custody_episode_shapes_preserve_bytes_and_persistent_dedupe_pg
+services::discord::inflight::removal::custody_notice_tests::pending_notify_readdresses_when_custody_copy_identifies_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg

@@ -223,7 +223,7 @@ fn s3act_b1_scoped_probe_requires_complete_read_and_backfill() {
 }
 
 #[test]
-fn s3act_b1_protected_probe_does_not_backfill() {
+fn scoped_probe_backfills_old_rows_under_the_sidecar_lock() {
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
     let channel = 5340122;
@@ -231,23 +231,14 @@ fn s3act_b1_protected_probe_does_not_backfill() {
     let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     json.as_object_mut().unwrap().remove("finalizer_turn_id");
     fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-    let before = fingerprint(&path);
-    let gate = crate::services::discord::input_runtime::fence::Gate::protect(
-        ProviderKind::Claude,
-        channel,
-    )
-    .unwrap();
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
     let loaded = inflight::load_inflight_probe_scoped(&ProviderKind::Claude, channel);
-    assert!(
-        !loaded.complete && loaded.states.is_empty(),
-        "protected is held, not restored"
-    );
-    assert_eq!(fingerprint(&path), before);
-    assert!(
-        !path.with_extension("json.lock").exists(),
-        "fence precedes row lock/backfill"
-    );
+    assert!(loaded.complete);
+    assert_eq!(loaded.states.len(), 1);
+    assert_eq!(loaded.states[0].channel_id, channel);
+    let persisted: inflight::InflightTurnState =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted.finalizer_turn_id, 11);
+    assert!(path.with_extension("json.lock").exists());
 }
 
 #[cfg(unix)]
