@@ -833,10 +833,50 @@ fn the_dead_letter_row_preserves_the_unsent_tail_and_the_delivery_channel_5941()
 }
 
 #[test]
-fn denial_counters_keep_their_distinct_admission_scopes_5941() {
-    // The per-conjunct cause names every denial, even when no body was lost;
-    // the aggregate feeds a threshold-1 alert and therefore follows admission.
+fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
+    // The dead-letter row test reads the body, channel and offsets back; these
+    // operands leave no trace in that row under the plan fixture.
+    let source = include_str!("terminal_relay_plan.rs");
+    let call_site = source
+        .split_once("orphan_terminal_frame::observe_orphan_terminal_frame(")
+        .expect("the plan must route the denial seam through the orphan-frame recorder")
+        .1
+        .split_once("\n        );")
+        .expect("the call must terminate")
+        .0;
+
+    for operand in [
+        "watcher_resend_committed,",
+        "placeholder_msg_id,",
+        "request_owner_user_id: inflight_before_relay",
+        "duplicate_guard_refused_body: direct_terminal_response_decision",
+    ] {
+        assert!(
+            call_site.contains(operand),
+            "the seam must be fed `{operand}` from the frame being lost: {call_site}"
+        );
+    }
+
+    // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
+    // which makes the duplicate conjunct unfalsifiable while every test above stays green.
+    assert!(
+        !call_site.contains("direct_terminal_response_refused_duplicate"),
+        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
+    );
+
+    // The WARN and the counter MOVED with the seam — not duplicated, not
+    // dropped. Operators grep `#5175:`.
     let module = include_str!("orphan_terminal_frame.rs");
+    assert!(!source.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("record_relay_terminal_authority_denied("));
+    assert!(module.contains("#5175: terminal frame has NO delivery owner"));
+    assert!(module.contains("soft_terminal_denial = denial.as_str()"));
+
+    // #5941 r3 P1-2: the PER-CONJUNCT cause counter answers "which authority
+    // conjunct refused" and must fire for EVERY denial, including the ones that
+    // lose nothing — a forged turn nonce is refused with an empty tail, so
+    // behind the record admission the one arm the counter exists to name never
+    // emits. Order, not presence: it has to precede the `record_required` gate.
     let cause = module
         .find("record_relay_terminal_denial_cause(")
         .expect("the seam must emit the per-conjunct cause counter");
@@ -846,8 +886,14 @@ fn denial_counters_keep_their_distinct_admission_scopes_5941() {
     let aggregate = module
         .find("metrics::record_relay_terminal_authority_denied(")
         .expect("the seam must emit the aggregate denial counter");
-    assert!(cause < gate, "the cause counter must precede admission");
-    assert!(gate < aggregate, "the aggregate counter must follow admission");
+    assert!(
+        cause < gate,
+        "the per-conjunct cause counter must be emitted BEFORE the record admission gate"
+    );
+    assert!(
+        gate < aggregate,
+        "the aggregate counter feeds a threshold-1 alert row and must stay behind the admission"
+    );
 }
 
 #[test]
@@ -967,10 +1013,14 @@ fn admitted_losses(channel: u64) -> u64 {
 /// delivered-content fingerprint for `LOST_BODY` first, and is the ONLY input that
 /// differs between the two callers below — so the delta between them isolates the
 /// duplicate-guard conjunct from every other one.
-async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel: bool) -> u64 {
+async fn admitted_losses_over_one_plan_pass(
+    channel_id: u64,
+    already_on_channel: bool,
+    pg_pool: Option<sqlx::PgPool>,
+) -> u64 {
     let root = tempfile::tempdir().expect("isolated runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
-    let shared = crate::services::discord::make_shared_data_for_tests();
+    let shared = crate::services::discord::make_shared_data_for_tests_with_storage(pg_pool);
     let channel = serenity::ChannelId::new(channel_id);
     let http = std::sync::Arc::new(serenity::Http::new("fixture-no-network"));
     let provider = ProviderKind::Claude;
@@ -1041,15 +1091,18 @@ async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel:
 }
 
 #[tokio::test]
-async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
-    // Enter through production instead of grepping its source. Mutating the
-    // call-site operand from `current_response` to `""` must make this test fail:
-    // the seam then admits zero losses instead of preserving the unsent body.
-    // The incident shape is a soft stop-hook terminal carrying an assistant
-    // body, no inflight row (soft-terminal authority is denied), and no cached
-    // relay producer (the sink never owns the frame).
+async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
+    // With the dead-letter row test, these alone enter through PRODUCTION. The others hand-build
+    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
+    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
+    // the call falsifies `record_required` forever, writes zero dead-letter rows
+    // and leaves every one of them green. The gap was the ENTRY POINT, not the
+    // strength of any assertion, so this one drives `run_terminal_relay_plan`
+    // itself over the incident shape: a soft stop-hook terminal carrying an
+    // assistant body, no inflight row (soft-terminal authority is denied) and no
+    // cached relay producer (the sink never owns the frame).
     assert_eq!(
-        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false).await,
+        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false, None).await,
         1,
         "a frame the plan itself left with no delivery owner must be admitted to the record exactly once"
     );
@@ -1065,11 +1118,15 @@ async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_59
     // row is owed and the threshold-1 aggregate behind that gate must not move — while
     // the seam read the routed flag it did move.
     assert_eq!(
-        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true).await,
+        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true, None).await,
         0,
         "a body the duplicate guard found already on the channel is not a loss and must not page"
     );
 }
+
+// Reads back the dead-letter row the plan writes, so it needs PostgreSQL.
+#[path = "lost_body_record_pg_tests.rs"]
+mod lost_body_record_pg_tests;
 
 // Main-behaviour baselines for a dropped terminal body under a later commit.
 #[path = "owed_range_baseline_tests.rs"]
