@@ -64,6 +64,9 @@ pub(crate) struct PersistedHeadInjection {
     pub(crate) identity: QueueIdentity,
     pub(crate) original: PendingQueueItem,
     pub(crate) phase: HeadPhase,
+    /// The paste this head may have become, recorded before it could start; absent before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) attempt: Option<mend::HeadAttempt>,
 }
 
 /// The part of a channel snapshot beyond its items; written only while one of them is set.
@@ -473,6 +476,7 @@ pub(super) fn blocks_claims(
     state.queued_head.meta.head_injection.is_some()
 }
 
+pub(crate) mod mend;
 pub(crate) mod prefix;
 
 pub(super) use claim::step;
@@ -488,11 +492,23 @@ mod claim {
         lease: Arc<HeadLease>,
         identity: QueueIdentity,
         item: Box<Intervention>,
+        attempt: Option<mend::HeadAttempt>,
     }
 
     impl HeadTicket {
         pub(crate) fn item(&self) -> &Intervention {
             &self.item
+        }
+
+        /// Names the paste about to start, so the MayHaveSent settle records it with the head.
+        pub(crate) fn with_attempt(
+            mut self,
+            nonce: &str,
+            transcript: &Path,
+            session_id: Option<String>,
+        ) -> Self {
+            self.attempt = mend::HeadAttempt::before_paste(nonce, transcript, session_id);
+            self
         }
     }
 
@@ -538,6 +554,7 @@ mod claim {
             persistence: QueuePersistenceContext,
             reply: oneshot::Sender<HeadSettle>,
         },
+        Mend(mend::MendMsg),
     }
 
     impl HeadMsg {
@@ -546,6 +563,7 @@ mod claim {
         ) -> &QueuePersistenceContext {
             match self {
                 Self::Claim { persistence, .. } | Self::Settle { persistence, .. } => persistence,
+                Self::Mend(msg) => msg.persistence(),
             }
         }
 
@@ -557,6 +575,7 @@ mod claim {
                 Self::Settle { ticket, reply, .. } => {
                     let _ = reply.send(HeadSettle::NotCommitted(ticket, error));
                 }
+                Self::Mend(msg) => msg.refuse(error),
             }
         }
     }
@@ -599,6 +618,7 @@ mod claim {
                 state.last_persistence = Some(persistence.clone());
                 let _ = reply.send(settle(state, channel_id, ticket, outcome, &persistence));
             }
+            HeadMsg::Mend(msg) => mend::step(state, channel_id, msg),
         }
     }
 
@@ -674,6 +694,7 @@ mod claim {
             identity: identity.clone(),
             original,
             phase,
+            attempt: None,
         });
         ledger.lease = Some(lease.clone());
         if let Err(error) = persist_queue(state, channel_id, persistence) {
@@ -686,6 +707,7 @@ mod claim {
             lease,
             identity,
             item,
+            attempt: None,
         })
     }
 
@@ -715,6 +737,9 @@ mod claim {
         match (outcome, phase) {
             (HeadOutcome::MayHaveSent, HeadPhase::Reserved) => {
                 set_phase(&mut state.queued_head, HeadPhase::MayHaveSent);
+                if let Some(head) = state.queued_head.meta.head_injection.as_mut() {
+                    head.attempt = ticket.attempt.clone();
+                }
             }
             (HeadOutcome::Injected, HeadPhase::MayHaveSent) => {
                 state.intervention_queue.remove(0);

@@ -7,7 +7,7 @@ const CLOSE: &str = "</pasted_content id=\"";
 const TOKEN_LEN: usize = 4;
 
 /// The body is the frame verbatim, or the frame as the whole inside of exactly one paste block.
-pub(super) fn exact(body: &str, expected: &str) -> bool {
+pub(crate) fn exact(body: &str, expected: &str) -> bool {
     body == expected || unwrap_paste(body) == Some(expected)
 }
 

@@ -33,6 +33,8 @@ mod auto;
 
 struct Fixture {
     _db: TestPostgresDb,
+    pool: sqlx::PgPool,
+    context: serenity::Context,
     app: Router,
     shared: Arc<SharedData>,
     pane: InjectPane,
@@ -195,7 +197,11 @@ impl Fixture {
                 format!("ws://{address}/gateway"),
             )
             .await;
-        shared.http.cached_serenity_ctx.set(context).unwrap();
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(context.clone())
+            .unwrap();
         let config = crate::config::Config::default();
         let engine = crate::engine::PolicyEngine::new(&config).unwrap();
         let broadcast = crate::eventbus::new_broadcast();
@@ -206,10 +212,12 @@ impl Fixture {
             broadcast,
             buffer,
             Some(registry),
-            Some(pool),
+            Some(pool.clone()),
         );
         Self {
             _db: db,
+            pool,
+            context,
             app,
             shared,
             pane,
@@ -222,6 +230,35 @@ impl Fixture {
             server,
             _rest: rest,
         }
+    }
+
+    /// A process restart: a new runtime with its own mailbox registry restores the queue from disk
+    /// as startup does, on the same pane, transcript and database; `busy` holds the same turn again.
+    async fn restart(&mut self, busy: bool) {
+        let registry = HealthRegistry::new();
+        let channels = [self.channel.get()];
+        let shared = register_inject_runtime(&registry, &channels, Some(self.pool.clone())).await;
+        let token = "s2b-test-token".to_string();
+        shared.http.cached_bot_token.set(token).unwrap();
+        let context = self.context.clone();
+        shared.http.cached_serenity_ctx.set(context).unwrap();
+        // Startup restores only channels the configuration binds, where the route read the allowlist.
+        let role_map = runtime_store::role_map_path().unwrap();
+        std::fs::create_dir_all(role_map.parent().unwrap()).unwrap();
+        let bound = json!({ "byChannelId": { self.channel.get().to_string():
+            { "roleId": "s2b-head-agent", "promptFile": "prompt.md", "provider": "claude" } } });
+        std::fs::write(role_map, bound.to_string()).unwrap();
+        let restore =
+            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests;
+        restore(&self.http, &shared, &ProviderKind::Claude).await;
+        let mailbox = shared.mailbox(self.channel);
+        let (holder, owner) = (self.holder.clone(), UserId::new(100));
+        if busy && mailbox.snapshot().await.cancel_token.is_none() {
+            mailbox
+                .restore_active_turn(holder, owner, self.holder_message)
+                .await;
+        }
+        self.shared = shared;
     }
 
     async fn enqueue(&self, text: &str) {

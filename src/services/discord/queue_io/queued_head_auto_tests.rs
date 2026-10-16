@@ -850,3 +850,6 @@ async fn s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads
     assert_eq!(injected, [h.get(), b.get()]);
     fixture.assert_still_busy().await;
 }
+
+#[path = "queued_head_mend_tests.rs"]
+mod mend;

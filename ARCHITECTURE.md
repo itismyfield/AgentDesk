@@ -1021,6 +1021,9 @@ src/
 │   │   │   │   │   ├── herdr.rs
 │   │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   │   ├── names.rs
+│   │   │   │   │   ├── queued_owner.rs
+│   │   │   │   │   ├── queued_reconcile.rs
+│   │   │   │   │   ├── queued_reconcile_tests.rs
 │   │   │   │   │   ├── queued_support.rs
 │   │   │   │   │   └── test_hook.rs
 │   │   │   │   ├── inject.rs
@@ -1350,6 +1353,7 @@ src/
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
 │   │   │   ├── queued_head_inject_tests.rs
+│   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── transport.rs
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
@@ -3000,6 +3004,8 @@ src/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
 │   │   ├── queued_head/
+│   │   │   ├── mend.rs
+│   │   │   ├── mend_tests.rs
 │   │   │   └── prefix.rs
 │   │   ├── registry_purge/
 │   │   │   └── closed_gate_tests.rs

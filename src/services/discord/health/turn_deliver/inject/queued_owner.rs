@@ -1,0 +1,182 @@
+//! The queued-head owner: a head already proven taken is consumed first, otherwise the first ready
+//! input is reserved, its paste recorded before it can start, typed once and settled by the actor.
+use super::*;
+use crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session;
+
+pub(super) async fn queued_attempt(
+    shared: &Arc<SharedData>,
+    request: &HumanInputRequest,
+    expected: QueueIdentity,
+    parent: Option<ChannelId>,
+    gate: fn(ChannelId, Option<ChannelId>) -> bool,
+) -> InjectAttempt {
+    // A head already proven taken is consumed before the busy check, so an idle pane is no veto.
+    if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
+        return mended;
+    }
+    let target = match resolve(shared, request, true).await {
+        Ok(target) => target,
+        Err(veto) => return InjectAttempt::NotSent(veto),
+    };
+    let shared = shared.clone();
+    let request = HumanInputRequest {
+        channel_id: request.channel_id,
+        provider: request.provider.clone(),
+        text: request.text.clone(),
+        author_id: request.author_id,
+        source: request.source.clone(),
+        metadata: request.metadata.clone(),
+        channel_name_hint: request.channel_name_hint.clone(),
+    };
+    let permit = target.input.clone();
+    // The detached owner keeps the admitted effect through claim, pane I/O and durable settle.
+    let owner = async move {
+        let mailbox = shared.mailbox(request.channel_id);
+        let persistence = crate::services::discord::queue_persistence_context(
+            &shared,
+            &request.provider,
+            request.channel_id,
+        );
+        let held = mailbox
+            .claim_queued_head_if_enabled(
+                expected,
+                persistence.clone(),
+                request.channel_id,
+                parent,
+                gate,
+            )
+            .await;
+        let held = match held {
+            QueuedHeadClaim::Reserved(ticket) => ticket,
+            QueuedHeadClaim::NotEligible => return InjectAttempt::NotSent("queued_not_eligible"),
+            QueuedHeadClaim::PersistenceFailed(error) => return persistence_failed(error),
+            QueuedHeadClaim::BlockedUnknown => return InjectAttempt::HandbackFailed(HEAD_UNKNOWN),
+            _ => return InjectAttempt::HandbackFailed("queued_head_blocked"),
+        };
+        let item = held.item();
+        let turn_id = Some(format!(
+            "discord:{}:{}",
+            request.channel_id, item.message_id
+        ));
+        let input = Arc::new(Input {
+            channel: request.channel_id.get(),
+            provider: request.provider.as_str().to_string(),
+            source: turn_id.clone().unwrap(),
+            author: item.author_id.to_string(),
+            text: item.text.clone(),
+            nonce: busy_inject::fresh_nonce(),
+        });
+        let mut ticket = Some(held);
+        let work = async {
+            #[cfg(test)]
+            test_hook::before_reserve(input.channel).await;
+            if !queued_target_matches(&shared, &request, &target, true).await {
+                return InjectAttempt::NotSent(HOLDER_CHANGED);
+            }
+            #[cfg(test)]
+            test_hook::owner_crash(input.channel);
+            // The paste is named before it can start, so a later Unknown can still be proven.
+            let binding = runtime_binding_for_tmux_session(&target.session);
+            let session_id = binding.and_then(|binding| binding.session_id);
+            let held = ticket.take().unwrap();
+            let marked = mailbox
+                .settle_queued_head(
+                    held.with_attempt(&input.nonce, &target.transcript, session_id),
+                    HeadOutcome::MayHaveSent,
+                    persistence.clone(),
+                )
+                .await;
+            match marked {
+                HeadSettle::Committed(Some(kept)) => ticket = Some(kept),
+                HeadSettle::NotCommitted(kept, error) => {
+                    persistence_failed(error);
+                    ticket = Some(kept);
+                    return InjectAttempt::Unconfirmed {
+                        turn_id: turn_id.clone(),
+                        detail: "queued_phase_failed",
+                    };
+                }
+                _ => {
+                    return InjectAttempt::Unconfirmed {
+                        turn_id: turn_id.clone(),
+                        detail: "queued_phase_failed",
+                    };
+                }
+            }
+            #[cfg(test)]
+            test_hook::before_queued(input.channel, "may_have_sent").await;
+            if !queued_target_matches(&shared, &request, &target, true).await {
+                return InjectAttempt::NotSent(HOLDER_CHANGED);
+            }
+            let effect = tokio::task::spawn_blocking({
+                let (input, session, transcript, turn_id, permit) = (
+                    input.clone(),
+                    target.session.clone(),
+                    target.transcript.clone(),
+                    turn_id.clone(),
+                    target.input.clone(),
+                );
+                let herdr = target.herdr.clone();
+                move || {
+                    fence::effect::synchronous(permit, || {
+                        run(
+                            (&pane(input.channel, &session), herdr.as_ref()),
+                            &session,
+                            &transcript,
+                            turn_id,
+                            &input,
+                        )
+                    })
+                }
+            });
+            let attempt = effect.await.unwrap_or(InjectAttempt::OwnerFailed {
+                turn_id: turn_id.clone(),
+            });
+            #[cfg(test)]
+            test_hook::before_queued(input.channel, "after_effect").await;
+            if !matches!(attempt, InjectAttempt::NotSent(_))
+                && !queued_target_matches(&shared, &request, &target, false).await
+            {
+                return InjectAttempt::Unconfirmed {
+                    turn_id: turn_id.clone(),
+                    detail: HOLDER_CHANGED,
+                };
+            }
+            attempt
+        };
+        let attempt = std::panic::AssertUnwindSafe(work)
+            .catch_unwind()
+            .await
+            .unwrap_or(InjectAttempt::OwnerFailed {
+                turn_id: turn_id.clone(),
+            });
+        if let Some(ticket) = ticket {
+            let outcome = match attempt {
+                InjectAttempt::Injected { .. } => HeadOutcome::Injected,
+                InjectAttempt::NotSent(_) => HeadOutcome::NotSent,
+                _ => HeadOutcome::Unconfirmed,
+            };
+            if !matches!(
+                mailbox
+                    .settle_queued_head(ticket, outcome, persistence)
+                    .await,
+                HeadSettle::Committed(None)
+            ) {
+                return InjectAttempt::Unconfirmed {
+                    turn_id,
+                    detail: "queued_settle_unknown",
+                };
+            }
+            // A committed NotSent is the actor's proof that the head is back at the queue front.
+            if let (InjectAttempt::NotSent(veto), Some(turn_id)) = (&attempt, turn_id) {
+                let veto = *veto;
+                return InjectAttempt::HandedBack { turn_id, veto };
+            }
+        }
+        attempt
+    };
+    match tokio::spawn(fence::effect::scope(permit, owner)).await {
+        Ok(attempt) => attempt,
+        Err(_) => InjectAttempt::OwnerFailed { turn_id: None },
+    }
+}

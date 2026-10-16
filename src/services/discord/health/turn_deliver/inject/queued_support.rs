@@ -11,6 +11,8 @@ use crate::services::discord::SharedData;
 
 /// The head was left Unknown by an earlier attempt; nothing types it again.
 pub(super) const HEAD_UNKNOWN: &str = "queued_head_unknown";
+/// The Unknown head was consumed on transcript proof alone; nothing was typed for it.
+pub(super) const RECONCILED: &str = "queued_head_reconciled";
 
 pub(super) async fn queued_target_matches(
     shared: &SharedData,
@@ -63,6 +65,7 @@ impl InjectAttempt {
     pub(crate) fn queued_report(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Injected { .. } => ("injected", "", "terminal"),
+            Self::NotSent(RECONCILED) => ("reconciled", RECONCILED, "terminal"),
             Self::NotSent(veto) => ("not_sent", veto, "unavailable"),
             Self::HandbackFailed(HEAD_UNKNOWN) => ("blocked", HEAD_UNKNOWN, "unknown"),
             Self::HandbackFailed(detail) => ("blocked", detail, "unavailable"),

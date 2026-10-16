@@ -2,6 +2,7 @@
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
 mod receipt;
+pub(crate) use receipt::exact as exact_receipt;
 pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;

@@ -524,6 +524,11 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
   services::discord::placeholder_sweeper::retirement_tests::tick_leaves_input_protected_rows_before_and_after_probe
   services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_closed_gate_holds_a_proven_unknown_head_until_it_opens_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_recorded_paste_left_unknown_is_consumed_after_a_restart_pg
+  services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_an_overlapping_kick_or_a_failed_write_never_consumes_twice_or_types_pg
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
   services::discord::recovery_engine::herdr_before_start_restart::tests::an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again
