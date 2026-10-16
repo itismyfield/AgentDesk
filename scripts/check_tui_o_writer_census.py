@@ -149,7 +149,6 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "health/recovery.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
     "http.rs": {".edit_message": 2, ".send_message": 5, "send_channel_message*": 2},
     "idle_recap/card.rs": {"edit_channel_message*": 1, "send_channel_message*": 1},
-    "input_runtime/intake/skills.rs": {".say": 1},
     "meeting_orchestrator/records.rs": {"send_long_message*": 3},
     "meeting_orchestrator/rounds.rs": {"send_long_message*": 1},
     "meeting_orchestrator/selection_runtime.rs": {".edit_message": 1, ".send_message": 1},
@@ -267,8 +266,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "health/recovery.rs": ("W33", "CUT_D"),
     "http.rs": ("W19", "KEEP_TRANSPORT"),
     "idle_recap/card.rs": ("W25", "KEEP_NONBODY"),
-    # The fixed custody ACK follows a durable receipt and carries no TUI body.
-    "input_runtime/intake/skills.rs": ("CMD", "KEEP_NONBODY"),
     "meeting_orchestrator/records.rs": ("MEETING", "KEEP_NONBODY"),
     "meeting_orchestrator/rounds.rs": ("MEETING", "KEEP_NONBODY"),
     "meeting_orchestrator/selection_runtime.rs": ("MEETING", "KEEP_NONBODY"),
@@ -363,7 +360,6 @@ CENSUS: dict[str, tuple[str, ...]] = {
 # Each file's cutover gates as `enclosing fn:kind`, in source order.
 # claim: a body is sent here (`claim_then_send`, or a RAW_CLAIM_SITES claim). peek: only read.
 EXPECTED_GATES: dict[str, tuple[str, ...]] = {
-    "src/services/discord/commands/control/native.rs": ("select:peek",),
     "src/services/discord/footer_view_reconciler/mod.rs": (
         "edit_body_message:claim",
     ),

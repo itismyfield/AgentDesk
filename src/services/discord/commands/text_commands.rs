@@ -1,4 +1,3 @@
-use crate::services::discord::input_runtime::intake::skills::hold_text_skill;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -453,7 +452,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
         TextCommandId::Clear => {
             let cleared = async {
-                super::clear_channel_session_state(
+                let report = super::clear_channel_session_state(
                     &ctx.http,
                     &data.shared,
                     &data.provider,
@@ -462,7 +461,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     super::SoftClearNotifyMode::Suppress,
                 )
                 .await?;
-                let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
+                let _ = msg.reply(&ctx.http, report.reply()).await;
                 anyhow::Ok(())
             };
             // A failed clear answers with its reason, as `/clear` does: an error returned from
@@ -1400,10 +1399,6 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         .await;
                 }
                 _ => {}
-            }
-
-            if Box::pin(hold_text_skill(ctx, msg, data, &skill, args_str)).await? {
-                return Ok(true);
             }
 
             auto_restore_session(&data.shared, channel_id, ctx).await;

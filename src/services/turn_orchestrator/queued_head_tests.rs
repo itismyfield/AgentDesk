@@ -307,10 +307,10 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_purge() {
     });
 }
 
-/// A clear discards an Unknown head a restart read from disk together with its queue; a failed
-/// clear write keeps both, so the head still holds the queue until the retried clear.
+/// A clear discards a restart-read Unknown head with its queue even when its writes fail twice;
+/// a landed clear republishes the submitted sources the snapshot recorded.
 #[test]
-fn a_clear_discards_an_unknown_head_from_disk_and_a_failed_write_keeps_it() {
+fn a_clear_discards_an_unknown_head_from_disk_even_when_its_writes_fail() {
     let _root = root();
     block_on(async {
         let channel = ChannelId::new(6_995_001);
@@ -332,32 +332,33 @@ fn a_clear_discards_an_unknown_head_from_disk_and_a_failed_write_keeps_it() {
         assert_eq!(ids(queued(&restart).await), [31, 32, 33]);
         assert_eq!(disk(channel)["head_injection"]["phase"], "unknown");
         let before = std::fs::read(queue_path(channel)).unwrap();
-        fail_queue_saves(channel, 1);
+        ChannelMailboxRegistry::fail_clear_removals(channel, false, 2, false);
+        fail_queue_saves(channel, 2);
         let failed = restart.clear(ctx()).await;
-        assert!(failed.persistence_error.is_some());
-        assert!(failed.queue_exit_events.is_empty());
-        assert_eq!(ids(queued(&restart).await), [31, 32, 33]);
+        assert_eq!(failed.persistence.failed, ["queue_unlink", "queue_publish"]);
+        let kinds: Vec<_> = failed.queue_exit_events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [QueueExitKind::Superseded; 3]);
+        for id in [31, 32, 33] {
+            assert!(failed.discarded_message_ids.contains(&MessageId::new(id)));
+        }
+        assert!(queued(&restart).await.is_empty());
         assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
+        assert!(restart.enqueue(human(34, 8, "next"), ctx()).await.enqueued);
         assert_eq!(
             taken(&restart).await,
-            None,
-            "the kept head still holds the queue"
+            Some(34),
+            "the head left on disk holds nothing"
         );
 
         let cleared = restart.clear(ctx()).await;
-        assert_eq!(cleared.persistence_error, None);
-        for id in [31, 32, 33] {
-            assert!(cleared.discarded_message_ids.contains(&MessageId::new(id)));
-        }
-        let kinds: Vec<_> = cleared.queue_exit_events.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, [QueueExitKind::Superseded; 3]);
+        assert_eq!(cleared.persistence, Default::default());
         assert!(queued(&restart).await.is_empty());
         let written = disk(channel);
         assert_eq!(written["items"], serde_json::json!([]));
         assert!(written["head_injection"].is_null());
         assert_eq!(written["terminal_identities"][0]["primary"], 30);
-        assert!(restart.enqueue(human(34, 8, "next"), ctx()).await.enqueued);
-        assert_eq!(taken(&restart).await, Some(34));
+        assert!(restart.enqueue(human(35, 8, "later"), ctx()).await.enqueued);
+        assert_eq!(taken(&restart).await, Some(35));
     });
 }
 
@@ -372,15 +373,17 @@ async fn restarted(channel: ChannelId) -> Vec<u64> {
     ids(queued(&fresh).await)
 }
 
-/// A clear returns a dequeued input from its dispatch marker to the queue file before removing
-/// the marker, so a failed removal keeps it exactly once and the retried clear leaves it nowhere.
+/// A clear discards a dequeued input's marker instead of requeueing it; a failed removal lands on
+/// retry, and a twice-failed one is left only for a restart, never for the live actor.
 #[test]
-fn a_clear_reclaims_a_dequeued_input_and_a_failed_marker_removal_keeps_it_once() {
+fn a_clear_discards_a_dequeued_input_and_retries_a_failed_marker_removal() {
     let _root = root();
     block_on(async {
-        for (index, after_removal) in [false, true].into_iter().enumerate() {
+        let cases = [(false, 1), (true, 1), (false, 2)];
+        for (index, (after_removal, failures)) in cases.into_iter().enumerate() {
             let channel = ChannelId::new(6_995_011 + index as u64);
             let handle = ChannelMailboxRegistry::default().handle(channel);
+            let case = format!("{after_removal}/{failures}");
             assert!(
                 handle
                     .enqueue(human(41, 7, "dequeued"), ctx())
@@ -389,20 +392,27 @@ fn a_clear_reclaims_a_dequeued_input_and_a_failed_marker_removal_keeps_it_once()
             );
             assert!(handle.enqueue(human(42, 8, "behind"), ctx()).await.enqueued);
             assert_eq!(taken(&handle).await, Some(41));
-            assert!(queue_path(channel).with_extension("dispatch").exists());
-            super::super::dispatch_reservation::marker_remove_fault::fail_next(
-                channel,
-                after_removal,
-            );
-            let failed = handle.clear(ctx()).await;
-            assert!(failed.persistence_error.is_some(), "{after_removal}");
-            assert_eq!(restarted(channel).await, [41, 42], "{after_removal}");
+            let marker = queue_path(channel).with_extension("dispatch");
+            assert!(marker.exists());
+            ChannelMailboxRegistry::fail_clear_removals(channel, true, failures, after_removal);
 
             let cleared = handle.clear(ctx()).await;
-            assert_eq!(cleared.persistence_error, None, "{after_removal}");
-            assert!(cleared.discarded_message_ids.contains(&MessageId::new(41)));
-            assert_eq!(taken(&handle).await, None, "{after_removal}");
-            assert!(restarted(channel).await.is_empty(), "{after_removal}");
+            for id in [41, 42] {
+                assert!(
+                    cleared.discarded_message_ids.contains(&MessageId::new(id)),
+                    "{case}"
+                );
+            }
+            assert_eq!(taken(&handle).await, None, "{case}");
+            if failures == 1 {
+                assert_eq!(cleared.persistence.retried, ["marker_unlink"], "{case}");
+                assert!(!marker.exists(), "{case}");
+                assert!(restarted(channel).await.is_empty(), "{case}");
+            } else {
+                assert_eq!(cleared.persistence.failed, ["marker_unlink"], "{case}");
+                assert!(marker.exists(), "{case}");
+                assert_eq!(restarted(channel).await, [41], "{case}");
+            }
         }
     });
 }
@@ -431,8 +441,8 @@ fn a_clear_leaves_memory_and_disk_alike_when_a_parent_fsync_fails() {
         let memory = ids(queued(&handle).await);
         let disk = restarted(channel).await;
         assert_eq!(
-            (cleared.persistence_error, memory, disk),
-            (None, vec![], vec![])
+            (cleared.persistence, memory, disk),
+            (Default::default(), vec![], vec![])
         );
         assert!(handle.enqueue(human(53, 8, "next"), ctx()).await.enqueued);
         assert_eq!(restarted(channel).await, [53]);
@@ -898,7 +908,7 @@ fn without_a_claim_the_queue_file_stays_the_legacy_array() {
         let content = std::fs::read_to_string(queue_path(channel)).unwrap();
         let items: Vec<PendingQueueItem> = serde_json::from_str(&content).unwrap();
         assert_eq!(content, serde_json::to_string_pretty(&items).unwrap());
-        assert_eq!(handle.clear(ctx()).await.persistence_error, None);
+        assert_eq!(handle.clear(ctx()).await.persistence, Default::default());
         let content = std::fs::read_to_string(queue_path(channel)).unwrap();
         let empty: Vec<PendingQueueItem> = Vec::new();
         assert_eq!(content, serde_json::to_string_pretty(&empty).unwrap());
@@ -955,3 +965,6 @@ fn the_downgrade_converts_only_a_resolved_snapshot() {
 
 #[path = "queued_head_prefix_tests.rs"]
 mod prefix;
+
+#[path = "clear_trust_tests.rs"]
+mod clear_trust;

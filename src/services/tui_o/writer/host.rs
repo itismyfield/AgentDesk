@@ -27,9 +27,11 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
+mod activation_io;
 mod first_init;
 mod recover;
 mod transition;
+pub use activation_io::{Custody, FencedFacts};
 use recover::{Recovered, recover};
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
@@ -85,21 +87,6 @@ pub(crate) type RepostTurn<I> = Box<
             ChannelWriter<<I as HostIo>::Port, <I as HostIo>::Lease, <I as HostIo>::Alarms>,
         >,
 >;
-/// The facts and queued Legacy bodies read while intake writes are fenced.
-pub struct FencedFacts {
-    pub hold: crate::db::o_channel_activation::IntakeFence,
-    pub facts: ActivationFacts,
-    pub queued_bodies: i64,
-}
-/// Legacy's local hold on a channel as the gateway reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Custody {
-    Free,
-    /// Only an inflight row, which outlives its turn when Legacy never clears it.
-    Row,
-    /// A pending start or a terminal delivery Legacy still owns.
-    Active,
-}
 
 /// Channels with a hosted actor, by the claim that hosts each, and those ready to take work.
 #[derive(Default)]

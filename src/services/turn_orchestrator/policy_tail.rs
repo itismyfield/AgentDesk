@@ -203,9 +203,8 @@ impl ChannelMailboxHandle {
             capture,
             reply,
         };
-        let permit = crate::services::discord::input_runtime::fence::effect::current();
         if (self.sender)
-            .send((ChannelMailboxMsg::ClaimPolicyTail(claim), permit))
+            .send(ChannelMailboxMsg::ClaimPolicyTail(claim))
             .is_err()
         {
             return ticket.decide(unreachable);

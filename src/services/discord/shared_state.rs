@@ -240,24 +240,7 @@ impl SharedData {
         user_msg_id: MessageId,
         placeholder_msg_id: MessageId,
     ) {
-        if super::input_runtime::fence::lookup(&self.provider, channel_id.get()).is_none() {
-            return self.insert_queued_placeholder_locked(
-                channel_id,
-                user_msg_id,
-                placeholder_msg_id,
-            );
-        }
-        self.queued
-            .queued_placeholders
-            .insert((channel_id, user_msg_id), placeholder_msg_id);
-        super::queued_placeholders_store::persist_map_on_worker(
-            &self.queued.queued_placeholders,
-            &self.provider,
-            &self.token_hash,
-            channel_id,
-            false,
-        )
-        .await;
+        self.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
     }
 
     /// Write-through remove for the `queued_placeholders` mapping. Returns
@@ -279,23 +262,7 @@ impl SharedData {
         channel_id: ChannelId,
         user_msg_id: MessageId,
     ) -> Option<MessageId> {
-        if super::input_runtime::fence::lookup(&self.provider, channel_id.get()).is_none() {
-            return self.remove_queued_placeholder_locked(channel_id, user_msg_id);
-        }
-        let removed = self
-            .queued
-            .queued_placeholders
-            .remove(&(channel_id, user_msg_id))
-            .map(|(_, msg_id)| msg_id);
-        super::queued_placeholders_store::persist_map_on_worker(
-            &self.queued.queued_placeholders,
-            &self.provider,
-            &self.token_hash,
-            channel_id,
-            false,
-        )
-        .await;
-        removed
+        self.remove_queued_placeholder_locked(channel_id, user_msg_id)
     }
 
     /// Remove variant that assumes the caller already holds the per-channel

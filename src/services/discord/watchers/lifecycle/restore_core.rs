@@ -6,18 +6,8 @@ pub(super) async fn register_restored_core(
     owned_sessions: std::collections::HashMap<ChannelId, String>,
 ) {
     if !owned_sessions.is_empty() {
-        #[cfg(all(test, unix))]
-        for channel_id in owned_sessions.keys() {
-            super::n3bc_restore_tests::attempt(channel_id.get(), "core_candidate");
-            super::n3bc_restore_tests::at(channel_id.get(), "core_lock").await;
-        }
         let mut data = shared.core.lock().await;
         for (channel_id, channel_name) in &owned_sessions {
-            #[cfg(all(test, unix))]
-            super::n3bc_restore_tests::at(channel_id.get(), "core_locked").await;
-            if boot_skip(BootTarget::Channel(provider, channel_id.get())) {
-                continue;
-            }
             let persisted_path = load_last_session_path(
                 shared.pg_pool.as_ref(),
                 &shared.token_hash,
@@ -42,8 +32,6 @@ pub(super) async fn register_restored_core(
             let db_cwd =
                 load_restored_session_cwd(shared.pg_pool.as_ref(), &session_keys, channel_id.get());
 
-            #[cfg(all(test, unix))]
-            super::n3bc_restore_tests::attempt(channel_id.get(), "core_register");
             let session = data.sessions.entry(*channel_id).or_insert_with(|| {
                 crate::services::discord::DiscordSession {
                     session_id: persisted_session_id.clone(),
