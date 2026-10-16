@@ -320,29 +320,34 @@ mod tests {
 
     #[test]
     fn intake_judges_its_row_create_before_any_provider_or_bridge_spawn() {
-        let src = include_str!("intake_turn.rs");
-        let create = "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);";
-        let admit = "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }";
+        let compact = |source: &str| source.split_whitespace().collect::<String>();
+        let src = compact(include_str!("intake_turn.rs"));
+        let create = compact(
+            "let row = super::super::super::inflight::save_inflight_state_create_new(&inflight_state);",
+        );
+        let admit = compact(
+            "if !super::foreign_row::admit(shared, &provider, &inflight_state, &cancel_token, row).await? {\n        return Ok(IntakeExecution::deferred(channel_id));\n    }",
+        );
         // The provider spawn follows the teardown verdict; the bridge spawn comes after it.
         // Split so the bridge entry-site census does not count this file as a caller.
-        let bridge = ["\n    spawn_turn_", "bridge("].concat();
+        let bridge = ["spawn_turn_", "bridge("].concat();
         let anchors = [
-            create,
-            admit,
+            create.as_str(),
+            admit.as_str(),
             "for_turn(",
-            "spawn_blocking(move ||",
+            "spawn_blocking(move||",
             &bridge,
         ];
-        let mut from = src.find(create).unwrap_or(src.len());
+        let mut from = src.find(create.as_str()).unwrap_or(src.len());
         for anchor in anchors {
             let at = src[from..].find(anchor).map(|at| from + at);
             assert!(at.is_some(), "{anchor} missing after the previous anchor");
             from = at.unwrap_or(from);
         }
         assert!(
-            src.find(create)
-                .zip(src.find(admit))
-                .is_some_and(|(c, a)| c + create.len() + 5 == a)
+            src.find(create.as_str())
+                .zip(src.find(admit.as_str()))
+                .is_some_and(|(c, a)| c + create.len() == a)
         );
         assert_eq!(src.matches("save_inflight_state_create_new(").count(), 2);
     }

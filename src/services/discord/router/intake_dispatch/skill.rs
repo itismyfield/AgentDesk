@@ -19,13 +19,6 @@ pub(crate) async fn dispatch_skill_intake(
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     admitted_local: Option<LocalAdmissionPermit>,
 ) -> Result<(), super::super::super::Error> {
-    super::super::intake_gate::ledger::legacy_allowed(
-        deps.shared,
-        deps.http,
-        &provider,
-        channel_id,
-    )
-    .await?;
     let submission = IntakeSubmission {
         provider,
         request: super::super::message_handler::IntakeRequest {

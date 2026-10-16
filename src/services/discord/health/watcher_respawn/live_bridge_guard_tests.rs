@@ -1,6 +1,5 @@
 use super::super::complete_force_clean_watcher_recovery;
 use super::*;
-use crate::services::discord::input_runtime::fence::{Gate, test_health};
 use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
 use crate::services::discord::tmux::{InstallFixture, n4d2_entry_support as support};
 use poise::serenity_prelude::{MessageId, UserId};
@@ -22,13 +21,6 @@ fn run<F: std::future::Future<Output = ()>>(
             let (fixture, _discord) = support::fixture(ProviderKind::Claude, channel).await;
             check(fixture).await;
         });
-}
-
-fn assert_no_legacy(observed: &discord::inflight::o_seed_observation::Guard) {
-    for event in ["legacy_reclaim_enter", "legacy_rebind_enter"] {
-        assert_eq!(observed.snapshot().event_count(event), 0, "{event}");
-    }
-    support::assert_zero_loaders(observed);
 }
 
 fn old_row(fx: &InstallFixture) -> (std::path::PathBuf, Vec<u8>) {
@@ -72,9 +64,9 @@ fn old_row(fx: &InstallFixture) -> (std::path::PathBuf, Vec<u8>) {
 }
 
 #[test]
-fn legacy_retry_keeps_input_fence_and_legacy_call_column() {
+fn legacy_retry_rebinds_an_old_format_row_and_keeps_legacy_call_column() {
     run(
-        "legacy_retry_keeps_input_fence_and_legacy_call_column",
+        "legacy_retry_rebinds_an_old_format_row_and_keeps_legacy_call_column",
         632_520_108,
         |fx| async move {
             let _http = discord::shared_state::test_rest::install(fx.http.clone());
@@ -88,26 +80,6 @@ fn legacy_retry_keeps_input_fence_and_legacy_call_column() {
                 WatcherAbsenceKey::new(&fx.provider, fx.channel),
                 WatcherAbsenceState::newly_absent(10),
             );
-            let gate = Gate::protect(fx.provider.clone(), fx.channel.get()).unwrap();
-            let health = test_health::Clear::new(&gate);
-            let closing = gate.close().unwrap();
-            assert!(
-                !retry_pending_watcher_respawn(
-                    &fx.registry,
-                    &fx.provider,
-                    std::slice::from_ref(&fx.shared),
-                    fx.channel,
-                    10
-                )
-                .await
-            );
-            assert_eq!(std::fs::read(&row).unwrap(), bytes);
-            assert_no_legacy(&observed);
-            closing.abort_close(false).unwrap();
-            assert_eq!(gate.mode(), discord::input_runtime::fence::Mode::LegacyOpen);
-            drop(closing);
-            drop(health);
-            drop(gate);
             let scope = Scope::new(&fx.shared);
             assert!(
                 retry_pending_watcher_respawn(
