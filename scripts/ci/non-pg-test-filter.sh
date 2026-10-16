@@ -87,7 +87,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::cluster::intake_worker::dispatch_stamp_tests
   --skip services::cluster::intake_worker::home_accept_tests
   --skip services::cluster::intake_worker::home_route_tests
-  --skip services::cluster::intake_worker::input_effect_tests
   --skip services::cluster::intake_worker::o_route_tests
   --skip services::cluster::intake_worker::replay_hold_tests
   --skip services::cluster::machine_resources::store::tests
@@ -162,6 +161,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::fence_tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests
+  --skip services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests
   --skip services::discord::session_idle_cleanup::tests
   --skip services::discord::session_runtime::worktree_reuse_channel_isolation_tests
   --skip services::discord::task_notification_delivery::tests
@@ -630,6 +630,13 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_probe_requires_complete_read_and_backfill
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b1_scoped_readers_preserve_foreign_files_and_mailboxes
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::s3act_b3a1_scoped_probe_excludes_stale_planned_restart
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_late_old_cleanup_leaves_the_successor_running
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_stuck_writer_stays_stuck_and_the_commit_still_exits
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::backend_exit_joins_writers_before_the_lease_drops
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_child
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_joins_every_provider_writer_before_exit
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::every_slot_holding_runtime_registers_one_sigterm_handler
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::switch_off_shutdown_builds_no_lifecycle
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed
   services::discord::session_runtime::worktree_reuse_channel_isolation_tests::reconcile_noop_when_db_matches_tmux

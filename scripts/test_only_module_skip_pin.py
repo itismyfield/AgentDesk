@@ -163,7 +163,6 @@ PINNED_BASENAME_TEST_FILES = frozenset({
         "src/services/discord/admin_host_guard_verified_reset_tests.rs",
         "src/services/auto_queue/runtime/verified_reset_pg_tests.rs",
         "src/services/discord/input_runtime/clear_tests.rs",
-        "src/services/cluster/intake_worker/input_effect_tests.rs",
         "src/services/discord/input_runtime/effect_tests.rs",
         "src/services/discord/queue_dispatch/input_effect_tests.rs",
         "src/services/discord/input_runtime/fence_tests.rs",
@@ -749,6 +748,7 @@ PINNED_BASENAME_TEST_FILES = frozenset({
         "src/services/turn_orchestrator/dispatch_reservation/tests/hydrate_corrupt_queue_tests.rs",
         "src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs",
         "src/services/session_host/herdr_gate/legacy_return_tests.rs",
+        "src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs",
 })
 
 # Production-looking basenames classified as test-only by the shared resolver.
