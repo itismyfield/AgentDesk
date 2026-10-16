@@ -1,10 +1,10 @@
-//! Redrive retirement gates: a retired request or owner key stops before the snapshot, the nudge
-//! or the reattach, with no accounting; each fixture's Legacy run reaches the real nudge or apply.
+//! Legacy redrive outcomes: each fixture's run reaches the real nudge or reattach apply and
+//! leaves exactly the expected accounting and durable bytes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
@@ -13,7 +13,6 @@ use super::{
     HealthRegistry, REDRIVE_ATTEMPTS, REDRIVE_PLACEHOLDER_SHIELDS, RedriveEpisode, stall_liveness,
 };
 use crate::services::discord::SharedData;
-use crate::services::discord::health::legacy_supervision::RetiredForTest;
 use crate::services::discord::health::legacy_supervision::test_support::{
     MockDiscord, tree_fingerprint,
 };
@@ -22,11 +21,6 @@ use crate::services::platform::tmux;
 use crate::services::provider::ProviderKind;
 
 const GRACE_SECS: i64 = stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64;
-
-/// Checkpoints named by the gate site that follows them.
-type Stage = &'static str;
-const AFTER_SNAPSHOT: Stage = "redrive_snapshot";
-const BEFORE_REATTACH: Stage = "redrive_reattach";
 
 type Tree = BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>;
 
@@ -54,155 +48,6 @@ fn write_foreign_dead_marker(session: &str) {
     let marker =
         crate::services::tmux_common::session_dead_marker_path(&format!("{session}-other"));
     std::fs::write(marker, "dead").expect("unrelated session exits during the pass");
-}
-
-/// Full redrive accounting and durable bytes, excluding other sessions' asynchronous death markers.
-#[derive(Debug, PartialEq)]
-struct Observed {
-    accounting: String,
-    tree: Tree,
-}
-
-fn observe(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    keys: &[ChannelId],
-    root: &Path,
-    session: &str,
-) -> Observed {
-    let accounting = keys
-        .iter()
-        .map(|channel| {
-            let key = shared.redrive_key(provider, *channel);
-            let attempt = REDRIVE_ATTEMPTS.get(&key).map(|state| state.clone());
-            let shield = REDRIVE_PLACEHOLDER_SHIELDS
-                .get(&key)
-                .map(|shield| shield.clone());
-            format!("{channel}: attempt={attempt:?} shield={shield:?}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Observed {
-        accounting,
-        tree: redrive_tree(root, session),
-    }
-}
-
-type Capture = Box<dyn Fn() -> Observed + Send>;
-
-struct Plan {
-    reached: Vec<Stage>,
-    retire: Option<(Stage, String, u64)>,
-    retired: Option<RetiredForTest>,
-    capture: Option<Capture>,
-    captured: Option<Observed>,
-}
-
-static PLANS: LazyLock<Mutex<HashMap<ChannelId, Plan>>> = LazyLock::new(Default::default);
-
-/// Records that the pass reached `stage`; an armed plan observes the state and then retires its
-/// key at that instant.
-pub(super) fn checkpoint(channel: ChannelId, stage: Stage) {
-    let mut plans = PLANS.lock().unwrap();
-    let Some(plan) = plans.get_mut(&channel) else {
-        return;
-    };
-    plan.reached.push(stage);
-    if plan.retired.is_none()
-        && let Some((_, provider, key)) = plan.retire.as_ref().filter(|(at, ..)| *at == stage)
-    {
-        plan.captured = plan.capture.as_ref().map(|capture| capture());
-        plan.retired = Some(RetiredForTest::new(provider, *key));
-    }
-}
-
-/// Watches one pass over `channel`; dropping it forgets the plan and un-retires its key.
-struct Probe(ChannelId);
-
-impl Probe {
-    fn arm(channel: ChannelId, retire: Option<(Stage, &ProviderKind, ChannelId)>) -> Self {
-        Self::arm_capturing(channel, retire, None)
-    }
-
-    fn arm_capturing(
-        channel: ChannelId,
-        retire: Option<(Stage, &ProviderKind, ChannelId)>,
-        capture: Option<Capture>,
-    ) -> Self {
-        let plan = Plan {
-            reached: Vec::new(),
-            retire: retire
-                .map(|(at, provider, key)| (at, provider.as_str().to_string(), key.get())),
-            retired: None,
-            capture,
-            captured: None,
-        };
-        PLANS.lock().unwrap().insert(channel, plan);
-        Self(channel)
-    }
-
-    fn reached(&self) -> Vec<Stage> {
-        PLANS.lock().unwrap()[&self.0].reached.clone()
-    }
-
-    fn captured(&self) -> Option<Observed> {
-        PLANS.lock().unwrap().get_mut(&self.0)?.captured.take()
-    }
-}
-
-impl Drop for Probe {
-    fn drop(&mut self) {
-        let plan = PLANS.lock().unwrap().remove(&self.0);
-        drop(plan);
-    }
-}
-
-/// Logs every tmux invocation through a PATH wrapper, so a test counts the snapshot's real
-/// producer probes instead of trusting a checkpoint placed after the snapshot.
-#[cfg(unix)]
-struct TmuxLog {
-    log: PathBuf,
-    _dir: tempfile::TempDir,
-    _path: crate::config::TestEnvVarGuard,
-}
-
-#[cfg(unix)]
-impl TmuxLog {
-    fn install() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let real = std::env::split_paths(&inherited)
-            .map(|dir| dir.join("tmux"))
-            .find(|candidate| candidate.is_file())
-            .expect("tmux on PATH");
-        let dir = tempfile::tempdir().expect("tmux wrapper dir");
-        let log = dir.path().join("calls.log");
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
-            log.display(),
-            real.display()
-        );
-        let wrapper = dir.path().join("tmux");
-        std::fs::write(&wrapper, script).expect("tmux wrapper");
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod tmux wrapper");
-        let path =
-            crate::config::TestEnvVarGuard::prepend_path_after_shared_test_env_lock(dir.path());
-        Self {
-            log,
-            _dir: dir,
-            _path: path,
-        }
-    }
-
-    /// tmux invocations so far whose arguments name `session`.
-    fn calls_naming(&self, session: &str) -> usize {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains(session))
-            .count()
-    }
 }
 
 /// Structured events recorded so far for `channel`, by type.
@@ -336,14 +181,6 @@ impl NudgeFixture {
 
     fn resumed_at(&self) -> Option<u64> {
         *self.resume_offset.lock().unwrap()
-    }
-
-    fn observe(&self, root: &Path) -> Observed {
-        let mut keys = vec![self.channel];
-        if self.owner != self.channel {
-            keys.push(self.owner);
-        }
-        observe(&self.shared, &self.provider, &keys, root, &self.session.0)
     }
 
     fn clear(&self) {
@@ -485,205 +322,32 @@ impl ReattachFixture {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Retire {
-    Never,
-    BeforeEntry,
-    AfterSnapshot,
-}
-
-/// A retired key never reaches the nudge: retired before entry it spends no snapshot probe,
-/// retired while the snapshot awaits it stops right after; nothing it leaves behind changes.
+/// The nudge targets the watcher owner's slot, so a request whose watcher is registered under
+/// another channel moves that owner watcher's offset.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
-async fn retired_redrive_key_never_moves_the_watcher_resume_offset() {
+async fn legacy_request_nudges_its_watcher_owner_slot() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let tmp = tempfile::tempdir().expect("temp runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
         tmp.path(),
     );
-    let tmux_log = TmuxLog::install();
-    for (index, retire) in [Retire::Never, Retire::BeforeEntry, Retire::AfterSnapshot]
-        .into_iter()
-        .enumerate()
-    {
-        let channel = ChannelId::new(6_325_615_001 + index as u64);
-        let fixture = NudgeFixture::new(tmp.path(), channel, channel);
-        let base = chrono::Utc::now().timestamp();
-        fixture.seed_grace(base).await;
-        let before = fixture.observe(tmp.path());
-        let probes_before = tmux_log.calls_naming(&fixture.session.0);
-        let _retired_before = matches!(retire, Retire::BeforeEntry)
-            .then(|| RetiredForTest::new(fixture.provider.as_str(), channel.get()));
-        let probe = Probe::arm(
-            channel,
-            matches!(retire, Retire::AfterSnapshot).then_some((
-                AFTER_SNAPSHOT,
-                &fixture.provider,
-                channel,
-            )),
-        );
+    let channel = ChannelId::new(6_325_616_001);
+    let owner = ChannelId::new(channel.get() + 5);
+    let fixture = NudgeFixture::new(tmp.path(), channel, owner);
+    let base = chrono::Utc::now().timestamp();
+    fixture.seed_grace(base).await;
 
-        let result = fixture.redrive(base).await.expect("redrive entrypoint");
-        write_foreign_dead_marker(&fixture.session.0);
+    let result = fixture.redrive(base).await.expect("redrive entrypoint");
 
-        let probes = tmux_log.calls_naming(&fixture.session.0) - probes_before;
-        match retire {
-            Retire::Never => {
-                assert!(result, "the Legacy key is nudged");
-                assert!(probes > 0, "the snapshot probes the producer session");
-                assert_eq!(fixture.resumed_at(), Some(BIRTH_OFFSET));
-            }
-            Retire::BeforeEntry => {
-                assert!(!result, "a retired key reports no redrive action");
-                assert_eq!(probes, 0, "a key retired before entry takes no snapshot");
-                assert!(probe.reached().is_empty());
-            }
-            Retire::AfterSnapshot => {
-                assert!(!result, "a retired key reports no redrive action");
-                assert!(probes > 0, "the snapshot ran before the retirement landed");
-                assert_eq!(probe.reached(), vec![AFTER_SNAPSHOT]);
-            }
-        }
-        if !matches!(retire, Retire::Never) {
-            assert_eq!(
-                fixture.resumed_at(),
-                None,
-                "{retire:?}: resume offset untouched"
-            );
-            assert_eq!(
-                fixture.observe(tmp.path()),
-                before,
-                "{retire:?}: accounting and durable bytes untouched"
-            );
-        }
-        drop(probe);
-        fixture.clear();
-    }
-}
-
-/// The nudge targets the watcher owner's slot, so a retired owner stops the pass even when the
-/// requested key is still Legacy, leaving both keys' accounting as it was.
-#[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn retired_watcher_owner_key_stops_the_nudge_of_a_legacy_request() {
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let tmp = tempfile::tempdir().expect("temp runtime root");
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        tmp.path(),
+    assert!(result, "the Legacy owner slot is nudged");
+    assert_eq!(
+        fixture.resumed_at(),
+        Some(BIRTH_OFFSET),
+        "the owner watcher was nudged"
     );
-    for (index, owner_retired) in [false, true].into_iter().enumerate() {
-        let channel = ChannelId::new(6_325_616_001 + 10 * index as u64);
-        let owner = ChannelId::new(channel.get() + 5);
-        let fixture = NudgeFixture::new(tmp.path(), channel, owner);
-        let base = chrono::Utc::now().timestamp();
-        fixture.seed_grace(base).await;
-        let before = fixture.observe(tmp.path());
-        let _retired =
-            owner_retired.then(|| RetiredForTest::new(fixture.provider.as_str(), owner.get()));
-        let probe = Probe::arm(channel, None);
-
-        let result = fixture.redrive(base).await.expect("redrive entrypoint");
-        write_foreign_dead_marker(&fixture.session.0);
-
-        assert_eq!(
-            probe.reached(),
-            vec![AFTER_SNAPSHOT],
-            "the request key is Legacy"
-        );
-        if owner_retired {
-            assert!(!result, "a retired owner slot is not nudged");
-            assert_eq!(
-                fixture.resumed_at(),
-                None,
-                "the owner watcher offset is untouched"
-            );
-            assert_eq!(
-                fixture.observe(tmp.path()),
-                before,
-                "request and owner accounting and durable bytes untouched"
-            );
-        } else {
-            assert!(result, "the Legacy owner slot is nudged");
-            assert_eq!(
-                fixture.resumed_at(),
-                Some(BIRTH_OFFSET),
-                "the owner watcher was nudged"
-            );
-        }
-        drop(probe);
-        fixture.clear();
-    }
-}
-
-/// A key retired right before the reattach promotion spawns nothing and leaves everything as it
-/// stood at that instant; the same fixture's Legacy run really spawns a watcher.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retirement_before_reattach_promotion_spawns_no_watcher() {
-    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let tmp = tempfile::tempdir().expect("temp runtime root");
-    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-        "AGENTDESK_ROOT_DIR",
-        tmp.path(),
-    );
-    for (index, retire) in [false, true].into_iter().enumerate() {
-        let channel = ChannelId::new(6_325_617_001 + index as u64);
-        let fixture = ReattachFixture::new(tmp.path(), channel).await;
-        let base = chrono::Utc::now().timestamp();
-        fixture.seed_grace(base).await;
-        let (shared, provider, root, session) = (
-            fixture.shared.clone(),
-            fixture.provider.clone(),
-            tmp.path().to_path_buf(),
-            fixture.session.0.clone(),
-        );
-        let capture: Capture =
-            Box::new(move || observe(&shared, &provider, &[channel], &root, &session));
-        let probe = Probe::arm_capturing(
-            channel,
-            retire.then_some((BEFORE_REATTACH, &fixture.provider, channel)),
-            Some(capture),
-        );
-
-        let result = fixture.redrive(base).await.expect("redrive entrypoint");
-        write_foreign_dead_marker(&fixture.session.0);
-
-        assert_eq!(
-            probe.reached(),
-            vec![AFTER_SNAPSHOT, BEFORE_REATTACH],
-            "the nudge declined for want of a watcher and the pass reached the promotion"
-        );
-        let spawned = fixture.take_spawned_watcher();
-        if retire {
-            assert!(!result, "a retired key reports no redrive action");
-            assert!(
-                spawned.is_none(),
-                "no watcher is installed for a retired key"
-            );
-            let at_gate = probe
-                .captured()
-                .expect("state observed at the promotion gate");
-            assert_eq!(
-                observe(
-                    &fixture.shared,
-                    &fixture.provider,
-                    &[channel],
-                    tmp.path(),
-                    &fixture.session.0,
-                ),
-                at_gate,
-                "nothing changes after the promotion gate refuses a retired key"
-            );
-        } else {
-            assert!(result, "the Legacy key is reattached");
-            assert!(spawned.is_some(), "the apply spawned a watcher");
-        }
-        drop(probe);
-        fixture.clear();
-    }
+    fixture.clear();
 }
 
 /// With nothing retired the nudge pass leaves exactly the pre-gate outcome: the offset, the full

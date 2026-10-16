@@ -29,8 +29,8 @@ PROTECTED = {
         'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
-    'src/services/discord/health/legacy_supervision.rs': {'*': '1c1497db24b104d698762e3d24c51e224acce622e0cc4255806b1d02dd55a4b3'},
-    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1d692d44f1073550b7163ffac6d16a1c2ed51c42f23edd1d5524dc824181ae27'}}
+    'src/services/discord/health/legacy_supervision.rs': {'*': 'e1aaadf38e5f4753d767c21bdca7c35f806c998d7554c368a08b2823329818b1'},
+    'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '3eee49d3f4b9aaf09d08e4a8e06d32abcecd7ed36c18bc37a1ca30f802d2948b'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 

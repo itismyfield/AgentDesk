@@ -1055,8 +1055,6 @@ src/
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
 │   │   │   ├── transcript_binding_stall.rs
-│   │   │   ├── transcript_turn.rs
-│   │   │   ├── transcript_turn_tests.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
 │   │   │   └── watcher_respawn.rs
@@ -1679,9 +1677,9 @@ src/
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
 │   │   ├── task_supervisor/
-│   │   │   ├── n4d_spawn_observation_tests.rs
 │   │   │   ├── watcher_completion.rs
-│   │   │   └── watcher_completion_tests.rs
+│   │   │   ├── watcher_completion_tests.rs
+│   │   │   └── watcher_spawn_observation_tests.rs
 │   │   ├── terminal_delivery_custody/
 │   │   │   ├── pg_tests.rs
 │   │   │   └── tests.rs
@@ -2192,7 +2190,6 @@ src/
 │   │   │   │   ├── liveness_tests.rs
 │   │   │   │   ├── n3bc_restore_tests.rs
 │   │   │   │   ├── n4d2_boundary_tests.rs
-│   │   │   │   ├── n4d2_entry_test.rs
 │   │   │   │   ├── output_policy.rs
 │   │   │   │   ├── ready_failure.rs
 │   │   │   │   ├── recovery_markers.rs
@@ -2204,7 +2201,8 @@ src/
 │   │   │   │   ├── restore_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
-│   │   │   │   └── watch_host_tests.rs
+│   │   │   │   ├── watch_host_tests.rs
+│   │   │   │   └── watcher_install_fixture.rs
 │   │   │   ├── codex_tui_restore.rs
 │   │   │   ├── dispatched_origin_ghost.rs
 │   │   │   ├── dispatched_origin_ghost_tests.rs

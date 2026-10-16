@@ -641,7 +641,7 @@ pub(in crate::services::discord) async fn restore_tmux_watchers(
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
         #[cfg(all(test, unix))]
-        crate::services::discord::tmux::n4d2_entry_support::record_reader_start(
+        crate::services::discord::tmux::watcher_install_fixture::record_reader_start(
             pw.channel_id.get(),
             pw.initial_offset,
         );

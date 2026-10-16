@@ -520,7 +520,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
-  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_and_then_edits_the_legacy_placeholder
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
   services::discord::recovery_engine::herdr_before_start_restart::tests::an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again

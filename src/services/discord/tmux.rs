@@ -72,7 +72,7 @@ pub(crate) use watcher_lifecycle::commit_codex_watcher_restore_to_empty_registry
 #[cfg(test)]
 pub(in crate::services::discord) use watcher_lifecycle::InstallFixture;
 #[cfg(test)]
-pub(in crate::services::discord) use watcher_lifecycle::n4d2_entry_support;
+pub(in crate::services::discord) use watcher_lifecycle::watcher_install_fixture;
 
 use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;

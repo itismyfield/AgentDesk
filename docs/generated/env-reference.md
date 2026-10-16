@@ -32,7 +32,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` | Cache the kill switch once so activation requires a process restart. |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
-| `ADK_N4D2_ENTRY_CHILD` | `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
@@ -55,6 +54,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs` |  |
+| `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
@@ -127,7 +127,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs` | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
