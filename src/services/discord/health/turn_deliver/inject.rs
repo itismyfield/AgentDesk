@@ -21,7 +21,6 @@ use crate::services::codex_tui::busy_inject as codex_inject;
 use crate::services::discord::SharedData;
 use crate::services::discord::inflight::{InflightTurnState, TurnSource};
 use crate::services::discord::inject_disposition::{self, InjectionOutcome, SourceGuard};
-use crate::services::discord::input_runtime::fence;
 use crate::services::discord::queue_io::queued_head_inject::{
     BindingKey, binding_key, persistence_failed, queued_head_enabled,
 };
@@ -43,7 +42,6 @@ pub(crate) const INJECT_ENV: &str = "ADK_BUSY_INJECT";
 
 pub(super) const HOLDER_CHANGED: &str = "holder_changed";
 pub(super) const INPUT_IN_FLIGHT: &str = "input_in_flight";
-const INPUT_RUNTIME_OWNED: &str = "input_runtime_owned";
 const MAILBOX_UNAVAILABLE: &str = "mailbox_unavailable";
 const NOT_BUSY: &str = "not_busy";
 const EPISODE_UNIDENTIFIED: &str = "episode_unidentified";
@@ -233,8 +231,6 @@ struct Target {
     claim: ExpectedClaim,
     /// Held from the first mailbox read until the owner settles.
     transition: OwnedMutexGuard<()>,
-    /// Keeps an input-runtime gate from closing on the channel until the owner settles.
-    input: Option<fence::Permit>,
     row: Option<RowKey>,
     binding: Option<BindingKey>,
     /// The gated pane of a Herdr-hosted session; the effect then never calls tmux.
@@ -348,11 +344,6 @@ async fn resolve(
     let binding = binding_key(&pane.0);
     // An idle transcript keeps the caller's own start; a reservation is only for a live turn.
     let native_turn = busy_turn(runtime, &pane.1)?;
-    let input = if queued {
-        fence::effect::admit(&request.provider, channel).map_err(|_| INPUT_RUNTIME_OWNED)?
-    } else {
-        None
-    };
     // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
     // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
     let transition = shared
@@ -394,7 +385,6 @@ async fn resolve(
         turn_id: first.turn_id,
         claim: first.claim,
         transition,
-        input,
         row: first.row,
         binding,
         herdr,
@@ -518,7 +508,6 @@ impl Owner {
             turn_id,
             claim,
             transition,
-            input: permit,
             herdr,
             ..
         } = target;
@@ -589,8 +578,7 @@ impl Owner {
                 match handed.await {
                     Ok(events) => {
                         let apply = crate::services::discord::apply_queue_exit_feedback;
-                        let feedback = apply(&shared, channel_id, &events);
-                        fence::effect::scope(permit.clone(), feedback).await;
+                        apply(&shared, channel_id, &events).await;
                         InjectAttempt::HandedBack {
                             turn_id: queued_turn,
                             veto,
@@ -598,10 +586,9 @@ impl Owner {
                     }
                     Err(reason) => {
                         if reason == HANDBACK_NOT_WRITTEN {
-                            let failure = fence::Failure::Persistence;
-                            fence::record_failure(&provider, input.channel, &source, failure);
-                            let notice = crate::services::discord::queue_io::input_refusal_notice;
-                            notice(&shared, channel_id, &source, failure).await;
+                            let notice =
+                                crate::services::discord::queue_io::input_persistence_refusal_notice;
+                            notice(&shared, channel_id, &source).await;
                         }
                         InjectAttempt::HandbackFailed(reason)
                     }
@@ -624,7 +611,7 @@ impl Owner {
             }
         };
         // A handed-back message now waits in the queue, so the drain must not see it claimed.
-        drop((guard, transition, permit));
+        drop((guard, transition));
         // Ending the reservation may release a drain it withheld.
         let kick = crate::services::discord::queue_io::schedule_post_enqueue_idle_queue_kick;
         kick(shared, provider, channel_id);

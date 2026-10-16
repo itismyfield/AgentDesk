@@ -2568,9 +2568,7 @@ fn input_mailbox_step(
             {
                 tracing::warn!(%channel_id, %error, "queued head refused mailbox purge");
                 let _ = reply.send(PurgeQueueResult {
-                    input_refusal: Some(
-                        crate::services::discord::input_runtime::fence::Failure::Busy,
-                    ),
+                    queued_head_refused: true,
                     own_files_removed: Some(0),
                     queue_len_after: state.intervention_queue.len(),
                     ..Default::default()
@@ -2643,7 +2641,7 @@ fn input_mailbox_step(
                     Some(0)
                 },
                 queue_len_after: state.intervention_queue.len(),
-                input_refusal: None,
+                queued_head_refused: false,
             });
         }
         #[cfg(test)]
