@@ -11,7 +11,7 @@
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
 | **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
-| **PostgreSQL tests** | `postgres` (matrix `shard: [0, 1]`) | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. main은 PG 선택을 두 샤드로 나눠 샤드마다 자기 PostgreSQL 서비스에서 직렬 실행하며, 두 샤드가 모두 성공해야 run이 green이다. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
+| **PostgreSQL tests** | `postgres` (matrix `shard: [0, 1, 2, 3]`) | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. main은 PG 선택을 네 샤드로 나눠 샤드마다 자기 PostgreSQL 서비스에서 직렬 실행하며, 모든 샤드가 성공해야 run이 green이다. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
 **주석 전용 PR.** `ci-pr.yml`의 `changes` job은 `scripts/ci/comment_only_gate.py`로
@@ -293,7 +293,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 | Full tests | `full_non_pg`의 `Library sweep (selection-set gated)` step (PR `library_sweep`과 같은 명령) | 아래 Full tests (PR) 행과 같다 |
 | Lint (main) | `lint`의 `npm run test:policies`, `just fmt-check`, `just lint`, `Non-lib tests and doctests`(`test-non-pg`의 `--all-targets` 줄을 `--bins --test '*'`로, `cargo test --doc ClaudeBinary`) | `just check` |
 | Full tests (PR) | `library_sweep`의 `Library sweep (selection-set gated)` step | 도달 가능한 PostgreSQL과 `AGENTDESK_REQUIRE_PG=1` 아래에서 `python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 2 --skip _pg --skip pg_ --skip postgres -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --skip _pg --skip pg_ --skip postgres` (⚠️ 레인 이름과 달리 PG가 필요하다 — 위 §PR 측 library sweep 참조) |
-| PostgreSQL tests | `postgres` 샤드별 `just test-postgres-shard` step: `PG_INCLUDE_SHARD=<0\|1> just test-postgres-shard` | workflow와 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=0 just test-postgres-shard`, `PG_INCLUDE_SHARD=1 just test-postgres-shard` (둘을 합친 것이 `just test-postgres` 한 번과 같다) |
+| PostgreSQL tests | `postgres` 샤드별 `just test-postgres-shard` step: `PG_INCLUDE_SHARD=<0\|1\|2\|3> just test-postgres-shard` | workflow와 같은 PostgreSQL 환경에서 `PG_INCLUDE_SHARD=<n> just test-postgres-shard`를 0부터 3까지 한 번씩 (넷을 합친 것이 `just test-postgres` 한 번과 같다) |
 | High-risk recovery | `high-risk-recovery`의 `High-risk recovery lane` step: `cargo test --lib high_risk_recovery:: -- --test-threads=1` | 동일 |
 
 ## 2. Path Filter Policy
@@ -374,17 +374,17 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ## 4. Resource Contention Policy
 
-`PostgreSQL tests` 의 두 샤드와 `High-risk recovery` 는 **각자의 job 에서 `Start PostgreSQL service` 를 따로 실행한다** — 컨테이너를 공유하지 않는다. 공유되는 것은 job 내부에서 여러 테스트가 같은 PG 인스턴스를 CREATE/DROP DATABASE 로 나눠 쓴다는 점이고, 아래 정책은 그 job-내 경합을 다룬다.
+`PostgreSQL tests` 의 각 샤드와 `High-risk recovery` 는 **각자의 job 에서 `Start PostgreSQL service` 를 따로 실행한다** — 컨테이너를 공유하지 않는다. 공유되는 것은 job 내부에서 여러 테스트가 같은 PG 인스턴스를 CREATE/DROP DATABASE 로 나눠 쓴다는 점이고, 아래 정책은 그 job-내 경합을 다룬다.
 
 ### Serial execution
 
-- main·PR `test_fast`는 같은 `pg_shards` 계획으로 PG matrix를 실행한다. shard 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정한다(현재 2). 이 값으로 matrix와 SHA256 modulus 및 허용 job 이름을 만든다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 shard 결과를 확인한다.
+- main·PR `test_fast`는 같은 `pg_shards` 계획으로 PG matrix를 실행한다. shard 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정한다(현재 4). 이 값으로 matrix와 SHA256 modulus 및 허용 job 이름을 만든다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 shard 결과를 확인한다.
 - `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
 - main·PR shard step은 `just test-postgres-shard`에서 PG 명령을 직접 실행한다. 모든 shard가 자기 PG 선택을 실행한 뒤 shard 0만 추가 targeted 명령을 실행한다. recipe는 한 Bash script에서 source·시험 실패를 전파하고, 각 shard 안에서는 `--test-threads=1`을 유지한다.
 - main·PR shard step은 같은 `timeout-minutes: 75` 예산을 유지하고 job timeout을 두지 않는다. `check-ci-runner-hardening.sh`가 planner·matrix·env 출처·step 예산을 고정하고 membership 검사는 전체 lib inventory에서 단일 PG 선택과 shard union 동일·교집합 0을 검사한다. integrity 검사는 canonical 셸 파생 코드를 검증하고 같은 exact 선택을 복원한다.
-- PR infra retry는 planner가 열거한 실제 shard 이름만 PG로 인정한다. unknown·실제 회귀·불완전 API 응답이면 재시도를 막고, 나머지는 infra로 판정한 shard job만 각각 한 번 재시도한다(최초 attempt에서만 요청). 두 shard가 모두 infra여도 둘 다 대상으로 삼으며, default branch checkout과 요청 전 stale-attempt 검사는 유지한다.
+- PR infra retry는 planner가 열거한 실제 shard 이름만 PG로 인정한다. unknown·실제 회귀·불완전 API 응답이면 재시도를 막고, 나머지는 infra로 판정한 shard job만 각각 한 번 재시도한다(최초 attempt에서만 요청). 여러 shard가 infra여도 모두 대상으로 삼으며, default branch checkout과 요청 전 stale-attempt 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다.
-- 두 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
+- 모든 샤드의 합집합이 미분할 선택과 같고 교집합이 없다는 것은 `check_pg_test_lane_membership.py` 의 filter contract 가 lib inventory 로 검사한다.
 - `high-risk-recovery` job의 `High-risk recovery lane` step은 `cargo test --lib high_risk_recovery:: -- --test-threads=1`을 실행한다 — 동일.
 - 이유(#974, `683db919f`): `PgRecoveryTestDatabase::create()` 가 시나리오마다 admin PG connection 을 열어 새 DB 를 만드는데, 기본 병렬 executor 에서는 **admin pool 이 고갈**되어 `pool timed out while waiting for an open connection` 으로 실패했다. `--test-threads=1` 이 순차 실행을 강제해 admin connection 을 재사용하게 한다. 즉 원인은 "테스트 간 lifecycle race" 가 아니라 **connection pool 고갈**이다.
 - #973(`24a0e1cb0`)은 이 항목의 근거가 아니다 — non-PG lane 의 skip 필터가 너무 좁아(`_pg_`, `postgres_`) `*_pg`/`pg_*`/`*postgres` 가 새어 들어간 것과 brittle assertion 을 고친 건이다.
