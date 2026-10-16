@@ -1,7 +1,7 @@
 //! The dead-letter row a plan-driven loss writes, read back from PostgreSQL.
 
 use super::soft_terminal_direct_send_authority_tests::{
-    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_over_one_plan_pass_under,
+    FRAME_END, FRAME_START, LOST_BODY, SENT_PREFIX, admitted_losses_under_root,
 };
 use super::*;
 
@@ -40,13 +40,7 @@ async fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
     let pool = pg_db.connect_and_migrate().await;
 
     assert_eq!(
-        admitted_losses_over_one_plan_pass_under(
-            root.path(),
-            ROW_CHANNEL,
-            false,
-            Some(pool.clone())
-        )
-        .await,
+        admitted_losses_under_root(root.path(), ROW_CHANNEL, false, Some(pool.clone())).await,
         1
     );
     let rows = terminal_rows(&pool).await;

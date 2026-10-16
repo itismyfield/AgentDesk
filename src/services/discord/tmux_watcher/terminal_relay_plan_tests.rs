@@ -887,13 +887,10 @@ fn the_call_site_operands_the_dead_letter_row_cannot_show_stay_pinned_5941() {
     let aggregate = module
         .find("metrics::record_relay_terminal_authority_denied(")
         .expect("the seam must emit the aggregate denial counter");
-    assert!(
-        cause < gate,
-        "the per-conjunct cause counter must be emitted BEFORE the record admission gate"
-    );
+    assert!(cause < gate, "the cause counter must precede admission");
     assert!(
         gate < aggregate,
-        "the aggregate counter feeds a threshold-1 alert row and must stay behind the admission"
+        "the aggregate counter must follow admission"
     );
 }
 
@@ -1017,13 +1014,11 @@ fn admitted_losses(channel: u64) -> u64 {
 async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel: bool) -> u64 {
     let root = tempfile::tempdir().expect("isolated runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
-    admitted_losses_over_one_plan_pass_under(root.path(), channel_id, already_on_channel, None)
-        .await
+    admitted_losses_under_root(root.path(), channel_id, already_on_channel, None).await
 }
 
-/// The same pass under a runtime root the caller already pinned, which a PostgreSQL
-/// fixture needs because the env lock must be taken before the database is created.
-pub(super) async fn admitted_losses_over_one_plan_pass_under(
+/// The same pass under a root the caller pinned before creating a PostgreSQL database.
+pub(super) async fn admitted_losses_under_root(
     root: &std::path::Path,
     channel_id: u64,
     already_on_channel: bool,
