@@ -400,7 +400,9 @@ mod verified_watcher_claim_tests {
             Arc,
             atomic::{AtomicBool, AtomicI64, AtomicU64},
         };
-        let registry = crate::services::discord::TmuxWatcherRegistry::new();
+        let registry = crate::services::discord::TmuxWatcherRegistry::new_with_coords(
+            std::sync::Arc::new(dashmap::DashMap::new()),
+        );
         let handle = crate::services::discord::TmuxWatcherHandle {
             tmux_session_name: tmux.to_owned(),
             output_path: output.to_owned(),

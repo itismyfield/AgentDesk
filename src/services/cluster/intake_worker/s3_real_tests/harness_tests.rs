@@ -15,7 +15,9 @@ use tokio::sync::watch;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::cluster::channel_home::{self, HomeGate, HomeOwnership};
-use crate::services::cluster::channel_home_boot::{self, Boot, BootPort, ResetRefused};
+use crate::services::cluster::channel_home_boot::{
+    self, Boot, BootPort, ChannelWriters, ResetRefused,
+};
 use crate::services::cluster::channel_home_drain::DrainPort;
 use crate::services::cluster::channel_home_port::ChannelHomePort;
 use crate::services::cluster::intake_router_hook::{
@@ -1089,6 +1091,8 @@ pub(super) struct Discord {
     state: Arc<DiscordState>,
     valve: watch::Sender<bool>,
     history_unavailable: bool,
+    /// Lists another author's message after every anchor.
+    chatter: bool,
 }
 
 /// What every history read of [`Discord::history_unavailable`] fails with.
@@ -1100,6 +1104,7 @@ impl Default for Discord {
             state: Arc::default(),
             valve: watch::channel(true).0,
             history_unavailable: false,
+            chatter: false,
         }
     }
 }
@@ -1136,6 +1141,13 @@ impl Discord {
     /// As this Discord, with every history read failing as an outage would.
     pub(super) fn history_unavailable(mut self) -> Self {
         self.history_unavailable = true;
+        self
+    }
+
+    /// As this Discord, with another author's message listed after every anchor, which shows the
+    /// history readable.
+    pub(super) fn with_chatter(mut self) -> Self {
+        self.chatter = true;
         self
     }
 
@@ -1310,7 +1322,16 @@ impl DiscordPort for Discord {
                 let created = locked(&self.state.created);
                 let page = (self.state.kept.iter().chain(created.iter()))
                     .filter(|(c, m)| *c == channel && m.id > after);
-                Ok(page.map(|(_, m)| m.clone()).collect::<Vec<_>>())
+                let mut page: Vec<_> = page.map(|(_, m)| m.clone()).collect();
+                if self.chatter {
+                    let (id, author_id, content) = (after + 1, BOT + 1, "chatter".to_owned());
+                    page.push(SeenMessage {
+                        id,
+                        author_id,
+                        content,
+                    });
+                }
+                Ok(page)
             };
             let read = HistoryRead {
                 channel,
@@ -1331,8 +1352,21 @@ impl DiscordPort for Discord {
         std::future::ready(answer.expect("the history was read"))
     }
 
-    fn history_readable(&self, _: u64) -> bool {
-        true
+    fn message(
+        &self,
+        channel: u64,
+        id: u64,
+    ) -> impl Future<Output = Result<Option<SeenMessage>, String>> + Send {
+        let found = if self.history_unavailable {
+            Err(HISTORY_UNAVAILABLE.to_string())
+        } else {
+            let created = locked(&self.state.created);
+            let mut known = self.state.kept.iter().chain(created.iter());
+            Ok(known
+                .find(|(c, m)| *c == channel && m.id == id)
+                .map(|(_, m)| m.clone()))
+        };
+        std::future::ready(found)
     }
 }
 
@@ -1920,6 +1954,12 @@ impl Booted {
         Self::boot_reset_on(env, reads, reset, discord, provider, GW).await
     }
 
+    /// As [`Booted::boot_on`], its watch adopting a released row as a restored runtime's does.
+    pub(super) async fn boot_adopting(env: &Env, discord: Discord) -> Self {
+        let port = |id| BootPort::reading(id, worker_restored(), no_reset());
+        Self::boot_port_on(env, port, discord, ShadowProvider::Claude, GW).await
+    }
+
     async fn boot_with_on<R>(
         env: &Env,
         reads: impl Fn(u64) -> R,
@@ -1982,6 +2022,7 @@ impl Booted {
                 rows,
                 candidates: vec![C],
                 port,
+                writers: None,
             })
         };
         let gates = channel_home_boot::start(Some(true), prepare).await;
@@ -2014,6 +2055,79 @@ impl Booted {
             writers,
             _hosts: hosts,
         }
+    }
+
+    /// A gateway node with no home row: its writers run under its acquired gateway authority and
+    /// are supervised as the runtime's, so its candidate watch can return a reclaimed channel.
+    pub(super) async fn boot_gateway(env: &Env, discord: Discord) -> (Self, Arc<ChannelWriters>) {
+        let (node, writers, first_spawn) = Self::boot_gateway_homes(env, discord).await;
+        first_spawn();
+        (node, writers)
+    }
+
+    /// [`Booted::boot_gateway`] with its homes started and the runtime's first writer spawn
+    /// (`ChannelWriters::start_boot`) left for the caller to run.
+    pub(super) async fn boot_gateway_homes(
+        env: &Env,
+        discord: Discord,
+    ) -> (Self, Arc<ChannelWriters>, Box<dyn FnOnce()>) {
+        let (role, provider) = (env.role.clone(), ShadowProvider::Claude);
+        let root = crate::config::runtime_root().expect("node root");
+        let hosts = crate::config::session_hosts::force_for_test(Some(&role), &[(C, &role)]);
+        let config = node_config(&role, provider, &role);
+        crate::services::tui_o::channel_policy::install(&config).expect("boot snapshot");
+        let pool = env.pool().await;
+        let gateway = Arc::new(OwnershipGate::default());
+        gateway.acquired();
+        let writers = ChannelWriters::new(Arc::clone(&gateway), host::process_readiness());
+        let writers = Arc::new(writers);
+        // A gateway whose Herdr endpoint runs here keeps its pane, so its release reset applies.
+        let reset: channel_home_boot::LegacyReset = Arc::new(|| Box::pin(async { Ok(()) }));
+        let reads = |id| ChannelHomePort::new(id, host::process_readiness(), worker_restored());
+        let (local, boot_pool, boot_writers) = (role.clone(), pool.clone(), Arc::clone(&writers));
+        let rows = channel_home_boot::listed(&pool);
+        let prepare = move || {
+            Some(Boot {
+                provider: provider_name(provider).into(),
+                local,
+                pool: boot_pool,
+                rows,
+                candidates: vec![C],
+                port: move |id| BootPort::new(reads(id), Arc::clone(&reset)),
+                writers: Some(boot_writers),
+            })
+        };
+        let gates = channel_home_boot::start(Some(true), prepare).await;
+        let transcript = root.join("c.jsonl");
+        if !transcript.exists() {
+            std::fs::write(&transcript, b"").unwrap();
+        }
+        let source = source_id_for("s1", &transcript).unwrap();
+        let host = Arc::new(S3Host {
+            inner: TestHost::new([(C, source)]),
+            discord: Arc::new(discord),
+            lease: Lease::default(),
+            logs: Mutex::default(),
+        });
+        let (io, parts_root) = (Arc::clone(&host), root.clone());
+        let parts = move || HostParts {
+            io: Arc::clone(&io),
+            runtime_root: Some(parts_root.clone()),
+            gate: Arc::clone(&gateway),
+            readiness: host::process_readiness(),
+        };
+        let spawned = Arc::clone(&writers);
+        let first_spawn = Box::new(move || spawned.start_boot(provider, true, parts));
+        let node = Self {
+            pool,
+            root,
+            transcript,
+            gates,
+            host,
+            writers: Vec::new(),
+            _hosts: hosts,
+        };
+        (node, writers, first_spawn)
     }
 
     pub(super) fn discord(&self) -> &Discord {

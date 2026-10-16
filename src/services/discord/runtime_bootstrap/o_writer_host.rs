@@ -7,6 +7,7 @@ use super::*;
 use std::future::Future;
 use std::time::Duration;
 
+use crate::services::cluster::channel_home_boot::ChannelWriters;
 use crate::services::discord::outbound::o_writer_io::{ChannelLeases, GatewayPort};
 use crate::services::discord::outbound::o_writer_legacy::LegacyRelay;
 use crate::services::tui_o::alarm::AlarmRouter;
@@ -310,6 +311,8 @@ fn parts(
 }
 
 /// Starts the writer host for this provider's gateway runtime; it never waits on the gateway.
+/// With delegated homes on, its writers are supervised so a reclaimed channel's watch can end and
+/// restart them, and a channel another node's boot row names starts none.
 pub(super) fn spawn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -320,7 +323,50 @@ pub(super) fn spawn(
         return;
     };
     // Nothing below runs unless this bot may adopt a channel, so an off or empty writer takes no lock.
-    host::start(shadow, pg_gateway, || parts(shared, provider, config, None));
+    let Some(writers) = with_writers(|writers| writers.get(provider.as_str()).cloned()) else {
+        host::start(shadow, pg_gateway, || parts(shared, provider, config, None));
+        return;
+    };
+    let (shared, provider, config) = (Arc::clone(shared), provider.clone(), config.cloned());
+    let prepare = move || parts(&shared, &provider, config.as_ref(), None);
+    writers.start_boot(shadow, pg_gateway, prepare);
+}
+
+type Writers = std::collections::BTreeMap<String, Arc<ChannelWriters>>;
+
+#[cfg(not(test))]
+static WRITERS: std::sync::Mutex<Writers> = std::sync::Mutex::new(Writers::new());
+#[cfg(test)]
+thread_local! {
+    static WRITERS: std::sync::Mutex<Writers> = const { std::sync::Mutex::new(Writers::new()) };
+}
+
+fn with_writers<R>(use_writers: impl FnOnce(&mut Writers) -> R) -> R {
+    let locked = |writers: &std::sync::Mutex<Writers>| {
+        use_writers(
+            &mut writers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    };
+    #[cfg(not(test))]
+    return locked(&WRITERS);
+    #[cfg(test)]
+    WRITERS.with(locked)
+}
+
+/// The gateway runtime's supervised writers, made when its delegated homes start, before
+/// [`spawn`] hands them the writers it starts.
+pub(super) fn home_writers(provider: &ProviderKind) -> Arc<ChannelWriters> {
+    let gateway = crate::services::tui_o::ownership::gate(provider.as_str());
+    let make = || Arc::new(ChannelWriters::new(gateway, host::process_readiness()));
+    with_writers(|writers| {
+        Arc::clone(
+            writers
+                .entry(provider.as_str().to_owned())
+                .or_insert_with(make),
+        )
+    })
 }
 
 /// Starts the writer for each delegated channel whose home gate is registered here and whose Herdr

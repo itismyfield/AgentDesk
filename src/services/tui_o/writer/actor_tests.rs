@@ -204,6 +204,59 @@ async fn the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart()
     halt(stop, task).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn local_retry_survives_actor_restart_and_keeps_following_work_behind_it() {
+    let (harness, path, _) = switched_over(&row("m0", "before"));
+    harness.gate.acquired();
+    harness.port.say(BOT + 1, "history is readable");
+    harness
+        .port
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(Reply::Unsent);
+    let (stop, task) = spawn(harness.writer());
+    append(&path, &row("m1", "보존할 본문 ```code```"));
+    append(&path, &row("m2", "following"));
+    for _ in 0..4000 {
+        if harness
+            .alarms
+            .raised
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|alarm| matches!(alarm, WriterAlarm::NotFound { .. }))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        harness
+            .alarms
+            .raised
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|alarm| matches!(alarm, WriterAlarm::NotFound { .. }))
+    );
+    assert_eq!(harness.port.posts(), ["보존할 본문 ```code```"]);
+    halt(stop, task).await;
+    for _ in 0..3 {
+        let (stop, task) = spawn(harness.writer());
+        polls(70).await;
+        halt(stop, task).await;
+    }
+    assert_eq!(
+        harness.port.posts(),
+        [
+            "보존할 본문 ```code```",
+            "보존할 본문 ```code```",
+            "following"
+        ]
+    );
+}
+
 /// An assistant row holding a whole message, as Claude Code writes its blocks into one row.
 fn whole_message(id: &str, content: serde_json::Value) -> Vec<u8> {
     let row = serde_json::json!({"type": "assistant", "uuid": format!("u-{id}"),
@@ -517,6 +570,7 @@ async fn restored_prepared_uses_durable_utc_age_and_clamps_future_time() {
     let mut store = harness.channel();
     store
         .append_ledger(LedgerEntry::Prepared {
+            local_retry: None,
             serial: 0,
             unit_key: unit("restore"),
             piece_index: 0,
@@ -888,7 +942,6 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
         binding_context::{BindingContext, PreparedIncarnation},
     };
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (_context_root, _env) =
         dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     dedupe::reset_state_for_tests();
@@ -982,7 +1035,10 @@ async fn held_actor_preserves_cursor_and_owed_output(allowed_new_source: bool) {
 
 #[path = "canary_policy_tests.rs"]
 mod canary_policy;
+#[path = "local_retry_actor_tests.rs"]
+mod local_retry;
 #[path = "operator_resume_actor_tests.rs"]
 mod operator_resume;
+
 #[path = "repost_turn_tests.rs"]
 mod repost_turn;

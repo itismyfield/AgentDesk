@@ -253,7 +253,7 @@ impl Runner {
             // Off: the recovered admission index decides; an unknown one holds the piece.
             return Ok(match membership {
                 OriginalGate::Admitted => Admission::Parked,
-                OriginalGate::Send => Admission::LegacyOff,
+                OriginalGate::SendLocal | OriginalGate::SendPgManaged => Admission::LegacyOff,
                 OriginalGate::Unknown => Admission::ObserveOnly,
             });
         }
@@ -573,14 +573,14 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     async fn original_gate(&mut self, serial: u64, record: PieceRecord) -> OriginalGate {
         let channel = self.channel;
         if !self.runner.allowed(channel) {
-            return OriginalGate::Send;
+            return OriginalGate::SendLocal;
         }
         let Some(admitter) = self.runner.admitter() else {
-            return OriginalGate::Send;
+            return OriginalGate::SendLocal;
         };
         let keys = admitter.admitted_keys(channel).await;
         let gate = keys.original(&record.unit_key, record.piece_index);
-        if gate != OriginalGate::Send {
+        if gate != OriginalGate::SendLocal {
             return gate;
         }
         if !self.runner.allowed(channel) {
@@ -606,7 +606,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
             self.log = None;
             return OriginalGate::Unknown;
         }
-        gate
+        OriginalGate::SendPgManaged
     }
 }
 

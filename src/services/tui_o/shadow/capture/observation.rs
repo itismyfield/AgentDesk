@@ -12,6 +12,7 @@ pub struct ObservationCapture {
     source: SourceId,
     file: File,
     opened: (u64, u64),
+    snapshot_len: u64,
     captured_through: u64,
     cursor: u64,
     partial: Vec<u8>,
@@ -40,6 +41,7 @@ impl ObservationCapture {
             source,
             file,
             opened,
+            snapshot_len: meta.len(),
             captured_through: offset,
             cursor: offset,
             partial: Vec::new(),
@@ -74,10 +76,31 @@ impl ObservationCapture {
         if (path.dev, path.ino) != self.opened {
             return Err((Kind::Replaced, "path no longer names the open file".into()));
         }
-        if len < cursor {
-            return Err((Kind::Shrunk, format!("len {len} < cursor {cursor}")));
+        if len < cursor.max(self.snapshot_len) {
+            return Err((
+                Kind::Shrunk,
+                format!("len {len} < observed {}", cursor.max(self.snapshot_len)),
+            ));
         }
         Ok(len)
+    }
+    /// Revalidates the old reader's identity, snapshot floor, guard and buffered partial.
+    pub fn validate_handoff(&self) -> io::Result<()> {
+        self.file_len()?;
+        if self.halted.is_some() {
+            return Err(io::Error::other("observation halted"));
+        }
+        let guard = read_at(
+            &self.file,
+            self.cursor - self.guard.len() as u64,
+            self.guard.len() as u64,
+        )?;
+        let partial = read_at(&self.file, self.captured_through, self.partial.len() as u64)?;
+        if guard != self.guard || partial != self.partial {
+            return Err(io::Error::other("old observation bytes changed"));
+        }
+        self.file_len()?;
+        Ok(())
     }
     fn poll_inner(
         &mut self,

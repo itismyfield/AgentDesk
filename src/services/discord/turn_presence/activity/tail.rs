@@ -1,9 +1,9 @@
-//! Dormant bounded bootstrap and the current Codex boundary's evidence.
+//! Bounded bootstrap and the current Codex boundary's evidence.
 use super::*;
 use crate::services::tui_o::writer::input_facts::{Boundary, BoundaryKind, ChannelFact};
 
 #[derive(Clone, Copy)]
-struct Limits {
+pub(super) struct Limits {
     full: u64,
     tail: u64,
     poll: u64,
@@ -20,7 +20,7 @@ impl Default for Limits {
     }
 }
 impl Limits {
-    fn tail_start(self, len: u64) -> Option<u64> {
+    pub(super) fn tail_start(self, len: u64) -> Option<u64> {
         (len > self.full).then(|| len.saturating_sub(self.tail))
     }
 }
@@ -91,14 +91,15 @@ impl TailMeta {
                 || matches!(self.codex, CodexBoundary::Closed { .. }))
     }
 }
-struct TailReader {
-    facts: InputFacts,
+pub(super) struct TailReader {
+    pub(super) facts: InputFacts,
     meta: TailMeta,
     remaining: u64,
+    read_bytes: u64,
     limits: Limits,
 }
 impl TailReader {
-    fn open(binding: SourceBinding, limits: Limits) -> Result<Self, String> {
+    pub(super) fn open(binding: SourceBinding, limits: Limits) -> Result<Self, String> {
         let end = std::fs::metadata(&binding.source.path)
             .map_err(|e| e.to_string())?
             .len();
@@ -115,31 +116,39 @@ impl TailReader {
                 codex: CodexBoundary::Unproven,
             },
             remaining: limits.tail,
+            read_bytes: 0,
             limits,
         })
     }
     fn poll(&mut self, max: u64, end: Option<u64>) -> Result<ChannelFact, String> {
+        let before = self.facts.observation_progress().1;
         let result = match end {
             Some(end) => self.facts.poll_observation_until(max, end, self.remaining),
             None => self.facts.poll(max),
         };
+        self.read_bytes += self.facts.observation_progress().1.saturating_sub(before);
         self.meta.absorb(self.facts.boundaries());
         if result.is_err() && self.facts.resume_point().is_none() {
             self.meta.codex = CodexBoundary::Unproven;
         }
         result
     }
-    fn resume(&mut self) -> Result<(), String> {
+    pub(super) fn resume(&mut self) -> Result<(), String> {
+        #[cfg(all(test, unix))]
+        tests::before_resume(self.facts.binding().channel_id);
         let resume = self
             .facts
             .resume_point()
             .cloned()
             .ok_or("not a typed block")?;
+        let next = self.facts.resume_observation_checked()?;
         self.meta.carry(&resume);
-        self.facts = InputFacts::resume_observation(self.facts.binding().clone(), &resume)?;
+        self.facts = next;
         Ok(())
     }
-    fn bootstrap(&mut self) -> Result<(), String> {
+    pub(super) fn bootstrap(&mut self) -> Result<(), String> {
+        #[cfg(all(test, unix))]
+        tests::before_bootstrap(self.facts.binding().channel_id);
         loop {
             let before = self.facts.observation_progress();
             let result = self.poll(
@@ -165,10 +174,93 @@ impl TailReader {
         }
         Ok(())
     }
-    fn poll_installed(&mut self) -> Result<ChannelFact, String> {
+    pub(super) fn diagnostics(&self) -> (u64, u64, u64, u64) {
+        (
+            self.meta.window_start,
+            self.meta.bootstrap_end,
+            self.remaining,
+            self.read_bytes,
+        )
+    }
+    pub(super) fn allows_idle(&self, fact: &ChannelFact, caught_up: bool) -> bool {
+        self.meta
+            .allows_idle(self.facts.binding().provider, fact, caught_up)
+    }
+    pub(super) fn poll_installed(&mut self) -> Result<ChannelFact, String> {
         self.poll(self.limits.poll, None)
     }
 }
-#[cfg(test)]
+pub(super) fn enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var_os("ADK_TURN_PRESENCE_TAIL") {
+        None => true,
+        Some(value) if value == "1" => true,
+        Some(value) if value == "0" => false,
+        Some(_) => {
+            tracing::warn!("invalid ADK_TURN_PRESENCE_TAIL; cold Tail disabled until restart");
+            false
+        }
+    })
+}
+pub(super) fn limits(channel: u64) -> Limits {
+    #[cfg(test)]
+    if let Some(limits) = overrides::limits_for(channel) {
+        return limits;
+    }
+    let _ = channel;
+    Limits::default()
+}
+#[cfg(all(test, unix))]
 #[path = "tail_tests.rs"]
-mod tests;
+pub(super) mod tests;
+
+#[cfg(test)]
+pub(super) mod overrides {
+    use super::*;
+    static LIMITS: LazyLock<Mutex<HashMap<u64, Limits>>> = LazyLock::new(Default::default);
+    pub(super) fn limits_for(channel: u64) -> Option<Limits> {
+        lock(&LIMITS).get(&channel).copied()
+    }
+    pub(in crate::services::discord::turn_presence::activity) struct Guard(u64);
+    impl Guard {
+        pub(in crate::services::discord::turn_presence::activity) fn new(
+            channel: u64,
+            full: u64,
+            tail: u64,
+            poll: u64,
+            worker: u64,
+        ) -> Self {
+            assert!(
+                lock(&LIMITS)
+                    .insert(
+                        channel,
+                        Limits {
+                            full,
+                            tail,
+                            poll,
+                            worker
+                        }
+                    )
+                    .is_none()
+            );
+            Self(channel)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            lock(&LIMITS).remove(&self.0);
+        }
+    }
+    #[test]
+    fn s1_limits_override_keeps_the_exact_full_boundary() {
+        let _guard = Guard::new(69181999, 128, 64, 16, 32);
+        let limits = super::limits(69181999);
+        assert_eq!(limits.tail_start(128), None);
+        assert_eq!(limits.tail_start(129), Some(65));
+        assert_eq!(super::limits(0).full, MAX_TRANSCRIPT_BYTES);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "tail_switch_tests.rs"]
+mod switch_tests;
