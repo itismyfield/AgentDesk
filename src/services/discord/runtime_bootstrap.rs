@@ -667,11 +667,6 @@ fn legacy_reset(
     })
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn c2b_standby_health_fixture_for_test() {
-    bootstrap_tests::standby_registration_settles_the_reconcile_obligation();
-}
-
 #[cfg(test)]
 mod bootstrap_tests {
     use super::*;

@@ -10,8 +10,8 @@ mod busy_duplicate_notice;
 pub(super) mod busy_inject;
 mod component_events;
 mod gate;
-pub(in crate::services::discord) mod ledger;
-use crate::services::discord::input_runtime::intake::admit::SourceKind;
+#[cfg(all(test, unix))]
+mod live_entry_tests;
 mod queue_effects;
 mod stale_turn;
 
@@ -744,19 +744,6 @@ pub(in crate::services::discord) async fn handle_event(
             // Auth check (allowed bots bypass auth)
             let is_allowed_bot = is_allowed_bot_sender;
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
-                return Ok(());
-            }
-            if !is_dm
-                && Box::pin(ledger::hold_live(
-                    &data.shared,
-                    &ctx.http,
-                    &data.provider,
-                    new_message,
-                    SourceKind::LiveMessage,
-                    None,
-                ))
-                .await?
-            {
                 return Ok(());
             }
             let author_excluded_from_cancel_preservation =

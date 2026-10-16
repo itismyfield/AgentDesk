@@ -1,4 +1,3 @@
-use crate::services::discord::input_runtime::intake::skills::hold_text_skill;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -1400,10 +1399,6 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                         .await;
                 }
                 _ => {}
-            }
-
-            if Box::pin(hold_text_skill(ctx, msg, data, &skill, args_str)).await? {
-                return Ok(true);
             }
 
             auto_restore_session(&data.shared, channel_id, ctx).await;

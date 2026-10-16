@@ -1,8 +1,7 @@
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::services::discord::input_runtime::{fence, supervisor};
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
-use crate::services::discord::{Data, SharedData, mailbox_snapshot, router};
+use crate::services::discord::{Data, mailbox_snapshot, router};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
@@ -142,53 +141,18 @@ impl Transport {
     }
 }
 
-fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
-    fn visit(root: &Path, directory: &Path, entries: &mut BTreeMap<PathBuf, Vec<u8>>) {
-        for entry in std::fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                visit(root, &path, entries);
-            } else {
-                entries.insert(
-                    path.strip_prefix(root).unwrap().to_path_buf(),
-                    std::fs::read(path).unwrap(),
-                );
-            }
-        }
-    }
-    let mut entries = BTreeMap::new();
-    visit(root, root, &mut entries);
-    entries
-}
-
-async fn session(shared: &SharedData, channel: serenity::ChannelId) -> Value {
-    let core = shared.core.lock().await;
-    let session = &core.sessions[&channel];
-    json!({
-        "session_id": session.session_id, "current_path": session.current_path,
-        "history": format!("{:?}", session.history), "uploads": session.pending_uploads,
-        "cleared": session.cleared
-    })
-}
-
 struct Outcome {
     held: bool,
     original: Value,
     after: Value,
-    queue_before: String,
-    queue_after: String,
     queued: Vec<Intervention>,
     durable: Vec<Intervention>,
     checkpoint: Option<u64>,
-    session_before: Value,
-    session_after: Value,
-    files_before: BTreeMap<PathBuf, Vec<u8>>,
-    files_after: BTreeMap<PathBuf, Vec<u8>>,
     http: Vec<(Method, String)>,
     message: serenity::MessageId,
 }
 
-async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
+async fn invoke(branch: Branch, root: &Path) -> Outcome {
     let channel = serenity::ChannelId::new(branch.channel());
     let thread = serenity::ChannelId::new(branch.channel() + 1);
     let message_id = serenity::MessageId::new(branch.channel() + 4);
@@ -338,17 +302,9 @@ async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
         "fixture passes fresh user authorization"
     );
     assert_eq!(supervisor::REGISTRY.population_for_test(), (0, 0));
-    if protected {
-        let gate = fence::Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
-        assert_eq!(gate.mode(), fence::Mode::LegacyOpen);
-    } else {
-        assert!(fence::channel_gate(channel.get()).is_none());
-    }
+    assert!(fence::channel_gate(channel.get()).is_none());
     transport.calls.lock().unwrap().clear();
     let original = serde_json::to_value(&message).unwrap();
-    let before = mailbox_snapshot(&shared, channel).await;
-    let queue_before = format!("{:?}", before.intervention_queue);
-    let session_before = session(&shared, channel).await;
     let mut voice_config = crate::voice::VoiceConfig::default();
     voice_config.audio.recordings_dir = root.join("recordings");
     let data = Arc::new(Data {
@@ -359,7 +315,6 @@ async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
         voice_config,
         ingress_shadow: None,
     });
-    let files_before = files(root);
     let ctx = transport.ctx.clone();
     let event = serenity::FullEvent::Message {
         new_message: message,
@@ -381,7 +336,6 @@ async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
     };
     let after = serde_json::to_value(new_message).unwrap();
     let snapshot = mailbox_snapshot(&shared, channel).await;
-    let queue_after = format!("{:?}", snapshot.intervention_queue);
     let queued = snapshot.intervention_queue;
     let (durable, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
         &ProviderKind::Claude,
@@ -389,8 +343,6 @@ async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
         channel,
     );
     let checkpoint = shared.last_message_ids.get(&channel).map(|entry| *entry);
-    let session_after = session(&shared, channel).await;
-    let files_after = files(root);
     let http = transport.calls.lock().unwrap().clone();
     shared.mailboxes.remove_fixture_for_test(channel);
     shared.mailboxes.remove_fixture_for_test(thread);
@@ -402,21 +354,15 @@ async fn invoke(branch: Branch, protected: bool, root: &Path) -> Outcome {
         held: result.is_err(),
         original,
         after,
-        queue_before,
-        queue_after,
         queued,
         durable,
         checkpoint,
-        session_before,
-        session_after,
-        files_before,
-        files_after,
         http,
         message: message_id,
     }
 }
 
-fn run(test: &str, branches: &[Branch], protected: bool) {
+fn run(test: &str, branches: &[Branch]) {
     let qualified = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
     if !crate::services::discord::admin_host_guard::tests::api_child(&qualified) {
         return;
@@ -481,7 +427,7 @@ fn run(test: &str, branches: &[Branch], protected: bool) {
     let outcomes = runtime.block_on(async {
         let mut outcomes = Vec::new();
         for &branch in branches {
-            outcomes.push((branch, Box::pin(invoke(branch, protected, &root)).await));
+            outcomes.push((branch, Box::pin(invoke(branch, &root)).await));
         }
         outcomes
     });
@@ -491,117 +437,126 @@ fn run(test: &str, branches: &[Branch], protected: bool) {
             outcome.original, outcome.after,
             "{branch:?}: the whole gateway Message stays original"
         );
-        if protected {
+        assert!(
+            !outcome.held,
+            "{branch:?}: actual intake executes the existing queue branch"
+        );
+        for rows in [&outcome.queued, &outcome.durable] {
             assert!(
-                outcome.held,
-                "{branch:?}: protected live input must fail before the actual Legacy queue branch"
+                rows.iter().any(|row| row.message_id == outcome.message
+                    || row.source_message_ids.contains(&outcome.message)),
+                "{branch:?}: actual Legacy input is present in mailbox and durable queue"
             );
-            assert_eq!(
-                outcome.queue_before, outcome.queue_after,
-                "{branch:?}: mailbox queue unchanged"
-            );
-            assert_eq!(
-                outcome.checkpoint, None,
-                "{branch:?}: no checkpoint advance"
-            );
-            assert_eq!(
-                outcome.session_before, outcome.session_after,
-                "{branch:?}: no session history or upload injection"
-            );
-            assert_eq!(
-                outcome.files_before, outcome.files_after,
-                "{branch:?}: no durable queue, busy injection, upload or history write"
-            );
-            assert!(
-                outcome
-                    .http
-                    .iter()
-                    .all(|(method, path)| *method == Method::GET && !path.ends_with("/messages")),
-                "{branch:?}: no Discord ACK, history fetch, download or other write: {:?}",
-                outcome.http
-            );
-        } else {
-            assert!(
-                !outcome.held,
-                "{branch:?}: OFF executes the actual Legacy branch"
-            );
-            for rows in [&outcome.queued, &outcome.durable] {
-                assert!(
-                    rows.iter().any(|row| row.message_id == outcome.message
-                        || row.source_message_ids.contains(&outcome.message)),
-                    "{branch:?}: actual Legacy input is present in mailbox and durable queue"
-                );
-            }
-            assert_eq!(
-                outcome.checkpoint,
-                Some(outcome.message.get()),
-                "{branch:?}: Legacy queue commit advances the actual checkpoint"
-            );
-            assert!(
-                outcome
-                    .http
-                    .iter()
-                    .any(|(method, path)| *method == Method::PUT && path.contains("/reactions/")),
-                "{branch:?}: Legacy queue commit emits the pending reaction"
-            );
-            assert!(fence::channel_gate(branch.channel()).is_none());
         }
+        assert_eq!(
+            outcome.checkpoint,
+            Some(outcome.message.get()),
+            "{branch:?}: Legacy queue commit advances the actual checkpoint"
+        );
+        assert!(
+            outcome
+                .http
+                .iter()
+                .any(|(method, path)| *method == Method::PUT && path.contains("/reactions/")),
+            "{branch:?}: Legacy queue commit emits the pending reaction"
+        );
+        assert!(fence::channel_gate(branch.channel()).is_none());
     }
 }
 
 #[test]
-fn c2b_live_gate_holds_thread_guard_before_legacy_effects() {
+fn actual_live_entry_keeps_all_six_queue_branches() {
     run(
-        "c2b_live_gate_holds_thread_guard_before_legacy_effects",
-        &[Branch::ThreadGuard],
-        true,
-    );
-}
-#[test]
-fn c2b_live_gate_holds_dispatch_guard_before_legacy_effects() {
-    run(
-        "c2b_live_gate_holds_dispatch_guard_before_legacy_effects",
-        &[Branch::DispatchGuard],
-        true,
-    );
-}
-#[test]
-fn c2b_live_gate_holds_busy_active_turn_before_legacy_effects() {
-    run(
-        "c2b_live_gate_holds_busy_active_turn_before_legacy_effects",
-        &[Branch::BusyActiveTurn],
-        true,
-    );
-}
-#[test]
-fn c2b_live_gate_holds_reconcile_gate_before_legacy_effects() {
-    run(
-        "c2b_live_gate_holds_reconcile_gate_before_legacy_effects",
-        &[Branch::ReconcileGate],
-        true,
-    );
-}
-#[test]
-fn c2b_live_gate_holds_drain_mode_before_legacy_effects() {
-    run(
-        "c2b_live_gate_holds_drain_mode_before_legacy_effects",
-        &[Branch::DrainMode],
-        true,
-    );
-}
-#[test]
-fn c2b_live_gate_holds_idle_backlog_before_legacy_effects() {
-    run(
-        "c2b_live_gate_holds_idle_backlog_before_legacy_effects",
-        &[Branch::IdleBacklog],
-        true,
-    );
-}
-#[test]
-fn c2b_off_actual_live_entry_keeps_all_six_legacy_queue_branches() {
-    run(
-        "c2b_off_actual_live_entry_keeps_all_six_legacy_queue_branches",
+        "actual_live_entry_keeps_all_six_queue_branches",
         &Branch::ALL,
-        false,
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn text_skill_aliases_keep_lookup_and_control_dispatch() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let config = crate::config::runtime_root()
+        .unwrap()
+        .join("skill-fixture.yml");
+    std::fs::write(&config, "server: {}\ndata: {dir: data}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
+    let channel = 6_325_225;
+    let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(channel);
+    let (backend, gateway, server) = discord_mock::start(mock.clone()).await;
+    let ctx = discord_mock::serenity_context(backend, gateway).await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.settings.write().await.owner_user_id = Some(6_325_211);
+    *shared.skills_cache.write().await = vec![("local-skill".into(), "fixture".into())];
+    let voice_config = crate::voice::VoiceConfig::default();
+    let data = Data {
+        shared,
+        token: "test-token".into(),
+        provider: ProviderKind::Claude,
+        voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
+        voice_config,
+        ingress_shadow: None,
+    };
+    for command in ["!skill", "!cc"] {
+        for (skill, expected) in [
+            (
+                "local-skill exact args",
+                "No active session. Use `!start <path>` first.",
+            ),
+            (
+                "missing-skill",
+                "Unknown skill: `missing-skill`. Use `!skill` to see available skills. `!cc` still works.",
+            ),
+            ("clear", "Use `!clear` instead."),
+        ] {
+            let mut original = discord_mock::user_message(6_325_226, &format!("{command} {skill}"));
+            original.channel_id = serenity::ChannelId::new(channel);
+            original.author.id = serenity::UserId::new(6_325_211);
+            let before = serde_json::to_value(&original).unwrap();
+            let writes_before = mock.written_texts();
+            assert!(
+                crate::services::discord::commands::handle_text_command_with_uploads(
+                    &ctx,
+                    &original,
+                    &data,
+                    original.channel_id,
+                    &original.content,
+                    &[],
+                    &mut None,
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(serde_json::to_value(&original).unwrap(), before);
+            let writes = mock.written_texts();
+            let count = |values: &[String]| {
+                values
+                    .iter()
+                    .filter(|text| text.as_str() == expected)
+                    .count()
+            };
+            assert!(count(&writes) > count(&writes_before), "{command} {skill}");
+            let mut other_before: Vec<_> = writes_before
+                .iter()
+                .filter(|text| text.as_str() != expected)
+                .collect();
+            let mut other_after: Vec<_> = writes
+                .iter()
+                .filter(|text| text.as_str() != expected)
+                .collect();
+            other_before.sort_unstable();
+            other_after.sort_unstable();
+            assert_eq!(
+                other_after, other_before,
+                "unexpected reply for {command} {skill}"
+            );
+        }
+    }
+    assert!(data.shared.core.lock().await.sessions.is_empty());
+    assert!(mock.unhandled.lock().unwrap().is_empty());
+    server.abort();
+    let _ = server.await;
 }
