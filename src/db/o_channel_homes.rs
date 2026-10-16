@@ -388,6 +388,32 @@ pub(crate) async fn remove_reclaimed(
     })
 }
 
+/// Operator `abort-release` on the gateway: drops a `released` row this node is not the target of,
+/// or a `releasing` row it holds, at `epoch` and with no open intake, all in one statement.
+pub(crate) async fn abort_release(
+    pool: &PgPool,
+    channel_id: &str,
+    epoch: i64,
+    gateway: &str,
+) -> Result<HomeWrite<ChannelHome>, HomeError> {
+    let row = sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM o_channel_homes
+          WHERE channel_id = $1 AND epoch = $2
+            AND ((state = 'released' AND holder IS NULL AND target <> $3)
+                 OR (state = 'releasing' AND holder = $3))
+            AND NOT EXISTS (SELECT 1 FROM intake_outbox io
+                             WHERE io.channel_id = $1
+                               AND io.status IN ({INTAKE_OUTBOX_OPEN_STATUSES_SQL}))
+          RETURNING {COLUMNS}"
+    )))
+    .bind(channel_id)
+    .bind(epoch)
+    .bind(gateway)
+    .fetch_optional(pool)
+    .await?;
+    written(row)
+}
+
 /// The holder's lease renewal. Only this write yields a [`HeldHome`].
 pub(crate) async fn renew(
     pool: &PgPool,

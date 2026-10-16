@@ -354,6 +354,39 @@ async fn a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_p
     pg_db.drop().await;
 }
 
+/// A releasing holder whose drain is held keeps its gate and lease until abort-release drops its
+/// row; then its watch unregisters the gate, ends the lease and claims hold no more.
+#[tokio::test]
+async fn a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    let epoch = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await).epoch;
+    let (ports, resets) = (Arc::default(), Arc::default());
+    let refused = counted(&resets, Some("kept session"));
+    let gw = boot(&pool, "gw", rows(&pool).await, vec![], refused, &ports);
+    assert_eq!(start(Some(true), || gw).await.len(), 1);
+    let blocker = || {
+        let health = channel_home::health();
+        health.is_some_and(|health| health["home_draining"][0]["blocker"] == "source_reset")
+    };
+    assert!(eventually(12, blocker).await);
+    assert_eq!(running(C), (true, Some(epoch)), "the holder renews");
+    assert!(channel_home::refusal(ID).is_some() && intake_hold(C, None).is_some());
+
+    let aborted = o_channel_homes::abort_release(&pool, C, epoch, "gw").await;
+    assert_eq!(applied(aborted).state, HomeState::Releasing);
+    assert!(eventually(8, || channel_home::registered(C).is_none()).await);
+    assert!(eventually(2, || running(C) == (false, None)).await);
+    assert_eq!(
+        (channel_home::refusal(ID), intake_hold(C, None)),
+        (None, None)
+    );
+    assert_eq!(o_channel_homes::read_home(&pool, C).await.unwrap(), None);
+    stop(C).await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 fn handles(channel: &str) -> (tokio::task::AbortHandle, tokio::task::AbortHandle) {
     live(|live| {
         let watched = live.get(channel).expect("started");

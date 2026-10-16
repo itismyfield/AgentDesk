@@ -122,13 +122,15 @@ class SafeAdditiveSkipTest(unittest.TestCase):
         if child:
             (root / "src/harness.rs").write_text("#[test]\nfn fixture() {}\n")
         existing = {"src/harness.rs"} if pinned else set()
-        source = 'PINNED_BASENAME_TEST_FILES = frozenset(\n    {\n    }\n)\nPINNED_RESOLVER_TEST_ONLY_FILES = frozenset(\n    {\n'
+        source = 'PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(\n    {\n'
         if pinned:
             source += '        "src/harness.rs",\n'
         path = root / "scripts/test_only_module_skip_pin.py"
         path.write_text(source + '    }\n)\n')
         pin = SimpleNamespace(_lexical_rust_files=PIN._lexical_rust_files, _INVENTORY=GEN,
-                              PINNED_TEST_ONLY_MODULE_FILES=frozenset(existing))
+                              is_basename_test_file=PIN.is_basename_test_file,
+                              validate_basename_mounts=PIN.validate_basename_mounts,
+                              PINNED_RESOLVER_TEST_ONLY_FILES=frozenset(existing))
         return path, pin
 
     def test_verified_test_only_addition_is_registered(self):
