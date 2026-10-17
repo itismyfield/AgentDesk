@@ -245,7 +245,9 @@ pub(crate) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
                 pending.retain(|waiting| waiting.seq != *resolves_seq);
                 bound.push(source);
             }
-            BindingRecord::Rejected { .. } => {}
+            BindingRecord::Rejected { closes, .. } => {
+                pending.retain(|waiting| Some(waiting.seq) != *closes);
+            }
         }
     }
     if let Some(seq) = pending.iter().map(|waiting| waiting.seq).min() {
@@ -835,3 +837,7 @@ mod tests;
 #[cfg(test)]
 #[path = "late_pin_tests.rs"]
 mod late_pin_tests;
+
+#[cfg(all(test, unix))]
+#[path = "adoption_terminal_tests.rs"]
+mod terminal_tests;

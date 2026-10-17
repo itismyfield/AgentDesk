@@ -319,5 +319,8 @@ pub(in crate::services::discord) fn hold_input_effect_for_tests(
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
+
 mod turn_context;
 use turn_context::TurnContext;

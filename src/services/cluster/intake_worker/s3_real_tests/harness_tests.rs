@@ -1482,6 +1482,7 @@ fn startup_log() -> EventLog {
 
 fn rejected(detail: &str) -> BindingRecord {
     BindingRecord::Rejected {
+        closes: None,
         detail: detail.into(),
     }
 }

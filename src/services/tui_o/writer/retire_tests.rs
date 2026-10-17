@@ -285,6 +285,7 @@ async fn a_legacy_hop_is_proven_only_by_evidence_from_the_pane_the_log_names() {
     let unnamed = legacy_rotation(|_, _| {
         let refused = BindingRecord::Rejected {
             detail: "regression".into(),
+            closes: None,
         };
         event(2, refused, Utc::now())
     });

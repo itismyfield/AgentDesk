@@ -99,6 +99,10 @@ pub(in crate::services::discord) use watcher_install_fixture::InstallFixture;
 #[path = "lifecycle/restore_legacy_tests.rs"]
 mod restore_legacy_tests;
 
+#[cfg(all(test, unix))]
+#[path = "lifecycle/resume_companion_restore_tests.rs"]
+mod resume_companion_restore_tests;
+
 #[cfg(test)]
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;

@@ -1062,7 +1062,7 @@ targets = {
     "needs" => %w[changes lib_test_prepare],
     "if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "74e999c410d21a42158d2209c6eaa4ac933d973726f6bc8ab41fca8e3dac2ba2",
+    "job_sha256" => "9d5b8c904c13d8fb97522b03a3e70c4574dfa5c2f97983d280034f7cbd7e49b1",
     "cargo_steps" => {
       "High-risk recovery lane" => {
         "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1"],

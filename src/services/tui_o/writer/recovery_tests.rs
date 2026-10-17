@@ -173,6 +173,7 @@ fn h3_future_resolution_and_future_bind_do_not_restore_an_applied_hop() {
         3,
         BindingRecord::Rejected {
             detail: "audit only".into(),
+            closes: None,
         },
         Utc::now(),
     ));
