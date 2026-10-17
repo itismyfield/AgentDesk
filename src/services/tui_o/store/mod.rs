@@ -148,6 +148,17 @@ pub(super) fn damage(detail: impl Into<String>) -> StoreError {
     StoreError::halt(HaltReason::StoreDamage, detail.into())
 }
 
+/// Whether no store of `channel` was ever laid out under `runtime_root`: only a `NotFound` counts,
+/// since no production path removes a channel directory once made.
+pub fn no_channel_store(runtime_root: &Path, channel: u64) -> bool {
+    not_found(&runtime_root.join(STORE_DIR_NAME).join(channel.to_string()))
+}
+
+fn not_found(path: &Path) -> bool {
+    let entry = std::fs::symlink_metadata(path);
+    matches!(entry, Err(error) if error.kind() == io::ErrorKind::NotFound)
+}
+
 /// Serializes a first activation's init and era seal with an open that finishes an interrupted one.
 static SEALING: Mutex<()> = Mutex::new(());
 
@@ -235,8 +246,7 @@ impl OStore {
     /// Whether anything of the channel's store may exist, even without its `init`; an unreadable
     /// entry counts.
     pub fn has_channel_dir(&self, channel: u64) -> bool {
-        let entry = std::fs::symlink_metadata(self.channel_dir(channel));
-        !matches!(entry, Err(error) if error.kind() == io::ErrorKind::NotFound)
+        !not_found(&self.channel_dir(channel))
     }
 
     /// Channels whose directory holds an `init` entry, readable or not. Only canonical ids count,

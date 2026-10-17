@@ -739,6 +739,7 @@ src/
 │   │   │   ├── s3_real_tests/
 │   │   │   │   ├── drain_pg_tests.rs
 │   │   │   │   ├── force_pg_tests.rs
+│   │   │   │   ├── fresh_drain_pg_tests.rs
 │   │   │   │   ├── harness_tests.rs
 │   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
@@ -2942,7 +2943,8 @@ src/
 │   ├── turn_orchestrator/
 │   │   ├── dispatch_reservation/
 │   │   │   └── tests/
-│   │   │       └── hydrate_corrupt_queue_tests.rs
+│   │   │       ├── hydrate_corrupt_queue_tests.rs
+│   │   │       └── restored_merge_tests.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs

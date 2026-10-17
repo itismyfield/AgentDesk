@@ -41,6 +41,8 @@ pub(super) async fn restore_queued_and_inflight_work(
         settings.allowed_bot_ids.clone()
     };
     let announce_bot_id_for_restore = super::resolve_announce_bot_user_id(shared).await;
+    // Channels whose merge could not read or write their queue; that input is not discarded.
+    let mut unsettled: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
     // P1-1: Restore dispatch_role_overrides from queue snapshots
     for (thread_channel_id, alt_channel_id) in &restored_overrides {
         if !matches!(
@@ -124,6 +126,7 @@ pub(super) async fn restore_queued_and_inflight_work(
                 // rolled-back-to previous queue). Surface the failure;
                 // don't miscount the restored items as duplicates.
                 skipped_persist_error += allowed_count;
+                unsettled.insert(channel_id);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 📋 FLUSH: persist failed merging {allowed_count} restored queue item(s) for channel {channel_id}: {error}"
@@ -136,7 +139,7 @@ pub(super) async fn restore_queued_and_inflight_work(
         let skipped = skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
+            "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_discarded={skipped_duplicate}, persist_error={skipped_persist_error})"
         );
     }
     // #2437 (#2427 C wire) boot-time generation
@@ -199,6 +202,7 @@ pub(super) async fn restore_queued_and_inflight_work(
             .await;
             if let Some(error) = result.persistence_error {
                 skipped_persist_error += 1;
+                unsettled.insert(marker.channel_id);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 📋 FLUSH: persist failed merging restored dispatch marker for channel {}: {error}",
@@ -223,8 +227,10 @@ pub(super) async fn restore_queued_and_inflight_work(
     // dedup; the placeholder live-queue filter then sees the final
     // restored queue state before kickoff.
     let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
-    let restored_queued_placeholders =
+    let mut restored_queued_placeholders =
         super::queued_placeholders_store::load_queued_placeholders(provider, &shared.token_hash);
+    // An unsettled channel's cards and rows stay as they are until its queue is read again.
+    restored_queued_placeholders.retain(|(channel_id, _), _| !unsettled.contains(channel_id));
     if !restored_queued_placeholders.is_empty() {
         let live_queue_ids = collect_live_queue_message_ids(shared).await;
         let filter_outcome =

@@ -59,8 +59,8 @@ use dispatch_reservation::{
     abandon_pending_dispatch_reservation, absorb_disk_queue, absorb_disk_queue_error,
     clear_pending_user_dispatch, clear_stale_pending_dispatch_reservation,
     consume_pending_dispatch_marker_if_matches, delete_pending_dispatch_marker_with_persistence,
-    hydrate_pending_queue_from_disk_if_present, hydrate_pending_queue_into_state,
-    merge_pending_dispatch_marker_into_state, pending_dispatch_lease_is_orphaned,
+    hydrate_pending_queue_from_disk_if_present, merge_pending_dispatch_marker_into_state,
+    merge_restored_queue_items, pending_dispatch_lease_is_orphaned,
     reconcile_pending_dispatch_marker_before_take_next, record_valve_cleared_pending_dispatch,
     set_pending_user_dispatch, settle_pending_dispatch_on_claim,
 };
@@ -2646,8 +2646,7 @@ fn input_mailbox_step(
             // or after this merge, never overwritten by it. override =
             // None — dispatch_role_overrides are restored separately,
             // before the restore loop (see recovery_flush).
-            let result =
-                hydrate_pending_queue_into_state(&mut state, channel_id, items, persistence, None);
+            let result = merge_restored_queue_items(&mut state, channel_id, items, persistence);
             let _ = reply.send(result);
         }
         ChannelMailboxMsg::MergeRestoredDispatchMarker {
@@ -3566,6 +3565,9 @@ mod actor_hydrate_regression_tests {
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
+            // The boot read found A on disk; the live Enqueue absorbs it first.
+            let a = [make_intervention(100, "restored", Instant::now())];
+            save_channel_queue(&provider, token_hash, channel_id, &a, None).unwrap();
 
             // Live reconcile-window message B lands first (actor `Enqueue`).
             let live = handle
@@ -3579,16 +3581,9 @@ mod actor_hydrate_regression_tests {
             // SIGTERM-restored item A is merged AFTER (loaded out-of-actor,
             // handed to the actor as items). It must NOT clobber the live B.
             let result = handle
-                .merge_restored_queue_items(
-                    vec![make_intervention(
-                        100,
-                        "restored-from-sigterm",
-                        Instant::now(),
-                    )],
-                    persistence.clone(),
-                )
+                .merge_restored_queue_items(a.to_vec(), persistence.clone())
                 .await;
-            assert_eq!(result.absorbed, 1, "restored item A is absorbed");
+            assert_eq!(result.absorbed, 0, "the Enqueue absorbed restored A");
             assert_eq!(result.queue_len_after, 2);
             assert!(result.persistence_error.is_none());
 
@@ -3628,7 +3623,11 @@ mod actor_hydrate_regression_tests {
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-
+            let restored = vec![
+                make_intervention(100, "restored-older", Instant::now()),
+                make_intervention(200, "restored-newer", Instant::now()),
+            ];
+            save_channel_queue(&provider, token_hash, channel_id, &restored, None).unwrap();
             handle
                 .enqueue(
                     make_intervention(300, "live", Instant::now()),
@@ -3636,15 +3635,9 @@ mod actor_hydrate_regression_tests {
                 )
                 .await;
             let result = handle
-                .merge_restored_queue_items(
-                    vec![
-                        make_intervention(100, "restored-older", Instant::now()),
-                        make_intervention(200, "restored-newer", Instant::now()),
-                    ],
-                    persistence.clone(),
-                )
+                .merge_restored_queue_items(restored, persistence.clone())
                 .await;
-            assert_eq!(result.absorbed, 2);
+            assert_eq!(result.absorbed, 0, "the Enqueue absorbed both first");
             let ids: Vec<u64> = handle
                 .snapshot()
                 .await
@@ -3743,16 +3736,18 @@ mod actor_hydrate_regression_tests {
                 )
                 .await;
 
+            let restored = make_intervention_with_sources(
+                source_b.get(),
+                &[source_a.get(), source_b.get()],
+                "restored-a\nrestored-b",
+                Instant::now(),
+            );
+            // The file still holds both sources, as the boot read saw it.
+            let mut disk = handle.snapshot().await.intervention_queue;
+            disk.push(restored.clone());
+            save_channel_queue(&provider, token_hash, channel_id, &disk, None).unwrap();
             let result = handle
-                .merge_restored_queue_items(
-                    vec![make_intervention_with_sources(
-                        source_b.get(),
-                        &[source_a.get(), source_b.get()],
-                        "restored-a\nrestored-b",
-                        Instant::now(),
-                    )],
-                    persistence.clone(),
-                )
+                .merge_restored_queue_items(vec![restored], persistence.clone())
                 .await;
 
             assert_eq!(result.absorbed, 1);
@@ -3807,6 +3802,11 @@ mod actor_hydrate_regression_tests {
                 )
                 .await;
             assert!(live.enqueued);
+            // Restored A is still in the file the merge reads.
+            let restored = make_intervention(100, "restored", Instant::now());
+            let live_b = make_intervention(200, "live", Instant::now());
+            let disk = [restored.clone(), live_b];
+            save_channel_queue(&provider, token_hash, channel_id, &disk, None).unwrap();
             let path = queue_file_path(tmp.path(), &provider, token_hash, channel_id);
             assert!(path.exists());
             let dir = path.parent().unwrap().to_path_buf();
@@ -3815,10 +3815,7 @@ mod actor_hydrate_regression_tests {
             // write (tmp create + rename) fails.
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
             let result = handle
-                .merge_restored_queue_items(
-                    vec![make_intervention(100, "restored", Instant::now())],
-                    persistence.clone(),
-                )
+                .merge_restored_queue_items(vec![restored], persistence.clone())
                 .await;
             // Restore perms before any assertion can early-return (and before drop).
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3839,10 +3836,10 @@ mod actor_hydrate_regression_tests {
                 .collect();
             assert_eq!(ids, vec![200], "rollback keeps the live enqueue");
 
-            // On disk: still the live B only (atomic write never clobbered it).
+            // On disk: the file as it was (atomic write never clobbered it).
             let (disk, _override) = load_channel_pending_queue(&provider, token_hash, channel_id);
             let disk_ids: Vec<u64> = disk.iter().map(|i| i.message_id.get()).collect();
-            assert_eq!(disk_ids, vec![200], "live enqueue stays durably persisted");
+            assert_eq!(disk_ids, [100, 200], "live enqueue stays durably persisted");
         });
     }
 

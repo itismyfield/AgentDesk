@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::services::tui_o::cutover::o_owns_tui_output_for_channel_reserving;
+use crate::services::tui_o::store::no_channel_store;
 use crate::services::tui_o::writer::activation::test_hook::{self, Step};
 
 /// A channel of its own per test, since activation hooks are keyed by channel process-wide.
@@ -255,6 +256,172 @@ async fn a_bound_codex_source_that_already_holds_output_gets_no_init() {
         assert!(!harness.store.has_channel_dir(CODEX), "{why}");
         assert!(harness.port.posts().is_empty(), "{why}");
     }
+}
+
+/// How long a cross-thread wait may take before the test fails instead of hanging.
+const WATCHDOG: Duration = Duration::from_secs(10);
+
+// The init is written under the gate's admission lock: a close racing the write returns only after
+// it, so a store read once the close returned sees the init.
+#[tokio::test(start_paused = true)]
+async fn a_close_racing_the_first_init_returns_only_after_its_write() {
+    const CODEX: u64 = 61_805;
+    let harness = fresh_on(CODEX);
+    harness.gate.acquired();
+    let _selected = test_override::force_candidates(&[(CODEX, CodexTui)]);
+    let (observer, closing) = (Arc::clone(&harness.gate), Arc::clone(&harness.gate));
+    let root = harness._runtime.path().to_path_buf();
+    let locked = Arc::new(AtomicBool::new(false));
+    let checked = Arc::clone(&locked);
+    let (closed_tx, closed) = std::sync::mpsc::channel();
+    test_hook::set(CODEX, Step::BeforeWrite, move || {
+        let held = std::thread::spawn(move || observer.locked_for_test());
+        checked.store(held.join().unwrap(), Ordering::SeqCst);
+        std::thread::spawn(move || {
+            closing.close();
+            closed_tx.send(no_channel_store(&root, CODEX)).unwrap();
+        });
+        Ok(())
+    });
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let _tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert!(
+        locked.load(Ordering::SeqCst),
+        "the write holds the gate lock"
+    );
+    let absent = closed.recv_timeout(WATCHDOG).expect("the close returned");
+    assert!(!absent, "a close that returned saw no init");
+    assert!(harness.store.read_init(CODEX).unwrap().is_some());
+}
+
+// A gate closed after the facts were judged and before the write gets no init, alarm or release;
+// the activation waits for Owned again and commits once the gate reopens.
+#[tokio::test(start_paused = true)]
+async fn a_gate_closed_before_the_held_write_creates_nothing_until_owned_again() {
+    const HELD: u64 = 61_806;
+    let harness = Harness::build_channel(HELD, |_| Vec::new());
+    let store_dir = harness._runtime.path().join("o_store");
+    std::fs::remove_dir_all(store_dir.join(HELD.to_string())).unwrap();
+    std::fs::remove_file(store_dir.join("o_era")).unwrap();
+    let closed = serde_json::json!({"type":"system", "subtype":"turn_duration", "durationMs":5});
+    let delivered = [row("m0", "delivered"), format!("{closed}\n").into_bytes()].concat();
+    let path = harness._runtime.path().join("held.jsonl");
+    std::fs::write(&path, &delivered).unwrap();
+    let source = source_id_for("s1", &path).unwrap();
+    let startup = p5_event(HELD, "claude", p5::BindingTarget::Source(source));
+    p5_log(harness._runtime.path(), HELD, &startup);
+    harness.gate.acquired();
+    let _selected = test_override::force_candidates(&[(HELD, ClaudeTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let len = delivered.len() as u64;
+    let legacy = Cursor {
+        path,
+        cursor: len,
+        frontier: len,
+    };
+    *io.legacy.lock().unwrap() = Some(Arc::new(legacy));
+    let closing = Arc::clone(&harness.gate);
+    let reached = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&reached);
+    test_hook::set(HELD, Step::Snapshot, move || {
+        closing.close();
+        seen.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+    let tasks = hosted(&harness, &io, true, &ready);
+    polls(3).await;
+    assert!(reached.load(Ordering::SeqCst), "the held activation pinned");
+    assert!(
+        !harness.store.has_channel_dir(HELD),
+        "no init past a closed gate"
+    );
+    assert_eq!(io.alarms.halted(), []);
+    assert_eq!(io.alarms.released(), []);
+    assert_eq!(adoption(HELD), Adoption::Pending);
+    harness.gate.acquired();
+    polls(3).await;
+    assert_eq!(
+        adoption(HELD),
+        Adoption::Committed,
+        "{:?}",
+        io.alarms.halted()
+    );
+    assert!(harness.store.read_init(HELD).unwrap().is_some());
+    abort(tasks);
+}
+
+// A lease transition on a gate whose first activation waits on another channel's activation waits
+// too, and completes once that one lets the serial lock go and this one has written.
+#[tokio::test(start_paused = true)]
+async fn a_transition_waits_while_its_activation_waits_on_the_serial_lock() {
+    const FIRST: u64 = 61_807;
+    const NEXT: u64 = 61_808;
+    let (held_tx, held) = std::sync::mpsc::channel();
+    let (go_tx, go) = std::sync::mpsc::channel::<()>();
+    // FIRST activates on its own runtime and holds the serial lock until told to go.
+    let first = std::thread::spawn(move || {
+        let mut runtime = tokio::runtime::Builder::new_current_thread();
+        let runtime = runtime.enable_all().start_paused(true).build().unwrap();
+        runtime.block_on(async move {
+            let harness = fresh_on(FIRST);
+            harness.gate.acquired();
+            let _selected = test_override::force_candidates(&[(FIRST, CodexTui)]);
+            test_hook::set(FIRST, Step::BeforeWrite, move || {
+                held_tx.send(()).unwrap();
+                go.recv().unwrap();
+                Ok(())
+            });
+            let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+            let _tasks = start_codex(&harness, &io, &ready);
+            polls(3).await;
+            harness.store.read_init(FIRST).unwrap().is_some()
+        })
+    });
+    held.recv_timeout(WATCHDOG)
+        .expect("FIRST holds the serial lock");
+    let harness = fresh_on(NEXT);
+    harness.gate.acquired();
+    let _selected = test_override::force_candidates(&[(NEXT, CodexTui)]);
+    let (observer, changing) = (Arc::clone(&harness.gate), Arc::clone(&harness.gate));
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    test_hook::set(NEXT, Step::BeforeLock, move || {
+        let locked = std::thread::spawn(move || observer.locked_for_test());
+        entered_tx.send(locked.join().unwrap()).unwrap();
+        Ok(())
+    });
+    // NEXT's activation blocks this runtime until FIRST lets go, so the transition runs off it.
+    let transition = std::thread::spawn(move || {
+        let locked = entered
+            .recv_timeout(WATCHDOG)
+            .expect("NEXT began its activation");
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let lost = std::thread::spawn(move || {
+            let at = std::time::Instant::now();
+            asked_tx.send(()).unwrap();
+            changing.lost();
+            at.elapsed()
+        });
+        asked.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let waited = !lost.is_finished();
+        go_tx.send(()).unwrap();
+        (locked, waited, lost.join().unwrap())
+    });
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let _tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    let (locked, waited, took) = transition.join().unwrap();
+    assert!(locked, "NEXT activates under its gate's admission");
+    assert!(
+        waited,
+        "the transition waited while FIRST held the serial lock"
+    );
+    eprintln!("[first_init] the lease transition waited {took:?}");
+    assert!(first.join().unwrap(), "FIRST committed");
+    assert!(harness.store.read_init(NEXT).unwrap().is_some());
+    let lost = crate::services::tui_o::ownership::GatewayOwnership::Lost;
+    assert_eq!(harness.gate.current(), lost);
 }
 
 #[path = "host_codex_takeover_tests.rs"]

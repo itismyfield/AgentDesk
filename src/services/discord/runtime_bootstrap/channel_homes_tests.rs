@@ -12,6 +12,7 @@ use crate::services::tui_o::channel_policy::Adoption;
 use crate::services::tui_o::cutover::test_override;
 use crate::services::tui_o::writer::DiscordPort;
 use crate::services::tui_o::writer::host::HostIo;
+use crate::services::tui_prompt_dedupe::binding_events;
 
 /// The turn a delegated drain would read for `channel` through `restored`.
 async fn turn(restored: Arc<std::sync::atomic::AtomicBool>) -> Option<bool> {
@@ -513,23 +514,89 @@ async fn blocker_reaches(channel: u64, want: &str, seen: &mut Vec<String>) -> bo
     false
 }
 
+/// Polls `channel`'s row until it leaves as reclaimed, recording each distinct blocker seen.
+async fn reclaimed(pool: &sqlx::PgPool, channel: u64, seen: &mut Vec<String>) -> bool {
+    for _ in 0..1_000 {
+        if let Some(now) = blocker(channel).filter(|now| seen.last() != Some(now)) {
+            seen.push(now);
+        }
+        let row = o_channel_homes::read_home(pool, &channel.to_string()).await;
+        let row = row.unwrap().unwrap();
+        if (row.state, row.holder.as_deref()) == (o_channel_homes::HomeState::Reclaimed, None) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// This thread's P5 binding-log root for a test, the previous one restored on drop.
+struct P5Root(Option<std::path::PathBuf>);
+
+impl P5Root {
+    fn install(root: &std::path::Path) -> Self {
+        let saved = binding_events::test_root();
+        if !channel_home_boot::writer_mutant("p5_root_unset") {
+            binding_events::set_test_root(Some(root));
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for P5Root {
+    fn drop(&mut self) {
+        binding_events::set_test_root(self.0.as_deref());
+    }
+}
+
 /// A standby restarted as a reclaim's holder restores each channel's input before its drain reads
-/// turns: a restored queue is busy until cleared, a failed restore stays unknown; neither leaves.
+/// turns: a restored queue is busy until cleared, a failed restore stays unknown. Once cleared, a
+/// channel this node never stored nor bound leaves; one whose session was bound here waits.
 #[tokio::test]
 async fn th6_standby_reclaim_restart_restores_turns_pg() {
     use crate::services::turn_orchestrator::{InterventionMode, save_channel_queue};
     const QUEUED: u64 = 9_300_000_000_000_021;
     const BROKEN: u64 = 9_300_000_000_000_022;
+    const BOUND: u64 = 9_300_000_000_000_023;
     const ITEM: u64 = 9_300_000_000_000_031;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let root = crate::config::runtime_root().expect("runtime root");
+    // The drain reads this thread's P5 root: its watch runs on this current-thread runtime.
+    let flavor = tokio::runtime::Handle::current().runtime_flavor();
+    assert_eq!(flavor, tokio::runtime::RuntimeFlavor::CurrentThread);
+    let _p5 = P5Root::install(&root);
+    let pending = binding_events::BindingTarget::Pending {
+        payload_session_id: "s-bound".into(),
+        payload_transcript_path: None,
+    };
+    let bound = binding_events::BindingEvent {
+        seq: 1,
+        channel_id: BOUND,
+        provider: "claude".into(),
+        tmux_session: "tmux-bound".into(),
+        execution_nonce: None,
+        old: None,
+        new: pending,
+        cause: binding_events::BindingCause::Startup,
+        parent_hint: None,
+        evidence: binding_events::BindingEvidence {
+            hook_event: None,
+            received_at: chrono::Utc::now(),
+        },
+        committed_at: chrono::Utc::now(),
+    };
+    let log = root.join(binding_events::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&log).unwrap();
+    let mut line = serde_json::to_vec(&bound).unwrap();
+    line.push(b'\n');
+    std::fs::write(log.join(format!("{BOUND}.log")), line).unwrap();
     let config = crate::runtime_layout::config_file_path(&root);
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     let agent = |id: u64| {
         let channel = format!("    channels:\n      claude:\n        id: \"{id}\"\n");
         format!("  - id: s3a-{id}\n    name: \"s3a {id}\"\n    provider: claude\n{channel}")
     };
-    let agents = [QUEUED, BROKEN].map(agent).concat();
+    let agents = [QUEUED, BROKEN, BOUND].map(agent).concat();
     std::fs::write(config, format!("server:\n  port: 8791\nagents:\n{agents}")).unwrap();
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -537,7 +604,7 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
         Ok(HomeWrite::Applied(row)) => row,
         other => panic!("{other:?}"),
     };
-    for channel in [QUEUED, BROKEN].map(|id| id.to_string()) {
+    for channel in [QUEUED, BROKEN, BOUND].map(|id| id.to_string()) {
         let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
         let row = applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
         let row = applied(o_channel_homes::adopt(&pool, &channel, "mini", row.epoch).await);
@@ -574,7 +641,7 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
     std::fs::write(broken.join(format!("{BROKEN}.json")), "not json").unwrap();
     let _hosts = crate::config::session_hosts::force_for_test(
         Some("mini"),
-        &[(QUEUED, "mini"), (BROKEN, "mini")],
+        &[(QUEUED, "mini"), (BROKEN, "mini"), (BOUND, "mini")],
     );
     let (_log, _rest) = super::super::shared_state::test_rest::recording_mock(1, QUEUED).await;
 
@@ -583,7 +650,7 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
     register_standby_and_settle_reconcile(&registry, &provider, &shared).await;
     let on = settings(Some(true));
     let started = start_channel_homes(&shared, &provider, HomeRole::Standby, &on);
-    assert_eq!(started.await.len(), 2);
+    assert_eq!(started.await.len(), 3);
 
     let mut seen = Vec::new();
     let busy = blocker_reaches(QUEUED, "turn_running", &mut seen).await;
@@ -616,18 +683,25 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
         cleared.removed.is_some(),
         "the mailbox clears the restored item"
     );
-    assert!(
-        blocker_reaches(QUEUED, "owed_unreadable", &mut seen).await,
-        "{seen:?}"
+    assert!(reclaimed(&pool, QUEUED, &mut seen).await, "{seen:?}");
+    assert_eq!(
+        seen,
+        ["turn_unreadable", "turn_running"],
+        "nothing owed is unknown"
     );
-    assert_eq!(seen, ["turn_unreadable", "turn_running", "owed_unreadable"]);
+    let store = root.join("o_store").join(QUEUED.to_string());
+    let store = std::fs::symlink_metadata(store).map_err(|error| error.kind());
+    assert_eq!(store.err(), Some(std::io::ErrorKind::NotFound), "no store");
+    let mut held = Vec::new();
+    let bound = blocker_reaches(BOUND, "owed_unreadable", &mut held).await;
+    assert!(bound, "a channel bound here waits: {held:?}");
     assert_eq!(
         blocker(BROKEN).as_deref(),
         Some("turn_unreadable"),
         "a failed restore stays unknown"
     );
     assert_eq!(unread, ["turn_unreadable"]);
-    for channel in [QUEUED, BROKEN].map(|id| id.to_string()) {
+    for channel in [BROKEN, BOUND].map(|id| id.to_string()) {
         let row = o_channel_homes::read_home(&pool, &channel)
             .await
             .unwrap()
@@ -636,6 +710,9 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
             (row.state, row.holder.as_deref()),
             (o_channel_homes::HomeState::Reclaiming, Some("mini"))
         );
+    }
+    assert_eq!(binding_events::test_root().as_deref(), Some(root.as_path()));
+    for channel in [QUEUED, BROKEN, BOUND].map(|id| id.to_string()) {
         channel_home_boot::stop(&channel).await;
         channel_home::unregister(&channel);
     }
