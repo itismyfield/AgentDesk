@@ -4,7 +4,7 @@
  * JS policy layer (kanban-rules, timeouts/*). A side-path dispatch records
  * information about a card without ever advancing, completing, or failing it: it
  * stays pinned in `requested` and its completion must not flow into the
- * implementation / review / PM-gate lifecycle.
+ * implementation / review lifecycle.
  *
  * `consultation` (#256) was the first such type; `scope-assessment` (#3605) is
  * the second. Centralizing the set here means every `=== "consultation"`

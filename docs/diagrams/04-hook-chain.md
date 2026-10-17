@@ -275,7 +275,7 @@ group Every 60s (count % 2 == 0)
   Engine -> JS : Call handlers in priority order
   JS -> P100 : timeouts.onTick1min()
   activate P100
-  P100 -> DB : Non-critical timeouts\n[A][C][D][E][L],\nstale detection
+  P100 -> DB : Non-critical timeouts\n[A][C][E][N],\nstale detection
   P100 --> JS
   deactivate P100
   JS -> P500 : auto-queue.onTick1min()
@@ -338,10 +338,8 @@ Engine -> JS : Call handlers in priority order
 JS -> P10 : kanban-rules.onDispatchCompleted()
 activate P10
 note right of P10
-  PM Decision Gate:
-  checks verdict, creates
-  review dispatch or transitions
-  card to done
+  Moves the completed card
+  into review (rework included)
 end note
 P10 --> JS
 deactivate P10

@@ -192,7 +192,7 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 |--------|---------|
 | `00-escalation.js` | Manual-intervention routing, PM cooldown management, escalation flush loop |
 | `00-pr-tracking.js` | Card→PR linkage cache and PR sync helpers |
-| `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates |
+| `kanban-rules.js` | Core lifecycle: dispatch completion → review entry |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
 | `ci-recovery.js` | CI failure detection, auto-rerun, and recovery card creation |
@@ -203,6 +203,14 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 No policy merges pull requests. Every merge goes through a PR that an agent babysits: it confirms CI and review, then merges, and repairs the PR on failure.
 
 Repository policy files under `policies/` are canonical for shipped behavior. Release copies under `~/.adk/release/policies/` are deployment replicas, and operator-local policy directories are extensions selected by `policies.dir`. For the complete policy/config source map, see [`docs/source-of-truth.md`](docs/source-of-truth.md).
+
+**Upgrade note (PM Decision Gate removal).** Completed work now enters review directly, and nothing advances a card still parked in the old `awaiting_dod` review sub-state. Before and after upgrading, check for leftovers:
+
+```sql
+SELECT id, title FROM kanban_cards WHERE status = 'review' AND review_status = 'awaiting_dod';
+```
+
+Recover each one with `POST /api/kanban-cards/{id}/rereview` (body `{"reason": "awaiting_dod cleanup"}`, plus the `Authorization: Bearer` / `X-Channel-Id` headers when `server.auth_token` / `kanban.manager_channel_id` are set). It clears the sub-state and starts a fresh counter-model review; `/resume` rejects this sub-state.
 
 ### Policy Tests
 Local policy development now has a dedicated Node runner for the repository copies under `policies/`.
@@ -422,7 +430,6 @@ policies:
 # `RuntimeSettingsConfig`) and can be hot-edited from the dashboard runtime panel.
 kanban:
   manager_channel_id: "channel-id"  # optional: PM/manager Discord channel
-  pm_decision_gate_enabled: true
 
 review:
   enabled: true
@@ -545,7 +552,7 @@ agentdesk.kanban.setStatus(cardId, "in_progress")
 agentdesk.kanban.setStatus(cardId, "done", true)        // force
 agentdesk.kanban.getCard(cardId)
 agentdesk.kanban.reopen(cardId, "ready")
-agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now" })
+agentdesk.kanban.setReviewStatus(cardId, "rework_pending", { suggestion_pending_at: null })
 
 // Review state
 agentdesk.reviewState.sync(cardId, "idle")

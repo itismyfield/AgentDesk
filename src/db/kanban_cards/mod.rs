@@ -123,8 +123,6 @@ pub struct RetryDispatchSpec {
 #[derive(Debug, Clone)]
 pub struct DodStateRecord {
     pub deferred_dod_json: Option<String>,
-    pub status: String,
-    pub review_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
