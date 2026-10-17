@@ -1559,6 +1559,8 @@ src/
 │   │   │   ├── queued_recovery.rs
 │   │   │   ├── queued_recovery_boot_restore_tests.rs
 │   │   │   ├── queued_recovery_draft_tests.rs
+│   │   │   ├── queued_recovery_held.rs
+│   │   │   ├── queued_recovery_held_tests.rs
 │   │   │   ├── queued_recovery_s2a_tests.rs
 │   │   │   ├── recovery_flush.rs
 │   │   │   ├── relay_dlq_redelivery.rs
@@ -2938,9 +2940,10 @@ src/
 │   │   └── completion_scan.rs
 │   ├── turn_orchestrator/
 │   │   ├── dispatch_reservation/
-│   │   │   └── tests/
-│   │   │       ├── hydrate_corrupt_queue_tests.rs
-│   │   │       └── restored_merge_tests.rs
+│   │   │   ├── tests/
+│   │   │   │   ├── hydrate_corrupt_queue_tests.rs
+│   │   │   │   └── restored_merge_tests.rs
+│   │   │   └── held_settle.rs
 │   │   ├── pending_queue_persistence/
 │   │   │   ├── queued_recovery.rs
 │   │   │   └── queued_recovery_tests.rs
