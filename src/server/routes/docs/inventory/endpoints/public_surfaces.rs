@@ -6,7 +6,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/ws",
             "auth",
-            "Dashboard WebSocket upgrade. A browser may use a one-use `ticket` query parameter obtained from `POST /api/auth/ws-ticket`; native clients may use `Authorization: Bearer <server.auth_token>`. When `server.auth_token` is unset, tokenless upgrades are allowed subject to the configured peer filter.",
+            "Mounted when the dashboard is enabled. Dashboard WebSocket upgrade. A browser may use a one-use `ticket` query parameter obtained from `POST /api/auth/ws-ticket`; native clients may use `Authorization: Bearer <server.auth_token>`. When `server.auth_token` is unset, tokenless upgrades are allowed subject to the configured peer filter.",
         )
         .with_params([
             (
@@ -38,7 +38,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/hooks/{provider}/{event}",
             "auth",
-            "Receive a provider lifecycle hook. Only loopback peers or a valid configured Bearer token are accepted; when `server.auth_token` is unset, loopback is required.",
+            "Mounted when the provider hook receiver is configured. Receive a provider lifecycle hook. Only loopback peers or a valid configured Bearer token are accepted; when `server.auth_token` is unset, loopback is required.",
         )
         .with_params([
             ("provider", super::super::path_param("Provider name, such as claude or codex.")),
@@ -56,17 +56,71 @@ mod tests {
     #[test]
     fn root_mounted_control_surfaces_are_listed_with_their_auth_boundary() {
         let endpoints = super::super::all();
-        for (method, path) in [
-            ("GET", "/ws"),
-            ("POST", "/tui/send"),
-            ("POST", "/tui/wait"),
-            ("POST", "/hooks/{provider}/{event}"),
+        for (method, path, required_phrases) in [
+            (
+                "GET",
+                "/ws",
+                &[
+                    "Mounted when the dashboard is enabled",
+                    "one-use `ticket` query parameter",
+                    "Authorization: Bearer",
+                    "configured peer filter",
+                ][..],
+            ),
+            (
+                "POST",
+                "/tui/send",
+                &[
+                    "Only loopback peers",
+                    "valid configured Bearer token",
+                    "when `server.auth_token` is unset, loopback is required",
+                    "Send user input",
+                ][..],
+            ),
+            (
+                "POST",
+                "/tui/wait",
+                &[
+                    "Only loopback peers",
+                    "valid configured Bearer token",
+                    "when `server.auth_token` is unset, loopback is required",
+                    "Wait for the active TUI session",
+                ][..],
+            ),
+            (
+                "POST",
+                "/hooks/{provider}/{event}",
+                &[
+                    "Mounted when the provider hook receiver is configured",
+                    "Only loopback peers",
+                    "valid configured Bearer token",
+                    "when `server.auth_token` is unset, loopback is required",
+                    "Receive a provider lifecycle hook",
+                ][..],
+            ),
         ] {
             let endpoint = endpoints
                 .iter()
                 .find(|endpoint| endpoint.method == method && endpoint.path == path)
                 .unwrap_or_else(|| panic!("missing {method} {path}"));
-            assert!(endpoint.description.contains("server.auth_token"));
+            for phrase in required_phrases {
+                assert!(
+                    endpoint.description.contains(phrase),
+                    "{method} {path} description missing {phrase:?}"
+                );
+            }
+            if path == "/ws" {
+                let ticket = endpoint
+                    .params
+                    .get("ticket")
+                    .expect("missing ticket parameter");
+                assert!(ticket.description.contains("One-use, 15-second"));
+                assert!(
+                    ticket
+                        .description
+                        .contains("bound to the request Origin and Host")
+                );
+            }
         }
     }
 }

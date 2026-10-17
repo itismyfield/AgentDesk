@@ -16,12 +16,11 @@ use std::time::Duration;
 use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Severity};
 use super::{health, mailbox};
 
+mod api_exposure;
 mod config_dir_checks;
 use crate::cli::dcserver;
 use crate::config;
-use crate::services::operator_connectors::{
-    OptionalConnectorState, OptionalConnectorStatus, optional_connector_statuses,
-};
+use crate::services::operator_connectors as connectors;
 use crate::services::provider::{ProviderKind, ProviderRuntimeProbe};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -854,7 +853,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_health_db_dashboard(snapshot),
         check_dispatch_outbox(snapshot),
         check_config_audit(snapshot),
-        check_server_api_exposure(cfg),
+        api_exposure::check_server_api_exposure(cfg),
         check_runtime_root(),
         config_dir_checks::check_data_dir(cfg),
         config_dir_checks::check_policies_dir(cfg),
@@ -871,86 +870,6 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
     checks.push(check_file_descriptor_headroom());
     checks.extend(check_mailbox_consistency(snapshot));
     checks
-}
-
-fn check_server_api_exposure(cfg: &config::Config) -> Check {
-    let token_configured = cfg
-        .server
-        .auth_token
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|token| !token.is_empty());
-    let non_loopback = !crate::server::routes::is_loopback_host(&cfg.server.host);
-
-    let (detail, next_steps) = if !non_loopback || token_configured {
-        (
-            "The configured server bind is loopback or has a server.auth_token.".to_string(),
-            Vec::new(),
-        )
-    } else if cfg.server.allow_insecure_nonloopback_bind {
-        (
-            format!(
-                "INFO: server.host={} is intentionally exposed without server.auth_token by server.allow_insecure_nonloopback_bind=true.",
-                cfg.server.host
-            ),
-            vec![
-                "See docs/operational-api-trust-boundary.md for the accepted trust boundary."
-                    .into(),
-            ],
-        )
-    } else {
-        (
-            format!(
-                "INFO: server.host={} has no server.auth_token; the startup guard will bind to loopback.",
-                cfg.server.host
-            ),
-            vec!["See docs/operational-api-trust-boundary.md for the bind policy.".into()],
-        )
-    };
-
-    Check::ok(
-        "server_api_exposure",
-        CheckGroup::Core,
-        "API bind exposure",
-        detail,
-    )
-    .with_path("docs/operational-api-trust-boundary.md")
-    .with_next_steps(next_steps)
-    .with_security_exposure(SecurityExposure::PublicSurface)
-}
-
-#[cfg(test)]
-mod server_api_exposure_tests {
-    use super::*;
-
-    fn tokenless_non_loopback_config(opted_in: bool) -> config::Config {
-        let mut cfg = config::Config::default();
-        cfg.server.host = "0.0.0.0".into();
-        cfg.server.auth_token = None;
-        cfg.server.allow_insecure_nonloopback_bind = opted_in;
-        cfg
-    }
-
-    #[test]
-    fn intentional_tokenless_non_loopback_bind_is_informational() {
-        let check = check_server_api_exposure(&tokenless_non_loopback_config(true));
-        assert_eq!(check.status, CheckStatus::Pass);
-        assert_eq!(check.severity, Severity::Info);
-        assert_eq!(
-            check.path.as_deref(),
-            Some("docs/operational-api-trust-boundary.md")
-        );
-        assert_eq!(check.next_steps.len(), 1);
-        assert!(check.detail.contains("intentionally exposed"));
-    }
-
-    #[test]
-    fn rejected_tokenless_non_loopback_bind_is_informational_too() {
-        let check = check_server_api_exposure(&tokenless_non_loopback_config(false));
-        assert_eq!(check.status, CheckStatus::Pass);
-        assert_eq!(check.severity, Severity::Info);
-        assert!(check.detail.contains("will bind to loopback"));
-    }
 }
 
 fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
@@ -1508,13 +1427,13 @@ fn build_all_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Chec
 }
 
 fn build_optional_connector_checks() -> Vec<Check> {
-    optional_connector_statuses()
+    connectors::optional_connector_statuses()
         .into_iter()
         .map(optional_connector_check)
         .collect()
 }
 
-fn optional_connector_check(status: OptionalConnectorStatus) -> Check {
+fn optional_connector_check(status: connectors::OptionalConnectorStatus) -> Check {
     let (id, name) = optional_connector_check_identity(status.id);
     let evidence = json!({
         "connector": status.id,
@@ -1527,14 +1446,14 @@ fn optional_connector_check(status: OptionalConnectorStatus) -> Check {
         "setup_actions": &status.setup_actions,
     });
     let check = match status.state {
-        OptionalConnectorState::Ready
-        | OptionalConnectorState::Skipped
-        | OptionalConnectorState::MissingConfig => {
+        connectors::OptionalConnectorState::Ready
+        | connectors::OptionalConnectorState::Skipped
+        | connectors::OptionalConnectorState::MissingConfig => {
             Check::ok(id, CheckGroup::OptionalConnectors, name, status.detail.clone())
         }
-        OptionalConnectorState::MissingPath
-        | OptionalConnectorState::MissingProvider
-        | OptionalConnectorState::InvalidConfig => Check::warn(
+        connectors::OptionalConnectorState::MissingPath
+        | connectors::OptionalConnectorState::MissingProvider
+        | connectors::OptionalConnectorState::InvalidConfig => Check::warn(
             id,
             CheckGroup::OptionalConnectors,
             name,
