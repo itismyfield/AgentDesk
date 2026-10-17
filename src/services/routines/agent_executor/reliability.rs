@@ -222,6 +222,7 @@ mod tests {
             "Error summary: the PR check failed, and the remediation is ready.",
             "API Error: The rate limit incident was resolved; today's briefing was delivered.",
             "API Error: An APIError explanation is ready for the report.",
+            "Provider documentation updated.\n||```text\nWhen \"The usage limit has been reached\" appears, check the account quota.\n```||",
         ] {
             let mut completion =
                 completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
