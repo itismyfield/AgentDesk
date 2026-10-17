@@ -2489,6 +2489,15 @@ services::cluster::channel_home::tests::command_replacement_and_resume_keep_coun
 services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
 services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
 services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+services::cluster::channel_home_boot::home_writers::tests::a_boot_writer_not_yet_supervised_holds_the_first_renewal_pg
+services::cluster::channel_home_boot::home_writers::tests::a_gateway_writer_mid_admission_is_joined_before_its_home_renews_pg
+services::cluster::channel_home_boot::home_writers::tests::a_reclaim_then_redelegation_takes_work_again_pg
+services::cluster::channel_home_boot::home_writers::tests::a_reclaimed_boot_returns_only_after_its_own_boot_writer_joined_pg
+services::cluster::channel_home_boot::home_writers::tests::a_stop_keeps_or_settles_the_late_reservation_by_its_reason
+services::cluster::channel_home_boot::home_writers::tests::a_stuck_leave_keeps_the_home_mounted_across_rounds_pg
+services::cluster::channel_home_boot::home_writers::tests::a_worker_holder_boot_hosts_one_writer_pg
+services::cluster::channel_home_boot::home_writers::tests::an_aborted_release_joins_the_home_writer_before_unmount_pg
+services::cluster::channel_home_boot::home_writers::tests::an_unobserved_leave_reuses_the_home_and_its_writer_pg
 services::cluster::channel_home_boot::tests::a_delegated_channel_is_adopted_by_its_target_after_the_gateway_drain_pg
 services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_lease_and_a_restart_reopens_by_write_pg
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg

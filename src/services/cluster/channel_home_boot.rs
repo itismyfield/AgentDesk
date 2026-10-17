@@ -18,7 +18,7 @@ pub(crate) use super::channel_home_drain::ResetRefused;
 use super::channel_home_drain::{self as drain, Blocker, DrainPort, Owed, finish_return};
 use super::channel_home_port::ChannelHomePort;
 pub(crate) use super::channel_home_port::PersistedInput;
-use super::home_supervisor::{HomeBundle, HomeLifecycle, Phase, Settled, StopReason, Supervisor};
+use super::home_supervisor::{HomeLifecycle, Phase, Settled, StopReason, Supervisor};
 use crate::db::o_channel_homes::{self, ChannelHome, HomeError, HomeState, HomeWrite};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::tui_o::channel_policy::{self, BootChannels, Candidate};
@@ -28,6 +28,11 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::writer::host::{
     self, HostIo, HostParts, ManagedWriterHandle, Readiness,
 };
+
+mod home_writers;
+#[cfg(test)]
+pub(crate) use home_writers::events;
+use home_writers::{Authority, BootStage, WRITER_AUTHORITY, WriterBundle};
 
 type ResetFuture = Pin<Box<dyn Future<Output = Result<(), ResetRefused>> + Send>>;
 
@@ -138,21 +143,6 @@ pub(crate) fn restore_mutant(name: &str) -> bool {
     std::env::var("ADK_S3A_RESTORE_MUTANT").ok().as_deref() == Some(name)
 }
 
-/// One channel's managed writer as the supervisor runs it.
-pub(crate) struct WriterBundle(ManagedWriterHandle);
-
-impl HomeBundle for WriterBundle {
-    fn stop_and_join(self, _: StopReason) -> impl Future<Output = Settled> + Send {
-        let stopped = self.0.stop_and_join();
-        async move {
-            match stopped.await {
-                Ok(_) => Settled::Joined,
-                Err(detail) => Settled::Stuck(detail),
-            }
-        }
-    }
-}
-
 /// Starts a channel's writer under the gateway's authority; `None` when none is hosted.
 pub(crate) type StartWriter = Arc<dyn Fn(u64) -> Option<ManagedWriterHandle> + Send + Sync>;
 
@@ -230,7 +220,8 @@ impl ChannelWriters {
     /// starts none.
     pub(crate) fn arm(&self, start: Option<StartWriter>, started: Vec<ManagedWriterHandle>) {
         for handle in started {
-            let (channel, bundle) = (handle.channel(), WriterBundle(handle));
+            let channel = handle.channel();
+            let bundle = WriterBundle::new(handle, self.delegated);
             drop(
                 self.supervisor
                     .start(channel, move |_| async move { Ok(bundle) }),
@@ -244,8 +235,12 @@ impl ChannelWriters {
         self.supervisor.phase(channel)
     }
 
-    /// Stops and joins the channel's writer; false while its end is not confirmed.
+    /// Stops and joins the channel's writer; false while its end is not confirmed, or while the
+    /// boot may still be starting one.
     pub(crate) async fn stop(&self, channel: u64) -> bool {
+        if matches!(self.stage(), BootStage::Incomplete) {
+            return false;
+        }
         let stopped = self.supervisor.stop(channel, None, StopReason::RowGone);
         stopped.await.is_none()
     }
@@ -264,7 +259,7 @@ impl ChannelWriters {
         let any = writer_mutant("return_keeps_home_bound_writer");
         #[cfg(not(test))]
         let any = false;
-        let ours = |bundle: &WriterBundle| any || bundle.0.authority() == gateway;
+        let ours = |bundle: &WriterBundle| any || bundle.handle.authority() == gateway;
         let running = self.supervisor.running(channel, ours) == Some(true);
         #[cfg(test)]
         if running && writer_mutant("running_slot_counts_as_alive") {
@@ -280,7 +275,7 @@ impl ChannelWriters {
         }
         let start = Arc::clone(start);
         let build = move |_| async move {
-            let started = start(channel).map(WriterBundle);
+            let started = start(channel).map(|handle| WriterBundle::new(handle, false));
             started.ok_or_else(|| "no writer started".to_owned())
         };
         self.supervisor.start(channel, build).await.is_ok()
@@ -466,7 +461,8 @@ where
             local: boot.local.clone(),
             mounted: home,
             candidate: boot.candidates.contains(&id),
-            writers: boot.writers.clone().filter(|writers| !writers.delegated),
+            writers: boot.writers.clone(),
+            tried: None,
         };
         let watch = tokio::spawn(watch(seen, (boot.port)(id), Arc::clone(&lease)));
         if let Some(writers) = &boot.writers {
@@ -528,6 +524,10 @@ impl LeaseSlot {
             }
             end(handle).await;
         }
+        #[cfg(test)]
+        if let Ok(channel) = home.channel_id().parse() {
+            events::record(channel, events::Event::Renew(epoch, gate_address(home)));
+        }
         let renewing = channel_home::run_lease(pool.clone(), Arc::clone(home), epoch);
         *self.locked() = Some((epoch, tokio::spawn(renewing)));
     }
@@ -536,6 +536,11 @@ impl LeaseSlot {
 async fn end(handle: JoinHandle<()>) {
     handle.abort();
     let _ = handle.await;
+}
+
+/// The process-local address of a home's gate, which the writer it hosts captured.
+fn gate_address(home: &HomeGate) -> usize {
+    Arc::as_ptr(&home.gate()) as usize
 }
 
 /// What one watch follows: its channel, the gate it has mounted while a row names this node, and
@@ -547,15 +552,19 @@ struct Seen {
     mounted: Option<Arc<HomeGate>>,
     candidate: bool,
     writers: Option<Arc<ChannelWriters>>,
+    /// The mounted home a missing writer was started for; cleared with the mount.
+    tried: Option<usize>,
 }
 
 impl Seen {
     /// The mounted gate, registering a fresh one when none is.
     fn mount(&mut self) -> Arc<HomeGate> {
-        let (channel, local) = (self.id.to_string(), self.local.as_str());
+        let (id, local) = (self.id, self.local.as_str());
         let home = self.mounted.get_or_insert_with(|| {
-            let home = Arc::new(HomeGate::new(&channel, local));
+            let home = Arc::new(HomeGate::new(&id.to_string(), local));
             channel_home::register(Arc::clone(&home));
+            #[cfg(test)]
+            events::record(id, events::Event::Mount(gate_address(&home)));
             home
         });
         Arc::clone(home)
@@ -563,8 +572,11 @@ impl Seen {
 
     fn unmount(&mut self) {
         if let Some(home) = self.mounted.take() {
+            #[cfg(test)]
+            events::record(self.id, events::Event::Unmount(gate_address(&home)));
             channel_home::unregister_if_same(&home);
         }
+        self.tried = None;
     }
 
     async fn stop_writer(&self) -> bool {
@@ -576,8 +588,8 @@ impl Seen {
 
     async fn ensure_writer(&self) -> bool {
         match &self.writers {
-            Some(writers) => writers.ensure(self.id).await,
-            None => true,
+            Some(writers) if !writers.delegated => writers.ensure(self.id).await,
+            _ => true,
         }
     }
 
@@ -595,15 +607,22 @@ impl Seen {
             drop(start(self.id));
         }
         #[cfg(test)]
-        let joined = writer_mutant("return_keeps_home_bound_writer") || self.stop_writer().await;
+        let joined = match &self.writers {
+            _ if writer_mutant("return_keeps_home_bound_writer") => true,
+            Some(writers) if writer_mutant("give_back_ignores_boot") => {
+                let stopped = writers.supervisor.stop(self.id, None, StopReason::RowGone);
+                stopped.await.is_none()
+            }
+            _ => self.left(StopReason::RowGone).await,
+        };
         #[cfg(not(test))]
-        let joined = self.stop_writer().await;
+        let joined = self.left(StopReason::RowGone).await;
         if joined
             && finish_return(&self.pool, home, epoch)
                 .await
                 .unwrap_or(false)
         {
-            self.mounted = None;
+            self.unmount();
             self.ensure_writer().await;
         }
     }
@@ -624,6 +643,17 @@ where
         };
         let name = seen.local.clone();
         let local = Some(name.as_str());
+        #[cfg(test)]
+        if let Ok(row) = &read
+            && row
+                .as_ref()
+                .is_none_or(|row| row.holder.as_deref() != local && row.target.as_deref() != local)
+            && let Some(park) = events::parked(seen.id)
+        {
+            events::record(seen.id, events::Event::Parked);
+            drop(park.acquire().await);
+            continue;
+        }
         match read {
             // An unreadable row is not its absence: nothing returns and no writer starts.
             Err(_) => {
@@ -631,11 +661,24 @@ where
                     home.note_drain(Some(Blocker::RowUnreadable.as_str()));
                 }
             }
+            // Gone, the home's writer is joined before the gate goes: a gateway's own then starts.
             Ok(None) => {
-                seen.unmount();
                 lease.end().await;
-                if seen.ensure_writer().await && !seen.candidate {
-                    break;
+                let reason = match seen.delegated() {
+                    true => StopReason::RowGone,
+                    false => StopReason::Replaced,
+                };
+                #[cfg(test)]
+                if writer_mutant("unmount_before_join") {
+                    seen.unmount();
+                }
+                if !seen.left(reason).await {
+                    seen.note(WRITER_AUTHORITY);
+                } else {
+                    seen.unmount();
+                    if seen.ensure_writer().await && !seen.candidate {
+                        break;
+                    }
                 }
             }
             Ok(Some(row)) if row.holder.as_deref() != local && row.target.as_deref() != local => {
@@ -646,11 +689,21 @@ where
                     break;
                 }
                 // Another node's channel: the gate goes only once this runtime's writer has ended.
-                if seen.stop_writer().await {
+                let left = match seen.delegated() {
+                    true => seen.left(StopReason::RowGone).await,
+                    false => seen.stop_writer().await,
+                };
+                if left {
                     seen.unmount();
+                } else {
+                    seen.note(WRITER_AUTHORITY);
                 }
             }
             Ok(Some(row)) => {
+                #[cfg(test)]
+                if writer_mutant("reuse_forces_remount") && row.state == HomeState::Released {
+                    seen.unmount();
+                }
                 let home = seen.mount();
                 home.note_drain(None);
                 if row.holder.as_deref() != local {
@@ -658,7 +711,18 @@ where
                     // Adopted, the row names this node holder and the next read starts its lease.
                     let releases_here =
                         row.state == HomeState::Released && row.target.as_deref() == local;
-                    if releases_here && port.restored() {
+                    #[cfg(test)]
+                    let restored = port.restored() || writer_mutant("adopt_ignores_restored");
+                    #[cfg(not(test))]
+                    let restored = port.restored();
+                    let adoptable = match releases_here && restored {
+                        true => Some(seen.adoptable(&home).await),
+                        false => None,
+                    };
+                    if let Some(Err(blocker)) = adoptable {
+                        home.note_drain(Some(blocker));
+                    }
+                    if adoptable == Some(Ok(())) {
                         let (channel, holder) = (home.channel_id(), home.holder());
                         let adopted =
                             o_channel_homes::adopt(&seen.pool, channel, holder, row.epoch);
@@ -669,6 +733,13 @@ where
                     if row.state == HomeState::Reclaimed {
                         seen.give_back(&home, row.epoch).await;
                     }
+                } else if seen
+                    .ensure_home(&home, row.state == HomeState::Worker)
+                    .await
+                    == Authority::Pending
+                {
+                    // A claim the supervisor does not account for may still post under another gate.
+                    home.note_drain(Some(WRITER_AUTHORITY));
                 } else {
                     lease.renew_at(&seen.pool, &home, row.epoch).await;
                     // The boot restore runs before any drain round reads the channel's turns.

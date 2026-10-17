@@ -716,6 +716,9 @@ src/
 │   │   │   └── uploads.rs
 │   │   ├── channel_home/
 │   │   │   └── ingress_snapshot.rs
+│   │   ├── channel_home_boot/
+│   │   │   ├── home_writers.rs
+│   │   │   └── home_writers_tests.rs
 │   │   ├── channel_ingress/
 │   │   │   └── tests.rs
 │   │   ├── execution_capacity/
@@ -2749,6 +2752,7 @@ src/
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
+│   │   │   │   ├── hosting.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
