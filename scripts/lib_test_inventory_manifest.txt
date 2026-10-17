@@ -9491,6 +9491,7 @@ services::discord::turn_bridge::stale_resume::tests::stream_error_helpers_compos
 services::discord::turn_bridge::stale_resume::tests::terminal_reset_matchers_cover_no_output_and_existing_provider_failures
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::actual_bridge_children_run_through_cleanup_and_retry_completion
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::alias_skipped_old_turn_does_not_remove_newer_owners_inflight_row
+services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::background_refreshes_keep_delivered_wip_warning_through_final_refresh_5350
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_emits_background_agent_pending_payload
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_producer_threads_sniffed_background_agent_pending
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::cleanup_guard_drop_routing_is_identity_aware
@@ -9898,6 +9899,7 @@ services::discord::turn_end_wip_warning::tests::clean_non_git_missing_and_missin
 services::discord::turn_end_wip_warning::tests::committed_reservation_suppresses_other_completion_paths
 services::discord::turn_end_wip_warning::tests::dirty_warning_text_includes_path_and_counts
 services::discord::turn_end_wip_warning::tests::dropped_reservation_can_be_claimed_by_another_completion_path
+services::discord::turn_end_wip_warning::tests::final_wire_bounds_backtick_escaped_darwin_path_warning_5350
 services::discord::turn_end_wip_warning::tests::final_wire_bounds_oversized_worktree_warning_5325
 services::discord::turn_end_wip_warning::tests::final_wire_reserves_normal_warning_after_full_panel_and_metadata_5325
 services::discord::turn_end_wip_warning::tests::zero_expected_user_msg_id_never_matches_inflight

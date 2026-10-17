@@ -5,7 +5,7 @@ use poise::serenity_prelude::{ChannelId, MessageId};
 
 use crate::services::discord::{
     ProviderKind, SharedData, completion_footer_metadata, placeholder_live_events::TerminalSlotId,
-    single_message_panel as smp,
+    single_message_panel as smp, turn_end_wip_warning as wip,
 };
 
 #[derive(Debug, Clone)]
@@ -349,7 +349,24 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
     let metadata = completion_footer_metadata::completion_footer_metadata_from_block(
         target.last_completion_block.as_deref(),
     );
-    let completion_block = rendered.block.clone().map(|block| {
+    // A delivered warning is never re-reserved, so carry it from the last committed block.
+    let block = match target
+        .last_completion_block
+        .as_deref()
+        .and_then(wip::split_merged_turn_end_wip_warning)
+    {
+        Some((_, warning)) => Some(wip::merge_bounded_turn_end_wip_warning(
+            rendered.block.clone().unwrap_or_default(),
+            &warning,
+        )),
+        None => rendered.block.clone(),
+    };
+    let merged_prefix = block
+        .as_deref()
+        .and_then(wip::split_merged_turn_end_wip_warning)
+        .map(|(prefix, _)| smp::completion_footer_subtext(&prefix).len())
+        .unwrap_or(usize::MAX);
+    let completion_block = block.map(|block| {
         completion_footer_metadata::append_completion_footer_metadata(block, &metadata)
     });
     let mut surviving_prefix = 0;
@@ -396,7 +413,8 @@ pub(in crate::services::discord) fn completion_footer_edit_for_registered_target
         remove_after_edit,
         owner: target.owner,
         completion_block,
-        delivered_terminal_ids: rendered.surviving_terminal_ids(surviving_prefix),
+        delivered_terminal_ids: rendered
+            .surviving_terminal_ids(surviving_prefix.min(merged_prefix)),
     })
 }
 
