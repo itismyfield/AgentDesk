@@ -17,7 +17,7 @@ D = "src/services/discord/"
 R = D + "runtime_bootstrap/boot_retirement"
 ENTRIES = {}
 # Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
-# "*" pins the whole file: legacy_supervision.rs owns RETIRED, and a new writer there escapes SYMBOL.
+# "*" pins a whole file.
 PROTECTED = {
     'src/cli/dcserver.rs': {'handle_dcserver': 'cd0fa633d7bbf6ed71ab6887cba145d5d2cc01e6255ed5668ea4173659b9cd66'},
     'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'b0f17747ee1fe1368ce49cc89efedcce1d77fd6d4dd738774244afbd30fb8293'},
@@ -29,9 +29,10 @@ PROTECTED = {
         'reap_inflight_rows_after_preparation': 'f3fee466ddc3d3925b5bfee8805a6678875db72874f30c51a9a74fee38d693bd'},
     'src/services/discord/tui_direct_pending_start/turn_retirement.rs': {'confirm_at_boot': '835b358746ebb4b1dd99bf662b73923f4904b73ce0b973b9aea84fa1d128ad07'},
     'src/services/discord/runtime_bootstrap/o_writer_host.rs': {'adopted': '0fe2f48e1465b84da5a3b7155df25e012efc1510762c78a4c61ae55ea48f2a23'},
-    'src/services/discord/health/legacy_supervision.rs': {'*': 'e1aaadf38e5f4753d767c21bdca7c35f806c998d7554c368a08b2823329818b1'},
     'src/services/discord/health/snapshot.rs': {'build_health_snapshot_with_options': '1ae7b07a407e0e867fa3bc3e2c28e51b2541ed818a3c75974784d4da577cbbac'}}
 SYMBOL = re.compile(r"\b(?:Boot(?:Cohort|Slot|Publication|WorkOnce|Roster|Bot|Selection|Result|RetirementHealth)|boot_retirement|boot_status|install_process|wait_released|publish_with)\b")
+# The deleted RETIRED gate (#6325 23C): any production return of its owner or readers fails.
+RETIRED_GATE = re.compile(r"\b(?:legacy_supervision|legacy_retired|retired_in|RetiredForTest)\b")
 FN = re.compile(r"\bfn\s+(\w+)")
 
 def digest(code):
@@ -85,7 +86,9 @@ def audit(sources, entries=ENTRIES, protected=PROTECTED, skips=frozenset()):
             errors.append(f"{path}: unclassified primitive file")
         if path in entries or path in skips or path in tests:
             continue
-        pattern = SYMBOL if not ("RETIRED" in code and "legacy_supervision" in code) else re.compile(SYMBOL.pattern + r"|\bRETIRED\b")
+        if "/legacy_supervision" in path:
+            errors.append(f"{path}: deleted RETIRED owner restored")
+        pattern = re.compile(SYMBOL.pattern + "|" + RETIRED_GATE.pattern)
         for match in pattern.finditer(code):
             owners = FN.findall(code[:match.start()])
             line = code[:match.start()].count("\n") + 1

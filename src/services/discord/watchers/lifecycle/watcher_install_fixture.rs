@@ -2,7 +2,7 @@
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::discord::health::legacy_supervision::test_support::MockDiscord;
+use crate::services::discord::health::test_support::MockDiscord;
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
 use crate::services::tmux_common as tc;
 use crate::services::tui_prompt_dedupe::{self as binding, TuiRuntimeBinding};

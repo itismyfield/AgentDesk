@@ -1,5 +1,7 @@
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, tests::record};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedExecution, HostedLocation, tests::record,
+};
 use crate::services::discord::turn_presence::activity::tests::{
     bind_turn_mode_transcript, settled_reason,
 };
@@ -44,6 +46,17 @@ fn queued(id: u64) -> Intervention {
 
 /// The restarted channel's hosted row for `case`, as the reconnect pass leaves it.
 async fn seed_row(rig: &Rig, name: &str, case: Case) {
+    seed_row_with(rig, name, case, "restarted", |_| {}).await;
+}
+
+/// `seed_row` of execution `nonce`, edited by `change` before it is stored.
+async fn seed_row_with(
+    rig: &Rig,
+    name: &str,
+    case: Case,
+    nonce: &str,
+    change: impl FnOnce(&mut HostedExecution),
+) {
     if case == Case::Missing {
         return;
     }
@@ -66,7 +79,7 @@ async fn seed_row(rig: &Rig, name: &str, case: Case) {
         Case::Retired => HostedState::Retired,
         _ => HostedState::Bound,
     };
-    let mut execution = record(&owner, "restarted", HostedState::Bound);
+    let mut execution = record(&owner, nonce, HostedState::Bound);
     execution.state = state;
     execution.location = Some(HostedLocation {
         host: "herdr".into(),
@@ -79,6 +92,7 @@ async fn seed_row(rig: &Rig, name: &str, case: Case) {
         named_session: endpoint.herdr_session.clone(),
         pane_id: "p-1".into(),
     });
+    change(&mut execution);
     let key = adk_session::build_namespaced_session_key(
         &rig.shared.token_hash,
         &ProviderKind::Claude,
@@ -143,6 +157,13 @@ async fn drained(id: u64, case: Case, named: bool) -> (&'static str, bool) {
         assert!(rig.shared.tmux_watchers.remove(&channel).is_some());
         turn
     };
+    settle_and_take(&rig, case).await
+}
+
+/// The reason presence settles on for the rig's channel, then whether the queue gate took the head
+/// of a two-item queue; the second item always stays.
+async fn settle_and_take(rig: &Rig, label: impl std::fmt::Debug) -> (&'static str, bool) {
+    let (provider, channel, id) = (ProviderKind::Claude, rig.channel, rig.channel.get());
     let reason = settled_reason(&rig.shared, &provider, id).await;
     let context =
         crate::services::discord::queue_persistence_context(&rig.shared, &provider, channel);
@@ -155,13 +176,13 @@ async fn drained(id: u64, case: Case, named: bool) -> (&'static str, bool) {
     let taken = take.intervention.as_ref().map(|i| i.message_id.get());
     assert!(
         taken.is_none_or(|taken| taken == head),
-        "{case:?}: took {taken:?}"
+        "{label:?}: took {taken:?}"
     );
     let left = mailbox_snapshot(&rig.shared, channel)
         .await
         .intervention_queue
         .len();
-    assert_eq!(left, if taken.is_some() { 1 } else { 2 }, "{case:?}");
+    assert_eq!(left, if taken.is_some() { 1 } else { 2 }, "{label:?}");
     (reason, taken.is_some())
 }
 
@@ -196,3 +217,6 @@ async fn restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_wat
     }
     assert!(wrong.is_empty(), "{wrong:?}");
 }
+
+#[path = "herdr_chain_tests.rs"]
+mod chain;

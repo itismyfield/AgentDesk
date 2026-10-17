@@ -2,7 +2,7 @@
 use super::super::watcher_install_fixture::{fixture_with_pool, isolated, list_sessions};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::legacy_supervision::test_support;
+use crate::services::discord::health::test_support;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::tmux_common as tc;

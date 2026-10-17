@@ -5,9 +5,7 @@ use axum::http::Method;
 
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::health::legacy_supervision::test_support::{
-    MockDiscord, age_file, fingerprint,
-};
+use crate::services::discord::health::test_support::{MockDiscord, age_file, fingerprint};
 use crate::services::discord::inflight::{inflight_state_path, save_inflight_state};
 
 fn row(channel: u64, panel: bool) -> InflightTurnState {

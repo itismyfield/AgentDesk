@@ -615,14 +615,12 @@ mod tests {
         write_pending_anchor(shared, channel_id, message_id);
         let path = TurnViewReconciler::persisted_target_path(anchor_target(channel_id, message_id))
             .expect("persisted path");
-        crate::services::discord::health::legacy_supervision::test_support::age_file(&path, 1_000);
+        crate::services::discord::health::test_support::age_file(&path, 1_000);
     }
 
     fn anchor_fingerprint(channel_id: u64, message_id: u64) -> Option<(Vec<u8>, SystemTime)> {
         let path = TurnViewReconciler::persisted_target_path(anchor_target(channel_id, message_id));
-        crate::services::discord::health::legacy_supervision::test_support::fingerprint(
-            &path.unwrap(),
-        )
+        crate::services::discord::health::test_support::fingerprint(&path.unwrap())
     }
 
     #[tokio::test]

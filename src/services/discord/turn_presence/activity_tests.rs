@@ -1048,7 +1048,6 @@ pub(crate) fn bind_turn_mode_transcript(
     path: &Path,
 ) -> crate::services::tui_o::turn_mode::TestConfirmation {
     use crate::services::discord::TmuxWatcherHandle;
-    use crate::services::tui_prompt_dedupe::binding_events as p5;
     shared.tmux_watchers.insert(
         ChannelId::new(channel),
         TmuxWatcherHandle {
@@ -1062,6 +1061,19 @@ pub(crate) fn bind_turn_mode_transcript(
             last_heartbeat_ts_ms: Arc::new(chrono::Utc::now().timestamp_millis().into()),
         },
     );
+    log_turn_source(provider, channel, session, "turn-presence-test", path);
+    crate::services::tui_o::turn_mode::TestConfirmation::new(channel)
+}
+
+/// The channel's binding log as one record of execution `nonce` naming `path` as `session`'s source.
+pub(crate) fn log_turn_source(
+    provider: &ProviderKind,
+    channel: u64,
+    session: &str,
+    nonce: &str,
+    path: &Path,
+) {
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
     let source = source_id_for("parent", path).unwrap();
     let now = chrono::Utc::now();
     let event = p5::BindingEvent {
@@ -1069,7 +1081,7 @@ pub(crate) fn bind_turn_mode_transcript(
         channel_id: channel,
         provider: provider.as_str().into(),
         tmux_session: session.into(),
-        execution_nonce: Some("turn-presence-test".into()),
+        execution_nonce: Some(nonce.into()),
         old: None,
         new: p5::BindingTarget::Source(source),
         cause: p5::BindingCause::Startup,
@@ -1084,7 +1096,6 @@ pub(crate) fn bind_turn_mode_transcript(
     std::fs::create_dir_all(&root).unwrap();
     let line = format!("{}\n", serde_json::to_string(&event).unwrap());
     std::fs::write(root.join(format!("{channel}.log")), line).unwrap();
-    crate::services::tui_o::turn_mode::TestConfirmation::new(channel)
 }
 
 /// The reason effect points read once the channel's rebuild finished.
