@@ -79,6 +79,7 @@ pub(super) async fn run_completion_postlude(
     let mut accumulated_memory_input_tokens = state.accumulated_memory_input_tokens;
     let mut accumulated_memory_output_tokens = state.accumulated_memory_output_tokens;
     let transport_error = state.transport_error;
+    let provider_failure = state.provider_failure;
     let api_friction_reports = state.api_friction_reports;
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
@@ -162,6 +163,7 @@ pub(super) async fn run_completion_postlude(
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
                     inflight_state.tmux_session_name.as_deref(),
                     completion_r0.permits_channel_effects(),
+                    provider_failure,
                 ),
             )
             .await;

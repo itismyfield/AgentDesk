@@ -31,11 +31,12 @@ pub(super) fn provider_error_presentation(
             super::super::super::response_delivery::prompt_too_long_guidance(&detail),
         )
     } else {
+        let summary = format!(
+            "{}\n같은 요청을 다시 시도해 주세요. 문제가 반복되면 `!clear`로 세션을 초기화한 뒤 다시 보내 주세요.",
+            crate::services::discord::turn_bridge::status_panel::provider_failure::PROVIDER_FAILURE_SUMMARY
+        );
         ProviderErrorPresentation::Failure(
-            crate::services::discord::commands::owner_error_response(
-                "provider가 응답을 완료하지 못했어요.\n같은 요청을 다시 시도해 주세요. 문제가 반복되면 `!clear`로 세션을 초기화한 뒤 다시 보내 주세요.",
-                &detail,
-            ),
+            crate::services::discord::commands::owner_error_response(&summary, &detail),
         )
     }
 }
