@@ -698,5 +698,97 @@ class IntegrationTest(unittest.TestCase):
             self.assertTrue(anchors, f"no anchors parsed from {rel}")
 
 
+class ForwardPromiseTests(unittest.TestCase):
+    def test_rejects_issue_and_same_change_update_promises(self) -> None:
+        for text in (
+            "#6012 updates this bullet in the same PR.",
+            "A lane owns correcting this bullet in the same change.",
+            "This section will be updated by #6012 in the same PR.",
+            "This bullet must be corrected in the same PR.",
+            "A lane will change this bullet in the same PR.",
+            "This bullet will be amended in the same PR.",
+            "The release may be delayed, so #6012 will update this bullet in the same PR.",
+            "The project could slip, therefore #6012 will update this bullet in the same PR.",
+            "The deadline may slip, so this bullet will be updated in the same PR.",
+            "The review could overrun, which means this section will be revised in the same PR.",
+            "#6012 edits this bullet in the same PR.",
+            "This section is scheduled to be revised in the same PR.",
+            "A lane is responsible for updating this bullet in the same change.",
+            "The follow-up PR plans to update this bullet in the same PR.",
+            "This section is planned to be revised in the same PR.",
+            "The lane is committed to correcting this paragraph in the same change.",
+            "#6012 will update the contract and correct this bullet in the same PR.",
+            "#6012 will update the contract and review the test and correct this bullet in the same PR.",
+            "#6012 will update the contract but also correct this bullet in the same PR.",
+            "A lane will avoid editing another section and update this bullet in the same PR.",
+            "Given no lane owns this section, #6012 will update this bullet in the same PR.",
+            "With no lane assigned to this paragraph, #6012 will rewrite this paragraph in the same PR.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(CHECKER.forward_promise_errors(text))
+
+    def test_follow_up_prediction_and_recheck_guidance_are_allowed(self) -> None:
+        text = (
+            "After #6012 lands, recheck this bullet before relying on it. "
+            "A later change may update the contract. The prior PR #6012 updated "
+            "this bullet in the preceding release. This bullet may be updated "
+            "in the same PR. It is possible that this bullet will be updated in the same PR. "
+            "This bullet will likely be updated in the same PR. "
+            "The old paragraph said this section would be revised "
+            "in the same change. No lane will update this bullet in the same PR. "
+            "This section must not be corrected in the same change. The prior PR "
+            "#6012 updated this bullet in the same PR. This paragraph is not "
+            "scheduled to be changed in the same PR. This paragraph is not "
+            "expected to be updated in the same PR. A lane is responsible for "
+            "not changing this bullet in the same PR. A lane is responsible for "
+            "ensuring this section is not changed in the same PR. A lane is "
+            "responsible for ensuring the same PR does not change this bullet. "
+            "A lane is responsible for ensuring this bullet won't be updated "
+            "in the same PR. A lane is responsible for ensuring this bullet "
+            "does not need updating in the same PR. A lane is responsible for "
+            "ensuring it does not have to update this bullet in the same PR."
+            " A lane will avoid updating this bullet in the same PR."
+            " A lane will refrain from changing this bullet in the same PR."
+            " No lane will update this paragraph and change this bullet in the same PR."
+            " No lane will update the document and change this bullet in the same PR."
+            " A lane must not edit anything and change this bullet in the same PR."
+            " No lane is expected to update the document and change this bullet in the same PR."
+            " No lane is scheduled to update the document and change this bullet in the same PR."
+            " A lane is not expected to update the document and change this bullet in the same PR."
+            " No lane is required to update the document and correct this bullet in the same PR."
+            " No lane has to update the document and correct this bullet in the same PR."
+            " No lane is planned to update the document and correct this bullet in the same PR."
+        )
+        self.assertEqual(CHECKER.forward_promise_errors(text), [])
+
+    def test_unrelated_prohibition_does_not_hide_promise_in_next_clause(self) -> None:
+        for text in (
+            "A lane must not cite the old fact; #6012 will update this bullet in the same PR.",
+            "No lane should cite this as fixed, or #6012 will update this bullet in the same PR.",
+            "No lane should cite this as fixed, while #6012 will update this bullet in the same PR.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(CHECKER.forward_promise_errors(text))
+
+    def test_repo_contract_has_no_forward_update_promise(self) -> None:
+        self.assertEqual(CHECKER.check_forward_promises(), [])
+
+    def test_checker_cli_fails_on_forward_promise_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = Path(tmp, "relay-state-contract.md")
+            doc.write_text(
+                CHECKER.DEFAULT_DOC.read_text(encoding="utf-8")
+                + "\n\n#6012 updates this bullet in the same PR.\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--doc", str(doc)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("forward-promise check:", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
