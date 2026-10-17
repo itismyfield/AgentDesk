@@ -693,6 +693,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             "test_completion_before_body",
             1510319194921504929,
             true,
+            false,
         )
         .await;
     }
@@ -720,6 +721,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             "test_completion_after_body",
             1510319194921504929,
             true,
+            false,
         )
         .await;
         assert!(committed);
@@ -756,6 +758,7 @@ async fn bridge_status_panel_completion_emits_background_agent_pending_payload()
         "test_bridge_background_agent_pending_payload",
         4_047_402,
         true,
+        false,
     )
     .await;
 
@@ -820,6 +823,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             0,
             None,
             false,
+            false,
             |_| async { false },
         )
         .await
@@ -867,6 +871,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             0,
             None,
             true,
+            false,
             |_| async { false },
         )
         .await
@@ -927,6 +932,7 @@ async fn foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm() {
         0,
         None,
         false,
+        false,
         |_| async { false },
     )
     .await;
@@ -970,6 +976,7 @@ async fn bridge_status_panel_completion_producer_threads_sniffed_background_agen
             0,
             Some("AgentDesk-claude-status-panel-background-test".to_string()),
             true,
+            false,
             move |tmux_session_name| async move {
                 sniffer_observed_tmux_session
                     .lock()
@@ -1027,6 +1034,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         "test_synthetic_status_panel_id",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1061,6 +1069,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         "test_synthetic_status_panel_id_retry",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1112,6 +1121,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         "test_wip_warning_order",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1144,6 +1154,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         "test_wip_warning_order_retry",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1219,6 +1230,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
             "test_status_panel_completion_path",
             user_msg_id,
             true,
+            false,
         )
         .await
     );
@@ -1306,6 +1318,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         "test_unknown_status_panel_id",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1374,6 +1387,7 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         "test_pending_bind_completion_purge",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1451,6 +1465,7 @@ async fn ledger_commit_failure_does_not_delete_a_completed_panel_4891() {
         "test_4891_ledger_failure_is_not_completion_failure",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1544,6 +1559,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         "test_singleton_transition_pending",
         4_860_102,
         true,
+        false,
     )
     .await;
     assert!(committed);
@@ -1570,6 +1586,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         "test_singleton_transition_final",
         4_860_102,
         true,
+        false,
     )
     .await;
     assert!(committed);
@@ -1636,6 +1653,7 @@ async fn single_message_mode_completion_leaves_singleton_store_untouched() {
         "test_flag_off_no_singleton",
         4_860_202,
         true,
+        false,
     )
     .await;
 

@@ -150,6 +150,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (mut claude_tui_busy_requeue_pending, mut auto_retry) = (false, AutoRetry::default());
     let mut busy_requeue_outcome = None;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
+    let mut provider_failure = false;
     let mut status_panel_terminal_committed = false;
     let mut completion_footer_terminal_text: Option<String> = None;
     // #2161 (Codex round-2 H1): hoisted into the outer scope so the
@@ -370,8 +371,22 @@ pub(super) async fn run_terminal_outcome_delivery(
         // Ownership is only read here; each Legacy arm below claims at its own transport.
         let direct = can_deliver_directly;
         let o_body_cut = bridge_o_body_peek_decision(channel_id, &inflight_state, direct);
+        provider_failure = status_panel::provider_failure::is_provider_failure_turn(
+            transport_error,
+            resume_failure_detected,
+            busy_requeue_outcome.is_some() || claude_tui_followup_pre_submit_requeue_candidate,
+            inflight_state.silent_turn,
+            &full_response,
+        );
+        // O posts only native answers, so on its channel the bridge still shows its own failure
+        // notice in full; like other bridge chrome it is no answer and sends without a claim.
+        let o_notice = provider_failure && direct && o_body_cut == Ok(true);
+        if o_notice {
+            delivery_response = full_response.clone();
+        }
         // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
-        let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
+        let answerless =
+            o_notice || no_answer(&full_response, response_sent_offset, &delivery_response);
         let body_claim =
             (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
         if o_body_cut.is_err() || silent_turn_handled {
@@ -411,7 +426,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if o_body_cut == Ok(true) {
+            if o_body_cut == Ok(true) && !o_notice {
                 let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
             } else if can_deliver_directly {
@@ -794,6 +809,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 cancelled,
                 is_prompt_too_long,
                 transport_error,
+                provider_failure,
                 recovery_retry,
                 resume_failure_detected,
                 busy_attempt_cost,
@@ -863,6 +879,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         new_session_id,
         new_raw_provider_session_id,
         full_response,
+        provider_failure,
         active_background_child_session_ids,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,

@@ -559,7 +559,7 @@ async fn run_bridge_postlude(driver: &TerminalDeliveryDriver, output: TerminalOu
         accumulated_input_tokens: 0, accumulated_cache_create_tokens: 0,
         accumulated_cache_read_tokens: 0, accumulated_output_tokens: 0,
         accumulated_memory_input_tokens: 0, accumulated_memory_output_tokens: 0,
-        transport_error: false, api_friction_reports: output.api_friction_reports, cancelled: false,
+        transport_error: false, provider_failure: false, api_friction_reports: output.api_friction_reports, cancelled: false,
         restart_followup_pending: None,
         bridge_skip_holder_owns_inflight: output.bridge_skip_holder_owns_inflight,
         completion_guard, inflight_guard, inflight_state: output.inflight_state,
