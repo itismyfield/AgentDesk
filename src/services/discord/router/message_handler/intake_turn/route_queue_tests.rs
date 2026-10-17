@@ -25,14 +25,14 @@ fn local_admission() -> crate::config::TestEnvVarGuard {
 fn hold_effect(
     channel: ChannelId,
 ) -> (
-    tokio::sync::oneshot::Receiver<(bool, bool)>,
+    tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
     std::sync::mpsc::Sender<()>,
 ) {
     super::super::super::super::hold_input_effect_for_tests(channel.get())
 }
 
 /// Whether the held effect starts within the wait.
-async fn starts(at: tokio::sync::oneshot::Receiver<(bool, bool)>, wait: Duration) -> bool {
+async fn starts(at: tokio::sync::oneshot::Receiver<std::thread::ThreadId>, wait: Duration) -> bool {
     matches!(tokio::time::timeout(wait, at).await, Ok(Ok(_)))
 }
 

@@ -39,7 +39,7 @@ mod input_effect_tests {
         let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
         let body = source.split_once(handler_marker.as_str()).unwrap().1;
         let start = body
-            .find("    let Some((route, bootstrapped_fresh_thread_session, redirected_permit))")
+            .find("    let Some((route, bootstrapped_fresh_thread_session))")
             .unwrap();
         let end = body[start..]
             .find("    let (mut session_id, mut memento_context_loaded")
@@ -49,9 +49,6 @@ mod input_effect_tests {
         assert!(
             !transition.contains("let provider ="),
             "role override must not shadow the original native-clear provider"
-        );
-        assert!(
-            transition.contains("final_admission(&final_provider, channel_id, redirected_permit)")
         );
         assert!(
             transition.contains("(http, shared, token, &provider)"),
@@ -798,7 +795,7 @@ pub(super) async fn handle_text_message(
                 );
             }
         }
-        let Some((route, bootstrapped_fresh_thread_session, redirected_permit)) =
+        let Some((route, bootstrapped_fresh_thread_session)) =
             adk_thread::redirect_dispatch(adk_thread::RedirectDispatch {
                 http,
                 cache,
@@ -821,23 +818,7 @@ pub(super) async fn handle_text_message(
         else {
             return Ok(IntakeExecution::Executed);
         };
-        let (channel_id, final_provider) = (route.target, route.provider(&provider));
-        let final_permit = adk_thread::final_admission(&final_provider, channel_id, redirected_permit)?;
-        let (http_owned, cache_owned, ctx_owned, shared_owned, token_owned) = (
-            http.clone(),
-            cache.cloned(),
-            ctx_for_chained_dispatch.cloned(),
-            shared.clone(),
-            token.to_owned(),
-        );
-        let user_text_owned = user_text.to_owned();
-        let request_owner_name_owned = request_owner_name.to_owned();
-        crate::services::discord::input_runtime::fence::effect::run(final_permit, async move {
-        let (http, cache, ctx_for_chained_dispatch, shared, token) = (
-            &http_owned, cache_owned.as_ref(), ctx_owned.as_ref(), &shared_owned, token_owned.as_str(),
-        );
-        let user_text = user_text_owned.as_str();
-        let request_owner_name = request_owner_name_owned.as_str();
+        let channel_id = route.target;
         let (final_thread_parent, authoritative, active_dispatch_info, active_dispatch_id_for_prompt) =
             dispatch_runtime::prepare_post_redirect_dispatch_runtime(
                 http,
@@ -988,10 +969,6 @@ pub(super) async fn handle_text_message(
             provider
         };
 
-        let execution_permit = crate::services::discord::input_runtime::fence::effect::admit(
-            &provider, channel_id.get(),
-        ).map_err(|failure| format!("execution input admission refused: {failure:?}"))?;
-        crate::services::discord::input_runtime::fence::effect::scope(execution_permit, async {
         {
             let channel_name_for_isolation = {
                 let data = shared.core.lock().await;
@@ -2371,9 +2348,7 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
-        let provider_permit = crate::services::discord::input_runtime::fence::effect::current();
-        tokio::task::spawn_blocking(move || crate::services::discord::input_runtime::fence::blocking(|| {
-            let _input_scope = crate::services::discord::input_runtime::fence::effect::worker_scope(provider_permit);
+        tokio::task::spawn_blocking(move || {
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
             let result = crate::services::platform::with_provider_execution_context(
@@ -2438,7 +2413,7 @@ pub(super) async fn handle_text_message(
                     });
                 }
             }
-        }));
+        });
 
         // #3813 Phase 1a: provider input is about to be handed to the turn bridge.
         intake_latency.mark_input_written();
@@ -2507,8 +2482,6 @@ pub(super) async fn handle_text_message(
         }
 
         Ok(IntakeExecution::Executed)
-        }).await
-        }).await
     })
     .await
 }

@@ -13,7 +13,6 @@ use axum::response::{IntoResponse, Response};
 use poise::serenity_prelude as serenity;
 use serde_json::{Value, json};
 
-use crate::services::discord::input_runtime::{fence, supervisor};
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::{Data, mailbox_snapshot, router};
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -301,8 +300,6 @@ async fn invoke(branch: Branch, root: &Path) -> Outcome {
         .await,
         "fixture passes fresh user authorization"
     );
-    assert_eq!(supervisor::REGISTRY.population_for_test(), (0, 0));
-    assert!(fence::channel_gate(channel.get()).is_none());
     transport.calls.lock().unwrap().clear();
     let original = serde_json::to_value(&message).unwrap();
     let mut voice_config = crate::voice::VoiceConfig::default();
@@ -460,7 +457,6 @@ fn run(test: &str, branches: &[Branch]) {
                 .any(|(method, path)| *method == Method::PUT && path.contains("/reactions/")),
             "{branch:?}: Legacy queue commit emits the pending reaction"
         );
-        assert!(fence::channel_gate(branch.channel()).is_none());
     }
 }
 

@@ -56,13 +56,6 @@ impl Route {
         shared.dispatch.role_overrides.get(&target).map(|v| *v)
     }
 
-    pub(super) fn provider(&self, provider: &ProviderKind) -> ProviderKind {
-        (self.role)
-            .and_then(|role| resolve_role_binding(role, None))
-            .and_then(|binding| binding.provider)
-            .unwrap_or_else(|| provider.clone())
-    }
-
     /// Runs right after the claim: this turn's parent edge and override replace the channel's.
     /// A replaced parent loses its thread guard, so its queue is kicked like any edge release.
     pub(super) fn publish(&self, shared: &Arc<SharedData>, provider: &ProviderKind) {
@@ -88,14 +81,7 @@ impl Route {
 
 pub(super) async fn redirect_dispatch(
     request: RedirectDispatch<'_>,
-) -> Result<
-    Option<(
-        Route,
-        bool,
-        Option<crate::services::discord::input_runtime::fence::Permit>,
-    )>,
-    Error,
-> {
+) -> Result<Option<(Route, bool)>, Error> {
     let RedirectDispatch {
         http,
         cache,
@@ -115,7 +101,6 @@ pub(super) async fn redirect_dispatch(
         queued,
     } = request;
     let mut bootstrapped_fresh_thread_session = false;
-    let mut redirected_permit = None;
     let (mut parent, mut role) = (None, None);
     let channel_id = if let Some(did) = dispatch_id_for_thread {
         if !crate::dispatch::dispatch_type_uses_thread_routing(dispatch_type_str) {
@@ -160,11 +145,6 @@ pub(super) async fn redirect_dispatch(
                             "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
                             alt_ch
                         );
-                        let final_provider = resolve_role_binding(alt_ch, None)
-                            .and_then(|binding| binding.provider)
-                            .unwrap_or_else(|| provider.clone());
-                        redirected_permit =
-                            final_admission(&final_provider, channel_id, redirected_permit.take())?;
                         role = Some(alt_ch);
                     }
                 }
@@ -185,14 +165,6 @@ pub(super) async fn redirect_dispatch(
 
                 // A reused thread is judged before it is unarchived, bootstrapped or mapped.
                 if let Some(tid) = reuse_tid {
-                    redirected_permit =
-                        crate::services::discord::input_runtime::fence::effect::admit(
-                            provider,
-                            tid.get(),
-                        )
-                        .map_err(|failure| {
-                            format!("redirect input admission refused: {failure:?}")
-                        })?;
                     let input = (std::mem::take(pending_uploads), session_was_cleared);
                     let target = (tid, original_channel_id, queued_drain);
                     let admitted =
@@ -210,15 +182,15 @@ pub(super) async fn redirect_dispatch(
                             tid,
                             did
                         );
-                        bootstrapped_fresh_thread_session = bootstrap_admitted(
-                            redirected_permit.clone(),
-                            shared,
-                            tid,
-                            dispatch_effective_path,
-                            http,
-                            cache,
-                        )
-                        .await;
+                        bootstrapped_fresh_thread_session =
+                            super::super::super::super::bootstrap_thread_session(
+                                shared,
+                                tid,
+                                dispatch_effective_path,
+                                http,
+                                cache,
+                            )
+                            .await;
                         parent = Some(channel_id);
                         // For review dispatches reusing an implementation thread,
                         // override role/model to use the counter-model channel.
@@ -229,14 +201,6 @@ pub(super) async fn redirect_dispatch(
                                     "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
                                     alt_ch
                                 );
-                                let final_provider = resolve_role_binding(alt_ch, None)
-                                    .and_then(|binding| binding.provider)
-                                    .unwrap_or_else(|| provider.clone());
-                                redirected_permit = final_admission(
-                                    &final_provider,
-                                    tid,
-                                    redirected_permit.take(),
-                                )?;
                                 role = Some(alt_ch);
                             }
                         }
@@ -278,29 +242,21 @@ pub(super) async fn redirect_dispatch(
                         .await
                     {
                         Ok(thread) => {
-                            redirected_permit =
-                                crate::services::discord::input_runtime::fence::effect::admit(
-                                    provider,
-                                    thread.id.get(),
-                                )
-                                .map_err(|failure| {
-                                    format!("redirect input admission refused: {failure:?}")
-                                })?;
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
                                 thread.id,
                                 did
                             );
-                            bootstrapped_fresh_thread_session = bootstrap_admitted(
-                                redirected_permit.clone(),
-                                shared,
-                                thread.id,
-                                dispatch_effective_path,
-                                http,
-                                cache,
-                            )
-                            .await;
+                            bootstrapped_fresh_thread_session =
+                                super::super::super::super::bootstrap_thread_session(
+                                    shared,
+                                    thread.id,
+                                    dispatch_effective_path,
+                                    http,
+                                    cache,
+                                )
+                                .await;
                             parent = Some(channel_id);
                             super::super::super::link_dispatch_thread(
                                 shared.api_port,
@@ -336,11 +292,7 @@ pub(super) async fn redirect_dispatch(
     };
     #[cfg(test)]
     route_reached(route.target).await;
-    Ok(Some((
-        route,
-        bootstrapped_fresh_thread_session,
-        redirected_permit,
-    )))
+    Ok(Some((route, bootstrapped_fresh_thread_session)))
 }
 
 #[cfg(all(test, unix))]
@@ -389,211 +341,10 @@ async fn route_reached(target: ChannelId) {
     }
 }
 
-pub(super) fn final_admission(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    redirected: Option<crate::services::discord::input_runtime::fence::Permit>,
-) -> Result<Option<crate::services::discord::input_runtime::fence::Permit>, Error> {
-    match redirected {
-        Some(permit) if permit.names(provider, channel.get()) => {
-            permit
-                .validate(provider, channel.get())
-                .map_err(|failure| format!("final input admission refused: {failure:?}"))?;
-            Ok(Some(permit))
-        }
-        _ => crate::services::discord::input_runtime::fence::effect::admit(provider, channel.get())
-            .map_err(|failure| format!("final input admission refused: {failure:?}").into()),
-    }
-}
-
-async fn bootstrap_admitted(
-    permit: Option<crate::services::discord::input_runtime::fence::Permit>,
-    shared: &Arc<SharedData>,
-    channel: ChannelId,
-    path: &str,
-    http: &Arc<serenity::http::Http>,
-    cache: Option<&Arc<serenity::cache::Cache>>,
-) -> bool {
-    use crate::services::discord::input_runtime::fence::effect;
-    if permit.is_none() && effect::current().is_none() {
-        return super::super::super::super::bootstrap_thread_session(
-            shared, channel, path, http, cache,
-        )
-        .await;
-    }
-    let (shared, path, http, cache) = (
-        shared.clone(),
-        path.to_owned(),
-        http.clone(),
-        cache.cloned(),
-    );
-    effect::run(permit, async move {
-        super::super::super::super::bootstrap_thread_session(
-            &shared,
-            channel,
-            &path,
-            &http,
-            cache.as_ref(),
-        )
-        .await
-    })
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::input_runtime::fence::{self, Gate, Mode};
     use futures::FutureExt;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn c1b_final_refusal_preserves_existing_thread_role_override() {
-        if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
-            "services::discord::router::message_handler::intake_turn::adk_thread::tests::",
-            "c1b_final_refusal_preserves_existing_thread_role_override"
-        )) {
-            return;
-        }
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(6_325_539);
-        let alt = ChannelId::new(6_325_540);
-        let previous = ChannelId::new(6_325_541);
-        let path = crate::services::discord::runtime_store::role_map_path().unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            serde_json::json!({"byChannelId": {alt.to_string(): {
-                "roleId": "c1b-refused-role", "promptFile": "", "provider": "codex"
-            }}})
-            .to_string(),
-        )
-        .unwrap();
-        let gate = Gate::protect(ProviderKind::Codex, channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let closing = gate.close().unwrap();
-        shared.dispatch.role_overrides.insert(channel, previous);
-        let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(
-            Arc::new(move |_, path| {
-                path.ends_with(&format!("/channels/{channel}")).then(|| {
-                    serde_json::json!({
-                        "id": channel.to_string(), "type": 0, "name": "c1b-input", "position": 0
-                    })
-                })
-            }),
-        )
-        .await;
-        let info = crate::services::discord::router::thread_binding::DispatchInfo {
-            discord_channel_alt: Some(alt.to_string()),
-            ..Default::default()
-        };
-        let mut uploads = Vec::new();
-        let result = redirect_dispatch(RedirectDispatch {
-            http: &api.http,
-            cache: None,
-            shared: &shared,
-            provider: &shared.provider,
-            channel_id: channel,
-            original_channel_id: channel,
-            dispatch_id_for_thread: &Some("c1b-refused-dispatch".into()),
-            dispatch_info_cached: &Some(info),
-            dispatch_type_str: Some("review"),
-            is_already_thread: true,
-            user_text: "review",
-            dispatch_effective_path: "/unreachable",
-            pending_uploads: &mut uploads,
-            session_was_cleared: Some(false),
-            queued_drain: false,
-            queued: None,
-        })
-        .await;
-        assert!(result.err().unwrap().to_string().contains("Closing"));
-        assert_eq!(
-            *shared.dispatch.role_overrides.get(&channel).unwrap(),
-            previous,
-            "refused final identity must not replace the prior override"
-        );
-        closing.drain().await;
-    }
-
-    #[tokio::test]
-    async fn c1b_final_identity_separates_original_and_execution_provider() {
-        let source = Gate::protect(ProviderKind::Codex, 6_325_510).unwrap();
-        let destination = Gate::protect(ProviderKind::Claude, 6_325_511).unwrap();
-        let _source_health = fence::test_health::Clear::new(&source);
-        let _destination_health = fence::test_health::Clear::new(&destination);
-        let permit = source.admit().unwrap();
-        let source_closing = source.close().unwrap();
-        let destination_closing = destination.close().unwrap();
-        fence::effect::detached(Some(permit), async move {
-            let inherited = fence::effect::current().unwrap();
-            let same = final_admission(
-                &ProviderKind::Codex,
-                ChannelId::new(6_325_510),
-                Some(inherited.clone()),
-            )
-            .unwrap();
-            assert!(same.unwrap().names(&ProviderKind::Codex, 6_325_510));
-            let refused = final_admission(
-                &ProviderKind::Claude,
-                ChannelId::new(6_325_511),
-                Some(inherited.clone()),
-            );
-            assert!(refused.err().unwrap().to_string().contains("Closing"));
-            // Another provider's protection covers the channel, so a foreign writer is refused.
-            let foreign = final_admission(
-                &ProviderKind::Claude,
-                ChannelId::new(6_325_510),
-                Some(inherited),
-            );
-            assert!(foreign.err().unwrap().to_string().contains("Closing"));
-        })
-        .await;
-        source_closing.drain().await;
-        destination_closing.drain().await;
-    }
-
-    #[tokio::test]
-    async fn c1b_redirect_refuses_closed_thread_before_bootstrap_or_mapping() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let original = ChannelId::new(6_325_508);
-        let destination = ChannelId::new(6_325_509);
-        let gate = Gate::protect(shared.provider.clone(), destination.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let closing = gate.close().unwrap();
-        let http = Arc::new(serenity::http::Http::new("Bot input-test-no-network"));
-        let info = crate::services::discord::router::thread_binding::DispatchInfo {
-            active_thread_id: Some(destination.to_string()),
-            ..Default::default()
-        };
-        let mut uploads = Vec::new();
-        let result = redirect_dispatch(RedirectDispatch {
-            http: &http,
-            cache: None,
-            shared: &shared,
-            provider: &shared.provider,
-            channel_id: original,
-            original_channel_id: original,
-            dispatch_id_for_thread: &Some("dispatch-test".into()),
-            dispatch_info_cached: &Some(info),
-            dispatch_type_str: None,
-            is_already_thread: false,
-            user_text: "input",
-            dispatch_effective_path: "/unreachable",
-            pending_uploads: &mut uploads,
-            session_was_cleared: Some(false),
-            queued_drain: false,
-            queued: None,
-        })
-        .now_or_never()
-        .expect("closed thread cannot await network");
-        assert!(result.err().unwrap().to_string().contains("Closing"));
-        assert!(!shared.dispatch.thread_parents.contains_key(&original));
-        assert!(!shared.core.lock().await.sessions.contains_key(&destination));
-        assert_eq!(gate.mode(), Mode::Closing);
-        closing.drain().await;
-    }
 
     /// A queued input refused by its reused Herdr thread hands every taken upload to its queue
     /// owner once; the session gets back only its clear flag and keeps an upload that came later.

@@ -293,7 +293,7 @@ fn an_unknown_head_blocks_every_consumer_and_survives_every_purge() {
         let _ = handle.finish_turn(ctx()).await;
         let before = std::fs::read(queue_path(channel)).unwrap();
         let purged = handle.purge_queue(ctx(), true).await;
-        assert!(purged.input_refusal.is_some());
+        assert!(purged.queued_head_refused);
         assert_eq!(std::fs::read(queue_path(channel)).unwrap(), before);
         assert_eq!(
             queued(&handle)
@@ -572,7 +572,7 @@ fn restore_cancel_and_purge_keep_a_reserved_head() {
         );
         assert!(handle.enqueue(human(63, 8, "third"), ctx()).await.enqueued);
         let purged = handle.purge_queue(ctx(), true).await;
-        assert!(purged.input_refusal.is_some());
+        assert!(purged.queued_head_refused);
         assert_eq!(purged.drained, 0);
         assert_eq!(
             queued(&handle).await,

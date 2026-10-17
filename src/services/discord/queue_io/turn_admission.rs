@@ -231,25 +231,16 @@ pub(in crate::services::discord) async fn mailbox_recovery_kickoff(
 #[path = "turn_admission_tests.rs"]
 mod tests;
 
-pub(in crate::services::discord) const INPUT_PENDING_NOTICE: &str =
-    "보류됨 — 입력 전환이 끝나면 자동 접수됩니다(5분 이내 원본). 다시 보내지 않아도 됩니다.";
-pub(in crate::services::discord) async fn input_refusal_notice(
+/// Replies to each source whose input could not be stored, asking the author to resend it.
+pub(in crate::services::discord) async fn input_persistence_refusal_notice(
     shared: &SharedData,
     channel: ChannelId,
     sources: &[u64],
-    failure: super::super::input_runtime::fence::Failure,
 ) {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         return;
     };
-    let text = if matches!(
-        failure,
-        super::super::input_runtime::fence::Failure::Mode(_)
-    ) {
-        INPUT_PENDING_NOTICE
-    } else {
-        "입력을 저장하지 못했습니다. 원본을 유지하고 다시 시도해 주세요."
-    };
+    let text = "입력을 저장하지 못했습니다. 원본을 유지하고 다시 시도해 주세요.";
     for source in sources {
         if super::super::http::send_channel_message_with_reference(
             &http,
@@ -264,7 +255,6 @@ pub(in crate::services::discord) async fn input_refusal_notice(
             tracing::warn!(
                 channel_id = channel.get(),
                 source,
-                ?failure,
                 "input refusal notice failed; responsibility retained"
             );
         }
