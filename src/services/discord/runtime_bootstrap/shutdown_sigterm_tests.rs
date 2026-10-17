@@ -1,8 +1,7 @@
 use super::*;
-use crate::services::discord::input_runtime::{self, fence::Gate};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
 
-/// The actual handler marks every row it can from async code (a protected open row included),
+/// The actual handler marks every row it can from async code (an open row included),
 /// still runs the final save after a row fails, and consumes its slot only after both saves.
 #[cfg(unix)]
 #[tokio::test]
@@ -44,8 +43,6 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
     let lock = row_path(failed).with_extension("json.lock");
     std::fs::remove_file(&lock).unwrap();
     std::fs::create_dir(&lock).unwrap();
-    let gate = Gate::protect(provider.clone(), open).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
     shared.last_message_ids.insert(channel, 99);
     // One remaining slot keeps this real handler path away from process::exit.
     shared
@@ -106,12 +103,6 @@ async fn c2_sigterm_handler_dispatch_persists_and_consumes_shutdown_slot() {
         );
     }
     assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={open}"))),
-        "the protected open row saw a refused writer"
-    );
-    assert!(
         shared
             .restart
             .shutdown_counted
@@ -135,7 +126,7 @@ const SIGTERM_ISOLATION_PROOF: &str = "c2b-sigterm-isolation.proof";
 #[test]
 fn c2b_injected_sigterm_never_installs_the_os_handler() {
     let test_name = concat!(
-        "services::discord::runtime_bootstrap::shutdown::input_fence_tests::",
+        "services::discord::runtime_bootstrap::shutdown::sigterm_tests::",
         "c2b_sigterm_isolation_child"
     );
     let temp = tempfile::tempdir().unwrap();
@@ -264,7 +255,7 @@ fn item(id: u64) -> Intervention {
 }
 
 #[tokio::test]
-async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_save_legacy() {
+async fn c2_sigterm_initial_and_final_snapshots_bracket_the_marking_pass() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -273,53 +264,45 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
     );
     let shared = crate::services::discord::make_shared_data_for_tests();
     let provider = ProviderKind::Codex;
-    let (held, legacy) = (ChannelId::new(6_325_590), ChannelId::new(6_325_591));
+    let legacy = ChannelId::new(6_325_591);
     let root = inflight::inflight_runtime_root().unwrap();
-    for channel in [held, legacy] {
-        shared
-            .mailboxes
-            .handle(channel)
-            .replace_queue(
-                vec![item(channel.get() + 10)],
-                QueuePersistenceContext::new(&provider, &shared.token_hash, None),
-            )
-            .await;
-        let row = InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            Some("shutdown-test".into()),
-            7,
-            channel.get() + 10,
-            channel.get() + 20,
-            "input".into(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        );
-        inflight::save_inflight_state_create_new(&row).unwrap();
-        shared.last_message_ids.insert(channel, channel.get() + 30);
-    }
+    shared
+        .mailboxes
+        .handle(legacy)
+        .replace_queue(
+            vec![item(legacy.get() + 10)],
+            QueuePersistenceContext::new(&provider, &shared.token_hash, None),
+        )
+        .await;
+    let row = InflightTurnState::new(
+        provider.clone(),
+        legacy.get(),
+        Some("shutdown-test".into()),
+        7,
+        legacy.get() + 10,
+        legacy.get() + 20,
+        "input".into(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    inflight::save_inflight_state_create_new(&row).unwrap();
+    shared.last_message_ids.insert(legacy, legacy.get() + 30);
     let queue_path = |channel: ChannelId| {
-        input_runtime::fence::population_root()
-            .unwrap()
-            .join(format!(
-                "discord_pending_queue/codex/{}/{}.json",
-                shared.token_hash,
-                channel.get()
-            ))
+        runtime_store::runtime_root().unwrap().join(format!(
+            "discord_pending_queue/codex/{}/{}.json",
+            shared.token_hash,
+            channel.get()
+        ))
     };
-    let held_queue = std::fs::read(queue_path(held)).unwrap();
     let legacy_row_path = inflight::inflight_state_path(&root, &provider, legacy.get());
     let checkpoint = runtime_store::last_message_root()
         .unwrap()
         .join("codex")
         .join(format!("{}.txt", legacy.get()));
     std::fs::remove_file(queue_path(legacy)).unwrap();
-    let gate = Gate::protect(provider.clone(), held.get()).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
-    let _closing = gate.close().unwrap();
 
     let drains = persist_sigterm_state_with_boundaries(
         &shared,
@@ -366,11 +349,5 @@ async fn c2_sigterm_initial_and_final_snapshots_preserve_held_population_and_sav
     assert_eq!(
         std::fs::read_to_string(checkpoint).unwrap().trim(),
         (legacy.get() + 31).to_string()
-    );
-    assert_eq!(std::fs::read(queue_path(held)).unwrap(), held_queue);
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={}", held.get())))
     );
 }

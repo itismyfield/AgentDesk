@@ -1161,65 +1161,6 @@ src/
 │   │   │   ├── shadow_tests.rs
 │   │   │   ├── telemetry.rs
 │   │   │   └── worker.rs
-│   │   ├── input_runtime/
-│   │   │   ├── activation/
-│   │   │   │   ├── plan.rs
-│   │   │   │   ├── scope.rs
-│   │   │   │   ├── scope_tests.rs
-│   │   │   │   └── selection_tests.rs
-│   │   │   ├── fence/
-│   │   │   │   ├── g1b_modes_tests.rs
-│   │   │   │   ├── modes.rs
-│   │   │   │   └── modes_tests.rs
-│   │   │   ├── intake/
-│   │   │   │   ├── admit.rs
-│   │   │   │   ├── admit_tests.rs
-│   │   │   │   ├── classify.rs
-│   │   │   │   ├── client.rs
-│   │   │   │   ├── client_tests.rs
-│   │   │   │   └── source.rs
-│   │   │   ├── runtime/
-│   │   │   │   ├── dormant_tests.rs
-│   │   │   │   ├── drive.rs
-│   │   │   │   ├── notice.rs
-│   │   │   │   ├── notice_tests.rs
-│   │   │   │   ├── ports.rs
-│   │   │   │   └── ports_tests.rs
-│   │   │   ├── supervisor/
-│   │   │   │   ├── drive.rs
-│   │   │   │   ├── drive_entry_tests.rs
-│   │   │   │   ├── drive_tests.rs
-│   │   │   │   ├── g1b_entry_tests.rs
-│   │   │   │   ├── g2b_entry_tests.rs
-│   │   │   │   ├── receipt_entry_tests.rs
-│   │   │   │   └── reserve.rs
-│   │   │   ├── activation.rs
-│   │   │   ├── admission.rs
-│   │   │   ├── clear.rs
-│   │   │   ├── clear_tests.rs
-│   │   │   ├── command.rs
-│   │   │   ├── effect.rs
-│   │   │   ├── effect_tests.rs
-│   │   │   ├── external.rs
-│   │   │   ├── external_tests.rs
-│   │   │   ├── fence.rs
-│   │   │   ├── fence_tests.rs
-│   │   │   ├── g1b_command_tests.rs
-│   │   │   ├── g1b_ordering_tests.rs
-│   │   │   ├── intake.rs
-│   │   │   ├── mapping.rs
-│   │   │   ├── mapping_guard_tests.rs
-│   │   │   ├── mod.rs
-│   │   │   ├── ordering.rs
-│   │   │   ├── ordering_tests.rs
-│   │   │   ├── receipt.rs
-│   │   │   ├── receipt_tests.rs
-│   │   │   ├── reconcile.rs
-│   │   │   ├── reserve_tests.rs
-│   │   │   ├── runtime.rs
-│   │   │   ├── source.rs
-│   │   │   ├── supervisor.rs
-│   │   │   └── supervisor_tests.rs
 │   │   ├── live_bridge/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
@@ -1253,6 +1194,7 @@ src/
 │   │   │   │   ├── validation.rs
 │   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
+│   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
 │   │   │   ├── turn_output_controller/
@@ -1354,7 +1296,8 @@ src/
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
 │   │   ├── queue_park_ledger/
-│   │   │   └── cancel_park_tests.rs
+│   │   │   ├── cancel_park_tests.rs
+│   │   │   └── promote_hold.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
@@ -1618,7 +1561,7 @@ src/
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
-│   │   │   ├── shutdown_input_fence_tests.rs
+│   │   │   ├── shutdown_sigterm_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
@@ -2158,7 +2101,6 @@ src/
 │   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
-│   │   │   ├── entrypoints.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs
@@ -2960,6 +2902,7 @@ src/
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_policy/
+│   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
@@ -2983,6 +2926,7 @@ src/
 │   │   │   ├── codex_policy.rs
 │   │   │   ├── codex_verified.rs
 │   │   │   ├── codex_verified_executed_resume_tests.rs
+│   │   │   ├── codex_verified_hold_detail_tests.rs
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
@@ -3034,8 +2978,6 @@ src/
 │   │   ├── incarnation.rs
 │   │   ├── injected_inputs.rs
 │   │   ├── injected_inputs_tests.rs
-│   │   ├── input_fence.rs
-│   │   ├── input_fence_tests.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs
