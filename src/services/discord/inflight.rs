@@ -25,9 +25,6 @@ mod invariant_test_capture;
 mod model;
 #[cfg(test)]
 pub(crate) mod read_only_owner_snapshot;
-#[cfg(test)]
-#[path = "inflight/restart_mark_fence_tests.rs"]
-mod restart_mark_fence_tests;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
 // Re-export the domain model at its existing visibility for root and sibling callers.
 #[cfg(test)]
@@ -533,7 +530,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     if !path.exists() {
         return Outcome::Missing;
     }
-    let _lock = match store::try_lock_unfenced_inflight_state_path(path) {
+    let _lock = match store::try_lock_inflight_state_path_typed(path) {
         Ok(lock) => lock,
         Err(store::TryLockRefusal::Failed(error)) => return Outcome::Io(error),
         Err(_) => return Outcome::Busy,
@@ -854,11 +851,6 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
         return Vec::new();
     };
     load_inflight_states_from_root(&root, provider)
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {

@@ -66,18 +66,16 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     {
         return Ok(false);
     }
-    crate::services::discord::input_runtime::fence::write(provider, channel, || {
-        log_inflight_remove(
-            provider,
-            channel,
-            fresh.user_msg_id,
-            "invalidate_stale_generation_scoped",
-            &path,
-        );
-        fs::remove_file(&path).map_err(|error| String::from(RestoreFailure::retryable(error)))?;
-        crate::services::discord::runtime_store::fsync_parent_dir(&path)
-            .map_err(|error| String::from(RestoreFailure::retryable(error)))
-    })?;
+    log_inflight_remove(
+        provider,
+        channel,
+        fresh.user_msg_id,
+        "invalidate_stale_generation_scoped",
+        &path,
+    );
+    fs::remove_file(&path).map_err(|error| String::from(RestoreFailure::retryable(error)))?;
+    crate::services::discord::runtime_store::fsync_parent_dir(&path)
+        .map_err(|error| String::from(RestoreFailure::retryable(error)))?;
     Ok(true)
 }
 

@@ -437,20 +437,18 @@ pub(crate) fn save_channel_queue(
     queue: &[Intervention],
     dispatch_role_override: Option<u64>,
 ) -> Result<(), String> {
-    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-        // This writer carries no metadata, so it must not replace or remove a V1 snapshot.
-        if let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) {
-            refuse_metadata_loss(&path)?;
-        }
-        save_channel_queue_locked(
-            provider,
-            token_hash,
-            channel_id,
-            queue,
-            None,
-            dispatch_role_override,
-        )
-    })
+    // This writer carries no metadata, so it must not replace or remove a V1 snapshot.
+    if let Some(path) = pending_queue_file_path(provider, token_hash, channel_id) {
+        refuse_metadata_loss(&path)?;
+    }
+    save_channel_queue_locked(
+        provider,
+        token_hash,
+        channel_id,
+        queue,
+        None,
+        dispatch_role_override,
+    )
 }
 
 /// A set `meta` writes the V1 object, which an empty queue does not remove.
@@ -479,20 +477,6 @@ fn save_channel_queue_locked(
     }
     if queue.is_empty() && meta.is_none() {
         return match fs::remove_file(&path) {
-            Ok(())
-                if crate::services::discord::input_runtime::fence::lookup(
-                    provider,
-                    channel_id.get(),
-                )
-                .is_some() =>
-            {
-                #[cfg(test)]
-                if fsync_fault::take(channel_id) {
-                    return Err(format!("injected parent fsync failure {}", path.display()));
-                }
-                crate::services::discord::runtime_store::fsync_parent_dir(&path)
-                    .map_err(|e| e.to_string())
-            }
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
@@ -574,9 +558,7 @@ pub(super) fn persist_queue(
         &state.intervention_queue,
         persistence.dispatch_role_override,
     );
-    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-        save_channel_queue_locked(provider, token_hash, channel_id, queue, meta, role)
-    })?;
+    save_channel_queue_locked(provider, token_hash, channel_id, queue, meta, role)?;
     super::queued_head::record_write(state);
     Ok(())
 }
@@ -598,24 +580,6 @@ pub(super) fn log_queue_persistence_rollback(
 }
 
 pub(crate) fn save_channel_pending_dispatch_marker(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-    intervention: &Intervention,
-    dispatch_role_override: Option<u64>,
-) -> Result<(), String> {
-    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-        save_channel_pending_dispatch_marker_locked(
-            provider,
-            token_hash,
-            channel_id,
-            intervention,
-            dispatch_role_override,
-        )
-    })
-}
-
-fn save_channel_pending_dispatch_marker_locked(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,
@@ -655,30 +619,10 @@ pub(super) fn remove_channel_pending_dispatch_marker(
     token_hash: &str,
     channel_id: ChannelId,
 ) -> Result<(), String> {
-    crate::services::discord::input_runtime::fence::write(provider, channel_id.get(), || {
-        remove_channel_pending_dispatch_marker_locked(provider, token_hash, channel_id)
-    })
-}
-
-fn remove_channel_pending_dispatch_marker_locked(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: ChannelId,
-) -> Result<(), String> {
     let Some(path) = pending_dispatch_marker_file_path(provider, token_hash, channel_id) else {
         return Ok(());
     };
     match fs::remove_file(&path) {
-        Ok(())
-            if crate::services::discord::input_runtime::fence::lookup(
-                provider,
-                channel_id.get(),
-            )
-            .is_some() =>
-        {
-            crate::services::discord::runtime_store::fsync_parent_dir(&path)
-                .map_err(|e| e.to_string())
-        }
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!(
@@ -695,10 +639,6 @@ pub(crate) fn remove_channel_pending_queue_files_all_tokens(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> usize {
-    if crate::services::discord::input_runtime::fence::lookup(provider, channel_id.get()).is_some()
-    {
-        return 0;
-    }
     let Some(root) = pending_queue_root() else {
         return 0;
     };
@@ -1001,28 +941,6 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
     }
 }
 
-/// Test-only: fail a channel's next parent fsync after its empty queue file was removed, once.
-#[cfg(test)]
-pub(super) mod fsync_fault {
-    use poise::serenity_prelude::ChannelId;
-    use std::sync::Mutex;
-
-    static ARMED: Mutex<Vec<ChannelId>> = Mutex::new(Vec::new());
-
-    pub(in crate::services::turn_orchestrator) fn fail_next(channel_id: ChannelId) {
-        ARMED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(channel_id);
-    }
-
-    pub(super) fn take(channel_id: ChannelId) -> bool {
-        let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
-        let index = armed.iter().position(|armed| *armed == channel_id);
-        index.map(|index| armed.swap_remove(index)).is_some()
-    }
-}
-
 /// Test-only: fail a channel's next queue save before the file is touched, once.
 #[cfg(test)]
 pub(super) mod save_fault {
@@ -1250,5 +1168,34 @@ mod tests {
             None,
             "ENOTDIR is not evidence that the entries are absent"
         );
+    }
+
+    /// Removing an empty queue or its dispatch marker adds no parent fsync, so a token directory
+    /// that cannot be opened for reading still accepts both removals.
+    #[cfg(unix)]
+    #[test]
+    fn empty_queue_and_marker_removal_never_open_the_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = lock_test_env();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let (provider, token, channel) = (ProviderKind::Claude, "unlink-test", ChannelId::new(41));
+        let item = intervention(42, "queued", Instant::now());
+        save_channel_queue(&provider, token, channel, std::slice::from_ref(&item), None).unwrap();
+        save_channel_pending_dispatch_marker(&provider, token, channel, &item, None).unwrap();
+        let queue = pending_queue_file_path(&provider, token, channel).unwrap();
+        let marker = pending_dispatch_marker_file_path(&provider, token, channel).unwrap();
+        let dir = queue.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let removed = (
+            save_channel_queue(&provider, token, channel, &[], None),
+            remove_channel_pending_dispatch_marker(&provider, token, channel),
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(removed, (Ok(()), Ok(())));
+        assert!(!queue.exists() && !marker.exists());
     }
 }
