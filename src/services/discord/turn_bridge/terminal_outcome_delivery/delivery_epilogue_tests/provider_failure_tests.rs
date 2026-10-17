@@ -115,9 +115,8 @@ async fn deliver(case: &Case) -> Seen {
     }
 }
 
-/// O's tick may or may not have consumed the notice and the panel may be a footer: the bridge
-/// still replaces its placeholder with the whole notice, never deletes it, commits only after
-/// that replace, marks the request failed, and leaves O's ledger untouched.
+/// Consumed by O's tick or not, footer or panel: the whole notice replaces the placeholder, which
+/// is never deleted, commits only after that replace, is marked failed and leaves O's ledger alone.
 #[tokio::test]
 async fn provider_failure_notice_is_shown_and_failed_on_o_and_legacy_channels() {
     for (o, consumed, footer) in [

@@ -228,10 +228,8 @@ fn reconcile_leaves_panel(turn: &Cold, panel_id: u64, panel: &str) -> bool {
     !queued || !crate::services::discord::placeholder_sweeper::is_message_still_placeholder(panel)
 }
 
-/// The executor fails at the launch host it asked for, with no attach or prompt, and its `Err`
-/// reaches the bridge through intake's conversion: on O's channel and on a Legacy one, with a
-/// separate panel or the footer, the notice with its detail is the turn's visible end, the panel
-/// ends failed rather than `✅ 완료`, and the request is marked `⚠`.
+/// The executor's launch-host `Err` reaches the bridge with no attach or prompt: O or Legacy, panel
+/// or footer, the notice and its detail stay shown, nothing reads `✅ 완료`, and the request is `⚠`.
 #[tokio::test(flavor = "current_thread")]
 async fn cold_launch_error_without_stop_shows_failure_not_completion() {
     let root = tempfile::tempdir().unwrap();
