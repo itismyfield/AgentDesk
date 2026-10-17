@@ -385,10 +385,9 @@ pub(super) async fn run_terminal_outcome_delivery(
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
         } else if provider_failure && direct && o_body_cut == Ok(true) {
-            // O posts only native answers, so the bridge shows its own failure notice in full,
-            // and the turn counts as delivered only once that replace is confirmed.
+            // O posts only native answers, so the bridge sends its own failure notice in full outside
+            // O's claim; the turn counts as delivered only once that replace is confirmed.
             delivery_response = full_response.clone();
-            // The notice is bridge chrome, not O's native body, so it is sent outside O's claim.
             let outcome = gateway
                 .replace_message_with_outcome(channel_id, current_msg_id, &delivery_response)
                 .await;
