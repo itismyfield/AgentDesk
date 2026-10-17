@@ -426,3 +426,246 @@ async fn a_transition_waits_while_its_activation_waits_on_the_serial_lock() {
 
 #[path = "host_codex_takeover_tests.rs"]
 mod codex_takeover;
+
+#[cfg(unix)]
+struct SettledResume {
+    _tmux: crate::services::provider_teardown::tests::test_support::FakeTmux,
+    _env: [crate::config::TestEnvVarGuard; 2],
+    context: crate::services::tui_prompt_dedupe::binding_context::BindingContext,
+    source: SourceId,
+    _dedupe: std::sync::MutexGuard<'static, ()>,
+    _shared: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+#[cfg(unix)]
+impl Drop for SettledResume {
+    fn drop(&mut self) {
+        p5::forget_channel_for_tests(self.context.channel_id.unwrap());
+        p5::set_test_root(None);
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+}
+
+#[cfg(unix)]
+fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, SettledResume) {
+    use crate::config::TestEnvVarGuard as Guard;
+    use crate::services::claude_tui::hook_server::{
+        adoption_retry::DurableKind,
+        observation_ingress::{IngressOutcome, observe_binding_hook},
+    };
+    use crate::services::tmux_common as tc;
+    use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context::*};
+    const SESSION: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
+    let shared = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let locked = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let harness = fresh_on(channel);
+    let root = harness._runtime.path();
+    let config = root.join("fixture-config.yaml");
+    std::fs::write(&config, "server: {}").unwrap();
+    let env = [
+        Guard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config),
+        Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root),
+    ];
+    dedupe::reset_state_for_tests();
+    p5::set_test_root(Some(root));
+    let sessions = root.join("sessions");
+    std::fs::create_dir(&sessions).unwrap();
+    let context = BindingContext {
+        schema: 1,
+        provider: "codex".into(),
+        created_at: Utc::now(),
+        execution_nonce: uuid::Uuid::new_v4().simple().to_string(),
+        tmux_session: format!("resume-first-init-{channel}"),
+        channel_id: Some(channel),
+        owner_runtime_root: tc::current_tmux_owner_marker(),
+        host: None,
+        expected_native_session_id: Some(SESSION.into()),
+        launch_mode: "resume".into(),
+        provider_root: Some(sessions.canonicalize().unwrap()),
+        first_prompt_digest: None,
+        source_policy: Some("verified".into()),
+    };
+    PreparedIncarnation::create(context.clone()).unwrap();
+    let marker = tc::session_temp_path(&context.tmux_session, "spawn_nonce");
+    std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(marker, &context.execution_nonce).unwrap();
+    std::fs::write(
+        tc::session_temp_path(&context.tmux_session, tc::TMUX_RUNTIME_KIND_TEMP_EXT),
+        CodexTui.as_str(),
+    )
+    .unwrap();
+    dedupe::register_tmux_channel(&context.tmux_session, channel);
+    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+        &context.tmux_session,
+    );
+    let path = context
+        .provider_root
+        .as_ref()
+        .unwrap()
+        .join(format!("rollout-{SESSION}.jsonl"));
+    let at = (context.created_at - chrono::Duration::days(4)).to_rfc3339();
+    let meta = serde_json::json!({"type":"session_meta","timestamp":at,"payload":{
+        "id":SESSION,"timestamp":at,"cwd":root,"source":"cli","originator":"codex_cli_rs"}});
+    let mut bytes = codex_line(meta);
+    if history {
+        bytes.extend(codex_line(
+            serde_json::json!({"type":"event_msg","payload":{
+            "type":"task_started","turn_id":"operational-history"}}),
+        ));
+        bytes.extend(codex_line(
+            serde_json::json!({"type":"event_msg","payload":{
+            "type":"user_message","message":"previous request"}}),
+        ));
+        bytes.extend(answer("old-answer", "previous answer"));
+        bytes.extend(codex_line(
+            serde_json::json!({"type":"event_msg","payload":{
+            "type":"task_complete","turn_id":"operational-history","last_agent_message":"previous answer"}}),
+        ));
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    let envelope = HookBindingEnvelope {
+        context: CapturedContext::Captured(context.clone()),
+        observed: ObservedHookProcess::default(),
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+    for (event, source) in [
+        ("session-start", Some("resume")),
+        ("user-prompt-submit", None),
+    ] {
+        let mut payload = serde_json::json!({"session_id":SESSION,"transcript_path":path,
+            "prompt":"resume request"});
+        if let Some(source) = source {
+            payload["source"] = serde_json::json!(source);
+        } else {
+            assert!(payload.get("source").is_none());
+        }
+        assert_eq!(
+            observe_binding_hook(
+                "codex",
+                event,
+                Some(SESSION),
+                Some(SESSION),
+                &payload,
+                &headers
+            ),
+            IngressOutcome::Durable(DurableKind::Pending)
+        );
+    }
+    let before = p5::codex::read_ownership(&context).unwrap();
+    assert_eq!(before.pending.len(), 2);
+    assert!(before.verified.is_none());
+    assert!(dedupe::codex_verified::record_executed_resume(&context, SESSION, &path, 0).unwrap());
+    let fold = p5::codex::read_ownership(&context).unwrap();
+    assert!(fold.pending.is_empty() && !fold.conflicted);
+    let source = fold.verified.unwrap().source;
+    let events = ChannelBindingLog::new(channel, ShadowProvider::Codex)
+        .binding_events_since(channel, 0)
+        .unwrap();
+    assert_eq!(events.len(), 4);
+    assert!(matches!(&events[2].record,
+        BindingRecord::Rejected { closes: Some(seq), .. } if *seq == before.pending[1].seq));
+    let (bound, _) = crate::services::tui_o::writer::adoption::logged(&events).unwrap();
+    assert_eq!(bound, [&source]);
+    assert_eq!(
+        harness.store.read_era().unwrap(),
+        None,
+        "no O era precedes activation"
+    );
+    (
+        harness,
+        SettledResume {
+            _tmux: fake,
+            _env: env,
+            context,
+            source,
+            _dedupe: locked,
+            _shared: shared,
+        },
+    )
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn resume_companion_metadata_only_log_allows_actual_host_first_init() {
+    const CODEX: u64 = 61_809;
+    let (harness, resume) = settled_resume_for_first_init(CODEX, false);
+    let prefix = std::fs::read(&resume.source.path).unwrap();
+    harness.gate.acquired();
+    let _selected = test_override::force_candidates(&[(CODEX, CodexTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(io.alarms.released(), [], "{:?}", io.alarms.halted());
+    assert_eq!(adoption(CODEX), Adoption::Committed);
+    assert!(ready.is_ready(CODEX), "{:?}", io.alarms.halted());
+    let init = harness.store.read_init(CODEX).unwrap().unwrap();
+    assert_eq!(
+        init.sources,
+        [InitSource {
+            source_id: resume.source.clone(),
+            delivery_start: prefix.len() as u64,
+            prefix_hash: hex::encode(Sha256::digest(&prefix)),
+        }]
+    );
+    append(
+        &resume.source.path,
+        &answer("first-answer", "first owned answer"),
+    );
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["first owned answer"]);
+    restart_posts_nothing(&harness, tasks, &resume.source).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn resume_companion_history_log_releases_actual_host_and_allows_legacy_body() {
+    use crate::services::tui_o::cutover::{BodyClaim, BodySend, claim_then_send, claims_judged};
+    const CODEX: u64 = 61_810;
+    let (harness, resume) = settled_resume_for_first_init(CODEX, true);
+    harness.gate.acquired();
+    let _selected = test_override::force_candidates(&[(CODEX, CodexTui)]);
+    let (io, ready) = (TestIo::over(&harness), Arc::new(Readiness::default()));
+    let tasks = start_codex(&harness, &io, &ready);
+    polls(3).await;
+    assert_eq!(adoption(CODEX), Adoption::Released);
+    assert!(
+        matches!(io.alarms.released().as_slice(), [(CODEX, detail)]
+        if detail.contains("holds more than metadata")),
+        "{:?}",
+        io.alarms.released()
+    );
+    assert!(!ready.is_ready(CODEX));
+    assert_eq!(harness.store.read_era().unwrap(), None);
+    assert!(!init_path(&harness, CODEX).exists());
+    let sent = claim_then_send(Some(BodyClaim::new(CODEX, Some(CodexTui))), || async {
+        "Legacy delivered the resumed answer"
+    })
+    .await;
+    assert_eq!(
+        sent,
+        Ok(BodySend::Sent("Legacy delivered the resumed answer"))
+    );
+    assert_eq!(
+        claims_judged(CODEX),
+        [false],
+        "the actual body claim is owned=false"
+    );
+    assert!(
+        harness.port.posts().is_empty(),
+        "O leaves the body to Legacy"
+    );
+    let (reason, idle) =
+        crate::services::discord::e2e_control::companion_activity_for_log_for_tests(
+            CODEX,
+            &resume.context.tmux_session,
+            &resume.source.path,
+        )
+        .await;
+    assert_ne!(
+        reason, "binding_pending",
+        "the same settled log reaches turn presence"
+    );
+    assert!(idle, "closed operational history is Idle: {reason}");
+    abort(tasks);
+}

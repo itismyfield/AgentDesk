@@ -161,6 +161,7 @@ fn audit(seq: u64) -> BindingEvent {
         seq,
         BindingRecord::Rejected {
             detail: "audit only".into(),
+            closes: None,
         },
     )
 }

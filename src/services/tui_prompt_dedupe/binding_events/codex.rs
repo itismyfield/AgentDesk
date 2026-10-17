@@ -7,9 +7,13 @@ use crate::services::codex_tui::session::source_observation::VerifiedCodexHookSo
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
 mod commit;
+mod terminal;
 #[cfg(test)]
 pub(crate) use commit::commit_claim;
+#[cfg(test)]
+pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
 pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
+pub(crate) use terminal::terminal_pending_at_seq;
 
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
     let mut events = binding_events_since(channel, 0)?;

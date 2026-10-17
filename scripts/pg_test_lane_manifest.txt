@@ -185,6 +185,7 @@ src/services/discord/router/intake_dispatch/tests.rs
 src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs
 src/services/discord/router/intake_dispatch/tests/replay_hold.rs
 src/services/discord/router/intake_gate/stale_turn_host_tests.rs
+src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs
 src/services/discord/router/message_handler/goal_lifecycle.rs
 src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs
 src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs
@@ -262,11 +263,13 @@ src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
 src/services/discord/turn_presence/activity/unbound/unit_tests.rs
+src/services/discord/turn_presence/activity_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
 src/services/discord/watchers/dispatched_origin_ghost_tests.rs
 src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs
 src/services/discord/watchers/lifecycle/restore.rs
 src/services/discord/watchers/lifecycle/restore_tests.rs
+src/services/discord/watchers/lifecycle/resume_companion_restore_tests.rs
 src/services/dispatches/discord_delivery/guard.rs
 src/services/dispatches/outbox_claiming.rs
 src/services/dispatches/outbox_queue_replay_tests.rs
@@ -516,6 +519,7 @@ services::discord::router::intake_dispatch::tests
 services::discord::router::intake_dispatch::tests::codex_turn_hold
 services::discord::router::intake_dispatch::tests::replay_hold
 services::discord::router::intake_gate::stale_turn::host_tests
+services::discord::router::message_handler::codex_resume_companion_queue_tests
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests
 services::discord::router::message_handler::intake_turn::native_fresh_prompt_tests
@@ -561,6 +565,7 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::restore::keyed_teardown_tests
 services::discord::tmux::watcher_lifecycle::restore::n3bc_restore_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests
 services::discord::tmux_reaper::host_guard_tests
 services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
@@ -596,6 +601,7 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_s
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
+services::discord::turn_presence::activity::tests
 services::discord::turn_presence::activity::unbound::dormancy_tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain
@@ -1752,6 +1758,11 @@ services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_stil
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_companion_settled_open_turn_stays_held_after_six_hundred_seconds
+services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_resume_companion_unregistered_discovery_pass_publishes
+services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_backstop_rechecks_after_source_publication
+services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_partial_settlement_failure_preserves_queue_and_retries
+services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_settlement_preserves_queue_then_admits_once
 services::discord::router::message_handler::goal_lifecycle::host_guard_tests::goal_clear_reports_a_refusal_before_any_session_clear_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_downgrade_stops_stamping_but_keeps_settling_pg
 services::discord::router::message_handler::intake_turn::dispatch_stamp::postgres_tests::enforce_ready_capability_resolution_writes_dispatched_stamp_pg
@@ -1963,6 +1974,12 @@ services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::restored_dispatch_rebinds_valid_dispatch_with_cas
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_does_not_cross_channels
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests::watcher_recovery_cwd_legacy_null_channel_id_not_reused
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_attached_confirmed_turn_mode_drains_once
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_cold_proof_without_candidate_does_not_claim
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_durable_proof_boot_restore_claims_once
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_restore_checkpoint_uses_complete_boundary
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_restore_rejects_unlinked_wrapper_namespace
+services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::resume_companion_scoped_rebind_refuses_synthetic_turn_for_confirmed_cold_channel
 services::discord::tmux_reaper::host_guard_tests::dead_session_reaper_kills_only_what_the_host_guard_admits_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_keeps_the_session_when_ownership_is_unreadable_pg
 services::discord::tmux_reaper::host_guard_tests::fresh_routine_backstop_reads_the_run_that_owned_the_listed_session_pg
@@ -2127,6 +2144,8 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests::backgr
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_prefers_voice_turn_link_by_dispatch_id_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::rehydrate_preserves_remaining_ttl_for_aged_rows_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::voice_turn_link_playback_lookup_falls_back_to_announce_message_pg
+services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation
+services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg

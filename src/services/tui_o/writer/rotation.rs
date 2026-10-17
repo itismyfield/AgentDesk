@@ -424,9 +424,11 @@ impl<B: BindingEvents> Sources<B> {
         });
         let superseded: HashSet<u64> = pending
             .filter(|p| {
-                events
-                    .iter()
-                    .any(|later| super::adoption::supersedes(p, later))
+                events.iter().any(|later| {
+                    super::adoption::supersedes(p, later)
+                        || matches!(&later.record, BindingRecord::Rejected { closes: Some(seq), .. }
+                                if *seq == p.seq && later.seq > p.seq)
+                })
             })
             .map(|p| p.seq)
             .collect();
