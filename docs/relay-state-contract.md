@@ -179,6 +179,13 @@ Repair, in priority order:
    here through `include_str!("../framework_setup.rs")`, and asserts that call
    site appears exactly once. Identify that file by what it CONTAINS, never by
    how it is related to the test — the relation is an accident of the example.
+   Choose a needle that identifies the executable expression, not a bare
+   identifier that a comment or docstring can repeat. A qualified call with
+   its arguments is one option; a distinctive predicate such as
+   `&& !preserve_on_cancel` is another. Prefer counting matches in source with
+   comments and strings excluded. If the guard searches raw source, assert the
+   needle occurs exactly once and verify that match is the intended expression;
+   `find()` alone can accept an earlier prose match while the real call is gone.
    Here `framework_setup` is a sibling of the module under test; elsewhere the
    wiring may sit in a parent or further away. "Read the parent module" is
    specifically the wrong generalization, because the parent of
