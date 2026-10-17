@@ -258,10 +258,13 @@ Key rows:
   have built the same deps.
 - `Non-cacheable calls` — build scripts, linker invocations, etc. These do not
   count against hit rate.
-- All-zero counters right after a build mean the stats query reached a fresh
-  server: the previous one exited on its idle timer (600s by default, reset only
-  by new requests). The Windows exact-targets runner defaults
-  `SCCACHE_IDLE_TIMEOUT=0` because its lib-test compile and test runs outlast it.
+- An all-zero block only shows that the queried server has recorded no requests
+  since its stats were last reset; it does not establish why an earlier server
+  exited or whether the build used that server. Capture stats in the same job
+  immediately after the build, and check that the build's wrapper and server
+  configuration point to that server.
+  The Windows exact-targets runner defaults `SCCACHE_IDLE_TIMEOUT=0` because
+  its lib-test compile and test runs outlast the usual 600s idle timeout.
 
 Reset stats between measurements:
 
