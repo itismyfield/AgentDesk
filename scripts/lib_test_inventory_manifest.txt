@@ -6099,8 +6099,10 @@ services::discord::queue_park_ledger::tests::observation_failure_keeps_unknown_p
 services::discord::queue_park_ledger::tests::observation_keeps_abandoned_synthetic_presence_and_bytes
 services::discord::queue_park_ledger::tests::observation_keeps_legacy_inflight_bytes_unchanged
 services::discord::queue_park_ledger::tests::periodic_discovery_records_cancelled_anchor_origin_without_drain
+services::discord::queue_park_ledger::tests::promote_hold_logs_once_per_channel_reason_and_rearms_after_clear
 services::discord::queue_park_ledger::tests::provider_evaluator_visits_all_registered_runtimes
 services::discord::queue_park_ledger::tests::selective_dequeue_of_later_item_keeps_head_waiting
+services::discord::queue_park_ledger::tests::session_transition_hold_logs_once_without_dequeue_and_clears_on_pass
 services::discord::queue_park_ledger::tests::short_claim_between_evaluations_resolves_unknown_without_error
 services::discord::queue_park_ledger::tests::stale_cancelled_snapshot_cannot_rediscover_explicitly_removed_source
 services::discord::queue_park_ledger::tests::stall_watchdog_task_evaluates_parks_without_backstop_or_health_calls
