@@ -2637,46 +2637,25 @@ src/
 │   │   │   ├── gate/
 │   │   │   │   ├── claude_guarded/
 │   │   │   │   │   └── acceptance_tests.rs
-│   │   │   │   └── claude_guarded.rs
+│   │   │   │   ├── claude_guarded.rs
+│   │   │   │   └── own_draft_tests.rs
 │   │   │   ├── pane/
 │   │   │   │   └── submit_tests.rs
-│   │   │   ├── busy_tests.rs
-│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
-│   │   │   ├── pane.rs
-│   │   │   ├── resume.rs
-│   │   │   ├── resume_actor_tests.rs
-│   │   │   ├── token.rs
-│   │   │   └── witness.rs
+│   │   │   └── pane.rs
 │   │   ├── submission_tmux/
 │   │   │   ├── guarded/
 │   │   │   │   ├── protocol_tests.rs
 │   │   │   │   └── transport_tests.rs
 │   │   │   └── guarded.rs
 │   │   ├── actor.rs
-│   │   ├── actor_tests.rs
-│   │   ├── attempt.rs
-│   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
-│   │   ├── durability_tests.rs
-│   │   ├── durable.rs
-│   │   ├── g1b_receipt_identity_tests.rs
-│   │   ├── g1b_rows_tests.rs
-│   │   ├── g1b_transition_tests.rs
-│   │   ├── handover.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
-│   │   ├── ledger.rs
 │   │   ├── mod.rs
-│   │   ├── receipt_identity.rs
-│   │   ├── rows.rs
-│   │   ├── rows_tests.rs
 │   │   ├── submission.rs
-│   │   ├── submission_tmux.rs
-│   │   ├── transition.rs
-│   │   ├── transition_fixture_tests.rs
-│   │   └── transition_tests.rs
+│   │   └── submission_tmux.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
@@ -2890,7 +2869,6 @@ src/
 │   │   ├── exact_pg_tests.rs
 │   │   ├── exact_submission.rs
 │   │   ├── gates_m1.rs
-│   │   ├── gates_m1_compact_tests.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
