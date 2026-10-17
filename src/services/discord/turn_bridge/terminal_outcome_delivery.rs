@@ -49,7 +49,6 @@ mod empty_response_recovery;
 mod foreign_terminal_handoff;
 pub(in crate::services::discord) use foreign_terminal_handoff::resume as resume_foreign_terminal_custody;
 mod prompt_too_long_guidance;
-mod provider_failure_notice;
 mod queue_retry_silence;
 mod recovery_retry;
 pub(super) mod rowless_receipt;
@@ -389,19 +388,26 @@ pub(super) async fn run_terminal_outcome_delivery(
             // O posts only native answers, so the bridge shows its own failure notice in full,
             // and the turn counts as delivered only once that replace is confirmed.
             delivery_response = full_response.clone();
-            let (committed, fallback) = provider_failure_notice::replace_on_o_channel(
+            // The notice is bridge chrome, not O's native body, so it is sent outside O's claim.
+            let outcome = gateway
+                .replace_message_with_outcome(channel_id, current_msg_id, &delivery_response)
+                .await;
+            let fallback = matches!(
+                &outcome,
+                Ok(super::super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
+            );
+            let committed = turn_bridge_replace_outcome_committed(
                 shared_owned.as_ref(),
-                gateway.as_ref(),
                 &provider,
                 channel_id,
                 current_msg_id,
-                &inflight_state,
+                inflight_state.tmux_session_name.as_deref(),
+                outcome,
                 dispatch_id.as_deref(),
                 adk_session_key.as_deref(),
-                &turn_id,
-                &delivery_response,
-            )
-            .await;
+                Some(turn_id.as_str()),
+                "turn_bridge_provider_failure_replace",
+            );
             (terminal_delivery_committed, terminal_body_visible) = (committed, committed);
             preserve_inflight_for_cleanup_retry |= !committed;
             if fallback && !committed {

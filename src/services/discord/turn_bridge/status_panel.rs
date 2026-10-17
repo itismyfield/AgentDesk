@@ -24,9 +24,22 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     source: &'static str,
     expected_user_msg_id: u64,
     permits_channel_effects: bool,
+    provider_failure: bool,
 ) -> bool {
     if !permits_channel_effects {
         return true;
+    }
+    if provider_failure {
+        return provider_failure::end_status_panel(
+            shared,
+            gateway,
+            channel_id,
+            status_panel_msg_id,
+            provider,
+            started_at_unix,
+            last_status_panel_text,
+        )
+        .await;
     }
     complete_status_panel_v2_on_surface(
         shared,
@@ -388,43 +401,6 @@ pub(super) fn status_panel_completion_edit_aliases_newer_turn(
         && on_disk_user_msg_id != 0
         && on_disk_user_msg_id != this_turn_user_msg_id
         && on_disk_status_message_id == Some(panel_id.get())
-}
-
-/// Whether this turn's completion edit of its panel is stale: a different real turn now owns
-/// the panel, or a newer two-message panel epoch superseded it (generations are 0 otherwise).
-pub(super) fn completion_panel_superseded(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    this_turn_user_msg_id: u64,
-    status_panel_msg_id: Option<MessageId>,
-    this_turn_status_panel_generation: u64,
-) -> bool {
-    let (aliases_newer_turn, generation_superseded) =
-        match super::super::inflight::load_inflight_state(provider, channel_id.get()) {
-            Some(on_disk) => {
-                let identity_alias = status_panel_completion_edit_aliases_newer_turn(
-                    this_turn_user_msg_id,
-                    status_panel_msg_id,
-                    on_disk.user_msg_id,
-                    on_disk.status_message_id,
-                );
-                let panel_owned_on_disk = match status_panel_msg_id {
-                    Some(id) if !is_synthetic_headless_message_id(id) => {
-                        on_disk.status_message_id == Some(id.get())
-                    }
-                    _ => false,
-                };
-                let generation_superseded =
-                    super::two_message_panel::two_message_status_edit_generation_is_stale(
-                        this_turn_status_panel_generation,
-                        panel_owned_on_disk,
-                        on_disk.status_panel_generation,
-                    );
-                (identity_alias, generation_superseded)
-            }
-            None => (false, false),
-        };
-    aliases_newer_turn || generation_superseded
 }
 
 /// #3161 (codex P1): pure seam deciding whether THIS turn's epilogue must

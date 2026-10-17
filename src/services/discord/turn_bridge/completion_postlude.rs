@@ -146,8 +146,7 @@ pub(super) async fn run_completion_postlude(
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
         let (terminal_projection_settled, committed) =
             followup_requeue::TerminalProjectionSettled::after(
-                super::status_panel::provider_failure::complete_terminal_projection(
-                    provider_failure,
+                complete_bridge_terminal_footer_or_status_panel(
                     shared_owned.as_ref(),
                     gateway.as_ref(),
                     channel_id,
@@ -164,6 +163,7 @@ pub(super) async fn run_completion_postlude(
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
                     inflight_state.tmux_session_name.as_deref(),
                     completion_r0.permits_channel_effects(),
+                    provider_failure,
                 ),
             )
             .await;
