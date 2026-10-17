@@ -2278,6 +2278,7 @@ services::claude_tui::input::tests::pre_enter_modal_guard_blocks_dialogs_but_all
 services::claude_tui::input::tests::prompt_draft_cleanup_actions_are_cancel_agnostic
 services::claude_tui::input::tests::prompt_marker_does_not_confirm_readiness_when_draft_is_present
 services::claude_tui::input::tests::prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries
+services::claude_tui::input::tests::prompt_ready_setup::wait_for_prompt_ready_event_observes_notify_fired_during_setup
 services::claude_tui::input::tests::prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts
 services::claude_tui::input::tests::prompt_ready_timeout_error_is_classified
 services::claude_tui::input::tests::prompt_ready_timeout_reason_reflects_snapshot
@@ -2305,7 +2306,6 @@ services::claude_tui::input::tests::selector_plans_reject_out_of_range_target
 services::claude_tui::input::tests::single_line_literal_settles_before_enter
 services::claude_tui::input::tests::split_literal_chunks_preserves_multibyte_char_boundaries
 services::claude_tui::input::tests::suffix_free_spinner_at_depth_31_vetoes_prompt_readiness_4888
-services::claude_tui::input::tests::wait_for_prompt_ready_event_observes_notify_fired_during_setup
 services::claude_tui::input::tests::wait_for_prompt_ready_is_public_and_returns_err_for_missing_session
 services::claude_tui::input::tests::wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token
 services::claude_tui::input::tests::warm_followup_lock_revalidation_keeps_idle_transcript_fallback
