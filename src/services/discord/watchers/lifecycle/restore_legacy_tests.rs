@@ -35,10 +35,7 @@ fn legacy_restore_preserves_backfill_and_session_adoption() {
             None,
             0,
         );
-        let path =
-            crate::services::discord::health::legacy_supervision::test_support::seed_backfill_row(
-                &row,
-            );
+        let path = crate::services::discord::health::test_support::seed_backfill_row(&row);
         let before = std::fs::read(&path).unwrap();
         let submitted = Scope::new(&fixture.shared);
         let observed = support::observe(&fixture);

@@ -17,7 +17,8 @@ describe("settingsDangerousConfig", () => {
   });
 
   it("narrows known dangerous keys", () => {
-    expect(isDangerousConfigKey("pm_decision_gate_enabled")).toBe(true);
+    expect(isDangerousConfigKey("review_enabled")).toBe(true);
+    expect(isDangerousConfigKey("pm_decision_gate_enabled")).toBe(false);
     expect(isDangerousConfigKey("server_port")).toBe(false);
   });
 

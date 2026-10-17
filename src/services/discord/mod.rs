@@ -2210,17 +2210,15 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                "KICKOFF: session transition owns channel; preserving queued head"
-            );
+            park.note_session_transition_hold(provider, channel_id);
             return MailboxTakeNextSoftOutcome::default();
         }
     };
+    park.clear_promote_hold(channel_id, "session_transition");
 
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane

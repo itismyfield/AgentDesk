@@ -3,10 +3,6 @@ export const DANGEROUS_CONFIG_KEY_DETAILS = {
     ko: "리뷰 게이트",
     en: "Review gate",
   },
-  pm_decision_gate_enabled: {
-    ko: "PM 판단 게이트",
-    en: "PM decision gate",
-  },
   context_clear_percent: {
     ko: "컨텍스트 초기화 기준",
     en: "Context clear threshold",

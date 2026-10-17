@@ -25,6 +25,90 @@ def pair(method: str, path: str) -> CHECKER.EndpointPair:
 
 
 class ApiDocsCoverageTest(unittest.TestCase):
+    def test_mounted_root_surfaces_pass_and_unmounted_docs_are_stale(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "server").mkdir(parents=True)
+            (root / "src" / "services" / "claude_tui").mkdir(parents=True)
+            web_surface_path = root / "src" / "server" / "web_surface.rs"
+            web_surface_without_hook_mount = textwrap.dedent(
+                """
+                fn ws_handler() {}
+                fn router() {
+                    Router::new()
+                        .route("/ws", get(ws_handler))
+                        .merge(crate::services::claude_tui::tui_relay::router());
+                    // hook_receiver_router() is mentioned here only as history.
+                    let note = "hook_receiver_router()";
+                }
+                """
+            )
+            web_surface_path.write_text(web_surface_without_hook_mount, encoding="utf-8")
+            (root / "src" / "services" / "claude_tui" / "tui_relay.rs").write_text(
+                textwrap.dedent(
+                    """
+                    fn handle_send() {}
+                    fn handle_wait() {}
+                    fn router() {
+                        Router::new()
+                            .route("/tui/send", post(handle_send))
+                            .route("/tui/wait", post(handle_wait));
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (root / "src" / "services" / "claude_tui" / "hook_server.rs").write_text(
+                textwrap.dedent(
+                    """
+                    fn receive_hook() {}
+                    fn hook_receiver_router() {
+                        Router::new().route("/hooks/{provider}/{event}", post(receive_hook));
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+
+            docs = [
+                pair("GET", "/ws"),
+                pair("POST", "/tui/send"),
+                pair("POST", "/tui/wait"),
+                pair("POST", "/hooks/{provider}/{event}"),
+            ]
+            with patch.object(CHECKER.inventory, "REPO_ROOT", root):
+                mounted_without_hook = CHECKER.collect_mounted_root_surface_endpoints()
+
+            report_without_hook = CHECKER.build_coverage_report(
+                mounted=mounted_without_hook,
+                docs=[entry for entry in docs if entry.path != "/tui/wait"],
+                allowlist={},
+            )
+            self.assertEqual(
+                report_without_hook.missing,
+                (pair("POST", "/tui/wait"),),
+            )
+            self.assertEqual(
+                report_without_hook.stale,
+                (pair("POST", "/hooks/{provider}/{event}"),),
+            )
+
+            web_surface_path.write_text(
+                web_surface_without_hook_mount.replace(
+                    ".merge(crate::services::claude_tui::tui_relay::router());",
+                    ".merge(crate::services::claude_tui::tui_relay::router())\n"
+                    ".merge(crate::services::claude_tui::hook_server::hook_receiver_router());",
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(CHECKER.inventory, "REPO_ROOT", root):
+                mounted_with_hook = CHECKER.collect_mounted_root_surface_endpoints()
+
+        report_with_hook = CHECKER.build_coverage_report(
+            mounted=mounted_with_hook, docs=docs, allowlist={}
+        )
+        self.assertTrue(report_with_hook.is_clean(), CHECKER.format_report(report_with_hook))
+
     def test_reports_missing_and_stale_pairs(self) -> None:
         report = CHECKER.build_coverage_report(
             mounted=[pair("GET", "/api/mounted")],

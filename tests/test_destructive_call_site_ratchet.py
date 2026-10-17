@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import copy
+import io
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 
@@ -88,6 +91,39 @@ class SourceContractTests(unittest.TestCase):
     def test_ci_wiring_runs_scanner(self) -> None:
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
+
+    def test_fs_unlink_ratchet_allows_decreases_and_blocks_growth(self) -> None:
+        path = "src/services/probe.rs"
+        baseline = {category: {} for category in ratchet.CATEGORIES}
+        baseline["fs_unlink"] = {path: 2}
+
+        reduced = {category: {} for category in ratchet.CATEGORIES}
+        reduced["fs_unlink"] = {path: 1}
+        self.assertEqual(ratchet.growth_errors(reduced, baseline), [])
+
+        snapshot = ratchet._snapshot(
+            reduced,
+            {
+                "direct_channel_remove": 0,
+                "remove_if_current": 0,
+                "cancel_and_remove_if_current": 0,
+                "remove_locked_helper": 0,
+            },
+            "test-sha",
+        )
+        regenerated = {
+            category: value["files"]
+            for category, value in snapshot["categories"].items()
+        }
+        self.assertEqual(regenerated["fs_unlink"], {path: 1})
+
+        increased = {category: {} for category in ratchet.CATEGORIES}
+        increased["fs_unlink"] = {path: 3}
+        errors = ratchet.growth_errors(increased, regenerated)
+        self.assertEqual(
+            errors,
+            [f"fs_unlink: GROWTH in {path}: found 3x, baseline 1x"],
+        )
 
     def test_baseline_prose_is_advisory(self) -> None:
         original = self.payload
@@ -196,6 +232,10 @@ class RatchetDiscriminationTests(unittest.TestCase):
         "inflight_row_clear_call": (
             "src/services/discord/t3a4_probe.rs",
             "inflight::clear_inflight_state(&provider, channel_id);\n",
+        ),
+        "fs_unlink": (
+            "src/services/probe.rs",
+            "std::fs::remove_file(path);\n",
         ),
         "structural_candidate_apply": (
             "src/services/discord/t3a4_probe.rs",
@@ -510,6 +550,44 @@ watcher_cancel
             actual, _subcounts = ratchet.scan(root)
             self.assertEqual(actual["watcher_cancel"], {"src/services/discord/probe.rs": 1})
             self.assertEqual(actual["process_kill"], {})
+
+    def test_fs_unlinks_count_production_spellings_and_exclude_test_only_sites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(
+                root,
+                "src/services/probe.rs",
+                """
+std::fs::remove_file(path);
+fs::remove_dir(path);
+fs::remove_dir_all(path);
+fs::remove_file::<&Path>(path);
+// std::fs::remove_file(comment_only);
+const EXAMPLE: &str = "fs::remove_file(string_only)";
+#[cfg(test)]
+fn test_only_cleanup() { std::fs::remove_file(test_path); }
+#[cfg(test)]
+fn test_only_turbofish() { std::fs::remove_file::<&Path>(test_path); }
+""",
+            )
+            write(root, "src/services/probe_tests.rs", "std::fs::remove_file(test_path);\n")
+            actual, _subcounts = ratchet.scan(root)
+        self.assertEqual(actual["fs_unlink"], {"src/services/probe.rs": 4})
+
+    def test_fs_unlink_turbofish_mutation_fails_the_ratchet_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "src/services/probe.rs", "std::fs::remove_file::<&Path>(path);\n")
+            baseline = {
+                "schema_version": 1,
+                "categories": {category: {"files": {}} for category in ratchet.CATEGORIES},
+            }
+            write(root, ratchet.BASELINE_PATH.as_posix(), json.dumps(baseline))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                result = ratchet.main(["--check"], repo_root=root)
+        self.assertEqual(result, 1)
+        self.assertIn("fs_unlink: UNLISTED call site", stderr.getvalue())
 
     def test_cfg_test_is_included_for_map_wide_categories_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

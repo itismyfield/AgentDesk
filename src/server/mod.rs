@@ -1,3 +1,4 @@
+mod bind_security_diagnostics;
 pub(crate) mod cluster;
 pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
@@ -382,19 +383,7 @@ pub(crate) async fn run(
     // Auth is fail-open without `server.auth_token`, so a non-loopback bind would hand the
     // mutating control plane to any LAN peer. Force loopback rather than refuse to boot.
     let (bind_host, bind_decision) = routes::resolve_secure_bind_host(&config);
-    if let routes::BindSecurityDecision::ForcedLoopback { requested_host } = &bind_decision {
-        tracing::error!(
-            requested_host = %requested_host,
-            forced_host = %bind_host,
-            port = config.server.port,
-            "SECURITY (#3870): server.host={requested_host} is non-loopback and \
-             server.auth_token is unset — the control-plane auth middleware is fail-open, so \
-             this would expose deploy-gate / agent-CRUD / dispatch endpoints to the LAN with no \
-             auth. Force-binding to loopback ({bind_host}) instead. The server still serves \
-             locally. To expose on the LAN intentionally, set server.auth_token (recommended) \
-             or server.allow_insecure_nonloopback_bind=true."
-        );
-    }
+    bind_security_diagnostics::log_decision(&config, &bind_host, &bind_decision);
     let addr = format!("{}:{}", bind_host, config.server.port);
     let listener = crate::services::platform::network::bind_tcp_listener(&addr).await?;
     tracing::info!("HTTP server listening on {addr}");
