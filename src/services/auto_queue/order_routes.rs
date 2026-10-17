@@ -239,8 +239,7 @@ pub(super) async fn submit_order_with_pg(
         );
         if let Err(error) = sqlx::query(
             "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 ai_rationale = $1
+             SET ai_rationale = $1
              WHERE id = $2",
         )
         .bind(format!("{rationale} (no ready cards — auto-completed)"))
@@ -250,8 +249,28 @@ pub(super) async fn submit_order_with_pg(
         {
             return Err(auto_queue_json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
+                Json(
+                    json!({"error": format!("record auto-queue run '{run_id}' rationale: {error}")}),
+                ),
             ));
+        }
+        // A pending run without entries is trivially ready; the canonical
+        // writer owns the status flip so it stays subject to the same gates.
+        match crate::db::auto_queue::finalize_run_if_ready_pg(pool, run_id).await {
+            Ok(outcome) if outcome.is_completed() => {}
+            Ok(outcome) => crate::auto_queue_log!(
+                warn,
+                "submit_order_empty_run_not_completed",
+                run_log_ctx.clone(),
+                "[auto-queue] submit_order: empty run {run_id} left unchanged ({})",
+                outcome.describe()
+            ),
+            Err(error) => {
+                return Err(auto_queue_json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("complete auto-queue run '{run_id}': {error}")})),
+                ));
+            }
         }
     }
 

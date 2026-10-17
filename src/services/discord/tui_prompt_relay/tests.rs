@@ -3,6 +3,8 @@ use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
+#[cfg(unix)]
+mod absent_tmux_host_tests;
 mod compact_summary_tests;
 
 fn compact_command_name_first_stub() -> &'static str {
@@ -534,14 +536,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
 // runtime binding + channel mapping must NOT spam the per-poll drift/skip
 // WARN forever. After the rehydrate pass evicts the mirror, the next idle
 // relay iteration finds NO runtime binding to iterate and NO channel mapping
-// to drift on — proving the 0.5s spam is stopped. A unique, never-created
-// session name guarantees `tmux_session_has_live_pane` is false.
+// to drift on — proving the 0.5s spam is stopped. A private `tmux` that reports
+// every session missing pins the dead verdict against PATH-swapping fixtures.
 #[cfg(unix)]
 #[test]
 fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
-    let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _host = absent_tmux_host_tests::AbsentTmuxHost::isolate();
     let shared = super::super::make_shared_data_for_tests();
     // A session that does not exist on this host (pane gone / orphaned).
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471-DEAD-ORPHAN-fix3105";

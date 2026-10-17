@@ -97,11 +97,10 @@ async fn wait_for_deferred(mut done: impl FnMut() -> bool) {
     panic!("deferred restart poller never reached the expected state");
 }
 
-/// The actual poller marks a protected open row from async code and still consumes its slot
+/// The actual poller marks an open row from async code and still consumes its slot
 /// when the scan could not read every row, as a short scan always did.
 #[tokio::test(start_paused = true)]
 async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
-    use crate::services::discord::input_runtime::{self, fence};
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -121,8 +120,6 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
         [0xff, 0xfe],
     )
     .unwrap();
-    let gate = fence::Gate::protect(provider.clone(), open).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
     std::fs::write(
         temp.path().join("restart_pending"),
         "nonce=c2b-incomplete\n",
@@ -145,16 +142,7 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
     assert_eq!(event["incomplete"], true);
     assert_eq!(event["failed"], serde_json::json!([]));
     assert!(deferred_row_marked(&plain_path));
-    assert!(
-        deferred_row_marked(&open_path),
-        "protected open row left unmarked"
-    );
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={open}"))),
-        "the protected open row saw a refused writer"
-    );
+    assert!(deferred_row_marked(&open_path), "open row left unmarked");
 }
 
 /// With no protected channel, the actual poller marks the readable row and consumes its slot past

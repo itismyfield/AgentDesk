@@ -207,20 +207,121 @@ pub(crate) async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
     Ok(())
 }
 
-async fn remaining_runnable_entry_count_on_pg_tx(
+/// Why the canonical completion writer left a run unchanged. Every variant names
+/// who resolves it and whether the run keeps its slot, so no blocked run lacks an owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCompletionBlockedReason {
+    /// Another transaction holds `aq_run:<run_id>`; the next terminal-entry
+    /// write or tick sweep retries. Slot stays held.
+    TokenContended,
+    /// The caller suppressed finalization for the rest of its transaction
+    /// (failed-sync replacement attach) and completes later itself.
+    FinalizeSuppressed,
+    /// No run row exists, so nothing owns a slot.
+    RunNotFound,
+    /// Run is `restoring` or in an unknown status: restore finalization or the
+    /// operator restore/cancel command resolves it. Slot stays held by design.
+    RunStatusNotCompletable,
+    /// A pending/failed phase gate: a gate pass clears it automatically, an
+    /// orphan gate needs operator repair. Gate creation already released the slot.
+    BlockingPhaseGate,
+    /// Policy is still creating gate dispatches (`phase_gate_grace_until` is in
+    /// the future); the window expires within 30s and the tick sweep retries.
+    PhaseGateGraceWindow,
+    /// An operator-held `user_cancelled` entry: the operator resumes or skips
+    /// it, or ends the run. Slot stays held so a resumed entry can reuse it.
+    UserCancelledEntry,
+    /// `pending`/`dispatched` entries remain; their terminal transitions retry.
+    RunnableEntry,
+}
+
+impl RunCompletionBlockedReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TokenContended => "token_contended",
+            Self::FinalizeSuppressed => "finalize_suppressed",
+            Self::RunNotFound => "run_not_found",
+            Self::RunStatusNotCompletable => "run_status_not_completable",
+            Self::BlockingPhaseGate => "blocking_phase_gate",
+            Self::PhaseGateGraceWindow => "phase_gate_grace_window",
+            Self::UserCancelledEntry => "user_cancelled_entry",
+            Self::RunnableEntry => "runnable_entry",
+        }
+    }
+}
+
+/// Result of one canonical completion attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCompletionOutcome {
+    /// This transaction flipped the run to `completed`, released its slots and
+    /// queued the completion notification.
+    Completed,
+    /// Readiness failed; nothing was written.
+    Blocked(RunCompletionBlockedReason),
+    /// The run was already `completed` or `cancelled`; nothing was written and
+    /// no notification was queued again.
+    AlreadyTerminal,
+}
+
+impl RunCompletionOutcome {
+    pub fn is_completed(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Blocked(_) => "blocked",
+            Self::AlreadyTerminal => "already_terminal",
+        }
+    }
+
+    pub fn blocked_reason(self) -> Option<RunCompletionBlockedReason> {
+        match self {
+            Self::Blocked(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Log label: the blocked reason when blocked, otherwise the outcome name.
+    pub fn describe(self) -> &'static str {
+        self.blocked_reason()
+            .map(RunCompletionBlockedReason::as_str)
+            .unwrap_or(self.as_str())
+    }
+}
+
+struct RunEntryReadiness {
+    runnable: i64,
+    user_cancelled: i64,
+    total: i64,
+}
+
+async fn run_entry_readiness_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
-) -> Result<i64, String> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)
+) -> Result<RunEntryReadiness, String> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) FILTER (WHERE status IN ('pending', 'dispatched')) AS runnable,
+                COUNT(*) FILTER (WHERE status = 'user_cancelled') AS user_cancelled,
+                COUNT(*) AS total
          FROM auto_queue_entries
-         WHERE run_id = $1
-           AND status IN ('pending', 'dispatched')",
+         WHERE run_id = $1",
     )
     .bind(run_id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))
+    .map_err(|error| format!("count remaining auto-queue entries for run {run_id}: {error}"))?;
+    let column = |name: &str| -> Result<i64, String> {
+        row.try_get::<i64, _>(name).map_err(|error| {
+            format!("decode auto-queue entry readiness {name} for run {run_id}: {error}")
+        })
+    };
+    Ok(RunEntryReadiness {
+        runnable: column("runnable")?,
+        user_cancelled: column("user_cancelled")?,
+        total: column("total")?,
+    })
 }
 
 /// A blocking advisory acquisition here would invert the lock order used by
@@ -262,19 +363,17 @@ async fn remaining_runnable_entry_count_on_pg_tx(
 /// key space. It is separate from the one-argument `aq_run:<run_id>` token and
 /// does not serialize phase-gate state writes with cancel.
 ///
-/// Known completed writers outside this token protocol are intentionally
-/// scoped: `submit_order_with_pg` completes a newly-created run when no
-/// ready card was accepted, `reset_global_with_pg` destructively removes queue
-/// entries across every queue before completing runs, and `update_run_with_pg`
-/// is an explicit admin override. They do not inherit the attach-versus-
-/// terminal atomicity guaranteed by the participants above.
-pub(crate) async fn maybe_finalize_run_if_ready_pg(
+/// The only other `completed` writers are the destructive admin owners pinned by
+/// `run_completion_contract_tests`: the operator `end` command and the two resets.
+pub(crate) async fn finalize_run_if_ready_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
-) -> Result<bool, String> {
+) -> Result<RunCompletionOutcome, String> {
+    use RunCompletionBlockedReason as Reason;
+
     if !try_acquire_run_advisory_xact_lock_on_pg_tx(tx, run_id).await? {
         tracing::info!(run_id = %run_id, "run_finalize_deferred_lock_contended");
-        return Ok(false);
+        return Ok(RunCompletionOutcome::Blocked(Reason::TokenContended));
     }
 
     let finalize_suppressed = sqlx::query_scalar::<_, bool>(
@@ -287,28 +386,68 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     .await
     .map_err(|error| format!("read terminal-entry finalizer suppression: {error}"))?;
     if finalize_suppressed {
-        return Ok(false);
+        return Ok(RunCompletionOutcome::Blocked(Reason::FinalizeSuppressed));
+    }
+
+    let run_row = sqlx::query(
+        "SELECT status, COALESCE(phase_gate_grace_until > NOW(), false) AS in_grace
+         FROM auto_queue_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("load auto-queue run {run_id} for completion: {error}"))?;
+    let Some(run_row) = run_row else {
+        return Ok(RunCompletionOutcome::Blocked(Reason::RunNotFound));
+    };
+    let run_status: String = run_row
+        .try_get("status")
+        .map_err(|error| format!("decode auto-queue run status for {run_id}: {error}"))?;
+    let in_grace: bool = run_row
+        .try_get("in_grace")
+        .map_err(|error| format!("decode auto-queue grace window for {run_id}: {error}"))?;
+    #[cfg(test)]
+    super::run_completion_pg_tests::pause_completion_at("grace_read").await;
+    if matches!(run_status.as_str(), "completed" | "cancelled") {
+        return Ok(RunCompletionOutcome::AlreadyTerminal);
     }
 
     if super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await? {
-        return Ok(false);
+        return Ok(RunCompletionOutcome::Blocked(Reason::BlockingPhaseGate));
+    }
+    if in_grace {
+        return Ok(RunCompletionOutcome::Blocked(Reason::PhaseGateGraceWindow));
     }
 
-    let remaining = remaining_runnable_entry_count_on_pg_tx(tx, run_id).await?;
-    if remaining > 0 {
-        return Ok(false);
+    let entries = run_entry_readiness_on_pg_tx(tx, run_id).await?;
+    if entries.user_cancelled > 0 {
+        return Ok(RunCompletionOutcome::Blocked(Reason::UserCancelledEntry));
+    }
+    if entries.runnable > 0 {
+        return Ok(RunCompletionOutcome::Blocked(Reason::RunnableEntry));
     }
 
-    // The status transition is the release authority. In particular, a run in
-    // the restore hand-off window must retain its slot until restore finalizes;
-    // releasing first and then discovering the status is ineligible creates a
-    // restoring-run / unowned-slot split brain.
+    #[cfg(test)]
+    super::run_completion_pg_tests::pause_completion_at("readiness_read").await;
+
+    // Recheck blockers committed by token-free writers since the readiness reads.
+    // Only a successful status transition authorizes releasing slots and notifying.
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'completed',
              completed_at = NOW()
          WHERE id = $1
-           AND status IN ('active', 'paused', 'generated', 'pending')",
+           AND status IN ('active', 'paused', 'generated', 'pending')
+           AND NOT COALESCE(phase_gate_grace_until > NOW(), false)
+           AND NOT EXISTS (
+               SELECT 1 FROM auto_queue_phase_gates
+               WHERE run_id = $1 AND status IN ('pending', 'failed')
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM auto_queue_entries
+               WHERE run_id = $1 AND status IN ('pending', 'dispatched', 'user_cancelled')
+           )",
     )
     .bind(run_id)
     .execute(&mut **tx)
@@ -316,14 +455,52 @@ pub(crate) async fn maybe_finalize_run_if_ready_pg(
     .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?
     .rows_affected();
     if updated == 0 {
-        return Ok(false);
+        let in_grace = sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(phase_gate_grace_until > NOW(), false)
+             FROM auto_queue_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| format!("reload auto-queue grace window for {run_id}: {error}"))?
+        .unwrap_or(false);
+        let reason = if in_grace {
+            Reason::PhaseGateGraceWindow
+        } else if super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await? {
+            Reason::BlockingPhaseGate
+        } else {
+            let entries = run_entry_readiness_on_pg_tx(tx, run_id).await?;
+            if entries.user_cancelled > 0 {
+                Reason::UserCancelledEntry
+            } else if entries.runnable > 0 {
+                Reason::RunnableEntry
+            } else {
+                Reason::RunStatusNotCompletable
+            }
+        };
+        tracing::info!(run_id = %run_id, reason = reason.as_str(), "run_finalize_refused");
+        return Ok(RunCompletionOutcome::Blocked(reason));
     }
 
     release_run_slots_on_pg_tx(tx, run_id)
         .await
         .map_err(|error| format!("release auto-queue slots for run {run_id}: {error}"))?;
-    queue_run_completion_notify_on_pg(tx, run_id).await?;
-    Ok(true)
+    // A run that never held an entry has nothing to announce.
+    if entries.total > 0 {
+        queue_run_completion_notify_on_pg(tx, run_id).await?;
+    }
+    Ok(RunCompletionOutcome::Completed)
+}
+
+/// Boolean view of [`finalize_run_if_ready_on_pg_tx`] for terminal-entry and
+/// phase-gate writers that only need to know whether this transaction completed the run.
+pub(crate) async fn maybe_finalize_run_if_ready_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: &str,
+) -> Result<bool, String> {
+    Ok(finalize_run_if_ready_on_pg_tx(tx, run_id)
+        .await?
+        .is_completed())
 }
 
 pub(super) async fn auto_queue_run_review_disabled_on_pg_tx(
@@ -397,96 +574,31 @@ pub async fn resume_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, Strin
     Ok(updated > 0)
 }
 
-/// Explicit completion begins with the same blocking run token used by attach
-/// and cancel writers. Unlike the opportunistic finalizer, this function owns
-/// its transaction and holds no row locks before acquiring the token. It then
-/// derives the remaining-entry predicate under that token before changing phase
-/// gates, the run, slots, or completion notifications.
-async fn complete_run_on_pg_inner(
+/// Transaction-owning entry point for callers holding no row locks (policy `completeRun`,
+/// activate tail): blocking run token, same readiness predicate, commit only on `Completed`.
+pub async fn finalize_run_if_ready_pg(
     pool: &PgPool,
     run_id: &str,
-    queue_completion_notification: bool,
-) -> Result<bool, String> {
+) -> Result<RunCompletionOutcome, String> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("begin postgres complete auto-queue run {run_id}: {error}"))?;
     acquire_run_advisory_xact_lock_on_pg_tx(&mut tx, run_id).await?;
-
-    // `user_cancelled` is intentionally not runnable: it is an operator-held
-    // state whose dispatch link has already been cleared. The same predicate is
-    // used by `maybe_finalize_run_if_ready_pg`.
-    let remaining = remaining_runnable_entry_count_on_pg_tx(&mut tx, run_id).await?;
-    if remaining > 0 {
+    let outcome = finalize_run_if_ready_on_pg_tx(&mut tx, run_id).await?;
+    if outcome.is_completed() {
+        tx.commit().await.map_err(|error| {
+            format!("commit postgres complete auto-queue run {run_id}: {error}")
+        })?;
+    } else {
         tracing::info!(
             run_id = %run_id,
-            remaining,
-            "complete_run_refused_live_entries"
+            outcome = outcome.describe(),
+            "complete_run_left_unchanged"
         );
         tx.rollback().await.map_err(|error| {
             format!("rollback refused postgres complete auto-queue run {run_id}: {error}")
         })?;
-        return Ok(false);
     }
-
-    // #2048 F17: even an explicit "manual complete" call must drop any
-    // pending/failed phase-gate rows AND release the run's slot bindings.
-    // Otherwise a completed run leaves stale phase_gate rows that next
-    // restore/audit treats as still-pending, plus zombie slot assignments
-    // that block other runs from picking up the slot. We perform the
-    // delete + release inside the same transaction so the operation is
-    // atomic with the status flip.
-    sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = $1")
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("delete phase gates for completed run {run_id}: {error}"))?;
-    let updated = sqlx::query(
-        "UPDATE auto_queue_runs
-         SET status = 'completed',
-             completed_at = NOW()
-         WHERE id = $1
-           AND status IN ('active', 'paused', 'generated', 'pending')",
-    )
-    .bind(run_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("complete postgres auto-queue run {run_id}: {error}"))?
-    .rows_affected();
-    if updated == 0 {
-        tx.rollback().await.map_err(|error| {
-            format!("rollback stale postgres complete auto-queue run {run_id}: {error}")
-        })?;
-        return Ok(false);
-    }
-
-    release_run_slots_on_pg_tx(&mut tx, run_id)
-        .await
-        .map_err(|error| format!("release slots for completed run {run_id}: {error}"))?;
-
-    if queue_completion_notification {
-        queue_run_completion_notify_on_pg(&mut tx, run_id).await?;
-    }
-    tx.commit()
-        .await
-        .map_err(|error| format!("commit postgres complete auto-queue run {run_id}: {error}"))?;
-    Ok(true)
-}
-
-pub async fn complete_run_on_pg(pool: &PgPool, run_id: &str) -> Result<bool, String> {
-    complete_run_on_pg_inner(pool, run_id, true).await
-}
-
-/// Adapter for the drained-run tail of activate. It deliberately omits the
-/// completion notification, deletes phase-gate rows on successful completion,
-/// and releases slots only inside that successful transaction; activate no
-/// longer performs an unconditional slot pre-release. The activate caller
-/// treats a refused completion as informational and demotes database errors to
-/// a warning instead of turning the otherwise successful activate response
-/// into HTTP 500.
-pub(crate) async fn complete_run_after_activate_on_pg(
-    pool: &PgPool,
-    run_id: &str,
-) -> Result<bool, String> {
-    complete_run_on_pg_inner(pool, run_id, false).await
+    Ok(outcome)
 }

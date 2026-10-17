@@ -30,12 +30,11 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
     "narrate_progress",
-    // #5993: the human-alert channel was retired; operator signals are WARN
-    // lines and observability events. Deleting the row at boot also leaves the
-    // remaining frozen reader with no target.
+    // Retired rows deleted at boot: the human-alert channel (its frozen reader then has
+    // no target), the PM decision gate toggle, and the escalation routing override.
     "kanban_human_alert_channel_id",
-    // The PM decision gate no longer exists; drop its toggle row at boot.
     "pm_decision_gate_enabled",
+    "escalation-settings-override",
 ];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[

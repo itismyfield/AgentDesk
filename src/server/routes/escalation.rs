@@ -1,23 +1,11 @@
 use axum::{Json, extract::State, http::StatusCode};
-use chrono::{DateTime, NaiveTime, Utc};
-use chrono_tz::Tz;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row as SqlxRow;
 
-use crate::config::{Config, EscalationMode, EscalationSettings, EscalationSettingsResponse};
-use crate::db::agents::load_agent_channel_bindings_pg;
 use crate::error::{AppError, AppResult, ErrorCode};
 use crate::server::routes::AppState;
-use crate::services::discord::health::active_request_owner_for_channel;
-// Escalation-settings read path now lives in the service layer (#3037); the
-// route handlers re-import the resolver helpers as the single source of truth.
-use crate::services::escalation_settings::{
-    ESCALATION_SETTINGS_OVERRIDE_KEY, escalation_defaults, load_override_pg_async,
-    merged_settings_pg, normalize_optional_string,
-};
 
-const ESCALATION_THREAD_KEY_PREFIX: &str = "escalation_thread:";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DISCORD_MESSAGE_CHAR_LIMIT: usize = 2000;
 const ESCALATION_ISSUE_SUMMARY_LINE_LIMIT: usize = 3;
@@ -33,11 +21,6 @@ fn pg_unavailable() -> AppError {
     )
 }
 
-// `EscalationScheduleSettings`, `EscalationSettings`, and
-// `EscalationSettingsResponse` now live in `crate::config` so service-layer
-// callers can depend on them without a server-layer backflow (#3037). They are
-// re-exported above via `use crate::config::{...}`.
-
 #[derive(Debug, Deserialize)]
 pub struct EmitEscalationBody {
     pub card_id: String,
@@ -49,7 +32,6 @@ pub struct EmitEscalationBody {
 struct CardEscalationSummary {
     title: String,
     issue_number: Option<i64>,
-    assigned_agent_id: Option<String>,
     description: Option<String>,
     status: String,
     review_status: Option<String>,
@@ -66,107 +48,6 @@ struct CardContext {
     blocked_reason: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct OwnerRoutingTarget {
-    user_id: Option<u64>,
-    parent_channel_id: Option<u64>,
-    source: &'static str,
-}
-
-fn parse_channel_reference(channel: &str) -> Option<u64> {
-    channel
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(channel))
-}
-
-fn store_override_pg(pool: &sqlx::PgPool, settings: &EscalationSettings) -> Result<(), String> {
-    let raw = serde_json::to_string(settings).map_err(|error| error.to_string())?;
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            sqlx::query(
-                "INSERT INTO kv_meta (key, value)
-                 VALUES ($1, $2)
-                 ON CONFLICT (key) DO UPDATE
-                 SET value = EXCLUDED.value",
-            )
-            .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
-            .bind(&raw)
-            .execute(&bridge_pool)
-            .await
-            .map_err(|error| {
-                format!(
-                    "store postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
-                )
-            })?;
-            Ok(())
-        },
-        |error| error,
-    )
-}
-
-fn clear_override_pg(pool: &sqlx::PgPool) -> Result<(), String> {
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
-                .execute(&bridge_pool)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "clear postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
-                    )
-                })?;
-            Ok(())
-        },
-        |error| error,
-    )
-}
-
-fn parse_time_window(raw: &str) -> Option<(NaiveTime, NaiveTime)> {
-    let (start, end) = raw.trim().split_once('-')?;
-    let start = NaiveTime::parse_from_str(start.trim(), "%H:%M").ok()?;
-    let end = NaiveTime::parse_from_str(end.trim(), "%H:%M").ok()?;
-    Some((start, end))
-}
-
-fn within_pm_window(now: NaiveTime, raw: &str) -> bool {
-    let Some((start, end)) = parse_time_window(raw) else {
-        return false;
-    };
-    if start == end {
-        return true;
-    }
-    if start < end {
-        now >= start && now < end
-    } else {
-        now >= start || now < end
-    }
-}
-
-fn resolve_mode_at(settings: &EscalationSettings, now: DateTime<Utc>) -> EscalationMode {
-    match settings.mode {
-        EscalationMode::Pm => EscalationMode::Pm,
-        EscalationMode::User => EscalationMode::User,
-        EscalationMode::Scheduled => {
-            let tz = settings
-                .schedule
-                .timezone
-                .parse::<Tz>()
-                .unwrap_or(chrono_tz::Asia::Seoul);
-            let local_time = now.with_timezone(&tz).time();
-            if within_pm_window(local_time, &settings.schedule.pm_hours) {
-                EscalationMode::Pm
-            } else {
-                EscalationMode::User
-            }
-        }
-    }
-}
-
 async fn load_card_summary_pg_async(
     pool: &sqlx::PgPool,
     card_id: &str,
@@ -175,7 +56,6 @@ async fn load_card_summary_pg_async(
         "SELECT
              kc.title,
              kc.github_issue_number,
-             kc.assigned_agent_id,
              kc.description,
              kc.status,
              kc.review_status,
@@ -214,9 +94,6 @@ async fn load_card_summary_pg_async(
         issue_number: row.try_get("github_issue_number").map_err(|error| {
             format!("decode postgres card summary github_issue_number {card_id}: {error}")
         })?,
-        assigned_agent_id: row.try_get("assigned_agent_id").map_err(|error| {
-            format!("decode postgres card summary assigned_agent_id {card_id}: {error}")
-        })?,
         description: row.try_get("description").map_err(|error| {
             format!("decode postgres card summary description {card_id}: {error}")
         })?,
@@ -238,214 +115,11 @@ async fn load_card_summary_pg_async(
     })
 }
 
-async fn latest_dispatch_agent_id_pg_async(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> Result<Option<String>, String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT to_agent_id
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND to_agent_id IS NOT NULL
-           AND BTRIM(to_agent_id) != ''
-         ORDER BY created_at DESC, id DESC
-         LIMIT 1",
-    )
-    .bind(card_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres latest dispatch agent {card_id}: {error}"))
-}
-
-async fn candidate_parent_channels_pg_async(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-    assigned_agent_id: Option<&str>,
-) -> Result<Vec<u64>, String> {
-    let mut agent_ids = Vec::new();
-    if let Some(agent_id) = latest_dispatch_agent_id_pg_async(pool, card_id).await? {
-        agent_ids.push(agent_id);
-    }
-    if let Some(agent_id) = assigned_agent_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if !agent_ids.iter().any(|existing| existing == agent_id) {
-            agent_ids.push(agent_id.to_string());
-        }
-    }
-
-    let mut channels = Vec::new();
-    for agent_id in agent_ids {
-        let Some(bindings) = load_agent_channel_bindings_pg(pool, &agent_id)
-            .await
-            .map_err(|error| format!("load postgres agent channel bindings {agent_id}: {error}"))?
-        else {
-            continue;
-        };
-        for channel in bindings.all_channels() {
-            let Some(channel_id) = parse_channel_reference(&channel) else {
-                continue;
-            };
-            if !channels.contains(&channel_id) {
-                channels.push(channel_id);
-            }
-        }
-    }
-    Ok(channels)
-}
-
-async fn resolve_owner_target(
-    state: &AppState,
-    channels: &[u64],
-    configured_owner_user_id: Option<u64>,
-) -> OwnerRoutingTarget {
-    if let Some(registry) = state.health_registry.as_ref() {
-        for channel_id in channels {
-            if let Some(owner) = active_request_owner_for_channel(registry, *channel_id).await {
-                return OwnerRoutingTarget {
-                    user_id: Some(owner),
-                    parent_channel_id: Some(*channel_id),
-                    source: "live_owner",
-                };
-            }
-        }
-    }
-
-    for channel_id in channels {
-        if let Some(owner) =
-            crate::services::discord::latest_request_owner_user_id_for_channel(*channel_id)
-        {
-            return OwnerRoutingTarget {
-                user_id: Some(owner),
-                parent_channel_id: Some(*channel_id),
-                source: "inflight_owner",
-            };
-        }
-    }
-
-    OwnerRoutingTarget {
-        user_id: configured_owner_user_id,
-        parent_channel_id: channels.first().copied(),
-        source: "configured_owner",
-    }
-}
-
-fn escalation_thread_key(card_id: &str) -> String {
-    format!("{ESCALATION_THREAD_KEY_PREFIX}{card_id}")
-}
-
-async fn load_cached_thread_id_pg_async(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-) -> Result<Option<String>, String> {
-    let key = escalation_thread_key(card_id);
-    sqlx::query_scalar::<_, String>(
-        "SELECT value
-         FROM kv_meta
-         WHERE key = $1
-         LIMIT 1",
-    )
-    .bind(&key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))
-}
-
-fn clear_cached_thread_id_pg(pool: &sqlx::PgPool, card_id: &str) -> Result<(), String> {
-    let key = escalation_thread_key(card_id);
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-                .bind(&key)
-                .execute(&bridge_pool)
-                .await
-                .map_err(|error| {
-                    format!("clear postgres cached escalation thread {key}: {error}")
-                })?;
-            Ok(())
-        },
-        |error| error,
-    )
-}
-
-fn claim_cached_thread_id_pg(
-    pool: &sqlx::PgPool,
-    card_id: &str,
-    created_thread_id: &str,
-) -> Result<String, String> {
-    let key = escalation_thread_key(card_id);
-    let created_thread_id = created_thread_id.to_string();
-    crate::utils::async_bridge::block_on_pg_result(
-        pool,
-        move |bridge_pool| async move {
-            let mut tx = bridge_pool.begin().await.map_err(|error| {
-                format!("begin postgres escalation thread cache txn {key}: {error}")
-            })?;
-
-            if let Some(existing) = sqlx::query_scalar::<_, String>(
-                "SELECT value
-                 FROM kv_meta
-                 WHERE key = $1
-                 LIMIT 1",
-            )
-            .bind(&key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("load postgres cached escalation thread {key}: {error}"))?
-            {
-                tx.commit().await.map_err(|error| {
-                    format!("commit postgres escalation thread cache txn {key}: {error}")
-                })?;
-                return Ok(existing);
-            }
-
-            sqlx::query(
-                "INSERT INTO kv_meta (key, value)
-                 VALUES ($1, $2)
-                 ON CONFLICT (key) DO NOTHING",
-            )
-            .bind(&key)
-            .bind(&created_thread_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("save postgres cached escalation thread {key}: {error}"))?;
-
-            let effective = sqlx::query_scalar::<_, String>(
-                "SELECT value
-                 FROM kv_meta
-                 WHERE key = $1
-                 LIMIT 1",
-            )
-            .bind(&key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|error| format!("reload postgres cached escalation thread {key}: {error}"))?
-            .unwrap_or(created_thread_id);
-
-            tx.commit().await.map_err(|error| {
-                format!("commit postgres escalation thread cache txn {key}: {error}")
-            })?;
-            Ok(effective)
-        },
-        |error| error,
-    )
-}
-
 fn format_card_label(summary: &CardEscalationSummary) -> String {
     if let Some(issue_number) = summary.issue_number {
         format!("#{issue_number} {}", summary.title)
     } else {
         summary.title.clone()
-    }
-}
-
-fn build_user_thread_name(summary: &CardEscalationSummary) -> String {
-    if let Some(issue_number) = summary.issue_number {
-        format!("⚠️ [에스컬레이션] #{issue_number} {}", summary.title)
-    } else {
-        format!("⚠️ [에스컬레이션] {}", summary.title)
     }
 }
 
@@ -662,45 +336,17 @@ async fn load_card_context_pg_async(
     }
 }
 
-#[allow(clippy::type_complexity)]
 fn load_escalation_emit_inputs_pg(
     pool: &sqlx::PgPool,
-    config: &Config,
     card_id: &str,
-) -> Result<
-    (
-        EscalationSettings,
-        CardEscalationSummary,
-        Option<CardContext>,
-        Vec<u64>,
-        Option<String>,
-    ),
-    String,
-> {
-    let defaults = escalation_defaults(config);
+) -> Result<(CardEscalationSummary, Option<CardContext>), String> {
     let card_id = card_id.to_string();
     crate::utils::async_bridge::block_on_pg_result(
         pool,
         move |bridge_pool| async move {
-            let settings = load_override_pg_async(&bridge_pool)
-                .await?
-                .unwrap_or(defaults);
             let summary = load_card_summary_pg_async(&bridge_pool, &card_id).await?;
             let context = load_card_context_pg_async(&bridge_pool, &card_id, &summary).await?;
-            let parent_channels = candidate_parent_channels_pg_async(
-                &bridge_pool,
-                &card_id,
-                summary.assigned_agent_id.as_deref(),
-            )
-            .await?;
-            let cached_thread_id = load_cached_thread_id_pg_async(&bridge_pool, &card_id).await?;
-            Ok((
-                settings,
-                summary,
-                context,
-                parent_channels,
-                cached_thread_id,
-            ))
+            Ok((summary, context))
         },
         |error| error,
     )
@@ -757,16 +403,15 @@ fn compose_escalation_message(
     }
 }
 
-fn build_user_message(
+fn build_owner_message(
     summary: &CardEscalationSummary,
     context: Option<&CardContext>,
-    owner_user_id: u64,
     reasons: &[String],
 ) -> String {
     compose_escalation_message(
         vec![
             format!("⚠️ [에스컬레이션] {}", format_card_label(summary)),
-            format!("<@{owner_user_id}> 수동 판단이 필요합니다."),
+            "수동 판단이 필요합니다.".to_string(),
         ],
         context,
         vec![
@@ -778,48 +423,8 @@ fn build_user_message(
     )
 }
 
-fn build_pm_message(
-    card_id: &str,
-    summary: &CardEscalationSummary,
-    reasons: &[String],
-    fallback_note: Option<&str>,
-) -> String {
-    let mut lines = vec![format!("⚠️ [PM 결정 요청] card_id: {card_id}")];
-    if let Some(issue_number) = summary.issue_number {
-        lines.push(format!("issue: #{issue_number}"));
-    }
-    if let Some(note) = fallback_note {
-        lines.push(format!("fallback: {note}"));
-    }
-    lines.push("카드에 수동 판단이 필요합니다. 다음 조치를 결정해주세요.".to_string());
-    compose_escalation_message(
-        lines,
-        None,
-        vec![
-            "사유:".to_string(),
-            format_reason_lines(reasons),
-            "선택지: `resume`, `rework`, `dismiss`, `requeue`".to_string(),
-            "결정 API: `POST /api/pm-decision`".to_string(),
-        ],
-    )
-}
-
 fn summary_manual_decision_is_superseded(summary: &CardEscalationSummary) -> bool {
     matches!(summary.status.trim(), "backlog" | "done")
-}
-
-async fn discord_get(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-    path: &str,
-) -> Result<reqwest::Response, String> {
-    client
-        .get(format!("{}{}", base_url.trim_end_matches('/'), path))
-        .header("Authorization", format!("Bot {}", token))
-        .send()
-        .await
-        .map_err(|err| err.to_string())
 }
 
 async fn discord_post_json(
@@ -838,20 +443,30 @@ async fn discord_post_json(
         .map_err(|err| err.to_string())
 }
 
-async fn discord_patch_json(
+async fn open_dm_channel(
     client: &reqwest::Client,
     base_url: &str,
     token: &str,
-    path: &str,
-    body: &serde_json::Value,
-) -> Result<reqwest::Response, String> {
-    client
-        .patch(format!("{}{}", base_url.trim_end_matches('/'), path))
-        .header("Authorization", format!("Bot {}", token))
-        .json(body)
-        .send()
-        .await
-        .map_err(|err| err.to_string())
+    user_id: u64,
+) -> Result<String, String> {
+    let response = discord_post_json(
+        client,
+        base_url,
+        token,
+        "/users/@me/channels",
+        &json!({ "recipient_id": user_id.to_string() }),
+    )
+    .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("discord dm open failed: {status} {body}"));
+    }
+    let body: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
+    body.get("id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .ok_or_else(|| "discord dm open missing id".to_string())
 }
 
 async fn send_channel_message(
@@ -878,93 +493,6 @@ async fn send_channel_message(
     }
 }
 
-async fn try_reuse_escalation_thread(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-    thread_id: &str,
-    desired_name: &str,
-    message: &str,
-) -> Result<bool, String> {
-    let response = discord_get(client, base_url, token, &format!("/channels/{thread_id}")).await?;
-    if !response.status().is_success() {
-        return Ok(false);
-    }
-    let body: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
-    let metadata = body.get("thread_metadata");
-    if metadata
-        .and_then(|value| value.get("locked"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-    if metadata
-        .and_then(|value| value.get("archived"))
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        let response = discord_patch_json(
-            client,
-            base_url,
-            token,
-            &format!("/channels/{thread_id}"),
-            &json!({ "archived": false }),
-        )
-        .await?;
-        if !response.status().is_success() {
-            return Ok(false);
-        }
-    }
-    let current_name = body
-        .get("name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    if !desired_name.is_empty() && current_name != desired_name {
-        let _ = discord_patch_json(
-            client,
-            base_url,
-            token,
-            &format!("/channels/{thread_id}"),
-            &json!({ "name": desired_name }),
-        )
-        .await;
-    }
-    send_channel_message(client, base_url, token, thread_id, message).await?;
-    Ok(true)
-}
-
-async fn create_escalation_thread(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-    parent_channel_id: u64,
-    thread_name: &str,
-) -> Result<String, String> {
-    let response = discord_post_json(
-        client,
-        base_url,
-        token,
-        &format!("/channels/{parent_channel_id}/threads"),
-        &json!({
-            "name": thread_name,
-            "type": 11,
-            "auto_archive_duration": 1440
-        }),
-    )
-    .await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("discord thread create failed: {status} {body}"));
-    }
-    let body: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
-    body.get("id")
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-        .ok_or_else(|| "discord thread create missing id".to_string())
-}
-
 async fn emit_escalation_with_base_url(
     state: &AppState,
     body: EmitEscalationBody,
@@ -984,23 +512,21 @@ async fn emit_escalation_with_base_url(
         return Err(AppError::bad_request("reasons must not be empty"));
     }
 
-    let (settings, summary, context, parent_channels, cached_thread_id) =
-        if let Some(pool) = state.pg_pool_ref() {
-            match load_escalation_emit_inputs_pg(pool, &state.config, &card_id) {
-                Ok(loaded) => loaded,
-                Err(error) => {
-                    tracing::warn!(%error, "[escalation] postgres load failed for {card_id}");
-                    let status = if error.starts_with("card not found:") {
-                        StatusCode::NOT_FOUND
-                    } else {
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    };
-                    return Err(AppError::new(status, ErrorCode::Internal, error));
-                }
-            }
-        } else {
-            return Err(pg_unavailable());
-        };
+    let Some(pool) = state.pg_pool_ref() else {
+        return Err(pg_unavailable());
+    };
+    let (summary, context) = match load_escalation_emit_inputs_pg(pool, &card_id) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            tracing::warn!(%error, "[escalation] postgres load failed for {card_id}");
+            let status = if error.starts_with("card not found:") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return Err(AppError::new(status, ErrorCode::Internal, error));
+        }
+    };
 
     if summary_manual_decision_is_superseded(&summary) {
         let card_status = summary.status.clone();
@@ -1018,19 +544,20 @@ async fn emit_escalation_with_base_url(
         ));
     }
 
-    let client = reqwest::Client::new();
-    let requested_mode = settings.mode.clone();
-    let resolved_mode = resolve_mode_at(&settings, Utc::now());
-
-    // PM escalations use the actionable role; user escalations use the
-    // informational role because a person responds directly.
-    let bot_role = if resolved_mode == EscalationMode::User {
-        crate::services::discord::bot_role::UtilityBotRole::Notify
-    } else {
-        crate::services::discord::bot_role::UtilityBotRole::Announce
+    // An error keeps the policy's pending entry, so a missing owner is retried
+    // instead of silently dropping the alert.
+    let Some(owner_user_id) = state.config.discord.owner_id else {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::Config,
+            "discord.owner_id is not configured",
+        ));
     };
-    let bot_name = bot_role.alias();
-    let announce_token = match crate::credential::read_bot_token(bot_name).or_else(|| {
+
+    let token = match crate::credential::read_bot_token(
+        crate::services::discord::bot_role::UtilityBotRole::Notify.alias(),
+    )
+    .or_else(|| {
         crate::credential::read_bot_token(
             crate::services::discord::bot_role::UtilityBotRole::Announce.alias(),
         )
@@ -1041,314 +568,32 @@ async fn emit_escalation_with_base_url(
         }
     };
 
-    if resolved_mode == EscalationMode::User {
-        let owner_target =
-            resolve_owner_target(state, &parent_channels, settings.owner_user_id).await;
-        if let Some(owner_user_id) = owner_target.user_id {
-            let thread_name = build_user_thread_name(&summary);
-            let message = build_user_message(&summary, context.as_ref(), owner_user_id, &reasons);
-
-            if let Some(thread_id) = cached_thread_id {
-                match try_reuse_escalation_thread(
-                    &client,
-                    base_url,
-                    &announce_token,
-                    &thread_id,
-                    &thread_name,
-                    &message,
-                )
+    let client = reqwest::Client::new();
+    let message = build_owner_message(&summary, context.as_ref(), &reasons);
+    let delivered = match open_dm_channel(&client, base_url, &token, owner_user_id).await {
+        Ok(dm_channel_id) => {
+            send_channel_message(&client, base_url, &token, &dm_channel_id, &message)
                 .await
-                {
-                    Ok(true) => {
-                        return Ok((
-                            StatusCode::OK,
-                            Json(json!({
-                                "ok": true,
-                                "requested_mode": requested_mode,
-                                "resolved_mode": resolved_mode,
-                                "delivery": "user_thread_reused",
-                                "thread_id": thread_id,
-                                "owner_user_id": owner_user_id,
-                                "owner_source": owner_target.source,
-                            })),
-                        ));
-                    }
-                    Ok(false) => {
-                        if let Some(pool) = state.pg_pool_ref() {
-                            if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
-                                tracing::warn!(
-                                    %error,
-                                    "[escalation] failed to clear postgres cached thread for {card_id}"
-                                );
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!("[escalation] thread reuse failed for {card_id}: {err}");
-                        if let Some(pool) = state.pg_pool_ref() {
-                            if let Err(error) = clear_cached_thread_id_pg(pool, &card_id) {
-                                tracing::warn!(
-                                    %error,
-                                    "[escalation] failed to clear postgres cached thread for {card_id}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(parent_channel_id) = owner_target.parent_channel_id {
-                match create_escalation_thread(
-                    &client,
-                    base_url,
-                    &announce_token,
-                    parent_channel_id,
-                    &thread_name,
-                )
-                .await
-                {
-                    Ok(thread_id) => {
-                        if let Err(err) = send_channel_message(
-                            &client,
-                            base_url,
-                            &announce_token,
-                            &thread_id,
-                            &message,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "[escalation] failed to send initial thread message for {card_id}: {err}"
-                            );
-                            let fallback_note =
-                                "user thread creation succeeded but message send failed";
-                            return deliver_pm_fallback(
-                                &client,
-                                base_url,
-                                &announce_token,
-                                &card_id,
-                                &settings,
-                                &summary,
-                                &reasons,
-                                fallback_note,
-                                requested_mode,
-                                resolved_mode,
-                            )
-                            .await;
-                        }
-                        // #587: Optimistic locking — re-read cached_thread_id
-                        // before saving. If another concurrent escalation already
-                        // created and saved a thread, use the existing one instead
-                        // of overwriting it with our newly created thread.
-                        let effective_thread_id = if let Some(pool) = state.pg_pool_ref() {
-                            match claim_cached_thread_id_pg(pool, &card_id, &thread_id) {
-                                Ok(existing_or_saved) => {
-                                    if existing_or_saved != thread_id {
-                                        tracing::info!(
-                                            "[escalation] optimistic lock: another escalation already created thread {} for {card_id}, using existing",
-                                            existing_or_saved
-                                        );
-                                    }
-                                    existing_or_saved
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        %error,
-                                        "[escalation] failed to cache postgres thread for {card_id}"
-                                    );
-                                    thread_id
-                                }
-                            }
-                        } else {
-                            thread_id
-                        };
-                        return Ok((
-                            StatusCode::OK,
-                            Json(json!({
-                                "ok": true,
-                                "requested_mode": requested_mode,
-                                "resolved_mode": resolved_mode,
-                                "delivery": "user_thread_created",
-                                "thread_id": effective_thread_id,
-                                "parent_channel_id": parent_channel_id,
-                                "owner_user_id": owner_user_id,
-                                "owner_source": owner_target.source,
-                            })),
-                        ));
-                    }
-                    Err(err) => {
-                        tracing::warn!("[escalation] thread create failed for {card_id}: {err}");
-                    }
-                }
-            }
+                .map(|()| dm_channel_id)
         }
-
-        return deliver_pm_fallback(
-            &client,
-            base_url,
-            &announce_token,
-            &card_id,
-            &settings,
-            &summary,
-            &reasons,
-            "owner routing unavailable",
-            requested_mode,
-            resolved_mode,
-        )
-        .await;
-    }
-
-    deliver_pm_fallback(
-        &client,
-        base_url,
-        &announce_token,
-        &card_id,
-        &settings,
-        &summary,
-        &reasons,
-        None,
-        requested_mode,
-        resolved_mode,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver_pm_fallback(
-    client: &reqwest::Client,
-    base_url: &str,
-    announce_token: &str,
-    card_id: &str,
-    settings: &EscalationSettings,
-    summary: &CardEscalationSummary,
-    reasons: &[String],
-    fallback_note: impl Into<Option<&'static str>>,
-    requested_mode: EscalationMode,
-    resolved_mode: EscalationMode,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let fallback_note = fallback_note.into();
-    let pm_channel = settings
-        .pm_channel_id
-        .as_deref()
-        .and_then(parse_channel_reference);
-    let Some(pm_channel_id) = pm_channel else {
-        return Err(AppError::internal("pm_channel_id is not configured"));
+        Err(error) => Err(error),
     };
-    let pm_channel_id = pm_channel_id.to_string();
-
-    let message = build_pm_message(card_id, summary, reasons, fallback_note);
-    match send_channel_message(client, base_url, announce_token, &pm_channel_id, &message).await {
-        Ok(()) => Ok((
+    match delivered {
+        Ok(dm_channel_id) => Ok((
             StatusCode::OK,
             Json(json!({
                 "ok": true,
-                "requested_mode": requested_mode,
-                "resolved_mode": resolved_mode,
-                "delivery": "pm_channel",
-                "pm_channel_id": pm_channel_id,
-                "fallback_note": fallback_note,
+                "delivery": "owner_dm",
+                "owner_user_id": owner_user_id,
+                "dm_channel_id": dm_channel_id,
             })),
         )),
         Err(error) => Err(AppError::new(
             StatusCode::BAD_GATEWAY,
             ErrorCode::Discord,
-            format!("pm delivery failed: {error}"),
+            format!("owner dm delivery failed: {error}"),
         )),
     }
-}
-
-pub async fn seed_escalation_defaults_pg(
-    pool: &sqlx::PgPool,
-    config: &Config,
-) -> Result<(), String> {
-    if !config.runtime.reset_overrides_on_restart {
-        return Ok(());
-    }
-
-    sqlx::query("DELETE FROM kv_meta WHERE key = $1")
-        .bind(ESCALATION_SETTINGS_OVERRIDE_KEY)
-        .execute(pool)
-        .await
-        .map_err(|error| {
-            format!(
-                "clear postgres escalation settings override {ESCALATION_SETTINGS_OVERRIDE_KEY}: {error}"
-            )
-        })?;
-    Ok(())
-}
-
-/// GET /api/settings/escalation
-pub async fn get_escalation_settings(
-    State(state): State<AppState>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    let defaults = escalation_defaults(&state.config);
-    let current = if let Some(pool) = state.pg_pool_ref() {
-        match merged_settings_pg(pool, &state.config) {
-            Ok(current) => current,
-            Err(error) => {
-                tracing::warn!(%error, "[escalation] postgres settings load failed");
-                return Err(AppError::internal(error));
-            }
-        }
-    } else {
-        return Err(pg_unavailable());
-    };
-    Ok((
-        StatusCode::OK,
-        Json(
-            serde_json::to_value(EscalationSettingsResponse { current, defaults })
-                .unwrap_or_else(|_| json!({"error": "serialization failed"})),
-        ),
-    ))
-}
-
-/// PUT /api/settings/escalation
-pub async fn put_escalation_settings(
-    State(state): State<AppState>,
-    Json(mut body): Json<EscalationSettings>,
-) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    body.pm_channel_id = normalize_optional_string(body.pm_channel_id.take());
-    if body.schedule.timezone.parse::<Tz>().is_err() {
-        return Err(AppError::bad_request(
-            "schedule.timezone must be a valid IANA timezone",
-        ));
-    }
-    if parse_time_window(&body.schedule.pm_hours).is_none() {
-        return Err(AppError::bad_request(
-            "schedule.pm_hours must be HH:MM-HH:MM",
-        ));
-    }
-
-    let defaults = escalation_defaults(&state.config);
-    let current = if let Some(pool) = state.pg_pool_ref() {
-        let store_result = if body == defaults {
-            clear_override_pg(pool)
-        } else {
-            store_override_pg(pool, &body)
-        };
-        if let Err(error) = store_result {
-            return Err(AppError::internal(error));
-        }
-
-        match merged_settings_pg(pool, &state.config) {
-            Ok(current) => current,
-            Err(error) => {
-                tracing::warn!(%error, "[escalation] postgres settings reload failed");
-                return Err(AppError::internal(error));
-            }
-        }
-    } else {
-        return Err(pg_unavailable());
-    };
-
-    Ok((
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "current": current,
-            "defaults": defaults,
-        })),
-    ))
 }
 
 /// POST /api/internal/escalation/emit
@@ -1549,8 +794,7 @@ mod manual_decision_gate_tests {
         }
 
         let mut config = crate::config::Config::default();
-        config.escalation.mode = EscalationMode::Pm;
-        config.escalation.pm_channel_id = Some("222".to_string());
+        config.discord.owner_id = Some(111);
         let tx = crate::server::ws::new_broadcast();
         let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
         let mut state = AppState {
@@ -1587,5 +831,181 @@ mod manual_decision_gate_tests {
         server.abort();
         pool.close().await;
         pg_db.drop().await;
+    }
+    #[derive(Clone, Default)]
+    struct MockDiscordDm {
+        dm_recipients: Arc<Mutex<Vec<String>>>,
+        sent_messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn open_dm(
+        State(mock): State<MockDiscordDm>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let recipient = body["recipient_id"].as_str().unwrap_or("").to_string();
+        mock.dm_recipients.lock().unwrap().push(recipient.clone());
+        (
+            StatusCode::OK,
+            Json(json!({"id": format!("dm-{recipient}"), "type": 1})),
+        )
+    }
+
+    async fn send_dm_message(
+        State(mock): State<MockDiscordDm>,
+        Path(channel_id): Path<String>,
+        Json(body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        mock.sent_messages.lock().unwrap().push(format!(
+            "{channel_id}:{}",
+            body["content"].as_str().unwrap_or("")
+        ));
+        (StatusCode::OK, Json(json!({"channel_id": channel_id})))
+    }
+
+    fn test_state(pool: &sqlx::PgPool, owner_id: Option<u64>) -> AppState {
+        let mut config = crate::config::Config::default();
+        config.discord.owner_id = owner_id;
+        let tx = crate::server::ws::new_broadcast();
+        let buf = crate::server::ws::spawn_batch_flusher(tx.clone());
+        AppState {
+            pg_pool: Some(pool.clone()),
+            engine: test_engine_with_pg(pool.clone()),
+            config: std::sync::Arc::new(config),
+            broadcast_tx: tx,
+            batch_buffer: buf,
+            health_registry: None,
+            cluster_instance_id: None,
+        }
+    }
+
+    /// Emit goes only to the `discord.owner_id` DM; a leftover routing
+    /// override row is ignored, and a missing owner is an error with no send.
+    #[tokio::test]
+    async fn emit_escalation_pg_sends_only_to_configured_owner_dm() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let runtime_root = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime_root.path());
+        write_test_bot_tokens(runtime_root.path());
+
+        let mock = MockDiscordDm::default();
+        let app = Router::new()
+            .route("/users/@me/channels", post(open_dm))
+            .route("/channels/{channel_id}/messages", post(send_dm_message))
+            .with_state(mock.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let pg_db = EscalationPgDatabase::create().await;
+        let pool = pg_db.migrate().await;
+        sqlx::query(
+            "INSERT INTO kanban_cards (
+                id, title, status, priority, review_status, created_at, updated_at
+             )
+             VALUES ('card-active', 'Active card', 'review', 'medium', 'dilemma_pending', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO kv_meta (key, value) VALUES ($1, $2)")
+            .bind(concat!("escalation-settings", "-override"))
+            .bind(r#"{"mode":"pm","owner_user_id":999,"pm_channel_id":"222"}"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let body = || EmitEscalationBody {
+            card_id: "card-active".to_string(),
+            reasons: vec!["needs a person".to_string()],
+        };
+        let base_url = format!("http://{addr}");
+        let (status, Json(response)) =
+            emit_escalation_with_base_url(&test_state(&pool, Some(111)), body(), &base_url)
+                .await
+                .expect("owner DM delivery succeeds");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["delivery"], json!("owner_dm"));
+        assert_eq!(response["owner_user_id"], json!(111));
+        assert_eq!(*mock.dm_recipients.lock().unwrap(), vec!["111".to_string()]);
+        let sent = mock.sent_messages.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].starts_with("dm-111:"), "{sent:?}");
+        assert!(sent[0].contains("Active card") && sent[0].contains("needs a person"));
+
+        let error = emit_escalation_with_base_url(&test_state(&pool, None), body(), &base_url)
+            .await
+            .expect_err("missing owner is reported, not dropped");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.message().contains("discord.owner_id"));
+        assert_eq!(mock.dm_recipients.lock().unwrap().len(), 1);
+        assert_eq!(mock.sent_messages.lock().unwrap().len(), 1);
+
+        server.abort();
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+#[cfg(test)]
+mod retired_settings_route_tests {
+    use crate::server::routes::AppState;
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    fn loopback_request(method: &str, path: &str, body: &str) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        request
+    }
+
+    /// The routing-settings API is gone; the emit route stays mounted.
+    #[tokio::test]
+    async fn escalation_settings_route_is_gone_and_emit_stays_mounted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.policies.dir = dir.path().join("policies");
+        config.policies.hot_reload = false;
+        config.data.dir = dir.path().join("data");
+        std::fs::create_dir_all(&config.policies.dir).unwrap();
+        let state = AppState {
+            engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+            config: std::sync::Arc::new(config),
+            pg_pool: None,
+            broadcast_tx: crate::eventbus::new_broadcast(),
+            batch_buffer: Default::default(),
+            health_registry: None,
+            cluster_instance_id: None,
+        };
+        let app = super::super::compose_api_router(state.clone()).with_state(state);
+        for (method, body) in [("GET", ""), ("PUT", r#"{"mode":"user"}"#)] {
+            let response = app
+                .clone()
+                .oneshot(loopback_request(method, "/settings/escalation", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
+        }
+        let emit = app
+            .oneshot(loopback_request(
+                "POST",
+                "/internal/escalation/emit",
+                r#"{"card_id":"card-1","reasons":["needs a person"]}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(emit.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

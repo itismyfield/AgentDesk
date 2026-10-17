@@ -106,7 +106,6 @@ mod runtime_bootstrap;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
-pub(crate) use turn_presence::entrypoints::Lease as PresenceLease;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
@@ -173,7 +172,6 @@ mod tmux_watcher_registry;
 #[rustfmt::skip]
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
-pub(crate) mod input_runtime;
 #[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
@@ -366,7 +364,6 @@ pub(in crate::services::discord) use dispatch_policy::{
     stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
     strip_monitor_auto_turn_origin,
 };
-pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
@@ -2212,17 +2209,15 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                "KICKOFF: session transition owns channel; preserving queued head"
-            );
+            park.note_session_transition_hold(provider, channel_id);
             return MailboxTakeNextSoftOutcome::default();
         }
     };
+    park.clear_promote_hold(channel_id, "session_transition");
 
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane

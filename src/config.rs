@@ -1,5 +1,5 @@
 use crate::voice::{VoiceConfig, barge_in::BargeInSensitivity};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -63,8 +63,6 @@ pub struct Config {
     pub runtime: RuntimeSettingsConfig,
     #[serde(default, skip_serializing_if = "RoutinesConfig::is_default")]
     pub routines: RoutinesConfig,
-    #[serde(default, skip_serializing_if = "EscalationConfig::is_empty")]
-    pub escalation: EscalationConfig,
     #[serde(default, skip_serializing_if = "OnboardingConfig::is_empty")]
     pub onboarding: OnboardingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1961,120 +1959,6 @@ mod runtime_hook_registry_config_tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum EscalationMode {
-    Pm,
-    User,
-    Scheduled,
-}
-
-impl Default for EscalationMode {
-    fn default() -> Self {
-        Self::Pm
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationScheduleConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pm_hours: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-}
-
-impl EscalationScheduleConfig {
-    pub fn is_empty(&self) -> bool {
-        self.pm_hours.is_none() && self.timezone.is_none()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationConfig {
-    #[serde(default)]
-    pub mode: EscalationMode,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_u64",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub owner_user_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pm_channel_id: Option<String>,
-    #[serde(default, skip_serializing_if = "EscalationScheduleConfig::is_empty")]
-    pub schedule: EscalationScheduleConfig,
-}
-
-impl EscalationConfig {
-    pub fn is_empty(&self) -> bool {
-        self.mode == EscalationMode::Pm
-            && self.owner_user_id.is_none()
-            && self.pm_channel_id.is_none()
-            && self.schedule.is_empty()
-    }
-}
-
-/// Default PM-hours window applied when escalation settings leave it unset.
-pub const DEFAULT_ESCALATION_PM_HOURS: &str = "00:00-08:00";
-/// Default timezone applied when escalation settings leave it unset.
-pub const DEFAULT_ESCALATION_TIMEZONE: &str = "Asia/Seoul";
-
-/// Resolved (non-optional) escalation schedule used by the settings API and
-/// Discord text commands. Distinct from [`EscalationScheduleConfig`], which is
-/// the optional on-disk config representation; this is the materialized
-/// wire/runtime shape with defaults applied.
-///
-/// Lives in the config (domain) layer so service-layer callers can depend on it
-/// without reaching back into the server route module that owns the HTTP
-/// handlers (#3037 service→server backflow).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationScheduleSettings {
-    pub pm_hours: String,
-    pub timezone: String,
-}
-
-impl Default for EscalationScheduleSettings {
-    fn default() -> Self {
-        Self {
-            pm_hours: DEFAULT_ESCALATION_PM_HOURS.to_string(),
-            timezone: DEFAULT_ESCALATION_TIMEZONE.to_string(),
-        }
-    }
-}
-
-/// Resolved escalation settings (materialized wire/runtime shape with defaults
-/// applied). See [`EscalationScheduleSettings`] for the layering rationale.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationSettings {
-    pub mode: EscalationMode,
-    pub owner_user_id: Option<u64>,
-    pub pm_channel_id: Option<String>,
-    pub schedule: EscalationScheduleSettings,
-}
-
-impl Default for EscalationSettings {
-    fn default() -> Self {
-        Self {
-            mode: EscalationMode::Pm,
-            owner_user_id: None,
-            pm_channel_id: None,
-            schedule: EscalationScheduleSettings::default(),
-        }
-    }
-}
-
-/// API response body for the escalation settings endpoint: the current
-/// effective settings plus the computed defaults.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EscalationSettingsResponse {
-    pub current: EscalationSettings,
-    pub defaults: EscalationSettings,
-}
-
 /// Onboarding wizard / agent-factory rules. Externalizes the values that used
 /// to be hardcoded inside the `project-agentfactory` Discord prompt: the
 /// active Discord guild ID, the named category IDs new channels can be
@@ -2804,7 +2688,6 @@ impl Default for Config {
             placeholder: PlaceholderConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
             routines: RoutinesConfig::default(),
-            escalation: EscalationConfig::default(),
             onboarding: OnboardingConfig::default(),
             memory: None,
             mcp: McpConfig::default(),
@@ -2886,7 +2769,6 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
-    validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,
     )
@@ -2932,27 +2814,6 @@ mod scheduled_message_required_mention_config_tests {
             validate_scheduled_message_required_mentions(&["not-a-user-id".to_string()]).is_err()
         );
     }
-}
-
-fn validate_escalation_schedule(schedule: &EscalationScheduleConfig) -> Result<()> {
-    if let Some(timezone) = schedule.timezone.as_deref()
-        && timezone.parse::<chrono_tz::Tz>().is_err()
-    {
-        bail!("schedule.timezone must be a valid IANA timezone");
-    }
-    if let Some(pm_hours) = schedule.pm_hours.as_deref()
-        && parse_escalation_time_window(pm_hours).is_none()
-    {
-        bail!("schedule.pm_hours must be HH:MM-HH:MM");
-    }
-    Ok(())
-}
-
-fn parse_escalation_time_window(raw: &str) -> Option<(chrono::NaiveTime, chrono::NaiveTime)> {
-    let (start, end) = raw.trim().split_once('-')?;
-    let start = chrono::NaiveTime::parse_from_str(start.trim(), "%H:%M").ok()?;
-    let end = chrono::NaiveTime::parse_from_str(end.trim(), "%H:%M").ok()?;
-    Some((start, end))
 }
 
 fn register_config_secrets(config: &Config) {
@@ -3053,29 +2914,20 @@ mod secret_bearing_config_file_tests {
     }
 
     #[test]
-    fn load_from_path_rejects_invalid_escalation_schedule_timezone() {
+    fn load_from_path_ignores_retired_escalation_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
-        let mut config = Config::default();
-        config.escalation.schedule.timezone = Some("Mars/Olympus".to_string());
-        save_to_path(&path, &config).unwrap();
-
-        let error = format!("{:#}", load_from_path(&path).unwrap_err());
-
-        assert!(error.contains("schedule.timezone must be a valid IANA timezone"));
-    }
-
-    #[test]
-    fn load_from_path_rejects_invalid_escalation_schedule_pm_hours() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agentdesk.yaml");
-        let mut config = Config::default();
-        config.escalation.schedule.pm_hours = Some("soon".to_string());
-        save_to_path(&path, &config).unwrap();
-
-        let error = format!("{:#}", load_from_path(&path).unwrap_err());
-
-        assert!(error.contains("schedule.pm_hours must be HH:MM-HH:MM"));
+        save_to_path(&path, &Config::default()).unwrap();
+        let mut legacy_yaml = std::fs::read_to_string(&path).unwrap();
+        legacy_yaml.push_str("\nescalation:\n  mode: scheduled\n  owner_user_id: \"9\"\n  schedule:\n    timezone: Mars/Olympus\n");
+        std::fs::write(&path, legacy_yaml).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+        assert!(
+            serde_yaml::to_value(&loaded)
+                .unwrap()
+                .get("escalation")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3138,7 +2990,8 @@ mod secret_bearing_config_file_tests {
         let path = dir.path().join("agentdesk.yaml");
         let mut config = Config::default();
         config.database.password = Some("database-secret".to_string());
-        config.escalation.schedule.timezone = Some("Mars/Olympus".to_string());
+        config.discord.scheduled_message_required_mention_user_ids =
+            vec!["not-a-user-id".to_string()];
         save_to_path(&path, &config).unwrap();
 
         let mut loose_permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -3147,7 +3000,7 @@ mod secret_bearing_config_file_tests {
 
         let error = format!("{:#}", load_from_path(&path).unwrap_err());
 
-        assert!(error.contains("schedule.timezone must be a valid IANA timezone"));
+        assert!(error.contains("scheduled_message_required_mention_user_ids must contain"));
         let hardened_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(hardened_mode, 0o600);
     }
