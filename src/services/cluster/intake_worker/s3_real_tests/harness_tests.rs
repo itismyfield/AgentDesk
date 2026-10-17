@@ -1524,12 +1524,51 @@ fn racing_commits_publish_the_latest_seq_and_every_event() {
     assert_eq!(seqs, [1, 2, 3]);
 }
 
+/// A held step of the writer host: counts the waits it entered and the ones it let through.
+#[derive(Default)]
+pub(super) struct Park {
+    entered: AtomicUsize,
+    passed: AtomicUsize,
+    go: tokio::sync::Notify,
+}
+
+impl Park {
+    async fn wait(&self) {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.go.notified().await;
+        self.passed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Lets the next wait through, also one not entered yet.
+    pub(super) fn release(&self) {
+        self.go.notify_one();
+    }
+
+    pub(super) fn entered(&self) -> usize {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn passed(&self) -> usize {
+        self.passed.load(Ordering::SeqCst)
+    }
+}
+
+/// How a node's writer host runs: not started, or with its facts reads or port waits held.
+#[derive(Default)]
+pub(super) struct HostKnobs {
+    pub(super) unhosted: bool,
+    pub(super) facts: Option<Arc<Park>>,
+    pub(super) port: Option<Arc<Park>>,
+}
+
 /// The real writer host's gateway IO with the recording Discord in place of [`TestHost`]'s.
 pub(super) struct S3Host {
     inner: Arc<TestHost>,
     pub(super) discord: Arc<Discord>,
     pub(super) lease: Lease,
     logs: Mutex<BTreeMap<u64, Arc<EventLog>>>,
+    facts_park: Option<Arc<Park>>,
+    port_park: Option<Arc<Park>>,
 }
 
 impl S3Host {
@@ -1546,7 +1585,13 @@ impl HostIo for S3Host {
     type Bindings = EventLog;
 
     fn port(&self) -> impl Future<Output = Arc<Discord>> + Send {
-        std::future::ready(Arc::clone(&self.discord))
+        let (park, discord) = (self.port_park.clone(), Arc::clone(&self.discord));
+        async move {
+            if let Some(park) = park {
+                park.wait().await;
+            }
+            discord
+        }
     }
 
     fn lease(&self) -> Lease {
@@ -1574,7 +1619,16 @@ impl HostIo for S3Host {
         channel: u64,
         provider: ShadowProvider,
     ) -> impl Future<Output = Result<ActivationFacts, String>> + Send {
-        self.inner.activation_facts(channel, provider)
+        let (park, facts) = (
+            self.facts_park.clone(),
+            self.inner.activation_facts(channel, provider),
+        );
+        async move {
+            if let Some(park) = park {
+                park.wait().await;
+            }
+            facts.await
+        }
     }
 
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
@@ -1991,9 +2045,18 @@ impl Booted {
     /// As [`Booted::boot`], each port built by the runtime's own `BootPort::reading` with `restored`
     /// as the runtime's "persisted turns restored" flag.
     pub(super) async fn boot_reading(env: &Env, restored: Arc<AtomicBool>) -> Self {
+        Self::boot_reading_with(env, restored, HostKnobs::default()).await
+    }
+
+    /// As [`Booted::boot_reading`], its writer host run as `knobs` say.
+    pub(super) async fn boot_reading_with(
+        env: &Env,
+        restored: Arc<AtomicBool>,
+        knobs: HostKnobs,
+    ) -> Self {
         let port = move |id| BootPort::reading(id, Arc::clone(&restored), no_reset());
         let (discord, provider) = (Discord::default(), ShadowProvider::Claude);
-        Self::boot_port_on(env, port, discord, provider, GW).await
+        Self::boot_port_knobs(env, port, (discord, provider, GW), knobs).await
     }
 
     async fn boot_port_on<R>(
@@ -2002,6 +2065,19 @@ impl Booted {
         discord: Discord,
         provider: ShadowProvider,
         gateway: &str,
+    ) -> Self
+    where
+        R: DrainPort + Send + Sync + 'static,
+    {
+        let on = (discord, provider, gateway);
+        Self::boot_port_knobs(env, port, on, HostKnobs::default()).await
+    }
+
+    async fn boot_port_knobs<R>(
+        env: &Env,
+        port: impl Fn(u64) -> BootPort<R>,
+        (discord, provider, gateway): (Discord, ShadowProvider, &str),
+        knobs: HostKnobs,
     ) -> Self
     where
         R: DrainPort + Send + Sync + 'static,
@@ -2036,16 +2112,22 @@ impl Booted {
             discord: Arc::new(discord),
             lease: Lease::default(),
             logs: Mutex::default(),
+            facts_park: knobs.facts,
+            port_park: knobs.port,
         });
         let owned = channel_home_boot::delegated_boot_ownership(|_| true);
         let io = Arc::clone(&host);
         let parts_root = root.clone();
-        let writers = host::start_delegated(provider, owned, move || HostParts {
-            io,
-            runtime_root: Some(parts_root),
-            gate: Arc::new(OwnershipGate::default()),
-            readiness: host::process_readiness(),
-        });
+        let writers = if knobs.unhosted {
+            Vec::new()
+        } else {
+            host::start_delegated(provider, owned, move || HostParts {
+                io,
+                runtime_root: Some(parts_root),
+                gate: Arc::new(OwnershipGate::default()),
+                readiness: host::process_readiness(),
+            })
+        };
         Self {
             pool,
             root,
@@ -2108,6 +2190,8 @@ impl Booted {
             discord: Arc::new(discord),
             lease: Lease::default(),
             logs: Mutex::default(),
+            facts_park: None,
+            port_park: None,
         });
         let (io, parts_root) = (Arc::clone(&host), root.clone());
         let parts = move || HostParts {
