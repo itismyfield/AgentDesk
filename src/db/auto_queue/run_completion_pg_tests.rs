@@ -201,6 +201,149 @@ async fn grace_window_blocks_every_derived_entry_point_pg() {
     pg_db.drop().await;
 }
 
+#[derive(Clone)]
+struct CompletionBarrier {
+    point: &'static str,
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+tokio::task_local! {
+    static COMPLETION_BARRIER: CompletionBarrier;
+}
+
+pub(super) async fn pause_completion_at(point: &str) {
+    if let Ok(barrier) = COMPLETION_BARRIER.try_with(Clone::clone)
+        && barrier.point == point
+    {
+        barrier.reached.notify_one();
+        barrier.resume.notified().await;
+    }
+}
+
+async fn paused_completion(
+    pool: &PgPool,
+    point: &'static str,
+) -> (
+    tokio::task::JoinHandle<Result<RunCompletionOutcome, String>>,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
+    let barrier = CompletionBarrier {
+        point,
+        reached: Default::default(),
+        resume: Default::default(),
+    };
+    let writer_pool = pool.clone();
+    let writer_barrier = barrier.clone();
+    let writer = tokio::spawn(COMPLETION_BARRIER.scope(writer_barrier, async move {
+        finalize_run_if_ready_pg(&writer_pool, "run-1").await
+    }));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        barrier.reached.notified(),
+    )
+    .await
+    .expect("writer reaches readiness barrier");
+    (writer, barrier.resume)
+}
+
+async fn assert_completion_blocked(
+    pool: &PgPool,
+    writer: tokio::task::JoinHandle<Result<RunCompletionOutcome, String>>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+    reason: RunCompletionBlockedReason,
+) {
+    resume.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+        .await
+        .expect("writer finishes after the barrier opens")
+        .expect("join writer")
+        .expect("writer result");
+    assert_eq!(outcome, blocked(reason));
+    assert_eq!(run_status(pool, "run-1").await, "active");
+    assert_eq!(slot_run(pool).await.as_deref(), Some("run-1"));
+    assert_eq!(outbox_count(pool).await, 0);
+}
+
+// A separate connection commits grace after SELECT while the finalizer holds the run token.
+#[tokio::test]
+async fn grace_opened_after_readiness_read_blocks_completion_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db).await;
+    seed_entry(&pool, "entry-done", "failed").await;
+    let (writer, resume) = paused_completion(&pool, "grace_read").await;
+    set_grace(&pool, 30.0).await;
+    assert_completion_blocked(
+        &pool,
+        writer,
+        resume,
+        RunCompletionBlockedReason::PhaseGateGraceWindow,
+    )
+    .await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+// Phase-gate saves use a different token and can commit after the readiness reads.
+#[tokio::test]
+async fn gate_saved_after_readiness_read_blocks_completion_pg() {
+    for status in ["pending", "failed"] {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = setup_pool(&pg_db).await;
+        seed_entry(&pool, "entry-done", "failed").await;
+        let (writer, resume) = paused_completion(&pool, "readiness_read").await;
+        super::phase_gates::save_phase_gate_state_on_pg(
+            &pool,
+            "run-1",
+            0,
+            &super::phase_gates::PhaseGateStateWrite {
+                status: status.to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("commit phase gate through its writer");
+        assert_completion_blocked(
+            &pool,
+            writer,
+            resume,
+            RunCompletionBlockedReason::BlockingPhaseGate,
+        )
+        .await;
+        assert_eq!(gate_count(&pool).await, 1);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+// Reopening a terminal entry does not take the run token; UPDATE must see it.
+#[tokio::test]
+async fn entry_reopened_after_readiness_read_blocks_completion_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db).await;
+    seed_entry(&pool, "entry-done", "failed").await;
+    let (writer, resume) = paused_completion(&pool, "readiness_read").await;
+    let change = update_entry_status_on_pg(
+        &pool,
+        "entry-done",
+        super::ENTRY_STATUS_PENDING,
+        "test_reopen",
+        &EntryStatusUpdateOptions::default(),
+    )
+    .await
+    .expect("reopen through the entry writer");
+    assert!(change.changed);
+    assert_completion_blocked(
+        &pool,
+        writer,
+        resume,
+        RunCompletionBlockedReason::RunnableEntry,
+    )
+    .await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 /// Contract: pending and failed gates block derived completion and are never
 /// deleted by it; only the operator end command may remove them.
 #[tokio::test]

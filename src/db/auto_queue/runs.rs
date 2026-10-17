@@ -407,6 +407,8 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
     let in_grace: bool = run_row
         .try_get("in_grace")
         .map_err(|error| format!("decode auto-queue grace window for {run_id}: {error}"))?;
+    #[cfg(test)]
+    super::run_completion_pg_tests::pause_completion_at("grace_read").await;
     if matches!(run_status.as_str(), "completed" | "cancelled") {
         return Ok(RunCompletionOutcome::AlreadyTerminal);
     }
@@ -426,16 +428,26 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
         return Ok(RunCompletionOutcome::Blocked(Reason::RunnableEntry));
     }
 
-    // The status transition is the release authority. In particular, a run in
-    // the restore hand-off window must retain its slot until restore finalizes;
-    // releasing first and then discovering the status is ineligible creates a
-    // restoring-run / unowned-slot split brain.
+    #[cfg(test)]
+    super::run_completion_pg_tests::pause_completion_at("readiness_read").await;
+
+    // Recheck blockers committed by token-free writers since the readiness reads.
+    // Only a successful status transition authorizes releasing slots and notifying.
     let updated = sqlx::query(
         "UPDATE auto_queue_runs
          SET status = 'completed',
              completed_at = NOW()
          WHERE id = $1
-           AND status IN ('active', 'paused', 'generated', 'pending')",
+           AND status IN ('active', 'paused', 'generated', 'pending')
+           AND NOT COALESCE(phase_gate_grace_until > NOW(), false)
+           AND NOT EXISTS (
+               SELECT 1 FROM auto_queue_phase_gates
+               WHERE run_id = $1 AND status IN ('pending', 'failed')
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM auto_queue_entries
+               WHERE run_id = $1 AND status IN ('pending', 'dispatched', 'user_cancelled')
+           )",
     )
     .bind(run_id)
     .execute(&mut **tx)
@@ -443,14 +455,31 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
     .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?
     .rows_affected();
     if updated == 0 {
-        tracing::info!(
-            run_id = %run_id,
-            status = %run_status,
-            "run_finalize_refused_status_not_completable"
-        );
-        return Ok(RunCompletionOutcome::Blocked(
-            Reason::RunStatusNotCompletable,
-        ));
+        let in_grace = sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(phase_gate_grace_until > NOW(), false)
+             FROM auto_queue_runs WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| format!("reload auto-queue grace window for {run_id}: {error}"))?
+        .unwrap_or(false);
+        let reason = if in_grace {
+            Reason::PhaseGateGraceWindow
+        } else if super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await? {
+            Reason::BlockingPhaseGate
+        } else {
+            let entries = run_entry_readiness_on_pg_tx(tx, run_id).await?;
+            if entries.user_cancelled > 0 {
+                Reason::UserCancelledEntry
+            } else if entries.runnable > 0 {
+                Reason::RunnableEntry
+            } else {
+                Reason::RunStatusNotCompletable
+            }
+        };
+        tracing::info!(run_id = %run_id, reason = reason.as_str(), "run_finalize_refused");
+        return Ok(RunCompletionOutcome::Blocked(reason));
     }
 
     release_run_slots_on_pg_tx(tx, run_id)

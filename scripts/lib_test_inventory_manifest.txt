@@ -391,6 +391,9 @@ db::auto_queue::run_completion_pg_tests::blocking_phase_gates_refuse_derived_com
 db::auto_queue::run_completion_pg_tests::completion_rolls_back_slot_release_when_notification_fails_pg
 db::auto_queue::run_completion_pg_tests::concurrent_completion_waits_for_token_and_sees_terminal_pg
 db::auto_queue::run_completion_pg_tests::empty_run_completes_silently_and_restoring_run_is_blocked_pg
+db::auto_queue::run_completion_pg_tests::entry_reopened_after_readiness_read_blocks_completion_pg
+db::auto_queue::run_completion_pg_tests::gate_saved_after_readiness_read_blocks_completion_pg
+db::auto_queue::run_completion_pg_tests::grace_opened_after_readiness_read_blocks_completion_pg
 db::auto_queue::run_completion_pg_tests::grace_window_blocks_every_derived_entry_point_pg
 db::auto_queue::run_completion_pg_tests::user_cancelled_entry_blocks_completion_after_sibling_terminal_pg
 db::auto_queue::run_status::tests::activate_eligible_status_contract_admits_promotable_runs
@@ -1258,6 +1261,7 @@ server::routes::auth::tests::is_internal_loopback_path_matches_known_prefixes
 server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
 server::routes::auth::tests::loopback_peer_detection
 server::routes::auth::tests::peer_addr_from_request_reads_connect_info
+server::routes::auto_queue_lifecycle_pg_tests::tests::dispatch_next_route_completes_drained_run_through_canonical_writer_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
