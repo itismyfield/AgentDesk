@@ -421,20 +421,17 @@ impl PolicyReceipt for AckedPolicyReceipt {
         self.acked.channel_id
     }
 
-    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue. A
-    /// fenced channel's row is someone else's to write, so it reads as busy.
+    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue.
     fn try_clear(&self) -> PolicyClear {
         let acked = &self.acked;
         let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
             return PolicyClear::Io;
         };
         let path = inflight_state_path(&root, &provider, acked.channel_id);
-        use super::super::store::{TryLockRefusal, try_lock_unfenced_inflight_state_path};
-        let _lock = match try_lock_unfenced_inflight_state_path(&path) {
+        use super::super::store::{TryLockRefusal, try_lock_inflight_state_path_typed};
+        let _lock = match try_lock_inflight_state_path_typed(&path) {
             Ok(lock) => lock,
-            Err(TryLockRefusal::Contended | TryLockRefusal::Fenced) => {
-                return PolicyClear::LockBusy;
-            }
+            Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
             Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
         };
         let outcome = acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {

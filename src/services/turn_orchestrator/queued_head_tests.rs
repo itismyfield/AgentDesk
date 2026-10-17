@@ -417,38 +417,6 @@ fn a_clear_discards_a_dequeued_input_and_retries_a_failed_marker_removal() {
     });
 }
 
-/// With the input fence installed, clearing an Unknown head and tail that leave no metadata ends
-/// with memory, file and restart alike when a parent fsync would fail; the next write still lands.
-#[test]
-fn a_clear_leaves_memory_and_disk_alike_when_a_parent_fsync_fails() {
-    let _root = root();
-    block_on(async {
-        let channel = ChannelId::new(6_995_021);
-        let fence = crate::services::discord::input_runtime::fence::Gate::protect;
-        let gate = fence(ProviderKind::Claude, channel.get()).expect("gate");
-        let _health =
-            crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-        let handle = ChannelMailboxRegistry::default().handle(channel);
-        let head = human(51, 7, "status?");
-        assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
-        let ticket = reserve(&handle, &head).await;
-        let settled = settle(&handle, ticket, HeadOutcome::Unconfirmed).await;
-        assert_eq!(settled, "unknown");
-        assert!(handle.enqueue(human(52, 8, "tail"), ctx()).await.enqueued);
-        super::super::pending_queue_persistence::fsync_fault::fail_next(channel);
-
-        let cleared = handle.clear(ctx()).await;
-        let memory = ids(queued(&handle).await);
-        let disk = restarted(channel).await;
-        assert_eq!(
-            (cleared.persistence, memory, disk),
-            (Default::default(), vec![], vec![])
-        );
-        assert!(handle.enqueue(human(53, 8, "next"), ctx()).await.enqueued);
-        assert_eq!(restarted(channel).await, [53]);
-    });
-}
-
 /// Later input from the same author queues behind a reserved head instead of merging into it;
 /// later items still merge with each other, and the head leaves with its own payload.
 #[test]

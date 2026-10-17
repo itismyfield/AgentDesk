@@ -145,23 +145,15 @@ pub async fn load_dod_state_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<DodStateRecord>, String> {
-    sqlx::query_as::<_, (Option<String>, String, Option<String>)>(
-        "SELECT deferred_dod_json, status, review_status
+    sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT deferred_dod_json
          FROM kanban_cards
          WHERE id = $1",
     )
     .bind(card_id)
     .fetch_optional(pool)
     .await
-    .map(|row| {
-        row.map(
-            |(deferred_dod_json, status, review_status)| DodStateRecord {
-                deferred_dod_json,
-                status,
-                review_status,
-            },
-        )
-    })
+    .map(|row| row.map(|(deferred_dod_json,)| DodStateRecord { deferred_dod_json }))
     .map_err(|error| format!("load postgres DoD state: {error}"))
 }
 
@@ -180,19 +172,6 @@ pub async fn update_deferred_dod_pg(
     .execute(pool)
     .await
     .map_err(|error| format!("update postgres DoD state: {error}"))?;
-    Ok(())
-}
-
-pub async fn update_review_clock_after_dod_pg(pool: &PgPool, card_id: &str) -> Result<(), String> {
-    sqlx::query(
-        "UPDATE kanban_cards
-         SET review_entered_at = NOW(), awaiting_dod_at = NULL
-         WHERE id = $1",
-    )
-    .bind(card_id)
-    .execute(pool)
-    .await
-    .map_err(|error| format!("update postgres review clock: {error}"))?;
     Ok(())
 }
 

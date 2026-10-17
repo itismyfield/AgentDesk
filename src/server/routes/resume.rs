@@ -638,7 +638,7 @@ fn resume_from_review(
             }))
         }
 
-        // dilemma_pending / awaiting_dod → escalate
+        // dilemma_pending → escalate
         Some("dilemma_pending") => {
             resume_from_review_dilemma_pending(state, card_id, agent_id, card_title, force)
         }

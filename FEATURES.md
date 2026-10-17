@@ -26,17 +26,6 @@ backlog → ready → requested → in_progress → review → done
 | `failed` | Failed | ready (retry) |
 | `blocked` | Stalled | in_progress (manual unblock) |
 
-### PM Decision Gate
-
-Runs automatically on dispatch completion via `policies/kanban-rules.js` `onDispatchCompleted`.
-
-**Checks:**
-1. **DoD completion** — If `deferred_dod_json` has a checklist, verifies all items are checked
-2. **Minimum work time** — Agent must have worked at least 2 minutes (120s)
-
-**On pass:** → `review` (if DoD exists) or `done` (no DoD)
-**On fail:** → `pending_decision` + notification to PMD channel
-
 ### XP Rewards
 
 Agents earn XP on card completion:
@@ -132,7 +121,6 @@ Two tables manage the auto-queue:
 | requested card | 45min with no acceptance | → `failed` + dispatch failed |
 | in_progress card | 2hr inactivity | → `blocked` + reason logged |
 | review card | 30min after dispatch with no verdict | → `pending_decision` |
-| awaiting_dod card | 15min exceeded | → `pending_decision` |
 | suggestion_pending card | 15min exceeded | Auto-accept → rework_pending |
 | queue entry | 100min exceeded | Deleted |
 | pending/dispatched dispatch | 24hr exceeded | → `failed` |
@@ -196,7 +184,7 @@ On `onTick`, scans `backlog` cards without `assigned_agent_id`:
 
 1. Agent session ends → `OnSessionStatusChange` hook
 2. Dispatch status → `completed` + result_summary saved
-3. `OnDispatchCompleted` hook → PM gate, review automation, XP rewards
+3. `OnDispatchCompleted` hook → review entry, review automation, XP rewards
 
 ---
 

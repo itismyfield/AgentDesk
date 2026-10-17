@@ -177,15 +177,14 @@ Repair, in priority order:
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
    bears the load: it reads **the module that holds the production call site**,
    here through `include_str!("../framework_setup.rs")`, and asserts that call
-   site appears exactly once. Identify that file by what it CONTAINS, never by
-   how it is related to the test — the relation is an accident of the example.
-   Here `framework_setup` is a sibling of the module under test; elsewhere the
-   wiring may sit in a parent or further away. "Read the parent module" is
-   specifically the wrong generalization, because the parent of
-   `intake_delivery_sweep::tests` is `intake_delivery_sweep` itself, which is
-   the source read by this test's OTHER half — an ordering guard that pins no
-   production entrypoint. A guard copied from that half alone leaves exactly
-   the nominal coverage this gate rejects.
+   site appears exactly once. Identify its source by content, not test relation.
+   Use distinctive executable syntax—a qualified call with arguments or a
+   predicate such as `&& !preserve_on_cancel`—never a bare identifier prose can
+   repeat. Count after excluding comments and strings. A raw-source guard must
+   find exactly one intended executable match; `find()` can accept earlier prose.
+   `framework_setup` is a sibling here, but wiring may live elsewhere. The test
+   parent can mislead: `intake_delivery_sweep::tests` is under
+   `intake_delivery_sweep`, whose other half only pins ordering, not production.
 
 A lexical guard is the fallback, not the goal: it pins that the call site
 *exists*, not that the call is *meaningfully wired*. The exemplar says so in its
@@ -1405,11 +1404,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   nothing. `SessionEnrichment` holds those operands but publishes no
   such grade, which is why the derivation belongs at the source rather than at either
   struct's boundary.
-  Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
-  reads this term. A lane that publishes that grade owns correcting this bullet in the
-  same change, or the contract starts lying about its own surface — an obligation this
-  document cannot enforce on itself, which is why #6025 tracks the pattern instead of
-  this sentence predicting its own repair.
+  Publishing the attribution grade alone does not close this gap: both consumers must
+  read the grade before this contract's claim can change. Until then, no lane may cite
+  the grade as a repair.
   Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`
