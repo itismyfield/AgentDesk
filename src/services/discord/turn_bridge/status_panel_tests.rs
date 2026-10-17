@@ -1250,6 +1250,118 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
 }
 
 #[test]
+fn background_refreshes_keep_delivered_wip_warning_through_final_refresh_5350() {
+    // No git skip: a missing git must fail instead of passing without a warning.
+    let worktree = init_git_repo_for_wip_warning().expect("git is required for this test");
+    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    // A sync owner keeps the env lock outside the async body (clippy::await_holding_lock).
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(refresh_sequence_keeps_wip_warning(worktree.path()));
+}
+
+async fn refresh_sequence_keeps_wip_warning(worktree: &Path) {
+    use crate::services::agent_protocol::StatusEvent;
+    use crate::services::discord::footer_view_reconciler as fvr;
+
+    let shared = make_status_panel_v2_shared_for_tests();
+    let events = &shared.ui.placeholder_live_events;
+    let sink = fvr::FooterViewTestSink::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_350_201);
+    let message_id = MessageId::new(5_350_203);
+    let owner = fvr::CompletionFooterOwner::new(5_350_202, 1_700_000_000);
+    fvr::completion_footer_forget_registered_target(channel_id);
+    save_inflight_state(&wip_warning_inflight_state(
+        &provider,
+        channel_id.get(),
+        owner.user_msg_id,
+        worktree,
+    ))
+    .expect("save inflight state");
+    for id in ["5350-a", "5350-b"] {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".into(),
+                summary: format!("job {id}"),
+                tool_use_id: id.into(),
+            },
+        );
+    }
+    let end = |id: &str| {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: id.into(),
+                success: true,
+            },
+        );
+    };
+    let assert_step = |step: usize, registered: bool| {
+        let edits = sink.edits();
+        assert_eq!(edits.len(), step, "step {step} must take the edit path");
+        let wire = &edits[step - 1].text;
+        assert_eq!(edits[step - 1].message_id, message_id);
+        assert_eq!(wire.matches("커밋되지 않은 변경사항").count(), 1, "{wire}");
+        assert_eq!(wire.matches("⏱").count(), 1, "{wire}");
+        assert!(
+            crate::services::discord::formatting::discord_message_units(wire)
+                <= crate::services::discord::DISCORD_MSG_LIMIT
+        );
+        assert!(crate::services::discord::http::discord_content_or_zwsp(wire).is_ok());
+        assert_eq!(
+            fvr::completion_footer_has_registered_target(channel_id),
+            registered
+        );
+        wire.clone()
+    };
+
+    assert!(
+        fvr::note_turn_completed_footer(
+            fvr::FooterViewWriter::test(shared.as_ref(), &sink),
+            channel_id,
+            Some(message_id),
+            owner,
+            &provider,
+            "Final answer",
+            "⠸",
+            false,
+            false,
+            "5350_completion",
+        )
+        .await
+    );
+    assert!(assert_step(1, true).contains("job 5350-a ⠸"));
+
+    end("5350-a");
+    let refresh = || {
+        fvr::note_background_refresh_due(
+            fvr::FooterViewWriter::test(shared.as_ref(), &sink),
+            channel_id,
+            Some(owner),
+            "⠼",
+            "5350_refresh",
+        )
+    };
+    assert!(refresh().await);
+    let wire = assert_step(2, true);
+    assert!(wire.contains("job 5350-a ✓") && wire.contains("job 5350-b ⠼"));
+
+    // The card claims b's terminal slot, so the last refresh renders no block.
+    end("5350-b");
+    assert!(events.claim_terminal_slot_for_card(channel_id, "background", Some("5350-b")));
+    let rendered = events.render_completion_footer(channel_id, &provider, "⠼");
+    assert!(rendered.block.is_none() && !rendered.has_unfinished_entries);
+    assert!(refresh().await);
+    let wire = assert_step(3, false);
+    assert!(wire.contains("Final answer") && !wire.contains("job 5350"));
+}
+
+#[test]
 fn status_panel_wip_completion_uses_preloaded_recovery_snapshot_after_cleanup() {
     let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
     let worktree = tempfile::tempdir().expect("worktree tempdir");
