@@ -124,7 +124,7 @@ type Restored = Vec<(ChannelId, MessageId, MessageId)>;
 /// The root the restore ran under, kept until the test has read it.
 type Root = (crate::config::TestEnvVarGuard, tempfile::TempDir);
 
-/// #6258: runs the boot restore of a bound channel holding `[queued]` and a placeholder for it,
+/// Runs the boot restore of a bound channel holding `[queued]` and a placeholder for it,
 /// with `between` run after the boot read and before the merge.
 fn restore_around<F: std::future::Future<Output = ()>>(
     channel: u64,

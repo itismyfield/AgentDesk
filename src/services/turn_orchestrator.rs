@@ -2640,10 +2640,10 @@ fn input_mailbox_step(
         } => {
             // #3864: merge SIGTERM-restored disk items into the live
             // queue in ONE serialized actor step (read + dedup-merge +
-            // persist), so a live reconcile-window `Enqueue` is never
-            // overwritten. #6258: only sources the queue file still
-            // holds in this step are merged, so a clear, purge or
-            // dequeue since the boot read stays final. override =
+            // persist). Immune to the lost-enqueue race the old
+            // out-of-actor snapshot→build→`ReplaceQueue` RMW suffered:
+            // a live reconcile-window `Enqueue` is serialized before
+            // or after this merge, never overwritten by it. override =
             // None — dispatch_role_overrides are restored separately,
             // before the restore loop (see recovery_flush).
             let result = merge_restored_queue_items(&mut state, channel_id, items, persistence);
@@ -3565,7 +3565,7 @@ mod actor_hydrate_regression_tests {
             let registry = ChannelMailboxRegistry::default();
             let handle = registry.handle(channel_id);
             let persistence = QueuePersistenceContext::new(&provider, token_hash, None);
-            // #6258: the boot read found A on disk; the live Enqueue absorbs it first.
+            // The boot read found A on disk; the live Enqueue absorbs it first.
             let a = [make_intervention(100, "restored", Instant::now())];
             save_channel_queue(&provider, token_hash, channel_id, &a, None).unwrap();
 
@@ -3637,7 +3637,7 @@ mod actor_hydrate_regression_tests {
             let result = handle
                 .merge_restored_queue_items(restored, persistence.clone())
                 .await;
-            assert_eq!(result.absorbed, 0, "#6258: the Enqueue absorbed both first");
+            assert_eq!(result.absorbed, 0, "the Enqueue absorbed both first");
             let ids: Vec<u64> = handle
                 .snapshot()
                 .await
@@ -3742,7 +3742,7 @@ mod actor_hydrate_regression_tests {
                 "restored-a\nrestored-b",
                 Instant::now(),
             );
-            // #6258: the file still holds both sources, as the boot read saw it.
+            // The file still holds both sources, as the boot read saw it.
             let mut disk = handle.snapshot().await.intervention_queue;
             disk.push(restored.clone());
             save_channel_queue(&provider, token_hash, channel_id, &disk, None).unwrap();
@@ -3802,7 +3802,7 @@ mod actor_hydrate_regression_tests {
                 )
                 .await;
             assert!(live.enqueued);
-            // #6258: restored A is still in the file the merge reads.
+            // Restored A is still in the file the merge reads.
             let restored = make_intervention(100, "restored", Instant::now());
             let live_b = make_intervention(200, "live", Instant::now());
             let disk = [restored.clone(), live_b];

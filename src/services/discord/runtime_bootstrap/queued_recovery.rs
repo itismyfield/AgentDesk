@@ -41,7 +41,7 @@ pub(super) async fn restore_queued_and_inflight_work(
         settings.allowed_bot_ids.clone()
     };
     let announce_bot_id_for_restore = super::resolve_announce_bot_user_id(shared).await;
-    // #6258: channels whose merge could not read or write their queue; that input is not discarded.
+    // Channels whose merge could not read or write their queue; that input is not discarded.
     let mut unsettled: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
     // P1-1: Restore dispatch_role_overrides from queue snapshots
     for (thread_channel_id, alt_channel_id) in &restored_overrides {

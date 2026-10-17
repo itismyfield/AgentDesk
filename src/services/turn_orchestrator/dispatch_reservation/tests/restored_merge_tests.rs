@@ -1,4 +1,4 @@
-//! #6258: a boot snapshot merged after its items left the queue file never brings them back,
+//! A boot snapshot merged after its items left the queue file never brings them back,
 //! while items the file still holds are restored as before.
 
 use super::*;

@@ -142,7 +142,7 @@ async fn queued(handle: &ChannelMailboxHandle) -> Vec<(u64, Vec<u64>, String)> {
     queue.iter().map(row).collect()
 }
 
-/// #6258: puts `item` at the front of the channel's queue file and keeps the actor's metadata, as a
+/// Puts `item` at the front of the channel's queue file and keeps the actor's metadata, as a
 /// restore finds an item its boot read saw and the actor has not absorbed.
 pub(super) fn plant(token: &str, channel: ChannelId, item: &Intervention) {
     let provider = ProviderKind::Claude;

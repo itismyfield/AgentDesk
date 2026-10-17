@@ -412,9 +412,8 @@ pub(super) fn absorb_disk_queue(
     hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
 }
 
-/// #6258: merges boot-restored items keeping only the sources the queue file still holds, read in
-/// this actor step; a clear, purge, dequeue or eviction since the boot read removed the rest. An
-/// unreadable file merges nothing and reports its error, so the file is left for a later read.
+/// Merges boot-restored items, keeping only the sources the queue file holds in this actor step;
+/// an unreadable file merges nothing and reports its error, so the file stays for a later read.
 pub(super) fn merge_restored_queue_items(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
