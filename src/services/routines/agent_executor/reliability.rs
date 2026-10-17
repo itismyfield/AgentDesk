@@ -218,12 +218,21 @@ mod tests {
 
     #[test]
     fn provider_error_from_completion_allows_normal_error_reports() {
-        let mut completion =
-            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
-        completion.assistant_message =
-            Some("Error summary: the PR check failed, and the remediation is ready.".to_string());
+        for message in [
+            "Error summary: the PR check failed, and the remediation is ready.",
+            "API Error: The rate limit incident was resolved; today's briefing was delivered.",
+            "API Error: An APIError explanation is ready for the report.",
+        ] {
+            let mut completion =
+                completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+            completion.assistant_message = Some(message.to_string());
 
-        assert_eq!(provider_error_from_completion(&completion), None);
+            assert_eq!(
+                provider_error_from_completion(&completion),
+                None,
+                "normal report must not be classified as provider failure: {message}"
+            );
+        }
     }
 
     #[test]

@@ -42,7 +42,9 @@ fn is_unwrapped_api_error_line(trimmed: &str, lower: &str) -> bool {
     let Some(rest) = lower.strip_prefix("api error:") else {
         return false;
     };
-    !trimmed.contains(['\n', '\r']) && !rest.trim().is_empty() && has_rate_limit_marker(rest)
+    !trimmed.contains(['\n', '\r'])
+        && rest.trim()
+            == "server is temporarily limiting requests (not your usage limit) · the usage limit has been reached"
 }
 
 fn has_explicit_suffix_boundary(message: &str, prefix: &str) -> bool {
@@ -64,7 +66,10 @@ fn has_explicit_suffix_boundary(message: &str, prefix: &str) -> bool {
 /// work, so recognize it without matching ordinary prose that merely mentions
 /// an error or a rate limit.
 fn is_provider_error_presentation(lower: &str) -> bool {
-    let framed = lower.contains("||") && lower.contains("```") && lower.contains("provider");
+    let framed = lower.contains("||")
+        && lower.contains("```")
+        && lower.contains("provider")
+        && lower.ends_with("```||");
     if !framed {
         return false;
     }
@@ -195,7 +200,7 @@ mod tests {
             "Error: AGY returned an empty response because a tool permission was denied in headless mode.",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: AGY returned an empty response because a tool permission was denied in headless mode.\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: Unknown OpenCode error\n```||",
-            "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: Timeout waiting for Codex rollout transcript\n```||",
+            "⚠️ provider가 응답을 완료하지 못했어요.\n같은 요청을 다시 시도해 주세요. 문제가 반복되면 `!clear`로 세션을 초기화한 뒤 다시 보내 주세요.\n||**상세**\n```text\nError: Timeout waiting for Codex rollout transcript\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: APIError\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nAI_APICallError: statusCode: 429\n```||",
         ] {
@@ -213,12 +218,15 @@ mod tests {
             "Error: Unknown Codex error handling is documented here.",
             "Error: a report about an APIError is ready.",
             "API Error: a report about error handling is ready.",
+            "API Error: The rate limit incident was resolved; today's briefing was delivered.",
+            "API Error: An APIError explanation is ready for the report.",
             "[API Error: 400 status code (no body)] follow-up explanation",
             "[API Error: 400 status code (no body)]\nretry succeeded",
             "[API Error: 400 status code (no body)",
             "Error: a report about an AI_APICallError is ready.",
             "The provider returned Too Many Requests; the retry succeeded.",
             "Provider error example: ||```text\nError: AGY returned an empty response\n```||\nThe retry succeeded.",
+            "⚠️ provider가 응답을 완료하지 못했어요.\n같은 요청을 다시 시도해 주세요. 문제가 반복되면 `!clear`로 세션을 초기화한 뒤 다시 보내 주세요.\n||**상세**\n```text\nError: Timeout waiting for Codex rollout transcript\n```|| 복구 후 정상 응답했습니다.",
         ] {
             assert!(
                 !is_strong_provider_error_transcript(message),
