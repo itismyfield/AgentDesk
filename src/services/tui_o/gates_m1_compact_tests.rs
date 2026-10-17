@@ -153,8 +153,8 @@ async fn offered_input_keeps_runtime_attempt_through_compact() {
     let mut facts = InputFacts::open(binding.clone()).unwrap();
     let idle = facts.poll(u64::MAX).unwrap();
     assert_eq!(idle.state, TurnState::Idle);
-    let input_runtime = fs::canonicalize(root.path()).unwrap().join("input");
-    let mut inputs = Ledger::open(&input_runtime, binding.channel_id).unwrap();
+    let input_root = fs::canonicalize(root.path()).unwrap().join("input");
+    let mut inputs = Ledger::open(&input_root, binding.channel_id).unwrap();
     for (id, text) in [
         (1, "keep the actual offered input running"),
         (2, "next input"),
@@ -300,8 +300,8 @@ async fn g2_gate_same_source_auto_compact_preserves_input_attempt_and_output_ide
     let mut facts = InputFacts::open(binding.clone()).unwrap();
     assert_eq!(facts.poll(u64::MAX).unwrap().state, TurnState::Idle);
     let frame = token::render(TOKEN, "keep working through automatic compaction");
-    let input_runtime = fs::canonicalize(root.path()).unwrap().join("input");
-    let mut inputs = Ledger::open(&input_runtime, CHANNEL).unwrap();
+    let input_root = fs::canonicalize(root.path()).unwrap().join("input");
+    let mut inputs = Ledger::open(&input_root, CHANNEL).unwrap();
     for (id, text) in [(1, frame.as_str()), (2, "next input")] {
         inputs
             .append_entry(

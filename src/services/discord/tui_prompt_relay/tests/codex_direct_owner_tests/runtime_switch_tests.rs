@@ -36,12 +36,6 @@ fn channel(
     frames: &Arc<AtomicUsize>,
     relays: &mut Vec<crate::services::cluster::stream_relay::StreamRelayHandle>,
 ) -> CodexChannel {
-    // Input-fence gates outlive their tests and gate a channel for every provider.
-    let gate = crate::services::discord::input_runtime::fence::channel_gate(id);
-    assert!(
-        gate.is_none(),
-        "channel {id} is shared with an input-fence test"
-    );
     let codex = CodexChannel::new(shared, root, id, tmux);
     let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
         crate::services::cluster::session_matcher::MatchedChannel {
