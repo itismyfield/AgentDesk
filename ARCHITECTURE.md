@@ -2093,7 +2093,6 @@ src/
 │   │   │   │   └── large_tests.rs
 │   │   │   ├── activity.rs
 │   │   │   ├── activity_tests.rs
-│   │   │   ├── entrypoints.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
 │   │   │   └── supervisor_tests.rs

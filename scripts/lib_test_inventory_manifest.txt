@@ -10194,7 +10194,6 @@ services::discord::voice_barge_in::channel_state::tests::playback_finishes_only_
 services::discord::voice_barge_in::routing::tests::foreground_timeout_above_minimum_is_preserved
 services::discord::voice_barge_in::routing::tests::foreground_timeout_below_minimum_is_clamped_up
 services::discord::voice_barge_in::routing::tests::foreground_timeout_zero_falls_back_to_default
-services::discord::voice_barge_in::runtime_lifecycle::target_policy_tests::c2b_voice_targets_are_fresh_fallible_and_keep_consumer_routes_distinct
 services::discord::voice_barge_in::tests::aborted_foreground_future_clears_inflight_so_next_utterance_is_not_barge_in
 services::discord::voice_barge_in::tests::active_barge_in_mailbox_channel_prefers_routed_background_turn
 services::discord::voice_barge_in::tests::agent_voice_channel_route_falls_back_to_first_text_channel
