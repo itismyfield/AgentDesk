@@ -96,6 +96,7 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutp
     pub(in crate::services::discord::turn_bridge) new_session_id: Option<String>,
     pub(in crate::services::discord::turn_bridge) new_raw_provider_session_id: Option<String>,
     pub(in crate::services::discord::turn_bridge) full_response: String,
+    pub(in crate::services::discord::turn_bridge) provider_failure: bool,
     pub(in crate::services::discord::turn_bridge) active_background_child_session_ids: Vec<i64>,
     pub(in crate::services::discord::turn_bridge) pending_long_running_open_after_state_save:
         PendingLongRunningOpenAfterStateSave,
@@ -284,6 +285,8 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) cancelled: bool,
     pub(super) is_prompt_too_long: bool,
     pub(super) transport_error: bool,
+    /// The turn ends on the bridge's provider failure notice (see `is_provider_failure_turn`).
+    pub(super) provider_failure: bool,
     pub(super) recovery_retry: bool,
     pub(super) resume_failure_detected: bool,
     pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,

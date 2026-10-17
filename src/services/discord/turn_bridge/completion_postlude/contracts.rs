@@ -69,6 +69,7 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
     pub(in crate::services::discord::turn_bridge) accumulated_memory_input_tokens: u64,
     pub(in crate::services::discord::turn_bridge) accumulated_memory_output_tokens: u64,
     pub(in crate::services::discord::turn_bridge) transport_error: bool,
+    pub(in crate::services::discord::turn_bridge) provider_failure: bool,
     pub(in crate::services::discord::turn_bridge) api_friction_reports:
         Vec<crate::services::api_friction::ApiFrictionReport>,
     pub(in crate::services::discord::turn_bridge) cancelled: bool,

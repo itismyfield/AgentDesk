@@ -967,7 +967,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 accumulated_output_tokens,
                 accumulated_memory_input_tokens,
                 accumulated_memory_output_tokens,
-                transport_error,
+                transport_error, provider_failure: terminal_outcome_delivery_output.provider_failure,
                 api_friction_reports,
                 cancelled,
                 restart_followup_pending,
