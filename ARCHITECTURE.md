@@ -1850,6 +1850,7 @@ src/
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   ├── boundary_tests.rs
 │   │   │   │   │   └── runtime_switch_tests.rs
+│   │   │   │   ├── absent_tmux_host_tests.rs
 │   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
