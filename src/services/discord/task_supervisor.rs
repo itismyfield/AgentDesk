@@ -7,10 +7,10 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
-#[cfg(all(test, unix))]
-#[path = "task_supervisor/n4d_spawn_observation_tests.rs"]
-pub(in crate::services::discord) mod n4d_spawn_observation;
 pub(in crate::services::discord) mod watcher_completion;
+#[cfg(all(test, unix))]
+#[path = "task_supervisor/watcher_spawn_observation_tests.rs"]
+pub(in crate::services::discord) mod watcher_spawn_observation;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
     task_name: &'static str,
@@ -46,7 +46,7 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     #[cfg(all(test, unix))]
-    let observed = n4d_spawn_observation::submitted(&shared, &cancel);
+    let observed = watcher_spawn_observation::submitted(&shared, &cancel);
     #[cfg(all(test, unix))]
     let observed_task = observed.clone();
     let completion = watcher_completion::Registration::new(cancel.clone());
@@ -66,11 +66,11 @@ where
             }
         };
         #[cfg(all(test, unix))]
-        n4d_spawn_observation::finished(&observed_task, result);
+        watcher_spawn_observation::finished(&observed_task, result);
         completion.finish(result);
     });
     #[cfg(all(test, unix))]
-    n4d_spawn_observation::attach(&observed, task.abort_handle());
+    watcher_spawn_observation::attach(&observed, task.abort_handle());
     task
 }
 

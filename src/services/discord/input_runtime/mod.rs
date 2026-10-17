@@ -3,7 +3,6 @@
 pub(crate) mod clear;
 #[allow(dead_code)]
 pub(crate) mod fence;
-pub(crate) mod offer;
 #[allow(dead_code)]
 pub(crate) mod reconcile;
 #[allow(dead_code)]

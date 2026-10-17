@@ -237,8 +237,6 @@ pub struct DiscordHealthSnapshot {
     mailboxes: Vec<MailboxHealthSnapshot>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     queue_park_observation_failures: Vec<super::mailbox::QueueParkObservationFailureSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    transcript_turns: Option<super::transcript_turn::TranscriptTurnsHealth>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1075,12 +1073,7 @@ pub(super) async fn build_health_snapshot_with_options(
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
-    let (transcript_reasons, transcript_turns) =
-        super::transcript_turn::project_retired(&providers, include_mailbox_details).await;
-    for reason in crate::services::tui_o::alarm::health_reasons()
-        .into_iter()
-        .chain(transcript_reasons)
-    {
+    for reason in crate::services::tui_o::alarm::health_reasons() {
         status = status.worsen(HealthStatus::Degraded);
         degraded_reasons.push(reason);
     }
@@ -1103,7 +1096,6 @@ pub(super) async fn build_health_snapshot_with_options(
         providers: provider_entries,
         mailboxes: tmux.with_process_presence(mailbox_entries).await,
         queue_park_observation_failures: failures,
-        transcript_turns,
     }
 }
 
@@ -1507,12 +1499,10 @@ mod tests {
             });
     }
 
-    /// A LedgerOpen-shaped channel (O owns its output, input is retired to the ledger, nothing
-    /// is left behind) raises no reason naming it on either build.
+    /// An O-owned channel with nothing left behind raises no reason naming it on either build.
     #[cfg(unix)]
     #[test]
     fn a_ledger_open_channel_raises_no_legacy_reason() {
-        use crate::services::discord::health::legacy_supervision::RetiredForTest;
         use crate::services::tui_o::cutover::{boot_ownership, test_override};
 
         let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
@@ -1540,7 +1530,6 @@ mod tests {
                     .register(provider.to_string(), shared.clone())
                     .await;
                 shared.mailboxes.handle(ChannelId::new(owned));
-                let _retired = RetiredForTest::new(provider, owned);
 
                 let detail = build_health_snapshot(&registry).await;
                 let public = build_public_health_snapshot(&registry).await;
@@ -1548,10 +1537,6 @@ mod tests {
                     let names_owned = |r: &String| r.contains(&owned.to_string());
                     assert!(!reasons.iter().any(names_owned), "{reasons:?}");
                 }
-                let json = serde_json::to_value(detail).expect("serialize detail snapshot");
-                let entry = &json["transcript_turns"]["channels"][0];
-                assert_eq!(entry["channel_id"], owned);
-                assert_eq!(entry["residue"], serde_json::json!({}));
             });
     }
 

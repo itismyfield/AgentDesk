@@ -520,7 +520,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::placeholder_sweeper::abandon_guard::tests::tokenless_finalize_with_pending_soft_queue_still_schedules_kickoff
   services::discord::placeholder_sweeper::abandon_guard::tests::uncertain_or_live_evidence_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::zero_id_rows_require_owner_probe_before_terminal_marker_cleanup
-  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_without_mutating_retired_rows
+  services::discord::placeholder_sweeper::retirement_tests::tick_retries_5xx_and_then_edits_the_legacy_placeholder
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_clear_around_the_proof_neither_revives_nor_types_the_head_pg
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_closed_gate_holds_a_proven_unknown_head_until_it_opens_pg
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_a_legacy_unknown_head_proven_taken_is_consumed_untyped_busy_or_idle_pg
@@ -638,10 +638,12 @@ NON_PG_FILTER_REPLAY=(
   services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests::scoped_probe_backfills_old_rows_under_the_sidecar_lock
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_late_old_cleanup_leaves_the_successor_running
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::a_stuck_writer_stays_stuck_and_the_commit_still_exits
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::an_os_sigterm_joins_the_writer_before_exit
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::backend_exit_joins_writers_before_the_lease_drops
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_child
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::committed_restart_joins_every_provider_writer_before_exit
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::every_slot_holding_runtime_registers_one_sigterm_handler
+  services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::os_sigterm_child
   services::discord::runtime_bootstrap::shutdown::home_lifecycle_tests::switch_off_shutdown_builds_no_lifecycle
   services::discord::session_relay_sink::journal::pg_store::mixed_tests::mixed_strict_rows_leave_legacy_fold_frontier_and_shadow_bytes_unchanged
   services::discord::session_relay_sink::journal::pg_store::tests::stored_journal_event_mapping_is_closed_and_fail_closed

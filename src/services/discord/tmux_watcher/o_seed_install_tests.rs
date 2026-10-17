@@ -4,7 +4,7 @@ use crate::services::discord::health::legacy_supervision::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
 };
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};
-use crate::services::discord::task_supervisor::n4d_spawn_observation::Scope;
+use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::discord::task_supervisor::{spawn_observed_tmux_watcher, watcher_completion};
 use crate::services::discord::tmux::InstallFixture;
 use std::io::Write;

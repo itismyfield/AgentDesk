@@ -10,7 +10,7 @@
 
 | Gate | ci-main.yml job | ci-pr.yml job | ci-nightly.yml 대응 | 실행 조건 |
 | --- | --- | --- | --- | --- |
-| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
+| **Full tests** | `full_non_pg` (+ `lint` fmt/clippy/policy/non-lib tests/doctests) | `library_sweep` (+ `lint` compile/fmt/clippy/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests; main `full_non_pg` runs the PR `library_sweep` step verbatim on every push, so the whole non-PG `--lib` set (with `postgres` and `high-risk-recovery` for the rest) is checked after each merge. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on `rust_tests` (the broad `rust_or_policy` filter unless the PR is comment-only, see below) (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `lint` runs no tests beyond the policy JS. |
 | **PostgreSQL tests** | `postgres` (matrix `shard: [0, 1, 2, 3]`) | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. main은 PG 선택을 네 샤드로 나눠 샤드마다 자기 PostgreSQL 서비스에서 직렬 실행하며, 모든 샤드가 성공해야 run이 green이다. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
 | **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
@@ -21,7 +21,7 @@ PR이 주석만 바꾼 `.rs`(+ 어떤 path filter도 고르지 않는 `*.md`)인
 읽는 required mirror가 green을 게시한다. 단 base·head 트리의 `include!`·`include_str!`·
 `include_bytes!` 호출이 바뀐 파일을 읽거나 인자를 해석할 수 없어 읽을 수도 있으면
 (`scripts/ci/rust_include_reads.py`) 시험이 그 주석을 보므로 `rust_tests`는 원래 값을 유지해
-`library_sweep`만 돈다. `check_fast`·`lint`·Script checks·relay authority·
+`library_sweep`만 돈다. `lint`·Script checks·relay authority·
 dashboard는 원래 조건 그대로 돈다. 바뀐 `.rs`의 어느 쪽에든 LF·CRLF 외의 줄 경계 문자
 (`\r` 단독, U+2028 등)가 있으면 판정기가 리터럴 안의 차이를 지우므로 주석 전용으로 보지 않는다.
 판정 오류·include 스캔 실패·gate step 실패·입력 누락은 전부 원래 필터값(전체 실행)으로 간다.
@@ -419,7 +419,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 **Real-failure 우선 규약 (#3996):** 인프라 종료 skip 은 **인프라 종료가 유일한 실패 신호일 때만** 적용된다. job-level 폴백 로그에서 공유 술어 `scripts/ci/real-failure-predicate.sh` 의 `log_has_real_failure` 가 잡는 결정적 실패 신호가 하나라도 있으면 — 같은 로그에 SIGTERM/exit 143 노이즈가 섞여 있어도 — 그 job 은 **정상 승격**된다. 공유 술어가 지원 신호의 정본이며 이 문서는 닫힌 마커 목록을 중복하지 않는다. 즉 skip 조건은 `log_has_infra_termination && ! log_has_real_failure` 로, real 신호가 인프라 노이즈보다 항상 우선한다. 이 가드가 없으면 `test … FAILED` 를 남기지 않는 컴파일 회귀(job-level 폴백 경로)가 SIGTERM 문자열 혼재만으로 flaky 오분류되어 조용히 묻히는 false-negative 가 발생한다 (flaky 필터의 최악 실패 모드).
 
-PR 레벨 `Fast check` (`ci-pr.yml check_fast`) 의 signal-15 는 이 triage 대상이 아니다 (triage 는 `CI Main` on `main` 만 처리). PR 측은 재실행 또는 근본완화(러너 자원/컴파일 병렬도 캡, #3658 계열)로 커버한다.
+PR 레벨 `Fast check` (`ci-pr.yml lint` 거울) 의 signal-15 는 이 triage 대상이 아니다 (triage 는 `CI Main` on `main` 만 처리). PR 측은 재실행 또는 근본완화(러너 자원/컴파일 병렬도 캡, #3658 계열)로 커버한다.
 
 Self-test (`bash scripts/main-ci-triage.sh --self-test`) 는 위 분류가 red → red 2회 연속, recovery, existing issue comment-only, cancelled run skip, skipped lane non-closure 등 엣지 케이스 모두에서 유지됨을 검증한다. 또한 `scenario_three_gate_failures_produce_distinct_identifiers` 가 Full / PG / High-risk recovery 3개 gate 동시 실패 시 서로 다른 식별자 + 서로 다른 issue 가 생성됨을, `scenario_sigterm_job_failure_is_skipped_as_flaky` 가 2회 연속 SIGTERM job-level 실패(real 신호 없음)는 이슈화되지 않음을, `scenario_sigterm_noise_with_real_test_failure_still_creates_issue` 가 SIGTERM 노이즈가 섞여도 실제 test 실패는 여전히 이슈화됨을, `scenario_compile_error_with_sigterm_noise_still_creates_issue` (#3996) 가 SIGTERM 노이즈가 섞인 **컴파일 에러 job-level 폴백**도 real-failure 가드 덕에 ci-red 로 정상 승격됨을 확인한다.
 

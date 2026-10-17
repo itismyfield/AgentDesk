@@ -309,9 +309,6 @@ pub(super) async fn observe_watcher_absence_for_unwatched_work(
     for (channel_id, shared) in
         unwatched_relay_work_candidates(provider, runtimes, watcher_derived).await
     {
-        if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-            continue;
-        }
         let Some(snapshot) = registry
             .snapshot_watcher_state_for_shared(provider, shared, channel_id.get())
             .await
@@ -556,9 +553,6 @@ pub(super) fn detect_and_escalate_watcher_absence(
     watcher_present: bool,
     now_unix_secs: i64,
 ) -> bool {
-    if super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-        return false;
-    }
     if discord::live_bridge::is_live(provider, channel_id.get()) {
         return false;
     }
@@ -912,10 +906,9 @@ fn record_failed_respawn_attempt(
 }
 
 pub(super) fn gc_watcher_absence_state(now_unix_secs: i64) {
-    WATCHER_ABSENCE.retain(|key, state| {
-        super::legacy_supervision::is_retired(&key.provider, key.channel_id)
-            || saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
-                <= WATCHER_ABSENCE_STATE_TTL_SECS
+    WATCHER_ABSENCE.retain(|_, state| {
+        saturating_age_secs(state.last_seen_unix_secs, now_unix_secs)
+            <= WATCHER_ABSENCE_STATE_TTL_SECS
     });
 }
 

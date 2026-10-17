@@ -111,7 +111,6 @@ pub(super) async fn run_placeholder_sweeper_tick(
     // A busy-notice binding left without a turn ages out here; spent retry budgets and
     // unreadable records are kept, so age never re-arms a retry.
     let swept_busy_retry_bindings = super::super::busy_followup_retry_store::sweep_expired();
-    super::super::health::transcript_turn::observe_durable_residue(provider, &shared.token_hash);
     TickReport {
         pass,
         drained_orphans,
