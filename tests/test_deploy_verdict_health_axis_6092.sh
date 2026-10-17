@@ -128,6 +128,23 @@ if health_json_is_ready "$QUEUE" 1 1 1 >/dev/null 2>&1; then
 else
     pass "a non-deploy caller still refuses it"
 fi
+DEFERRED_BACKLOG="$(body '["provider:codex:deferred_hooks_backlog:1"]' true)"
+if health_json_is_ready "$DEFERRED_BACKLOG" 1 1 1 1 >/dev/null 2>&1; then
+    pass "the deploy verdict accepts its deferred hook backlog"
+else
+    fail "the deploy verdict refused its deferred hook backlog"
+fi
+if health_json_is_ready "$DEFERRED_BACKLOG" 1 1 1 >/dev/null 2>&1; then
+    fail "a non-deploy caller accepted deferred hook backlog"
+else
+    pass "a non-deploy caller still refuses deferred hook backlog"
+fi
+ZERO_DEFERRED_BACKLOG="$(body '["provider:codex:deferred_hooks_backlog:0"]' true)"
+if health_json_is_ready "$ZERO_DEFERRED_BACKLOG" 1 1 1 1 >/dev/null 2>&1; then
+    fail "a zero deferred hook count was accepted as backlog"
+else
+    pass "a zero deferred hook count is not treated as backlog"
+fi
 if health_json_is_ready "$(body '["relay_verdict_unknown_codex_c1"]' true)" 1 0 0 >/dev/null 2>&1; then
     pass "a relay verdict stays acceptable to every caller, as it was before"
 else
@@ -324,6 +341,8 @@ if ! command -v jq >/dev/null 2>&1; then
 else
     for shape in "$INCIDENT" '["relay_verdict_unknown_codex_c1","db_unavailable"]' \
         '["a_reason_this_script_has_never_seen"]' '["provider:codex:pending_queue_depth:4"]' \
+        '["provider:codex:deferred_hooks_backlog:1"]' \
+        '["provider:codex:deferred_hooks_backlog:0"]' \
         '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]' \
         '["relay_verdict_unknown_codex_c1",""]' '["provider:a,b:pending_queue_depth:4"]' \
         '["tui_o:released:7"]' '["tui_o:released:7","tui_o:halted:8"]'; do

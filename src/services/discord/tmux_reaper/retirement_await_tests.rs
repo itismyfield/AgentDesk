@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 
 use super::tests::{admit_any_host, seed_busy_channel, still_busy};
 use crate::config::TestEnvVarGuard;
-use crate::services::discord::health::legacy_supervision::test_support::fingerprint;
+use crate::services::discord::health::test_support::fingerprint;
 use crate::services::discord::inflight::{load_inflight_state, save_inflight_state};
 use crate::services::provider::ProviderKind;
 

@@ -128,12 +128,13 @@ impl Tq {
     }
 
     /// Runs the waiting CLI handoff on its own thread, as the provider's hook process would.
+    /// Yields how long the CLI waited, when it returned, and its result.
     fn waiting_cli(
         &self,
         event: &str,
         payload: Value,
         wait: Duration,
-    ) -> std::thread::JoinHandle<(Duration, Result<Value, String>)> {
+    ) -> std::thread::JoinHandle<(Duration, DateTime<Utc>, Result<Value, String>)> {
         let (endpoint, event, a) = (self.endpoint.clone(), event.to_owned(), self.a.clone());
         let cli_started = self.cli_started.clone();
         std::thread::spawn(move || {
@@ -142,8 +143,46 @@ impl Tq {
             let result = handoff_ordered_hook_event_response_with_timeout(
                 &endpoint, "claude", &event, &a, payload, wait,
             );
-            (started.elapsed(), result)
+            (started.elapsed(), Utc::now(), result)
         })
+    }
+
+    /// Holds the worker lock like a busy worker, so a waiting CLI's request stays in ingress.
+    /// Polled, not blocked on: a relaying worker waits on the proxy this runtime drives.
+    async fn hold_worker_lock(&self) -> RelayQueueFileLock {
+        let deadline = Instant::now() + LIVENESS;
+        loop {
+            let lock = self.queue_dir.join("worker.lock");
+            if let Some(held) = lock_relay_queue_file(&lock, true).unwrap() {
+                return held;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the worker lock"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    /// The `event` request the producer published, read while the held worker cannot promote it.
+    async fn ingress(&self, event: &str) -> OrderedHookRelayRequest {
+        let deadline = Instant::now() + LIVENESS;
+        loop {
+            let found = queue_ingress_paths(&self.queue_dir)
+                .unwrap()
+                .into_iter()
+                .filter_map(|path| std::fs::read(path).ok())
+                .filter_map(|bytes| serde_json::from_slice::<OrderedHookRelayRequest>(&bytes).ok())
+                .find(|request| request.event == event);
+            if let Some(request) = found {
+                return request;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {event} ingress"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 
     /// Holds the producer lock like a slow concurrent enqueue, released `hold` after the next
@@ -351,8 +390,11 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
     let (registry_before, mut rx) = ((buffered(&tq.a), buffered(&tq.b)), tq.state.subscribe());
 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
+    let worker = tq.hold_worker_lock().await;
     let producers = (!producer_delay.is_zero()).then(|| tq.delay_producers(producer_delay));
     let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})), REPLY_WAIT);
+    let request = tq.ingress("Stop").await;
+    drop(worker);
     // The fault outlives the caller's wait, so the Stop is first accepted after the CLI gave up
     // however slow the runner is; a CLI that waits for the delivery never returns.
     let cli = join_within(cli, LIVENESS).await;
@@ -364,8 +406,29 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
     tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (elapsed, result) = cli.expect("the CLI waits for the refused Stop past its own wait");
+    let (elapsed, returned_at, result) =
+        cli.expect("the CLI waits for the refused Stop past its own wait");
     assert!(elapsed >= REPLY_WAIT, "CLI waited {elapsed:?}");
+    // The worker's window is cut from the caller's deadline, which the CLI reached before it
+    // returned; both sides of the comparison only grow on a slow runner.
+    let window = request.response.expect("the waiting Stop asks for a reply");
+    let window_end = respond_by(request.published_at, window.timeout_millis);
+    assert!(
+        window_end <= returned_at,
+        "the reply window ({}ms from publish) outlives the caller's wait",
+        window.timeout_millis
+    );
+    if !producer_delay.is_zero() {
+        // The CLI published only after the held lock, so a caller wait restarted at enqueue
+        // returns at least a full `REPLY_WAIT` after the publish; a charged one returns
+        // `producer_delay` before that.
+        assert!(
+            returned_at < request.published_at + REPLY_WAIT,
+            "the slow enqueue was added to the caller's wait instead of charged to it: \
+             returned {}ms after publish",
+            (returned_at - request.published_at).num_milliseconds()
+        );
+    }
     assert!(
         result.is_err_and(|e| e.contains("timed out")),
         "CLI returns Err(timeout)"
@@ -451,7 +514,7 @@ fn a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepte
             .await;
         // SessionStart stays refused until the CLI gave up, so the Stop behind it cannot reply.
         let stop = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})), REPLY_WAIT);
-        let (elapsed, result) = join(stop).await;
+        let (elapsed, _, result) = join(stop).await;
         APPEND_FAULT.with(|fault| fault.set(None));
         tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -496,7 +559,7 @@ fn a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does() {
             // Enqueue outlives the caller's wait, so the reply window is already closed on arrival.
             let producers = tq.delay_producers(REPLY_WAIT + Duration::from_millis(50));
             let registry = buffered(&a);
-            let (_, result) = join(tq.waiting_cli(event, payload.clone(), REPLY_WAIT)).await;
+            let (_, _, result) = join(tq.waiting_cli(event, payload.clone(), REPLY_WAIT)).await;
             join(producers).await;
             assert!(result.is_err());
             tq.until("late hook accepted", |tq| !tq.accepted(event).is_empty())
@@ -510,7 +573,7 @@ fn a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does() {
 
             // The attached reply's budget is not under test, so a slow runner gets the full wait.
             let attached = tq.waiting_cli(event, payload.clone(), LIVENESS);
-            let result = join(attached).await.1;
+            let result = join(attached).await.2;
             assert!(result.is_ok(), "attached {event} replies: {result:?}");
             assert_eq!(tq.accepted(event).len(), 2);
             assert!(!tq.accepted(event)[1].1, "{event} attached");

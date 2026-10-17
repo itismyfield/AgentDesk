@@ -1312,6 +1312,8 @@ server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_sta
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
+server::routes::docs::group_response::tests::colliding_group_paths_advertise_resolvable_category_details
+server::routes::docs::group_response::tests::kanban_category_docs_include_single_card_get
 server::routes::docs::inventory::endpoints::part_06::tests::queue_generate_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::add_run_entry_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::docs_group_example_advertises_canonical_paths
@@ -1674,6 +1676,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_c
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_is_a_structural_no_op_after_the_cancel_commit_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::slot_release_and_its_durable_record_commit_together_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::tampered_null_generation_skips_card_but_rolls_back_some_sibling_pg
+services::auto_queue::cleanup_tasks::ownership_pg_tests::slot_cleanup_preserves_successor_session_after_ownership_probe_pg
 services::auto_queue::cleanup_tasks::tests::card_rollback_dispatch_id_accepts_only_null_or_string
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::active_only_explicit_promotable_run_is_harmless_no_op_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_run_id_admits_eligible_and_rejects_terminal_statuses_pg
@@ -3766,9 +3769,6 @@ services::discord::global_active_counter_tests::saturating_decrement_counter_doe
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_absent_reproduces_the_legacy_shared_starter_inputs
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_reaches_the_session_slot_without_moving_the_channel_hint
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_starter_hands_its_own_label_to_the_shared_starter_call
-services::discord::health::legacy_supervision::tests::empty_set_reads_without_initializing_or_locking
-services::discord::health::legacy_supervision::tests::retired_channel_is_scoped_by_provider
-services::discord::health::legacy_supervision::tests::transcript_confirmed_channel_is_not_retired
 services::discord::health::liveness_authority::tests::bounded_none_transient_then_fail_closed
 services::discord::health::liveness_authority::tests::capture_decrease_preserves_main_two_tick_grace
 services::discord::health::liveness_authority::tests::capture_some_to_none_records_disappearance_and_preserves_main_grace
@@ -5981,14 +5981,12 @@ services::discord::prompt_builder::session_anchors::tests::session_anchors_use_n
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
 services::discord::queue_dispatch::input_effect_tests::automatic_dequeue_restores_a_head_capped_after_selection_and_takes_the_tail
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
-services::discord::queue_io::cancel_backstop_tests::backstop_refuses_an_already_retired_channel
 services::discord::queue_io::cancel_backstop_tests::cancelled_anchor_is_rechecked_on_later_slow_backstop_cycle
 services::discord::queue_io::cancel_backstop_tests::cancelled_live_inflight_is_preserved_for_five_actual_slow_cycles
 services::discord::queue_io::cancel_backstop_tests::external_arm_at_shutdown_is_inherited_by_the_original_backstop_task
 services::discord::queue_io::cancel_backstop_tests::live_foreground_consumes_its_real_guard_skip_request_without_rearming
 services::discord::queue_io::cancel_backstop_tests::matching_residue_inserted_after_terminal_evidence_preserves_its_owner
 services::discord::queue_io::cancel_backstop_tests::matching_residue_keeps_release_priority_over_the_cancel_backstop
-services::discord::queue_io::cancel_backstop_tests::retirement_after_terminal_evidence_prevents_backstop_mutation
 services::discord::queue_io::ledger_settlement_tests::a_delivered_absorbed_copy_is_settled_before_a_new_input_merges
 services::discord::queue_io::ledger_settlement_tests::a_late_published_completion_settles_each_sources_original_enqueue
 services::discord::queue_io::ledger_settlement_tests::a_requeue_after_an_earlier_completed_episode_of_the_same_id_still_dispatches
@@ -10384,6 +10382,7 @@ services::discord::turn_presence::activity::tests::s1_read_now_unbound_invalidat
 services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
 services::discord::turn_presence::activity::unbound::dormancy_tests::activation_candidates_counter_crosses_the_blocking_worker
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
+services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg

@@ -65,7 +65,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/provider/read_fault.rs",
         "src/services/session_host/test_support.rs",
         "src/services/discord/host_teardown_gate/test_support.rs",
-        "src/services/discord/health/legacy_supervision/test_support.rs",
         "src/services/tmux_turn_liveness/tests_pg.rs",
         "src/test_env_panic_probe.rs",
         "src/services/tui_o/gates_m1.rs",
@@ -86,5 +85,6 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/recovery_defer.rs",
         "src/services/recovery_defer/cursor.rs",
         "src/services/discord/health/turn_deliver/inject/test_hook.rs",
+        "src/services/discord/health/test_support.rs",
     }
 )

@@ -197,9 +197,23 @@ impl HerdrRig {
 
     /// This node's registry over the rig, installed on the calling thread until dropped.
     pub(crate) fn registry_on_this_thread(&self) -> ForcedRegistry {
-        let endpoint = HerdrEndpoint::new(NODE, KEY, &self.path, SESSION)
-            .and_then(|endpoint| endpoint.with_herdr_home(Path::new("/adk/herdr")))
-            .unwrap();
+        self.registry_as_on_this_thread(NODE, KEY, &self.path, SESSION)
+    }
+
+    /// The registry of `node`'s endpoint `key` at `at`, as a channel's config names it, with every
+    /// dial reaching the rig; installed on the calling thread until dropped.
+    pub(crate) fn registry_as_on_this_thread(
+        &self,
+        node: &str,
+        key: &str,
+        at: &Path,
+        session: &str,
+    ) -> ForcedRegistry {
+        let endpoint = |socket: &Path| {
+            HerdrEndpoint::new(node, key, socket, session)
+                .and_then(|endpoint| endpoint.with_herdr_home(Path::new("/adk/herdr")))
+                .unwrap()
+        };
         let config = HerdrSocketConfig {
             io_timeout: Duration::from_millis(500),
             read_deadline: Duration::from_millis(500),
@@ -207,7 +221,7 @@ impl HerdrRig {
             max_frame_bytes: MAX_FRAME_BYTES,
         };
         let servers = self.servers.clone();
-        let socket = HerdrSocketTransport::new(&endpoint, config, LineJsonFraming)
+        let socket = HerdrSocketTransport::new(&endpoint(&self.path), config, LineJsonFraming)
             .with_peer_reader(Box::new(move |_| {
                 let mut servers = servers.lock().unwrap();
                 let pid = match servers.len() {
@@ -216,7 +230,7 @@ impl HerdrRig {
                 };
                 Ok((pid, start(1_000)))
             }));
-        let registry = HerdrRegistry::with_transport(endpoint, Arc::new(socket));
+        let registry = HerdrRegistry::with_transport(endpoint(at), Arc::new(socket));
         let os: Arc<dyn ProcessOs> = self.os.clone();
         herdr_registry::force_for_test(registry.with_reads((off_where_dialled, os)))
     }

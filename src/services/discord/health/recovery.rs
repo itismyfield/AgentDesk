@@ -6883,9 +6883,7 @@ mod legacy_channel_backfill_tests {
 
     use super::super::HealthRegistry;
     use crate::config::TestEnvVarGuard;
-    use crate::services::discord::health::legacy_supervision::test_support::{
-        fingerprint, seed_backfill_row,
-    };
+    use crate::services::discord::health::test_support::{fingerprint, seed_backfill_row};
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
 

@@ -32,6 +32,7 @@ src/
 │   │   ├── mailbox/
 │   │   │   └── observation.rs
 │   │   ├── orchestrator/
+│   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
@@ -377,7 +378,9 @@ src/
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
+│   │   │   │       ├── public_surfaces.rs
 │   │   │   │       └── session_evidence.rs
+│   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs
@@ -502,6 +505,7 @@ src/
 │   ├── worker_registry/
 │   │   ├── registry.rs
 │   │   └── status.rs
+│   ├── bind_security_diagnostics.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
@@ -581,6 +585,7 @@ src/
 │   │   ├── campaign_handoff_tests.rs
 │   │   ├── cancel_run.rs
 │   │   ├── cleanup_tasks.rs
+│   │   ├── cleanup_tasks_ownership_pg_tests.rs
 │   │   ├── cleanup_tasks_pg_tests.rs
 │   │   ├── command.rs
 │   │   ├── control_routes.rs
@@ -969,8 +974,6 @@ src/
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
-│   │   │   ├── legacy_supervision/
-│   │   │   │   └── test_support.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -1038,7 +1041,6 @@ src/
 │   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   └── live_bridge_guard_tests.rs
 │   │   │   ├── headless_turn.rs
-│   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── o_transition.rs
@@ -1057,6 +1059,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs
@@ -2141,6 +2144,7 @@ src/
 │   │   │   │   │   ├── dormancy_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
+│   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── live.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs

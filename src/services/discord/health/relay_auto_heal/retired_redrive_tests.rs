@@ -13,9 +13,7 @@ use super::{
     HealthRegistry, REDRIVE_ATTEMPTS, REDRIVE_PLACEHOLDER_SHIELDS, RedriveEpisode, stall_liveness,
 };
 use crate::services::discord::SharedData;
-use crate::services::discord::health::legacy_supervision::test_support::{
-    MockDiscord, tree_fingerprint,
-};
+use crate::services::discord::health::test_support::{MockDiscord, tree_fingerprint};
 use crate::services::discord::inflight::{self, InflightTurnIdentity, InflightTurnState};
 use crate::services::platform::tmux;
 use crate::services::provider::ProviderKind;
