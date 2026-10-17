@@ -119,6 +119,8 @@ src/
 │   │   ├── phase_gate_verdict.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
+│   │   ├── run_completion_contract_tests.rs
+│   │   ├── run_completion_pg_tests.rs
 │   │   ├── run_status.rs
 │   │   ├── runs.rs
 │   │   ├── slot_predicate.rs
@@ -599,6 +601,7 @@ src/
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
 │   │   ├── route_types.rs
+│   │   ├── run_completion_activate_pg_tests.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
 │   │   ├── view.rs

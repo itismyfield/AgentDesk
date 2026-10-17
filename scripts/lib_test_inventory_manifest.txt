@@ -382,6 +382,17 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_wi
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::whitespace_padded_check_status_is_not_inferred_as_pass
+db::auto_queue::run_completion_contract_tests::completed_run_status_literal_writers_are_pinned
+db::auto_queue::run_completion_contract_tests::inline_test_module_stripper_skips_fixture_sql
+db::auto_queue::run_completion_contract_tests::parameterized_run_status_writers_are_pinned
+db::auto_queue::run_completion_contract_tests::policies_never_write_run_status_directly
+db::auto_queue::run_completion_contract_tests::status_predicates_read_set_clause_only
+db::auto_queue::run_completion_pg_tests::blocking_phase_gates_refuse_derived_completion_and_keep_rows_pg
+db::auto_queue::run_completion_pg_tests::completion_rolls_back_slot_release_when_notification_fails_pg
+db::auto_queue::run_completion_pg_tests::concurrent_completion_waits_for_token_and_sees_terminal_pg
+db::auto_queue::run_completion_pg_tests::empty_run_completes_silently_and_restoring_run_is_blocked_pg
+db::auto_queue::run_completion_pg_tests::grace_window_blocks_every_derived_entry_point_pg
+db::auto_queue::run_completion_pg_tests::user_cancelled_entry_blocks_completion_after_sibling_terminal_pg
 db::auto_queue::run_status::tests::activate_eligible_status_contract_admits_promotable_runs
 db::auto_queue::run_status::tests::live_run_status_contract_includes_restore_window
 db::auto_queue::slot_predicate::tests::exists_form_matches_legacy_claim_exists
@@ -412,7 +423,7 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_concurr
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_dispatch_rows_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_empty_dispatch_set_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg
-db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_activate_completion_uses_protocol_without_notification_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_activate_tail_completion_queues_notification_once_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
@@ -1754,6 +1765,8 @@ services::auto_queue::route::route_types::reset_body_tests::parses_run_id_only_s
 services::auto_queue::route::route_types::reset_body_tests::rejects_empty_body
 services::auto_queue::route::route_types::reset_body_tests::rejects_missing_run_id
 services::auto_queue::route::route_types::reset_body_tests::rejects_unknown_scope_field
+services::auto_queue::route::run_completion_activate_pg_tests::activate_tail_obeys_grace_window_and_notifies_once_pg
+services::auto_queue::route::run_completion_activate_pg_tests::empty_run_short_circuit_reports_real_outcome_pg
 services::auto_queue::route::view::activate_next_dispatch_type_tests::absent_scope_depth_is_implementation_no_regression
 services::auto_queue::route::view::activate_next_dispatch_type_tests::completed_plan_advances_to_implementation_even_for_full
 services::auto_queue::route::view::activate_next_dispatch_type_tests::direct_is_fast_track_implementation

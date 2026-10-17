@@ -434,9 +434,10 @@ mod tests {
         wait_for_rebind_advisory_lock_waiter(&pool).await;
 
         assert!(
-            crate::db::auto_queue::complete_run_on_pg(&pool, "run-stale-rebind")
+            crate::db::auto_queue::finalize_run_if_ready_pg(&pool, "run-stale-rebind")
                 .await
                 .expect("canonically complete run after route status read")
+                .is_completed()
         );
         assert_eq!(run_status(&pool, "run-stale-rebind").await, "completed");
         assert_eq!(slot_run(&pool).await, None);
