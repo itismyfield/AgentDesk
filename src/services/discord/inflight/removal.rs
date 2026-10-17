@@ -283,15 +283,10 @@ pub(super) fn invalidate_stale_generation_in_root(
     provider: &ProviderKind,
     current_generation: u64,
 ) -> Vec<(u64, Option<u64>)> {
-    let states = load_inflight_states_from_root_excluding(root, provider, |channel| {
-        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    });
+    let states = load_inflight_states_from_root_excluding(root, provider, |_| false);
     let mut removed = Vec::new();
     for state in states {
-        // An input-protected channel's row waits for its move or handback.
-        let protected =
-            crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id);
-        if state.restart_mode.is_some() || protected.is_some() {
+        if state.restart_mode.is_some() {
             continue;
         }
         if state.rebind_origin {
@@ -745,12 +740,7 @@ pub(super) fn load_inflight_probe_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
-    let load = load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel);
-    #[cfg(test)]
-    if let Some(hook) = super::AFTER_EXCLUDING_SCAN.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
-    load
+    load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel)
 }
 
 /// Rows the loader's verdict would retire are hidden, never unlinked or
