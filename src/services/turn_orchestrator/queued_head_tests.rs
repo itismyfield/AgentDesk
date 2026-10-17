@@ -979,3 +979,26 @@ mod prefix;
 
 #[path = "clear_trust_tests.rs"]
 mod clear_trust;
+
+/// Only a pending queue file that cannot be read or parsed is marked unread; a namespace the
+/// actor already holds a head for refuses another namespace's merge with a plain error.
+#[test]
+fn a_namespace_conflict_is_not_a_queue_read_failure() {
+    let _root = root();
+    block_on(async {
+        let channel = ChannelId::new(6_709_901);
+        let head = human(6_709_911, 7, "head");
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+        assert!(handle.enqueue(head.clone(), ctx()).await.enqueued);
+        let _ticket = reserve(&handle, &head).await;
+        let other = QueuePersistenceContext::new(&ProviderKind::Claude, "other-namespace", None);
+        let merged = handle
+            .merge_restored_queue_items(vec![human(6_709_912, 7, "restored")], other)
+            .await;
+        let error = merged
+            .persistence_error
+            .expect("the other namespace is refused");
+        assert!(error.contains("another token namespace"), "{error}");
+        assert!(!crate::services::turn_orchestrator::is_queue_unread(&error));
+    });
+}

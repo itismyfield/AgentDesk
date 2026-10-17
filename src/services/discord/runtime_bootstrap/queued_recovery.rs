@@ -9,6 +9,9 @@ use crate::services::turn_orchestrator::{
 #[path = "queued_recovery_s2a_tests.rs"]
 mod s2a_tests;
 
+#[path = "queued_recovery_held.rs"]
+mod held;
+
 pub(super) async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
         tracing::error!(
@@ -29,6 +32,20 @@ pub(super) async fn restore_queued_and_inflight_work(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
+    let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
+    held::spawn_retries(http, shared, provider, held);
+    stale_cards
+}
+
+/// The boot restore: its stale cards, and the channels whose merge failed with the rows they hold.
+async fn restore_and_hold(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> (
+    Vec<(ChannelId, MessageId, MessageId)>,
+    Vec<held::HeldRestore>,
+) {
     // Restore pending intervention queues saved during previous SIGTERM
     // before inflight turn recovery. Drain-mode queue snapshots are the
     // source of truth for restart-gap user input; if inflight recovery
@@ -42,7 +59,8 @@ pub(super) async fn restore_queued_and_inflight_work(
     };
     let announce_bot_id_for_restore = super::resolve_announce_bot_user_id(shared).await;
     // Channels whose merge could not read or write their queue; that input is not discarded.
-    let mut unsettled: std::collections::HashSet<ChannelId> = std::collections::HashSet::new();
+    let mut held = std::collections::HashMap::new();
+    let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
     // P1-1: Restore dispatch_role_overrides from queue snapshots
     for (thread_channel_id, alt_channel_id) in &restored_overrides {
         if !matches!(
@@ -116,17 +134,22 @@ pub(super) async fn restore_queued_and_inflight_work(
             if allowed_count == 0 {
                 continue;
             }
-            let result =
-                mailbox_merge_restored_queue_items(shared, provider, channel_id, allowed_items)
-                    .await;
+            let candidates = allowed_items.clone();
+            let merge =
+                mailbox_merge_restored_queue_items(shared, provider, channel_id, allowed_items);
+            let already = held.contains_key(&channel_id);
+            let (result, installed) =
+                held::guarded_merge(shared, provider, channel_id, already, merge).await;
             if let Some(error) = result.persistence_error {
+                let stale = &mut stale_cards_to_delete;
+                let entry = held::hold(&mut held, stale, channel_id, &error, installed);
+                entry.queue = Some(candidates);
                 // Merge-persist failed → the actor rolled the in-memory
                 // queue back. The live reconcile-window enqueue survives
                 // (it was persisted by its own `Enqueue` and lives in the
                 // rolled-back-to previous queue). Surface the failure;
                 // don't miscount the restored items as duplicates.
                 skipped_persist_error += allowed_count;
-                unsettled.insert(channel_id);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 📋 FLUSH: persist failed merging {allowed_count} restored queue item(s) for channel {channel_id}: {error}"
@@ -166,6 +189,8 @@ pub(super) async fn restore_queued_and_inflight_work(
         );
     }
 
+    #[cfg(test)]
+    held::pause_after_queue_merges().await;
     restore_inflight_turns(http, shared, provider).await;
 
     if !restored_dispatch_markers.is_empty() {
@@ -192,21 +217,27 @@ pub(super) async fn restore_queued_and_inflight_work(
                 skipped_sender += 1;
                 continue;
             }
-            let result = mailbox_merge_restored_dispatch_marker(
+            let (channel_id, alt) = (marker.channel_id, marker.restored_override);
+            let candidate = (marker.intervention.clone(), alt);
+            let merge = mailbox_merge_restored_dispatch_marker(
                 shared,
                 provider,
-                marker.channel_id,
+                channel_id,
                 marker.intervention,
-                marker.restored_override,
-            )
-            .await;
+                alt,
+            );
+            let already = held.contains_key(&channel_id);
+            let (result, installed) =
+                held::guarded_merge(shared, provider, channel_id, already, merge).await;
             if let Some(error) = result.persistence_error {
                 skipped_persist_error += 1;
-                unsettled.insert(marker.channel_id);
+                let stale = &mut stale_cards_to_delete;
+                let entry = held::hold(&mut held, stale, channel_id, &error, installed);
+                entry.marker = Some(candidate);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 📋 FLUSH: persist failed merging restored dispatch marker for channel {}: {error}",
-                    marker.channel_id
+                    channel_id
                 );
             } else if result.absorbed == 0 {
                 skipped_duplicate += 1;
@@ -226,11 +257,10 @@ pub(super) async fn restore_queued_and_inflight_work(
     // `restore_inflight_turns` so active turn ids are visible to mailbox
     // dedup; the placeholder live-queue filter then sees the final
     // restored queue state before kickoff.
-    let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
     let mut restored_queued_placeholders =
         super::queued_placeholders_store::load_queued_placeholders(provider, &shared.token_hash);
-    // An unsettled channel's cards and rows stay as they are until its queue is read again.
-    restored_queued_placeholders.retain(|(channel_id, _), _| !unsettled.contains(channel_id));
+    // A held channel's undecided owners are not judged by the queued-only filter here.
+    restored_queued_placeholders.retain(|(channel_id, _), _| !held.contains_key(channel_id));
     if !restored_queued_placeholders.is_empty() {
         let live_queue_ids = collect_live_queue_message_ids(shared).await;
         let filter_outcome =
@@ -253,7 +283,7 @@ pub(super) async fn restore_queued_and_inflight_work(
                 "  [{ts}] 📋 FLUSH: loaded {live_count} live queued-placeholder candidate(s) from disk"
             );
         }
-        stale_cards_to_delete = filter_outcome.stale_cards;
+        stale_cards_to_delete.extend(filter_outcome.stale_cards);
         stale_cards_to_delete.extend(uninstalled);
     }
 
@@ -264,7 +294,7 @@ pub(super) async fn restore_queued_and_inflight_work(
     // P1-2: Warn about legacy queue files that cannot be restored
     warn_legacy_pending_queue_files(provider);
 
-    stale_cards_to_delete
+    (stale_cards_to_delete, held.into_values().collect())
 }
 
 type Restore = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;

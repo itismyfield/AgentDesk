@@ -53,7 +53,7 @@ pub(crate) use claim_observation::ClaimObservation;
 pub(crate) use claim_observation::RECENT_CLAIMS_CAP;
 use clear_channel::clear_channel_state;
 pub(crate) use dispatch_reservation::{
-    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE,
+    PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE, is_queue_unread,
 };
 use dispatch_reservation::{
     abandon_pending_dispatch_reservation, absorb_disk_queue, absorb_disk_queue_error,
