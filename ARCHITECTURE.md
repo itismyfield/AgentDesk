@@ -32,6 +32,7 @@ src/
 │   │   ├── mailbox/
 │   │   │   └── observation.rs
 │   │   ├── orchestrator/
+│   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
@@ -377,6 +378,7 @@ src/
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
+│   │   │   │       ├── public_surfaces.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
@@ -503,6 +505,7 @@ src/
 │   ├── worker_registry/
 │   │   ├── registry.rs
 │   │   └── status.rs
+│   ├── bind_security_diagnostics.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
