@@ -2626,21 +2626,14 @@ src/
 │   │   │   │   └── claude_guarded.rs
 │   │   │   ├── pane/
 │   │   │   │   └── submit_tests.rs
-│   │   │   ├── busy_tests.rs
-│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
-│   │   │   ├── pane.rs
-│   │   │   ├── resume.rs
-│   │   │   ├── resume_actor_tests.rs
-│   │   │   ├── token.rs
-│   │   │   └── witness.rs
+│   │   │   └── pane.rs
 │   │   ├── submission_tmux/
 │   │   │   ├── guarded/
 │   │   │   │   ├── protocol_tests.rs
 │   │   │   │   └── transport_tests.rs
 │   │   │   └── guarded.rs
 │   │   ├── actor.rs
-│   │   ├── actor_tests.rs
 │   │   ├── attempt.rs
 │   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
@@ -2876,7 +2869,6 @@ src/
 │   │   ├── exact_pg_tests.rs
 │   │   ├── exact_submission.rs
 │   │   ├── gates_m1.rs
-│   │   ├── gates_m1_compact_tests.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
