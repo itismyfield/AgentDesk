@@ -114,6 +114,42 @@ PATCHES = dict(OWNER_ROSTER=frozenset({OWNER}), R_C_GRANDFATHERED={}, NONEXEC=fr
                PS=frozenset({"agentdesk::services::platform::tmux::read_process_args"}),
                KNOWN_UNREFERENCED={lane: frozenset({TOKIO}) for lane in h2.LANES})
 
+class NestedCfgTokenViews(unittest.TestCase):
+    def test_doc_and_macro_cfg_tokens_do_not_hide_owner_api(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / OWNER
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "#[doc = stringify!(\n"
+                "    #[cfg(test)]\n"
+                ")]\n"
+                "pub fn after_doc_rhs() {}\n"
+                "pub fn carries_macro_token() {\n"
+                "    stringify!(\n"
+                "        #[cfg(test)]\n"
+                "    );\n"
+                "}\n"
+                "#[cfg(test)]\n"
+                "pub fn test_only_api() {}\n"
+                "#[cfg(test)] pub fn inline_test_only_api() {}\n"
+                "pub fn after_test_items() {}\n",
+                encoding="utf-8",
+            )
+            owner_api = adm.owner_pub_fns(root, OWNER, "agentdesk::services::platform::tmux")
+            path.write_text(
+                "#![allow(dead_code)]\n#![cfg(test)]\npub fn crate_test_only_api() {}\n",
+                encoding="utf-8",
+            )
+            inner_cfg_api = adm.owner_pub_fns(root, OWNER, "agentdesk::services::platform::tmux")
+        self.assertIn("agentdesk::services::platform::tmux::after_doc_rhs", owner_api)
+        self.assertIn("agentdesk::services::platform::tmux::carries_macro_token", owner_api)
+        self.assertIn("agentdesk::services::platform::tmux::after_test_items", owner_api)
+        self.assertNotIn("agentdesk::services::platform::tmux::test_only_api", owner_api)
+        self.assertNotIn("agentdesk::services::platform::tmux::inline_test_only_api", owner_api)
+        self.assertEqual(inner_cfg_api, set())
+
+
 class Tree(unittest.TestCase):
     """A fixture crate committed as `base`, with a measured baseline in both lanes."""
 

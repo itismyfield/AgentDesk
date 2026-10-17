@@ -183,13 +183,14 @@ from __future__ import annotations
 import importlib.util
 import re
 import sys
+from bisect import bisect_right
 from collections.abc import Iterable
 from pathlib import Path
 
 try:
-    from rust_cfg import find_test_only_cfg_attribute as _cfg_test_only_match
+    from rust_cfg import find_test_only_cfg_attributes as _cfg_test_only_matches
 except ModuleNotFoundError:  # imported from a repo-root unittest
-    from scripts.rust_cfg import find_test_only_cfg_attribute as _cfg_test_only_match
+    from scripts.rust_cfg import find_test_only_cfg_attributes as _cfg_test_only_matches
 
 try:
     from rust_lex import StripState, strip_line
@@ -486,9 +487,55 @@ def is_test_file(name: str) -> bool:
     return _SKIP_PIN.is_basename_test_file(name)
 
 
+def _only_inner_attributes_before(code: str, end: int) -> bool:
+    """Whether a prefix contains only whitespace and complete `#![...]` attrs."""
+    cursor = 0
+    while cursor < end:
+        while cursor < end and code[cursor].isspace():
+            cursor += 1
+        if cursor == end:
+            return True
+        opening = re.match(r"#!\s*\[", code[cursor:end])
+        if opening is None:
+            return False
+        bracket = code.find("[", cursor, cursor + opening.end())
+        depth = 0
+        close = None
+        for index in range(bracket, end):
+            if code[index] == "[":
+                depth += 1
+            elif code[index] == "]":
+                depth -= 1
+                if depth == 0:
+                    close = index
+                    break
+        if close is None:
+            return False
+        cursor = close + 1
+    return True
+
+
 def production_lines(path: Path):
     """Yield ``(lineno, stripped_code, is_production)`` for one Rust file."""
     state = StripState()
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    code_lines = [strip_line(raw, state) for raw in raw_lines]
+    line_starts: list[int] = []
+    offset = 0
+    for code in code_lines:
+        line_starts.append(offset)
+        offset += len(code) + 1
+    full_code = "\n".join(code_lines)
+    all_matches = list(_cfg_test_only_matches(full_code))
+    file_test_only = any(
+        match.is_inner and _only_inner_attributes_before(full_code, match.start())
+        for match in all_matches
+    )
+    arm_matches = {}
+    for match in all_matches:
+        arm_offset = match.attribute_end() - 1
+        line_index = bisect_right(line_starts, arm_offset) - 1
+        arm_matches[line_index + 1] = match
     brace_depth = 0
     group_depth = 0  # `(` and `[` nesting
     mode = "normal"  # normal | armed (saw cfg(test) attr) | skip (in test item)
@@ -500,23 +547,29 @@ def production_lines(path: Path):
     armed_parameter = False
     armed_parameter_known = False
     previous_code = ""
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        code = strip_line(raw, state)
-        countable = mode == "normal"
+    for lineno, code in enumerate(code_lines, start=1):
+        countable = mode == "normal" and not file_test_only
         parameter_mask_start = 0 if mode == "armed" and armed_parameter else None
         arm_at = None
+        match = None
         if mode == "normal":
-            match = _cfg_test_only_match(code)
+            match = arm_matches.get(lineno)
             if match:
                 # Arm after the complete attribute so its own delimiters
                 # cannot affect the attributed statement's starting depth.
-                arm_at = match.attribute_end() - 1
+                line_start = line_starts[lineno - 1]
+                arm_at = match.attribute_end() - 1 - line_start
         # Resolve the item-start keyword position BEFORE walking the line: the
         # comma that must not disarm (`-> HashMap<String, u64> {`) sits on the
         # same line as the `fn` that suppresses the comma rule, so deciding at
         # end-of-line is one line too late.
         item_start = ITEM_START_RE.search(code, arm_at if arm_at is not None else 0)
         item_start_at = item_start.end() if item_start else None
+        if arm_at is not None and item_start is not None:
+            # H2 consumes this line-level view directly, so compact test-only
+            # items must not share a production line merely because the gate
+            # becomes armed partway through it.
+            countable = False
         for index, char in enumerate(code):
             if item_start_at is not None and index >= item_start_at:
                 saw_body_keyword = True
@@ -600,7 +653,7 @@ def production_lines(path: Path):
                 armed_parameter = closure_parameter_depth is not None
                 armed_parameter_known = closure_parameters_known
                 if armed_parameter:
-                    parameter_mask_start = match.start()
+                    parameter_mask_start = max(0, match.start() - line_starts[lineno - 1])
         if code.strip():
             previous_code = code.rstrip()
         yield lineno, code, countable
@@ -609,14 +662,25 @@ def production_lines(path: Path):
 def _production_text(path: Path) -> str:
     """Return stripped production text while preserving cross-line chains."""
 
-    lines: list[str] = []
-    for _lineno, code, countable in production_lines(path):
-        if countable:
-            # Mask compact `#[cfg(test)] fn ... { raw_atomic(); }` items too.
-            cfg_test = _cfg_test_only_match(code)
-            if cfg_test:
-                code = code[: cfg_test.start()] + " " * (len(code) - cfg_test.start())
-        lines.append(code if countable else " " * len(code))
+    classified = list(production_lines(path))
+    lines = [
+        code if countable else " " * len(code)
+        for _line, code, countable in classified
+    ]
+    line_starts: list[int] = []
+    offset = 0
+    for line in lines:
+        line_starts.append(offset)
+        offset += len(line) + 1
+    full_code = "\n".join(code for _line, code, _countable in classified)
+    for match in _cfg_test_only_matches(full_code):
+        start_line = bisect_right(line_starts, match.start()) - 1
+        end_line = bisect_right(line_starts, match.attribute_end() - 1) - 1
+        if start_line == end_line and classified[end_line][2]:
+            start = match.start() - line_starts[start_line]
+            lines[end_line] = lines[end_line][:start] + " " * (len(lines[end_line]) - start)
+        elif classified[end_line][2]:
+            lines[end_line] = " " * len(lines[end_line])
     return "\n".join(lines)
 
 
