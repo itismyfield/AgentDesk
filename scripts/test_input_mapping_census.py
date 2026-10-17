@@ -87,6 +87,37 @@ def module_revivals(root):
     return revived
 
 
+INPUT_ROOT = "src/services/tui_input"
+# The ledger-owned input actor and its persistence closure; gate/ and pane/ under actor/ stay live.
+REMOVED_INPUT_FILES = (
+    "actor/capability", "actor/resume", "actor/token", "actor/witness",
+    "attempt", "blob", "durable", "handover", "ledger", "receipt_identity", "rows", "transition",
+    "durability_tests", "g1b_receipt_identity_tests", "g1b_rows_tests", "g1b_transition_tests",
+    "rows_tests", "transition_fixture_tests", "transition_tests",
+)
+REMOVED_INPUT_NAMES = (
+    "Input" + "Actor", "EXTERNAL" + "_KEY_BASE", "EXTERNAL" + "_KEY_SPAN", "EXTERNAL" + "_KEY_END",
+    "is_" + "external_key", "external" + "_key_v1",
+)
+
+
+def input_engine_revivals(root):
+    """Paths that bring a removed tui_input engine file, its mod line or its type back."""
+    base = root / INPUT_ROOT
+    revived = set()
+    for stem in REMOVED_INPUT_FILES:
+        for candidate in (base / (stem + ".rs"), base / stem):
+            if candidate.exists():
+                revived.add(candidate.relative_to(root).as_posix())
+    mods = re.compile(r"\bmod\s+(?:" + "|".join(Path(s).name for s in REMOVED_INPUT_FILES) + r")\b")
+    names = re.compile(r"\b(?:" + "|".join(REMOVED_INPUT_NAMES) + r")\b")
+    for path in sorted((root / "src").rglob("*.rs")):
+        text = path.read_text()
+        if names.search(text) or (base in path.parents and mods.search(text)):
+            revived.add(path.relative_to(root).as_posix())
+    return sorted(revived)
+
+
 EXPECTED = {
     "health/snapshot.rs": {"get": 1, "iter": 2, "contains_key": 1},
     "reaction_lifecycle.rs": {"declare": 1, "into_iter": 1, "iter": 1},
@@ -264,6 +295,28 @@ class Census(unittest.TestCase):
             live.write_text("fn live() {}\n")
             (root / "src" / (REMOVED_MODULE + ".rs")).write_text("")
             self.assertEqual(module_revivals(root), ["src/" + REMOVED_MODULE + ".rs"])
+
+    def test_removed_input_engine_stays_removed(self):
+        self.assertEqual(input_engine_revivals(ROOT), [])
+
+    def test_input_engine_revivals_catch_files_mods_and_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actor = root / INPUT_ROOT / "actor"
+            actor.mkdir(parents=True)
+            live = root / INPUT_ROOT / "actor.rs"
+            live.write_text("pub mod gate;\npub mod pane;\n")
+            outside = root / "src" / "token.rs"
+            outside.write_text("mod token;\n")
+            self.assertEqual(input_engine_revivals(root), [])
+            relative = live.relative_to(root).as_posix()
+            for revival in ["pub(crate) mod " + Path(REMOVED_INPUT_FILES[-1]).name + ";", "struct " + REMOVED_INPUT_NAMES[0] + ";"]:
+                with self.subTest(revival=revival):
+                    live.write_text(revival)
+                    self.assertEqual(input_engine_revivals(root), [relative])
+            live.write_text("pub mod gate;\n")
+            (root / INPUT_ROOT / (REMOVED_INPUT_FILES[0] + ".rs")).write_text("")
+            self.assertEqual(input_engine_revivals(root), [INPUT_ROOT + "/" + REMOVED_INPUT_FILES[0] + ".rs"])
 
 
 if __name__ == "__main__":
