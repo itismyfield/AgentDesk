@@ -1482,6 +1482,7 @@ src/
 │   │   │   │   │   └── codex_observation.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
+│   │   │   │   ├── codex_resume_companion_queue_tests.rs
 │   │   │   │   ├── control.rs
 │   │   │   │   ├── foreign_row.rs
 │   │   │   │   ├── goal_lifecycle.rs
@@ -2154,6 +2155,7 @@ src/
 │   │   │   │   ├── restore_mapping.rs
 │   │   │   │   ├── restore_support.rs
 │   │   │   │   ├── restore_tests.rs
+│   │   │   │   ├── resume_companion_restore_tests.rs
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── watch_host.rs
 │   │   │   │   ├── watch_host_tests.rs
@@ -2736,6 +2738,8 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
+│   │   │   ├── binding/
+│   │   │   │   └── terminal_tests.rs
 │   │   │   ├── codex_adoption/
 │   │   │   │   ├── coord.rs
 │   │   │   │   ├── fold.rs
@@ -2774,6 +2778,7 @@ src/
 │   │   │   ├── actor_tests.rs
 │   │   │   ├── adoption.rs
 │   │   │   ├── adoption_past_stall_tests.rs
+│   │   │   ├── adoption_terminal_tests.rs
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
@@ -2878,7 +2883,10 @@ src/
 │   ├── tui_prompt_dedupe/
 │   │   ├── binding_events/
 │   │   │   ├── codex/
-│   │   │   │   └── commit.rs
+│   │   │   │   ├── commit/
+│   │   │   │   │   └── resume_companions.rs
+│   │   │   │   ├── commit.rs
+│   │   │   │   └── terminal.rs
 │   │   │   ├── admission_tests.rs
 │   │   │   ├── claude_fold.rs
 │   │   │   ├── codex.rs
@@ -2912,6 +2920,7 @@ src/
 │   │   │   ├── codex_verified.rs
 │   │   │   ├── codex_verified_executed_resume_tests.rs
 │   │   │   ├── codex_verified_hold_detail_tests.rs
+│   │   │   ├── codex_verified_resume_companion_tests.rs
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs
