@@ -5443,6 +5443,10 @@ services::discord::outbound::delivery_record::tests::watcher_long_chunk_same_cha
 services::discord::outbound::delivery_record::tests::watcher_owner_context_preserves_frontier_and_resolves_current_generation_3751
 services::discord::outbound::delivery_record::tests::watcher_owner_context_rejects_stale_or_wrong_session_3751
 services::discord::outbound::delivery_record::tests::watcher_owner_context_survives_delivery_record_rewrite_3751
+services::discord::outbound::manual_delivery::discord_units_tests::bmp_body_keeps_the_2000_boundary
+services::discord::outbound::manual_delivery::discord_units_tests::dm_routes_supplementary_body_over_2000_units_to_attachment_or_chunks
+services::discord::outbound::manual_delivery::discord_units_tests::send_routes_supplementary_body_over_2000_units_to_attachment_or_chunks
+services::discord::outbound::manual_delivery::discord_units_tests::supplementary_body_at_2000_units_is_one_unmodified_post
 services::discord::outbound::manual_delivery::headless_nonce::tests::durable_identity_accepts_only_complete_headless_outbox_delivery_ids
 services::discord::outbound::manual_delivery::headless_nonce::tests::durable_row_parser_rejects_non_positive_and_overflow_identities
 services::discord::outbound::manual_delivery::headless_nonce::tests::flag_is_compiled_default_off_and_only_explicitly_enabled

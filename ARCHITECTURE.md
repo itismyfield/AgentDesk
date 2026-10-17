@@ -32,6 +32,7 @@ src/
 │   │   ├── mailbox/
 │   │   │   └── observation.rs
 │   │   ├── orchestrator/
+│   │   │   ├── api_exposure.rs
 │   │   │   ├── config_dir_checks.rs
 │   │   │   ├── fd_usage.rs
 │   │   │   ├── health_snapshot.rs
@@ -377,6 +378,7 @@ src/
 │   │   │   │       ├── part_09.rs
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
+│   │   │   │       ├── public_surfaces.rs
 │   │   │   │       └── session_evidence.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
@@ -502,6 +504,7 @@ src/
 │   ├── worker_registry/
 │   │   ├── registry.rs
 │   │   └── status.rs
+│   ├── bind_security_diagnostics.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
@@ -1250,6 +1253,7 @@ src/
 │   │   │   │   ├── validation.rs
 │   │   │   │   └── validation_tests.rs
 │   │   │   ├── manual_delivery/
+│   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
 │   │   │   │   └── production_nonce_tests.rs
 │   │   │   ├── turn_output_controller/
