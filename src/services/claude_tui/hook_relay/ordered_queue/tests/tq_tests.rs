@@ -287,16 +287,8 @@ impl Tq {
 impl Drop for Tq {
     fn drop(&mut self) {
         self.stop_worker.store(true, Ordering::Release);
-        // A worker still relaying waits on this test's runtime, which `drop` blocks; it is left
-        // to fail against the closed listener rather than joined into a hang.
         if let Some(worker) = self.worker.take() {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !worker.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if worker.is_finished() {
-                let _ = worker.join();
-            }
+            release_worker(worker);
         }
         APPEND_FAULT.with(|fault| fault.set(None));
         set_test_root(None);
@@ -348,6 +340,18 @@ fn spawn_worker_loop(queue_dir: PathBuf, stop: Arc<AtomicBool>) -> std::thread::
             std::thread::sleep(Duration::from_millis(2));
         }
     })
+}
+
+/// Joins a stopped worker loop, or leaves one still relaying: it waits on the test's runtime,
+/// which a synchronous `drop` blocks, so it fails against the closed listener instead of hanging.
+fn release_worker(worker: std::thread::JoinHandle<()>) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !worker.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if worker.is_finished() {
+        let _ = worker.join();
+    }
 }
 
 fn buffered(session: &str) -> usize {
@@ -419,9 +423,8 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
         window.timeout_millis
     );
     if !producer_delay.is_zero() {
-        // The CLI published only after the held lock, so a caller wait restarted at enqueue
-        // returns at least a full `REPLY_WAIT` after the publish; a charged one returns
-        // `producer_delay` before that.
+        // A caller wait restarted at enqueue returns at least `REPLY_WAIT` after the publish;
+        // one charged with the held lock returns about `producer_delay` before that.
         assert!(
             returned_at < request.published_at + REPLY_WAIT,
             "the slow enqueue was added to the caller's wait instead of charged to it: \
