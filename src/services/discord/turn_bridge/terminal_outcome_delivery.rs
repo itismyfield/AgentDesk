@@ -371,10 +371,6 @@ pub(super) async fn run_terminal_outcome_delivery(
         // Ownership is only read here; each Legacy arm below claims at its own transport.
         let direct = can_deliver_directly;
         let o_body_cut = bridge_o_body_peek_decision(channel_id, &inflight_state, direct);
-        // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
-        let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
-        let body_claim =
-            (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
         provider_failure = status_panel::provider_failure::is_provider_failure_turn(
             transport_error,
             resume_failure_detected,
@@ -382,36 +378,19 @@ pub(super) async fn run_terminal_outcome_delivery(
             inflight_state.silent_turn,
             &full_response,
         );
+        // O posts only native answers, so on its channel the bridge still shows its own failure
+        // notice in full; like other bridge chrome it is no answer and sends without a claim.
+        let o_notice = provider_failure && direct && o_body_cut == Ok(true);
+        if o_notice {
+            delivery_response = full_response.clone();
+        }
+        // An empty-response notice or TUI chrome is no answer, so it sends without a claim.
+        let answerless =
+            o_notice || no_answer(&full_response, response_sent_offset, &delivery_response);
+        let body_claim =
+            (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
-        } else if provider_failure && direct && o_body_cut == Ok(true) {
-            // O posts only native answers, so the bridge sends its own failure notice in full outside
-            // O's claim; the turn counts as delivered only once that replace is confirmed.
-            delivery_response = full_response.clone();
-            let outcome = gateway
-                .replace_message_with_outcome(channel_id, current_msg_id, &delivery_response)
-                .await;
-            let fallback = matches!(
-                &outcome,
-                Ok(super::super::formatting::ReplaceLongMessageOutcome::SentFallbackAfterEditFailure { .. })
-            );
-            let committed = turn_bridge_replace_outcome_committed(
-                shared_owned.as_ref(),
-                &provider,
-                channel_id,
-                current_msg_id,
-                inflight_state.tmux_session_name.as_deref(),
-                outcome,
-                dispatch_id.as_deref(),
-                adk_session_key.as_deref(),
-                Some(turn_id.as_str()),
-                "turn_bridge_provider_failure_replace",
-            );
-            (terminal_delivery_committed, terminal_body_visible) = (committed, committed);
-            preserve_inflight_for_cleanup_retry |= !committed;
-            if fallback && !committed {
-                inflight_state.response_sent_offset = full_response.len();
-            }
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
                 if o_body_cut == Ok(true) {
@@ -447,7 +426,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
-            if o_body_cut == Ok(true) {
+            if o_body_cut == Ok(true) && !o_notice {
                 let _ = gateway.delete_message(channel_id, current_msg_id).await;
                 (terminal_delivery_committed, terminal_body_visible) = (true, true);
             } else if can_deliver_directly {
