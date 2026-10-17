@@ -10,9 +10,8 @@ use crate::services::session_host::herdr_socket_rig_tests::PANE;
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
-/// The restart pass as rehydration runs it for Claude, on a new thread as a restarted process has
-/// no earlier pass; the thread carries this node's hosts, the binding log root and the rig as the
-/// channel's configured endpoint.
+/// The restart pass rehydration runs for Claude, on a fresh thread with no earlier pass, carrying
+/// this node's hosts, the binding log root and the rig as the channel's configured endpoint.
 async fn restart_pass(rig: &Rig, herdr: HerdrRig) -> ReconnectCounts {
     let (id, pool) = (rig.channel.get(), rig.shared.pg_pool.clone());
     let root = rig.root.path().to_owned();
@@ -33,9 +32,8 @@ async fn restart_pass(rig: &Rig, herdr: HerdrRig) -> ReconnectCounts {
     joined.await.unwrap().unwrap()
 }
 
-/// A restarted channel as a restart leaves it: its Bound row and the pane still running that
-/// execution, the source the launch logged, a queued head, and no watcher, core session or
-/// admission. Runs the restart pass when `reconnect`, then settles presence and the queue gate.
+/// A restarted channel: Bound row, live pane, logged source and queued head, but no watcher, core
+/// session or admission; runs the pass when `reconnect`, then settles presence and the queue gate.
 async fn restarted(
     id: u64,
     reconnect: bool,
