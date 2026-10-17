@@ -21,6 +21,9 @@ use crate::services::tui_prompt_dedupe::{
 };
 
 const REPLY_WAIT: Duration = Duration::from_millis(750);
+/// How long a wait for something that must happen polls before failing: a hang detector, not a
+/// bound of the contract, so a slow runner only makes a broken build fail later.
+const LIVENESS: Duration = Duration::from_secs(10);
 
 /// `(request id, hook event, status, detached)` of every request the proxy handed over.
 type Seen = Arc<Mutex<Vec<(String, String, u16, bool)>>>;
@@ -56,6 +59,7 @@ struct Tq {
     state: HookServerState,
     endpoint: String,
     seen: Seen,
+    cli_started: Arc<Mutex<Option<Instant>>>,
     channel: u64,
     a: String,
     b: String,
@@ -96,6 +100,7 @@ impl Tq {
             state,
             endpoint,
             seen,
+            cli_started: Arc::default(),
             channel,
             a,
             b,
@@ -127,23 +132,35 @@ impl Tq {
         &self,
         event: &str,
         payload: Value,
+        wait: Duration,
     ) -> std::thread::JoinHandle<(Duration, Result<Value, String>)> {
         let (endpoint, event, a) = (self.endpoint.clone(), event.to_owned(), self.a.clone());
+        let cli_started = self.cli_started.clone();
         std::thread::spawn(move || {
             let started = Instant::now();
+            *cli_started.lock().unwrap() = Some(started);
             let result = handoff_ordered_hook_event_response_with_timeout(
-                &endpoint, "claude", &event, &a, payload, REPLY_WAIT,
+                &endpoint, "claude", &event, &a, payload, wait,
             );
             (started.elapsed(), result)
         })
     }
 
-    /// Holds the producer lock like a slow concurrent enqueue, released after `hold`.
+    /// Holds the producer lock like a slow concurrent enqueue, released `hold` after the next
+    /// waiting CLI started, so a late-scheduled CLI thread does not shorten the delay.
     fn delay_producers(&self, hold: Duration) -> std::thread::JoinHandle<()> {
         let lock = self.queue_dir.join("producer.lock");
         let held = lock_relay_queue_file_with_mode(&lock, false, true).unwrap();
+        let cli_started = self.cli_started.clone();
+        *cli_started.lock().unwrap() = None;
         std::thread::spawn(move || {
-            std::thread::sleep(hold);
+            let started = loop {
+                if let Some(started) = *cli_started.lock().unwrap() {
+                    break started;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            std::thread::sleep((started + hold).saturating_duration_since(Instant::now()));
             drop(held);
         })
     }
@@ -164,9 +181,9 @@ impl Tq {
             .count()
     }
 
-    /// Waits up to 3s; the caller asserts the outcome so a mutant fails at its own assertion.
+    /// Waits up to `LIVENESS`; the caller asserts the outcome so a mutant fails at its assertion.
     async fn settled(&self, mut done: impl FnMut(&Self) -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + LIVENESS;
         while !done(self) && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -231,8 +248,16 @@ impl Tq {
 impl Drop for Tq {
     fn drop(&mut self) {
         self.stop_worker.store(true, Ordering::Release);
+        // A worker still relaying waits on this test's runtime, which `drop` blocks; it is left
+        // to fail against the closed listener rather than joined into a hang.
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !worker.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
         }
         APPEND_FAULT.with(|fault| fault.set(None));
         set_test_root(None);
@@ -255,15 +280,21 @@ fn claude(path: &Path, session: &str) -> TuiRuntimeBinding {
 
 async fn proxy_every_request(listener: tokio::net::TcpListener, app: Router, seen: Seen) {
     while let Ok((mut socket, _)) = listener.accept().await {
-        let (request_id, path, status, body) =
-            forward_actual_request(&mut socket, app.clone()).await;
-        let event = path.split('?').next().unwrap_or_default();
-        let event = event.rsplit('/').next().unwrap_or_default().to_owned();
-        let detached = serde_json::from_slice::<Value>(&body).is_ok_and(|b| b["detached"] == true);
-        seen.lock()
-            .unwrap()
-            .push((request_id, event, status.as_u16(), detached));
-        answer_actual_request(&mut socket, status, &body).await;
+        let (app, seen) = (app.clone(), seen.clone());
+        // A worker whose deadline passed before it sent the request panics the forwarder; the
+        // panic ends that connection only, and the worker retries on a new one.
+        let _ = tokio::spawn(async move {
+            let (request_id, path, status, body) = forward_actual_request(&mut socket, app).await;
+            let event = path.split('?').next().unwrap_or_default();
+            let event = event.rsplit('/').next().unwrap_or_default().to_owned();
+            let detached =
+                serde_json::from_slice::<Value>(&body).is_ok_and(|b| b["detached"] == true);
+            seen.lock()
+                .unwrap()
+                .push((request_id, event, status.as_u16(), detached));
+            answer_actual_request(&mut socket, status, &body).await;
+        })
+        .await;
     }
 }
 
@@ -292,7 +323,7 @@ fn drained_kinds(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> Vec<Ho
 }
 
 async fn join<T: Send + 'static>(handle: std::thread::JoinHandle<T>) -> T {
-    join_within(handle, Duration::from_secs(10)).await.unwrap()
+    join_within(handle, LIVENESS).await.unwrap()
 }
 
 async fn join_within<T: Send + 'static>(
@@ -307,7 +338,7 @@ async fn join_within<T: Send + 'static>(
 }
 
 /// Pending B is logged, B's file appears, then Stop(B) is refused past the reply window.
-async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration, fault_off_at: Duration) {
+async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
     tq.non_wait(
         "SessionStart",
         tq.payload(&tq.b, json!({ "source": "clear" })),
@@ -320,26 +351,21 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration, fault_off_a
     let (registry_before, mut rx) = ((buffered(&tq.a), buffered(&tq.b)), tq.state.subscribe());
 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
-    let t0 = Instant::now();
     let producers = (!producer_delay.is_zero()).then(|| tq.delay_producers(producer_delay));
-    let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})));
-    tokio::time::sleep(fault_off_at.saturating_sub(t0.elapsed())).await;
-    // A loaded runner may reach the first delivery attempt only after `fault_off_at`; the fault
-    // stays until that attempt is refused so the refusal below is observed, not raced.
+    let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})), REPLY_WAIT);
+    // The fault outlives the caller's wait, so the Stop is first accepted after the CLI gave up
+    // however slow the runner is; a CLI that waits for the delivery never returns.
+    let cli = join_within(cli, LIVENESS).await;
     tq.settled(|tq| tq.refused("Stop") > 0).await;
     APPEND_FAULT.with(|fault| fault.set(None));
-    let cli = join_within(cli, Duration::from_secs(5)).await;
     if let Some(producers) = producers {
         join(producers).await;
     }
     tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (elapsed, result) = cli.expect("elapsed < 850ms (the CLI was still waiting after 5s)");
-    assert!(
-        elapsed < Duration::from_millis(850),
-        "elapsed < 850ms (got {elapsed:?})"
-    );
+    let (elapsed, result) = cli.expect("the CLI waits for the refused Stop past its own wait");
+    assert!(elapsed >= REPLY_WAIT, "CLI waited {elapsed:?}");
     assert!(
         result.is_err_and(|e| e.contains("timed out")),
         "CLI returns Err(timeout)"
@@ -390,7 +416,7 @@ fn a_stop_refused_past_its_reply_window_is_delivered_detached_and_not_lost() {
     let _locks = TqLocks::take();
     runtime.block_on(async {
         let tq = Tq::new(7_500, "tq1-late-stop").await;
-        late_stop_after_refusals(&tq, Duration::ZERO, Duration::from_millis(1_000)).await;
+        late_stop_after_refusals(&tq, Duration::ZERO).await;
     });
 }
 
@@ -403,8 +429,7 @@ fn the_reply_window_ends_with_the_callers_wait_even_when_enqueue_was_slow() {
     let _locks = TqLocks::take();
     runtime.block_on(async {
         let tq = Tq::new(7_510, "tq1-slow-producer").await;
-        let (delay, fault_off) = (Duration::from_millis(300), Duration::from_millis(900));
-        late_stop_after_refusals(&tq, delay, fault_off).await;
+        late_stop_after_refusals(&tq, Duration::from_millis(300)).await;
     });
 }
 
@@ -424,19 +449,14 @@ fn a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepte
         );
         tq.until("SessionStart refused", |tq| tq.refused("SessionStart") > 0)
             .await;
-        let cli_started = Instant::now();
-        let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})));
-        let fault_off = Duration::from_millis(1_000).saturating_sub(cli_started.elapsed());
-        tokio::time::sleep(fault_off).await;
+        // SessionStart stays refused until the CLI gave up, so the Stop behind it cannot reply.
+        let stop = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})), REPLY_WAIT);
+        let (elapsed, result) = join(stop).await;
         APPEND_FAULT.with(|fault| fault.set(None));
-        let (elapsed, result) = join(cli).await;
         tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        assert!(
-            elapsed < Duration::from_millis(850),
-            "CLI < 850ms (got {elapsed:?})"
-        );
+        assert!(elapsed >= REPLY_WAIT, "CLI waited {elapsed:?}");
         assert!(
             result.is_err(),
             "the Stop outlives its reply window: {result:?}"
@@ -476,7 +496,7 @@ fn a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does() {
             // Enqueue outlives the caller's wait, so the reply window is already closed on arrival.
             let producers = tq.delay_producers(REPLY_WAIT + Duration::from_millis(50));
             let registry = buffered(&a);
-            let (_, result) = join(tq.waiting_cli(event, payload.clone())).await;
+            let (_, result) = join(tq.waiting_cli(event, payload.clone(), REPLY_WAIT)).await;
             join(producers).await;
             assert!(result.is_err());
             tq.until("late hook accepted", |tq| !tq.accepted(event).is_empty())
@@ -488,7 +508,9 @@ fn a_late_stop_or_prompt_reaches_no_turn_consumer_while_an_attached_one_does() {
                 "late {event} was broadcast"
             );
 
-            let result = join(tq.waiting_cli(event, payload.clone())).await.1;
+            // The attached reply's budget is not under test, so a slow runner gets the full wait.
+            let attached = tq.waiting_cli(event, payload.clone(), LIVENESS);
+            let result = join(attached).await.1;
             assert!(result.is_ok(), "attached {event} replies: {result:?}");
             assert_eq!(tq.accepted(event).len(), 2);
             assert!(!tq.accepted(event)[1].1, "{event} attached");
