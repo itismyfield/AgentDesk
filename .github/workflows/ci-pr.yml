@@ -310,6 +310,7 @@ jobs:
               - 'src/services/auto_queue/runtime/verified_reset_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
+              - 'src/services/cluster/channel_home_boot/home_writers_tests.rs'
               - 'src/services/cluster/channel_home_boot_tests.rs'
               - 'src/services/cluster/channel_home_drain_tests.rs'
               - 'src/services/cluster/channel_home_tests.rs'
