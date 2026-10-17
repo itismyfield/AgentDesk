@@ -133,7 +133,8 @@ async fn refused_restitution_lands_on_the_successor() {
                 .await
                 .enqueued
         );
-        if matches!(row, Restitution::Hydrate) {
+        // #6258: a merged item is merged only while the file still holds it.
+        if matches!(row, Restitution::Hydrate | Restitution::MergeQueueItems) {
             let disk = [queued(QUEUED), queued(OFFERED)];
             save_channel_queue(&provider, &shared.token_hash, channel, &disk, None).unwrap();
         }

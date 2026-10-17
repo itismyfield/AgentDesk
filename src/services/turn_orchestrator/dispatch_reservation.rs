@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
-use super::active_source_dedup::strip_source_message_id_from_intervention;
+use super::active_source_dedup::{
+    purge_sources_from_queue, strip_source_message_id_from_intervention,
+};
 use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker, load_channel_pending_queue_checked,
     remove_channel_pending_dispatch_marker,
@@ -408,6 +410,31 @@ pub(super) fn absorb_disk_queue(
     persistence.dispatch_role_override =
         persistence.dispatch_role_override.or(over.map(|c| c.get()));
     hydrate_pending_queue_into_state(state, channel_id, items, persistence, over)
+}
+
+/// #6258: merges boot-restored items keeping only the sources the queue file still holds, read in
+/// this actor step; a clear, purge, dequeue or eviction since the boot read removed the rest. An
+/// unreadable file merges nothing and reports its error, so the file is left for a later read.
+pub(super) fn merge_restored_queue_items(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    mut items: Vec<Intervention>,
+    persistence: QueuePersistenceContext,
+) -> HydratePendingQueueResult {
+    let loaded = super::queued_head::adopt(state, channel_id, &persistence)
+        .and_then(|()| load_trusted_queue(state, channel_id, &persistence));
+    let held: HashSet<MessageId> = match loaded {
+        Ok((disk, _)) => disk.iter().flat_map(intervention_dedup_ids).collect(),
+        Err(error) => {
+            return HydratePendingQueueResult {
+                queue_len_after: state.intervention_queue.len(),
+                persistence_error: Some(error),
+                ..Default::default()
+            };
+        }
+    };
+    let _ = purge_sources_from_queue(&mut items, |_, id| !held.contains(&id));
+    hydrate_pending_queue_into_state(state, channel_id, items, persistence, None)
 }
 
 /// The disk queue, or an empty one when a clear could not rewrite the file.
@@ -891,4 +918,5 @@ mod tests {
     }
 
     mod hydrate_corrupt_queue_tests;
+    mod restored_merge_tests;
 }

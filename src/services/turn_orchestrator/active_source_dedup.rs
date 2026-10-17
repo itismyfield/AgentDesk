@@ -201,7 +201,7 @@ pub(super) fn settle_completed_sources(
 const QUEUE_ROW_SETTLED_BY_COMPLETED_TURN_LEDGER: &str =
     "queue_row_settled_by_completed_turn_ledger";
 
-fn purge_sources_from_queue(
+pub(super) fn purge_sources_from_queue(
     queue: &mut Vec<Intervention>,
     is_settled: impl Fn(&Intervention, MessageId) -> bool,
 ) -> Vec<QueueExitEvent> {
