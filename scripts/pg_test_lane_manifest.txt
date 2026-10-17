@@ -6,6 +6,7 @@ src/cli/herdr_tests.rs
 src/db/auto_queue/entries.rs
 src/db/auto_queue/entries/dispatch_failure.rs
 src/db/auto_queue/phase_gates.rs
+src/db/auto_queue/run_completion_pg_tests.rs
 src/db/auto_queue/tests.rs
 src/db/automation_candidates/verdict_tests.rs
 src/db/calendar_sync/postgres_tests.rs
@@ -87,6 +88,7 @@ src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/campaign_handoff_tests.rs
 src/services/auto_queue/cancel_run.rs
+src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
 src/services/auto_queue/command.rs
 src/services/auto_queue/dispatch_query.rs
@@ -94,6 +96,7 @@ src/services/auto_queue/fsm.rs
 src/services/auto_queue/phase_gate.rs
 src/services/auto_queue/planning.rs
 src/services/auto_queue/route_generate.rs
+src/services/auto_queue/run_completion_activate_pg_tests.rs
 src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs
 src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs
 src/services/auto_queue/runtime/verified_reset_pg_tests.rs
@@ -156,7 +159,6 @@ src/services/discord/inflight/removal/custody_notice_tests.rs
 src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs
 src/services/discord/ingress_shadow/compat_tests.rs
 src/services/discord/ingress_shadow/shadow_tests.rs
-src/services/discord/input_runtime/runtime/ports_tests.rs
 src/services/discord/mod.rs
 src/services/discord/placeholder_sweeper/abandon_guard.rs
 src/services/discord/placeholder_sweeper/retirement_tests.rs
@@ -256,6 +258,7 @@ src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
+src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
 src/services/discord/turn_presence/activity/unbound/unit_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
@@ -323,6 +326,7 @@ db::auto_queue::entries::dispatch_failure::tests
 db::auto_queue::entries::tests
 db::auto_queue::phase_gates::current_batch_phase_pg_tests
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests
+db::auto_queue::run_completion_pg_tests
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests
 db::auto_queue::tests::grouped_card_count_pg_tests
 db::automation_candidates::verdict_tests
@@ -404,6 +408,7 @@ services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
 services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
+services::auto_queue::cleanup_tasks::ownership_pg_tests
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
@@ -417,6 +422,7 @@ services::auto_queue::route::planning::record_entry_dispatch_failure_tests
 services::auto_queue::route::route_generate::concurrent_generate_tests
 services::auto_queue::route::route_generate::dependency_hold_tests
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests
+services::auto_queue::route::run_completion_activate_pg_tests
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests
 services::auto_queue::runtime::slot_reset_host_pg_tests::host
 services::auto_queue::runtime::verified_reset_pg_tests
@@ -483,7 +489,6 @@ services::discord::inflight::removal::custody_notice_tests
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
 services::discord::ingress_shadow::compat_tests
 services::discord::ingress_shadow::shadow_tests
-services::discord::input_runtime::supervisor::runtime::ports::tests
 services::discord::placeholder_sweeper::abandon_guard::tests
 services::discord::placeholder_sweeper::retirement_tests
 services::discord::queue_io::queued_head_inject::tests
@@ -591,6 +596,7 @@ services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::discord::turn_presence::activity::unbound::dormancy_tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests
+services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain
 services::discord::turn_presence::activity::unbound::live::review_tests
 services::discord::turn_presence::activity::unbound::tests
 services::discord::turn_teardown_clearance::tests
@@ -719,6 +725,15 @@ db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_reports_orpha
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::repair_serializes_with_concurrent_dispatch_update_without_deadlock
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::status_only_completion_uses_persisted_result_for_pass
 db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::verdict_mismatch_marks_gate_failed_and_pauses_run
+db::auto_queue::run_completion_pg_tests::blocking_phase_gates_refuse_derived_completion_and_keep_rows_pg
+db::auto_queue::run_completion_pg_tests::completion_rolls_back_slot_release_when_notification_fails_pg
+db::auto_queue::run_completion_pg_tests::concurrent_completion_waits_for_token_and_sees_terminal_pg
+db::auto_queue::run_completion_pg_tests::empty_run_completes_silently_and_restoring_run_is_blocked_pg
+db::auto_queue::run_completion_pg_tests::entry_reopened_after_readiness_read_blocks_completion_pg
+db::auto_queue::run_completion_pg_tests::gate_saved_after_readiness_read_blocks_completion_pg
+db::auto_queue::run_completion_pg_tests::grace_opened_after_readiness_read_blocks_completion_pg
+db::auto_queue::run_completion_pg_tests::grace_window_blocks_every_derived_entry_point_pg
+db::auto_queue::run_completion_pg_tests::user_cancelled_entry_blocks_completion_after_sibling_terminal_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_does_not_reuse_busy_existing_group_slot
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_rejects_pending_review_slot_blocker
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::allocate_slot_for_group_agent_pg_releases_claim_when_dispatch_appears_after_update
@@ -740,7 +755,7 @@ db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_concurr
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_dispatch_rows_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_is_idempotent_for_empty_dispatch_set_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::phase_gate_state_save_rolls_back_stale_cleanup_when_write_fails_pg
-db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_activate_completion_uses_protocol_without_notification_pg
+db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_activate_tail_completion_queues_notification_once_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_pause_run_releases_slots_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg
 db::auto_queue::tests::dispatch_terminal_sync_pg_tests::postgres_auto_queue_resume_run_changes_paused_status_pg
@@ -1162,6 +1177,7 @@ server::routes::agents_turn_deliver::pg_tests::the_route_injects_into_a_busy_tui
 server::routes::agents_turn_deliver::pg_tests::the_route_reports_contaminated_submit_and_protects_a_mixed_direct_draft_pg
 server::routes::agents_turn_deliver::pg_tests::the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_channel_pg
 server::routes::agents_turn_deliver::pg_tests::the_switch_off_keeps_every_route_answer_field_for_field_pg
+server::routes::auto_queue_lifecycle_pg_tests::tests::dispatch_next_route_completes_drained_run_through_canonical_writer_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::manual_rebind_accepts_every_canonical_live_status_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_completed_is_rejected_and_performs_no_lifecycle_side_effects_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::patch_pending_start_and_metadata_updates_remain_supported_pg
@@ -1195,6 +1211,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_deliver
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
+server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_sends_only_to_configured_owner_dm
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::herdr_legacy_tests::m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg
@@ -1280,6 +1297,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_c
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::session_clear_is_a_structural_no_op_after_the_cancel_commit_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::slot_release_and_its_durable_record_commit_together_pg
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests::tampered_null_generation_skips_card_but_rolls_back_some_sibling_pg
+services::auto_queue::cleanup_tasks::ownership_pg_tests::slot_cleanup_preserves_successor_session_after_ownership_probe_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::active_only_explicit_promotable_run_is_harmless_no_op_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_run_id_admits_eligible_and_rejects_terminal_statuses_pg
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests::explicit_unknown_run_id_is_not_found_pg
@@ -1326,6 +1344,8 @@ services::auto_queue::route::route_generate::concurrent_generate_tests::two_gene
 services::auto_queue::route::route_generate::dependency_hold_tests::a_card_waits_for_the_issues_its_dependency_section_lists_pg
 services::auto_queue::route::route_generate::dependency_hold_tests::a_card_waits_until_its_declared_prerequisite_is_done_pg
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
+services::auto_queue::route::run_completion_activate_pg_tests::activate_tail_obeys_grace_window_and_notifies_once_pg
+services::auto_queue::route::run_completion_activate_pg_tests::empty_run_short_circuit_reports_real_outcome_pg
 services::auto_queue::runtime::clear_slot_sessions_pg_tests::tests::clear_slot_sessions_pg_batches_unique_targets_and_preserves_ineligible_rows
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_runs_only_the_runtime_verdict_taken_before_the_update_pg
 services::auto_queue::runtime::slot_reset_host_pg_tests::host::slot_clear_stops_only_the_turn_its_verdict_approved_pg
@@ -1623,7 +1643,6 @@ services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_ter
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
 services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
 services::discord::ingress_shadow::shadow_tests::the_observer_pool_reads_rows_on_one_connection_and_closes_pg
-services::discord::input_runtime::supervisor::runtime::ports::tests::g1b_off_entrypoint_preserves_legacy_trace_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::destructive_finalize_records_only_mailbox_edge_for_strict_plan_4888_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::owner_death_cleanup_runs_only_after_the_host_guard_admits_a_dead_pane_pg
 services::discord::placeholder_sweeper::abandon_guard::tests::s3act_b3b_placeholder_stops_before_mailbox_finish_pg
@@ -2104,6 +2123,7 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests::backgr
 services::discord::turn_bridge::voice_completion::voice_completion_tests::rehydrate_preserves_remaining_ttl_for_aged_rows_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::voice_turn_link_playback_lookup_falls_back_to_announce_message_pg
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
+services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg

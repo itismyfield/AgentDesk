@@ -509,7 +509,7 @@ async fn unretired_supervisor_consumer_preserves_legacy_decode_and_backfill() {
     if !isolated("unretired_supervisor_consumer_preserves_legacy_decode_and_backfill") {
         return;
     }
-    use crate::services::discord::health::legacy_supervision::test_support;
+    use crate::services::discord::health::test_support;
     use crate::services::discord::inflight::o_seed_observation;
     let channel = 63_254_081;
     let provider = ProviderKind::Claude;

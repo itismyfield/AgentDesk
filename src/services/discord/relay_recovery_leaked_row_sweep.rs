@@ -120,9 +120,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn legacy_channel_leaked_row_is_loaded_for_recovery() {
         use crate::config::TestEnvVarGuard;
-        use crate::services::discord::health::legacy_supervision::test_support::{
-            fingerprint, seed_backfill_row,
-        };
+        use crate::services::discord::health::test_support::{fingerprint, seed_backfill_row};
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env =

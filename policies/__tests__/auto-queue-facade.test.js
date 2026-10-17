@@ -118,8 +118,6 @@ test("auto-queue loadPhaseGateCardLabel uses typed facade agentdesk.cards.get", 
       createPhaseGateDispatches: function() {},
       // auto-queue-lifecycle
       loadRunInfo: function() {},
-      remainingRunnableEntryCount: function() {},
-      runHasUserCancelledEntry: function() {},
       finalizeRunWithoutPhaseGate: function() {},
       completeRunAndNotify: function() {},
       continueRunAfterEntry: function() {},

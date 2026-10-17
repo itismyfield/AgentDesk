@@ -89,8 +89,7 @@ pub(super) fn gate_closed_arm(
         return Some(msg);
     }
     let arm = match msg {
-        M::FreezeInput { .. }
-        | M::Snapshot { .. }
+        M::Snapshot { .. }
         | M::HasActiveTurn { .. }
         | M::HasBlockingActiveTurn { .. }
         | M::ActiveTurnKind { .. }

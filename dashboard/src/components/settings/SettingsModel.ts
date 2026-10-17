@@ -122,7 +122,6 @@ export const SETTINGS_PANEL_QUERY_KEY = "settingsPanel";
 export const GENERAL_FIELD_KEYS = ["companyName", "ceoName", "language", "theme"] as const;
 export const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
-  "pm_decision_gate_enabled",
 ]);
 
 export const NUMERIC_CONFIG_KEYS = new Set([
@@ -159,10 +158,6 @@ export const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string
   max_review_rounds: {
     ko: "한 작업이 반복 리뷰를 수행할 수 있는 최대 횟수입니다.",
     en: "Maximum number of repeated review rounds allowed for one task.",
-  },
-  pm_decision_gate_enabled: {
-    ko: "PM 판단 게이트를 거쳐야 다음 단계로 전환됩니다.",
-    en: "Requires PM decision gate approval before the next transition.",
   },
   requested_timeout_min: {
     ko: "requested 상태에서 오래 머무는 카드를 경고하는 기준입니다.",

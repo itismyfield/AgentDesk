@@ -7,6 +7,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod group_response;
 mod guides;
 mod inventory;
 mod taxonomy;
@@ -145,40 +146,8 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 
     let endpoints = all_endpoints();
 
-    // Primary: treat as group name.
-    if GROUP_NAMES.contains(&segment) {
-        if flat {
-            let matching: Vec<EndpointDoc> = endpoints
-                .into_iter()
-                .filter(|endpoint| category_to_group(effective_category(endpoint)) == segment)
-                .collect();
-            return (
-                StatusCode::OK,
-                HeaderMap::new(),
-                json!({ "endpoints": matching }),
-            );
-        }
-
-        let categories: Vec<Value> = categories_for_group(&endpoints, segment)
-            .into_iter()
-            .map(|(name, count)| {
-                json!({
-                    "name": name,
-                    "description": category_description(name),
-                    "endpoint_count": count,
-                    "canonical_path": format!("/api/docs/{segment}/{name}"),
-                })
-            })
-            .collect();
-        return (
-            StatusCode::OK,
-            HeaderMap::new(),
-            json!({
-                "group": segment,
-                "description": group_description(segment),
-                "categories": categories,
-            }),
-        );
+    if let Some(body) = group_response::resolve(&endpoints, segment, flat) {
+        return (StatusCode::OK, HeaderMap::new(), body);
     }
 
     // Backward compat: legacy flat category route.
@@ -280,8 +249,8 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 
 /// GET /api/docs/{group_or_category}
 ///
-/// Preferred behavior (#1063): `group` is one of the 8 top-level group names,
-/// response is `{ group, categories: [{name, description, endpoint_count, canonical_path}] }`.
+/// Group names take precedence; summaries list categories and their canonical paths.
+/// Name collisions also expose `name_collision.next_request` for category details.
 ///
 /// Backward-compatible fallback: if the segment matches a legacy category name
 /// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
@@ -385,13 +354,13 @@ mod tests {
 
     use super::*;
 
-    fn docs_router() -> Router {
+    pub(super) fn docs_router() -> Router {
         Router::new()
             .route("/api/docs/{segment}", get(api_docs_group_or_category))
             .route("/api/docs/{group}/{category}", get(api_docs_group_category))
     }
 
-    async fn request_docs_json(router: &Router, uri: &str) -> (StatusCode, Value) {
+    pub(super) async fn request_docs_json(router: &Router, uri: &str) -> (StatusCode, Value) {
         let response = router
             .clone()
             .oneshot(

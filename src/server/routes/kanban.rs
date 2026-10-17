@@ -878,59 +878,10 @@ pub async fn defer_dod(
     let Some(dod_state) = row else {
         return Err(AppError::not_found("card not found"));
     };
-    let current = dod_state.deferred_dod_json;
-    let card_status = dod_state.status;
-    let review_status = dod_state.review_status;
-
-    let dod = apply_deferred_dod_changes(current, body);
+    let dod = apply_deferred_dod_changes(dod_state.deferred_dod_json, body);
     let dod_str = serde_json::to_string(&dod).unwrap_or_default();
     if let Err(error) = kanban_db::update_deferred_dod_pg(pool, &id, &dod_str).await {
         return Err(database_error(error));
-    }
-
-    let is_review_state = {
-        crate::pipeline::ensure_loaded();
-        crate::pipeline::try_get()
-            .and_then(|p| p.hooks_for_state(&card_status))
-            .is_some_and(|h| h.on_enter.iter().any(|n| n == "OnReviewEnter"))
-    };
-    let all_done = if let (Some(items), Some(verified)) =
-        (dod["items"].as_array(), dod["verified"].as_array())
-    {
-        !items.is_empty() && items.iter().all(|item| verified.contains(item))
-    } else {
-        false
-    };
-    let restart_review_state =
-        is_review_state && review_status.as_deref() == Some("awaiting_dod") && all_done;
-
-    if restart_review_state {
-        use crate::engine::transition::TransitionIntent;
-        for intent in [
-            TransitionIntent::SetReviewStatus {
-                card_id: id.clone(),
-                review_status: Some("reviewing".to_string()),
-            },
-            TransitionIntent::SyncReviewState {
-                card_id: id.clone(),
-                state: "reviewing".to_string(),
-            },
-        ] {
-            if let Err(error) = execute_transition_intent_pg(&state, &intent) {
-                return Err(database_error(format!("{error}")));
-            }
-        }
-        if let Err(error) = kanban_db::update_review_clock_after_dod_pg(pool, &id).await {
-            return Err(database_error(error));
-        }
-    }
-
-    if restart_review_state {
-        crate::kanban::fire_enter_hooks_with_backends(&state.engine, &id, &card_status);
-        tracing::info!(
-            "[dod] Card {} DoD all-complete — restarting review from awaiting_dod",
-            id
-        );
     }
 
     match load_card_json_pg(pool, &id).await {

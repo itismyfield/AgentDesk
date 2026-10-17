@@ -21,7 +21,6 @@ use crate::services::provider::ProviderKind;
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
-pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 pub(crate) mod o_transition;
@@ -62,6 +61,8 @@ mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
 pub(in crate::services::discord) mod tail_evidence;
+#[cfg(test)]
+pub(in crate::services::discord) mod test_support;
 pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
@@ -155,8 +156,8 @@ use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_sha
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
-    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
-    build_health_snapshot, build_public_health_snapshot,
+    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, build_health_snapshot,
+    build_public_health_snapshot,
 };
 
 /// Per-provider snapshot for the health response.
@@ -547,9 +548,7 @@ impl HealthRegistry {
     /// a `String` per provider; the registry list is a handful of entries.
     ///
     /// The cost is that a provider registered or removed mid-build is not
-    /// observed by that build. That was already the contract for
-    /// `active_request_owner_for_channel`, and a health snapshot is a sample,
-    /// not a transaction.
+    /// observed by that build; a health snapshot is a sample, not a transaction.
     pub(super) async fn provider_entries_snapshot(&self) -> Vec<ProviderEntry> {
         self.providers.lock().await.clone()
     }

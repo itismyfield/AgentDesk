@@ -1,5 +1,7 @@
 mod guard;
 mod orchestration;
+#[cfg(test)]
+mod owner_tests;
 mod thread_reuse;
 mod transport;
 

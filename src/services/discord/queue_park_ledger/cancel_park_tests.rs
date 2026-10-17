@@ -987,7 +987,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
             relay_last_offset: None,
         },
     );
-    let api = discord::health::legacy_supervision::test_support::MockDiscord::start_with(
+    let api = discord::health::test_support::MockDiscord::start_with(
         Arc::new(move |method, path| {
             if method == axum::http::Method::GET && path.ends_with(&format!("/channels/{}", channel.get())) {
                 Some((200, serde_json::json!({
@@ -1624,4 +1624,110 @@ async fn stale_cancelled_snapshot_cannot_rediscover_explicitly_removed_source() 
     let state = shared.queue_park_ledger.channels.lock().unwrap();
     assert!(!state.sources.contains_key(&channel));
     assert!(state.revisions[&channel] >= revision_after_exit);
+}
+
+#[test]
+fn promote_hold_logs_once_per_channel_reason_and_rearms_after_clear() {
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let ledger = super::QueueParkLedger::default();
+    let channel = ChannelId::new(7_061_001);
+    let other = ChannelId::new(7_061_002);
+    for reason in [
+        "verified_unavailable",
+        "verified_unavailable",
+        "binding_missing",
+        "binding_missing",
+        "verified_unavailable",
+    ] {
+        ledger.note_promote_hold(&ProviderKind::Codex, channel, "codex_verified", reason);
+    }
+    assert_eq!(capture.outcome("queued promotion held"), 3);
+    ledger.note_promote_hold(
+        &ProviderKind::Codex,
+        other,
+        "codex_verified",
+        "verified_unavailable",
+    );
+    assert_eq!(capture.outcome("queued promotion held"), 4);
+    ledger.clear_promote_hold(channel, "session_transition");
+    ledger.note_promote_hold(
+        &ProviderKind::Codex,
+        channel,
+        "codex_verified",
+        "verified_unavailable",
+    );
+    assert_eq!(
+        capture.outcome("queued promotion held"),
+        4,
+        "unrelated gate clear must not defeat the latch"
+    );
+    ledger.clear_promote_hold(channel, "codex_verified");
+    ledger.note_promote_hold(
+        &ProviderKind::Codex,
+        channel,
+        "codex_verified",
+        "verified_unavailable",
+    );
+    assert_eq!(capture.outcome("queued promotion held"), 5);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_transition_hold_logs_once_without_dequeue_and_clears_on_pass() {
+    let _root = isolated_agentdesk_root();
+    let capture = LogCapture::default();
+    let _capture = capture.install();
+    let shared = discord::make_shared_data_for_tests();
+    let channel = ChannelId::new(7_061_011);
+    let provider = ProviderKind::Claude;
+    let persistence = discord::queue_persistence_context(&shared, &provider, channel);
+    shared
+        .mailbox(channel)
+        .replace_queue(vec![queued(7_061_012, false)], persistence)
+        .await;
+    let guard = shared.session_transition_lock(channel).lock_owned().await;
+    for _ in 0..3 {
+        shared
+            .queue_park_ledger
+            .clear_promote_hold(channel, "codex_verified");
+        let outcome =
+            discord::idle_queue_take_next_soft_if_ready(&shared, &provider, channel).await;
+        assert!(outcome.intervention.is_none());
+        assert_eq!(
+            snapshot(&shared, channel).await.intervention_queue[0]
+                .message_id
+                .get(),
+            7_061_012
+        );
+    }
+    assert_eq!(capture.outcome("queued promotion held"), 1);
+    assert!(
+        capture
+            .text()
+            .contains("queue_park_owner=\"session_transition\"")
+    );
+    assert!(capture.text().contains("hold_reason=\"lock_busy\""));
+    let held = shared.queue_park_ledger.project(
+        &shared,
+        &provider,
+        channel,
+        &snapshot(&shared, channel).await,
+    );
+    assert_eq!(
+        held.reason.as_deref(),
+        Some("session_transition_held:lock_busy")
+    );
+    assert_eq!(held.owner, Some("session_transition"));
+    drop(guard);
+    let outcome = discord::idle_queue_take_next_soft_if_ready(&shared, &provider, channel).await;
+    assert_eq!(outcome.intervention.unwrap().message_id.get(), 7_061_012);
+    assert!(
+        !shared
+            .queue_park_ledger
+            .channels
+            .lock()
+            .unwrap()
+            .promote_holds
+            .contains_key(&(channel, "session_transition"))
+    );
 }

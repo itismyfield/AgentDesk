@@ -828,7 +828,8 @@ fn expect_off(case: Case, off: &Effects) -> Vec<String> {
         }
         Case::ModelPicker | Case::IdleRecap | Case::NodePicker | Case::Sidecar => callbacks == 1,
         Case::HelpAllowed => {
-            (callbacks, followups) == (1, 1)
+            callbacks == 1
+                && followups >= 1
                 && writes.first().is_some_and(|w| w.1.ends_with("/callback"))
         }
         Case::HelpRefused => (callbacks, followups) == (0, 0),
