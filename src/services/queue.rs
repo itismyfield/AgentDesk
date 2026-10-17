@@ -122,11 +122,10 @@ pub(super) async fn force_purge_channel_mailbox(
     #[cfg(test)]
     run_pre_purge_hook_for_test(provider, channel_id, &handle).await;
     let purge = handle.try_purge_queue(persistence, true).await.ok()?;
-    if let Some(refusal) = purge.input_refusal {
+    if purge.queued_head_refused {
         tracing::warn!(
             provider = provider.as_str(),
             channel_id = channel_id.get(),
-            ?refusal,
             "force purge refused; mailbox preserved"
         );
         return None;
