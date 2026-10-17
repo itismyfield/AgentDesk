@@ -132,6 +132,8 @@ cli::doctor::mailbox::tests::frontier_provenance_changes_no_doctor_verdict
 cli::doctor::mailbox::tests::live_tmux_process_or_dispatch_still_suppresses_the_busy_mailbox_finding
 cli::doctor::mailbox::tests::no_unread_progress_field_changes_a_doctor_verdict
 cli::doctor::mailbox::tests::queue_depth_alone_no_longer_suppresses_the_busy_mailbox_finding
+cli::doctor::orchestrator::api_exposure::tests::intentional_tokenless_non_loopback_bind_is_informational
+cli::doctor::orchestrator::api_exposure::tests::rejected_tokenless_non_loopback_bind_is_informational_too
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
@@ -1309,9 +1311,12 @@ server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_sta
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
+server::routes::docs::group_response::tests::colliding_group_paths_advertise_resolvable_category_details
+server::routes::docs::group_response::tests::kanban_category_docs_include_single_card_get
 server::routes::docs::inventory::endpoints::part_06::tests::queue_generate_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::add_run_entry_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::docs_group_example_advertises_canonical_paths
+server::routes::docs::inventory::endpoints::public_surfaces::tests::root_mounted_control_surfaces_are_listed_with_their_auth_boundary
 server::routes::docs::tests::advertised_group_category_paths_resolve_without_behavior_regressions
 server::routes::docs::tests::api_friction_marker_guide_is_indexed_and_describes_collection
 server::routes::docs::tests::auto_queue_docs_surface_slot_recovery_identifiers
@@ -2279,6 +2284,7 @@ services::claude_tui::input::tests::pre_enter_modal_guard_blocks_dialogs_but_all
 services::claude_tui::input::tests::prompt_draft_cleanup_actions_are_cancel_agnostic
 services::claude_tui::input::tests::prompt_marker_does_not_confirm_readiness_when_draft_is_present
 services::claude_tui::input::tests::prompt_ready_debug_tail_keeps_recent_lines_and_utf8_boundaries
+services::claude_tui::input::tests::prompt_ready_setup::wait_for_prompt_ready_event_observes_notify_fired_during_setup
 services::claude_tui::input::tests::prompt_ready_timeout_clear_candidates_are_only_retryable_followup_drafts
 services::claude_tui::input::tests::prompt_ready_timeout_error_is_classified
 services::claude_tui::input::tests::prompt_ready_timeout_reason_reflects_snapshot
@@ -2306,7 +2312,6 @@ services::claude_tui::input::tests::selector_plans_reject_out_of_range_target
 services::claude_tui::input::tests::single_line_literal_settles_before_enter
 services::claude_tui::input::tests::split_literal_chunks_preserves_multibyte_char_boundaries
 services::claude_tui::input::tests::suffix_free_spinner_at_depth_31_vetoes_prompt_readiness_4888
-services::claude_tui::input::tests::wait_for_prompt_ready_event_observes_notify_fired_during_setup
 services::claude_tui::input::tests::wait_for_prompt_ready_is_public_and_returns_err_for_missing_session
 services::claude_tui::input::tests::wait_for_prompt_ready_returns_cancelled_for_pre_cancelled_token
 services::claude_tui::input::tests::warm_followup_lock_revalidation_keeps_idle_transcript_fallback
