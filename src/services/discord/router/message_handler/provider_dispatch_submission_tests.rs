@@ -4,7 +4,6 @@
 
 use super::super::*;
 use crate::services::discord::inflight::{SubmissionPhase, fault};
-use crate::services::discord::input_runtime::fence;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +78,6 @@ async fn run_turn(
         session.current_path = Some(workspace.display().to_string());
         session.session_id = cell.warm.then(|| "zp1-existing-session".to_string());
     }
-    let gate = fence::Gate::protect(ProviderKind::Claude, channel.get()).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
     if cell.refuse {
         fault::arm(channel.get(), fault::FenceWriteFault::Write);
     }
@@ -211,9 +208,6 @@ async fn run_turn(
         discord,
     };
     let _ = release.send(());
-    tokio::time::timeout(timeout, gate.close().unwrap().drain())
-        .await
-        .expect("no input effect outlives the turn");
     outcome
 }
 
@@ -589,8 +583,6 @@ async fn actual_creator(creator: Creator) {
     );
     assert!(script.contains(&old));
     std::fs::write(&shim, script.replace(&old, &(barrier + &old))).unwrap();
-    let gate = fence::Gate::protect(ProviderKind::Claude, id).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
     let (observed, owner) = tokio::sync::oneshot::channel();
     *D1_OWNER.lock().unwrap() = Some((id, f.root.path().join(&name), observed));
     let (finished, bridge) = tokio::sync::oneshot::channel();
@@ -764,9 +756,14 @@ async fn actual_creator(creator: Creator) {
         "CG_D1_ACTUAL_CREATOR {creator:?} phase=MayHaveSubmitted owner=Running payload=1 enter=0 requeue=0"
     );
     drop(release_guard);
-    tokio::time::timeout(timeout, gate.close().unwrap().drain())
-        .await
-        .unwrap();
+    // The released executor reports its late result on the provider thread.
+    tokio::time::timeout(timeout, async {
+        while !matches!(cap.classify_failure(), SubmissionFailure::GuardedStopped(_)) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     // T2: the late executor result is a typed hold kept on the session; the turn stays held.
     let SubmissionFailure::GuardedStopped(
         stopped @ crate::services::claude_tui::host_input::InputRun::Indeterminate { .. },

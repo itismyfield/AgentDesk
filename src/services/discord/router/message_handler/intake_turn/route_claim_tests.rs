@@ -232,7 +232,7 @@ async fn intake(shared: &Arc<SharedData>, http: &Arc<serenity::http::Http>, ids:
 fn hold_provider(
     thread: ChannelId,
 ) -> (
-    tokio::sync::oneshot::Receiver<(bool, bool)>,
+    tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
     std::sync::mpsc::Sender<()>,
 ) {
     let (entered, at) = tokio::sync::oneshot::channel();
@@ -249,9 +249,9 @@ fn hold_provider(
     (at, release)
 }
 
-async fn entered(at: tokio::sync::oneshot::Receiver<(bool, bool)>) -> bool {
+async fn entered(at: tokio::sync::oneshot::Receiver<std::thread::ThreadId>) {
     let entered = tokio::time::timeout(Duration::from_secs(10), at).await;
-    entered.unwrap().unwrap().0
+    entered.unwrap().unwrap();
 }
 
 fn opened() {
