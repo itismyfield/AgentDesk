@@ -254,10 +254,9 @@ config::scheduled_message_required_mention_config_tests::required_mentions_allow
 config::scheduled_message_required_mention_config_tests::required_mentions_reject_duplicates_and_invalid_ids
 config::secret_bearing_config_file_tests::load_from_path_hardens_secret_file_before_semantic_validation_error
 config::secret_bearing_config_file_tests::load_from_path_ignores_retired_automation_section
+config::secret_bearing_config_file_tests::load_from_path_ignores_retired_escalation_section
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_disabled_settings
 config::secret_bearing_config_file_tests::load_from_path_preserves_retired_shadow_enabled_settings
-config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_pm_hours
-config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalation_schedule_timezone
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
 config::session_hosts::tests::cg_d1_boot_env_replaces_yaml_empty_disables_and_invalid_fails_whole_list
 config::session_hosts::tests::claude_guard_channel_runtime_follows_the_hosting_resolver_fallback
@@ -1329,6 +1328,8 @@ server::routes::e2e_control::tests::disabled_surface_is_uniformly_unmounted_for_
 server::routes::e2e_control::tests::enabled_surface_rejects_channels_outside_boot_allowlist
 server::routes::e2e_control::tests::parsers_reject_unknown_provider_operation_and_zero_ids
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
+server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_sends_only_to_configured_owner_dm
+server::routes::escalation::retired_settings_route_tests::escalation_settings_route_is_gone_and_emit_stays_mounted
 server::routes::github::tests::block_on_rejects_non_positive_issue_numbers
 server::routes::github::tests::block_on_renders_dependency_section_and_kanban_metadata
 server::routes::github::tests::create_issue_dry_run_reports_reserved_feature_capabilities_without_failing
@@ -3510,8 +3511,9 @@ services::discord::catch_up::frontier_evidence::tests::only_the_active_turn_arm_
 services::discord::commands::cancel_backstop_tests::actual_stop_action_keeps_hold_and_arms_pending_queue_backstop_pg
 services::discord::commands::command_policy::command_policy_tests::cancel_queued_is_registered_as_mutating_and_not_high_risk
 services::discord::commands::command_policy::command_policy_tests::common_registered_slash_surfaces_keep_the_same_risk
-services::discord::commands::command_policy::command_policy_tests::help_formatter_preserves_provider_settings_and_risk_placeholders
+services::discord::commands::command_policy::command_policy_tests::help_formatter_preserves_provider_and_risk_placeholders
 services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
+services::discord::commands::command_policy::command_policy_tests::text_registration_and_help_name_the_same_commands
 services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
 services::discord::commands::config::session_override_cluster_characterization_tests::codex_goals_toggle_round_trip_marks_and_clears_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_reset_entries_stay_provider_scoped
@@ -3558,6 +3560,7 @@ services::discord::commands::control::soft_clear_notify_tests::slash_and_text_cl
 services::discord::commands::diagnostics::reports::queue_report_tests::queue_report_exposes_all_primary_ids_as_cancel_queued_inputs
 services::discord::commands::diagnostics::reports::runtime_label_tests::inflight_runtime_label_reports_direct_tui_kind
 services::discord::commands::help::tests::help_advertises_explicit_queue_cancellation_not_reaction_removal
+services::discord::commands::help::tests::slash_registration_help_and_risk_table_name_the_same_commands
 services::discord::commands::inspect::tests::context::context_report_clamps_context_usage_to_window
 services::discord::commands::inspect::tests::context::context_report_omits_other_turns_manifest_when_none
 services::discord::commands::inspect::tests::context::context_report_orders_largest_layers_and_formats_compaction
@@ -10697,6 +10700,7 @@ services::dispatches::discord_delivery::guard::tests::dispatch_send_deadline_bou
 services::dispatches::discord_delivery::guard::tests::dispatch_send_deadline_is_below_reservation_ttl
 services::dispatches::discord_delivery::guard::tests::duplicate_result_carries_dispatch_idempotency_keys
 services::dispatches::discord_delivery::orchestration::slot_routing_pure_tests::review_and_phase_gate_require_independent_slot_thread
+services::dispatches::discord_delivery::owner_tests::dispatch_thread_owner_comes_from_discord_owner_id
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_duplicate_path
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_permanent_failure_path
 services::dispatches::discord_delivery::transport::tests::delivery_result_dto_pins_success_path
@@ -10754,9 +10758,6 @@ services::dispatches::wait_queue::tests::wait_timeout_uses_wait_started_at
 services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
 services::dispatches::wait_queue::tests::wake_query_preserves_fifo_ordering
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
-services::escalation_settings::tests::escalation_defaults_keep_discord_owner_fallback_boot_bound
-services::escalation_settings::tests::escalation_defaults_still_use_live_escalation_owner_override
-services::escalation_settings::tests::escalation_pm_channel_comes_only_from_escalation_config
 services::gemini::accepted_turn_tests::quiet_accepted_stream_observes_manual_cancel
 services::gemini::accepted_turn_tests::quiet_accepted_stream_recovers_only_after_process_exit
 services::gemini::accepted_turn_tests::quiet_accepted_stream_waits_for_real_eof

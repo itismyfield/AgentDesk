@@ -861,24 +861,6 @@ thread_local! {
     pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {
-    let providers = [
-        ProviderKind::Claude,
-        ProviderKind::Codex,
-        ProviderKind::Gemini,
-        ProviderKind::Qwen,
-        ProviderKind::Grok,
-        ProviderKind::Antigravity,
-    ];
-
-    providers
-        .iter()
-        .flat_map(load_inflight_states)
-        .filter(|state| state.channel_id == channel_id)
-        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
-        .map(|state| state.request_owner_user_id)
-}
-
 /// #2448: explicit completion signal published from the turn_bridge
 /// CompletionGuard so downstream listeners (currently the standby JSONL
 /// relay) can exit promptly instead of polling against a wall-clock
