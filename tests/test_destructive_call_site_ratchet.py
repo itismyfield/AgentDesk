@@ -92,23 +92,38 @@ class SourceContractTests(unittest.TestCase):
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
 
-    def test_fs_unlink_baseline_pins_live_production_unlinks(self) -> None:
-        self.assertEqual(
+    def test_fs_unlink_ratchet_allows_decreases_and_blocks_growth(self) -> None:
+        path = "src/services/probe.rs"
+        baseline = {category: {} for category in ratchet.CATEGORIES}
+        baseline["fs_unlink"] = {path: 2}
+
+        reduced = {category: {} for category in ratchet.CATEGORIES}
+        reduced["fs_unlink"] = {path: 1}
+        self.assertEqual(ratchet.growth_errors(reduced, baseline), [])
+
+        snapshot = ratchet._snapshot(
+            reduced,
             {
-                path: self.actual["fs_unlink"].get(path)
-                for path in (
-                    "src/runtime_layout/mod.rs",
-                    "src/services/turn_orchestrator/pending_queue_persistence.rs",
-                    "src/services/discord/inflight/removal.rs",
-                )
+                "direct_channel_remove": 0,
+                "remove_if_current": 0,
+                "cancel_and_remove_if_current": 0,
+                "remove_locked_helper": 0,
             },
-            {
-                "src/runtime_layout/mod.rs": 5,
-                "src/services/turn_orchestrator/pending_queue_persistence.rs": 4,
-                "src/services/discord/inflight/removal.rs": 1,
-            },
+            "test-sha",
         )
-        self.assertEqual(self.actual["fs_unlink"], self.baseline["fs_unlink"])
+        regenerated = {
+            category: value["files"]
+            for category, value in snapshot["categories"].items()
+        }
+        self.assertEqual(regenerated["fs_unlink"], {path: 1})
+
+        increased = {category: {} for category in ratchet.CATEGORIES}
+        increased["fs_unlink"] = {path: 3}
+        errors = ratchet.growth_errors(increased, regenerated)
+        self.assertEqual(
+            errors,
+            [f"fs_unlink: GROWTH in {path}: found 3x, baseline 1x"],
+        )
 
     def test_baseline_prose_is_advisory(self) -> None:
         original = self.payload
@@ -546,20 +561,23 @@ watcher_cancel
 std::fs::remove_file(path);
 fs::remove_dir(path);
 fs::remove_dir_all(path);
+fs::remove_file::<&Path>(path);
 // std::fs::remove_file(comment_only);
 const EXAMPLE: &str = "fs::remove_file(string_only)";
 #[cfg(test)]
 fn test_only_cleanup() { std::fs::remove_file(test_path); }
+#[cfg(test)]
+fn test_only_turbofish() { std::fs::remove_file::<&Path>(test_path); }
 """,
             )
             write(root, "src/services/probe_tests.rs", "std::fs::remove_file(test_path);\n")
             actual, _subcounts = ratchet.scan(root)
-        self.assertEqual(actual["fs_unlink"], {"src/services/probe.rs": 3})
+        self.assertEqual(actual["fs_unlink"], {"src/services/probe.rs": 4})
 
-    def test_fs_unlink_mutation_fails_the_ratchet_cli(self) -> None:
+    def test_fs_unlink_turbofish_mutation_fails_the_ratchet_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write(root, "src/services/probe.rs", "std::fs::remove_file(path);\n")
+            write(root, "src/services/probe.rs", "std::fs::remove_file::<&Path>(path);\n")
             baseline = {
                 "schema_version": 1,
                 "categories": {category: {"files": {}} for category in ratchet.CATEGORIES},

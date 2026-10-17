@@ -210,7 +210,8 @@ INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
     r"|request_inflight_abandon_if_matches\w*)\s*\("
 )
 FS_UNLINK_PATTERN = re.compile(
-    r"\b(?:(?:std\s*::\s*)?fs\s*::\s*remove_[A-Za-z_]\w*)\s*\("
+    r"\b(?:(?:std\s*::\s*)?fs\s*::\s*remove_[A-Za-z_]\w*)"
+    r"\s*(?:::<|\()"
 )
 INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
 HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
@@ -811,8 +812,8 @@ def _snapshot(
                     "#5462 S5: calls to an inflight ROW-DESTRUCTION helper from "
                     "outside the owner module src/services/discord/inflight/"
                     "clear_store/. A spelling count: definitions and re-export "
-                    "wrappers are counted, direct fs::remove_file unlinks are "
-                    "invisible, and the generation-fenced *_for_reconcile "
+                    "wrappers are counted, filesystem unlink calls are counted "
+                    "in fs_unlink, and the generation-fenced *_for_reconcile "
                     "wrappers count AS destruction so converting a bare call to "
                     "its fenced form is not scored as a decrease. S5 r2 added "
                     "the three named entry points the design's enumeration "
