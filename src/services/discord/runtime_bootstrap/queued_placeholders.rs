@@ -238,10 +238,8 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
     uninstalled
 }
 
-/// Installs one channel's rows while the caller holds its persist lock, then saves the channel.
-/// A row is refused when its owner is not queued (checked only when `check_queued`), already owns
-/// another card, or its card belongs to another owner. Returns the rows now installed and the
-/// refused ones.
+/// Installs one channel's rows under the caller's persist lock and saves the channel; refuses an
+/// unqueued owner (if `check_queued`), an owner with another card, or another owner's card.
 pub(in crate::services::discord) async fn install_channel_rows_locked(
     shared: &SharedData,
     channel: ChannelId,

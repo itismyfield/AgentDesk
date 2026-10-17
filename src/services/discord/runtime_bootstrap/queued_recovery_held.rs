@@ -1,6 +1,5 @@
-//! Boot restores whose queue or marker merge failed. Their placeholder rows are taken under the
-//! channel's persist lock before the merge and installed before it is released, so no other save
-//! drops them; a retry settles them once the same candidates merge.
+//! Boot restores whose queue or marker merge failed: their placeholder rows are installed under
+//! the channel's persist lock before any other save, and a retry settles them.
 
 use super::*;
 use crate::services::turn_orchestrator::HydratePendingQueueResult;
@@ -142,9 +141,8 @@ pub(super) struct SettleReport {
     pub(super) backstop: bool,
 }
 
-/// Retries the failed merges with their boot candidates; once both merge, the actor's probe
-/// decides each held row: live rows stay, undecided rows wait, the rest are cleaned like boot's
-/// stale rows. Then the channel's draft holds are re-watched and its queue is kicked.
+/// Retries the failed merges, then lets the actor's probe keep live rows, leave undecided ones and
+/// clean the rest like boot's stale rows; the queue is then re-watched and kicked.
 pub(super) async fn settle_once(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
