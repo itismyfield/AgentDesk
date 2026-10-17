@@ -162,7 +162,13 @@ run_relay() {
     POST_DEPLOY_SMOKE_HEALTH_BODY="$health_path"
     POST_DEPLOY_SMOKE_RELAY_CHANNEL_ID=""
     : > "$TMP_ROOT/python3.calls"
-    ( _post_deploy_smoke_check_relay_round_trip ) > "$relay_out" 2>&1 || true
+    relay_rc=0
+    # The runner case runs in this shell so the channel E-1 leaves behind is visible.
+    if [ "${2:-}" = same-shell ]; then
+        _post_deploy_smoke_check_relay_round_trip > "$relay_out" 2>&1 || relay_rc=$?
+    else
+        ( _post_deploy_smoke_check_relay_round_trip ) > "$relay_out" 2>&1 || relay_rc=$?
+    fi
 }
 expect_round_trip() {
     grep -q 'relay E-1=round-trip proceeding cluster_standby=false' "$relay_out" \
@@ -172,7 +178,8 @@ expect_round_trip() {
 }
 
 # (f) runner: the relay belongs to the gateway, so E-1 skips before any config or yaml read.
-run_relay "{\"cluster_standby\":false,\"modules\":${RUNNER_MODULES}}"
+run_relay "{\"cluster_standby\":false,\"modules\":${RUNNER_MODULES}}" same-shell
+[ "$relay_rc" -eq 0 ] || fail_test "(f) runner E-1 must return 0, got $relay_rc"
 grep -qxF 'relay E-1=skipped modules.gateway=false (runner: relay belongs to the gateway)' "$relay_out" \
     || fail_test "(f) runner must note the gateway skip"
 grep -q 'round-trip proceeding\|FAIL:' "$relay_out" && fail_test "(f) runner must neither proceed nor fail"
