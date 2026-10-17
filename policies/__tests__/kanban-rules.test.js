@@ -394,7 +394,7 @@ test("kanban-rules sends completed rework dispatches directly back to review", (
   assert.deepEqual(state.statusCalls, [{ cardId: "card-3", status: "review", force: false }]);
 });
 
-test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escalating immediately", () => {
+test("kanban-rules sends a completed implementation with unverified DoD items straight to review", () => {
   const { policy, state } = loadPolicy("policies/kanban-rules.js", {
     cards: {
       "card-4": {
@@ -448,61 +448,8 @@ test("kanban-rules marks DoD-only gate failures as awaiting_dod instead of escal
   policy.onDispatchCompleted({ dispatch_id: "dispatch-3" });
 
   assert.deepEqual(state.statusCalls, [{ cardId: "card-4", status: "review", force: false }]);
-  assert.deepEqual(state.reviewStatusCalls, [
-    {
-      cardId: "card-4",
-      reviewStatus: "awaiting_dod",
-      options: { awaiting_dod_at: "now" }
-    }
-  ]);
-  assert.deepEqual(state.reviewStateSyncs, [
-    {
-      cardId: "card-4",
-      status: "awaiting_dod",
-      options: {}
-    }
-  ]);
-});
-
-test("kanban-rules ignores malformed DoD verified shape from facade card", () => {
-  const { policy, state } = loadPolicy("policies/kanban-rules.js", {
-    cards: {
-      "card-dod-malformed": {
-        id: "card-dod-malformed",
-        title: "Malformed DoD card",
-        status: "in_progress",
-        priority: "medium",
-        assigned_agent_id: "agent-4",
-        deferred_dod_json: {
-          items: ["add tests"],
-          verified: { "add tests": true }
-        }
-      }
-    },
-    dbQuery: createSqlRouter([
-      {
-        match: "FROM task_dispatches WHERE id = ?",
-        result: [
-          {
-            id: "dispatch-dod-malformed",
-            kanban_card_id: "card-dod-malformed",
-            to_agent_id: "agent-4",
-            dispatch_type: "implementation",
-            chain_depth: 0,
-            created_at: "2026-04-22 16:15:00",
-            result: "{}",
-            context: "{}",
-            status: "completed"
-          }
-        ]
-      }
-    ])
-  });
-
-  policy.onDispatchCompleted({ dispatch_id: "dispatch-dod-malformed" });
-
-  assert.deepEqual(state.statusCalls, [{ cardId: "card-dod-malformed", status: "review", force: false }]);
   assert.deepEqual(state.reviewStatusCalls, []);
+  assert.deepEqual(state.reviewStateSyncs, []);
   assert.deepEqual(state.manualInterventions, []);
 });
 
@@ -837,7 +784,7 @@ test("kanban-rules records scope-assessment result on the card metadata and stay
   assert.deepEqual(state.statusCalls, []);
   assert.deepEqual(state.manualInterventions, []);
   // Guard: scope-assessment must not flow into the review/create-pr lifecycle,
-  // so it never queries the PM-gate card-detail shape.
+  // so it never queries the card-detail shape.
   assert.equal(state.queries.some((query) => /title, status, priority/.test(query.sql)), false);
 });
 
@@ -1171,11 +1118,11 @@ test("T3: plan-review with missing/ambiguous verdict re-plans (cautious default)
   assert.equal(state.dispatchCreates[0].dispatchType, "plan", "ambiguous verdict must NOT advance to impl — re-plan");
 });
 
-test("T3: scope/plan dispatches never enter the PM-gate / review lifecycle", () => {
-  // A plan completion must early-return before the PM gate, so it never queries
-  // the PM-gate card-detail shape nor sets review status.
+test("T3: scope/plan dispatches never enter the review lifecycle", () => {
+  // A plan completion must early-return before the review entry, so it never
+  // queries the card-detail shape nor sets review status.
   const { policy, state } = loadFlowScenario({
-    cardId: "card-no-pmgate",
+    cardId: "card-no-review",
     dispatchId: "dispatch-plan-nopm",
     dispatchType: "plan",
     cardStatus: "in_progress",
@@ -1364,7 +1311,7 @@ test("T3 ★ full chain: scope→plan→plan-review→impl keeps one entry alive
     ["plan", "plan-review", "implementation"],
     "the full chain creates exactly plan → plan-review → implementation"
   );
-  // Never escalated / never advanced via PM gate during the staged chain.
+  // Never escalated during the staged chain.
   assert.deepEqual(h.state.manualInterventions, []);
 });
 

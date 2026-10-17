@@ -17,7 +17,7 @@ const TIER_DEFINITIONS: &[(&str, &str, i64, &str)] = &[
     ),
     (
         "tick:1min",
-        "onTick1min — [A][C][D][E][L] non-critical timeouts",
+        "onTick1min — [A][C][E][N] non-critical timeouts",
         60_000,
         "1min",
     ),

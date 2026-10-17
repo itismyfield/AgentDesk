@@ -205,7 +205,6 @@ function createAgentdeskMock(options) {
     {
       review_enabled: true,
       max_review_rounds: 3,
-      pm_decision_gate_enabled: true,
       maxEntryRetries: 3
     },
     settings.config || {}

@@ -378,27 +378,6 @@ test("timeouts failed-dispatch retry tolerates a dispatch create failure", () =>
   assert.match(state.logs.error[0], /Failed to create retry dispatch for card card-retry-2/);
 });
 
-test("timeouts review timeout module escalates overdue DoD waits", () => {
-  const { policy, state } = loadPolicy("policies/timeouts.js", {
-    dbQuery: createSqlRouter([
-      {
-        match: "WHERE status = ? AND review_status = 'awaiting_dod'",
-        result: [{ id: "card-dod-1" }]
-      }
-    ])
-  });
-
-  policy._section_D();
-
-  assert.deepEqual(state.manualInterventions, [
-    {
-      cardId: "card-dod-1",
-      reason: "DoD 대기 15분 초과",
-      options: { review: true }
-    }
-  ]);
-});
-
 test("timeouts review auto-accept module creates rework dispatches before transitioning", () => {
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     dbQuery: createSqlRouter([

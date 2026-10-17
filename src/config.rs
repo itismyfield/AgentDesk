@@ -1266,8 +1266,6 @@ pub struct KanbanConfig {
     pub manager_channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadlock_manager_channel_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pm_decision_gate_enabled: Option<bool>,
     /// #3561 — operator override for the relay-signal alert threshold. When
     /// set, every per-hour relay invariant signal (terminal-ack timeout,
     /// uncommitted-inflight-cleared, owner-unknown, offset invariant
@@ -1283,7 +1281,6 @@ impl KanbanConfig {
     pub fn is_empty(&self) -> bool {
         self.manager_channel_id.is_none()
             && self.deadlock_manager_channel_id.is_none()
-            && self.pm_decision_gate_enabled.is_none()
             && self.relay_alert_threshold.is_none()
     }
 }

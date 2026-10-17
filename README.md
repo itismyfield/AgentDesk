@@ -192,7 +192,7 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 |--------|---------|
 | `00-escalation.js` | Manual-intervention routing, PM cooldown management, escalation flush loop |
 | `00-pr-tracking.js` | Card→PR linkage cache and PR sync helpers |
-| `kanban-rules.js` | Core lifecycle: dispatch completion, PM decision gates |
+| `kanban-rules.js` | Core lifecycle: dispatch completion → review entry |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
 | `auto-queue.js` | Batch-phased card queuing, phase gate dispatch, slot management |
 | `ci-recovery.js` | CI failure detection, auto-rerun, and recovery card creation |
@@ -422,7 +422,6 @@ policies:
 # `RuntimeSettingsConfig`) and can be hot-edited from the dashboard runtime panel.
 kanban:
   manager_channel_id: "channel-id"  # optional: PM/manager Discord channel
-  pm_decision_gate_enabled: true
 
 review:
   enabled: true
@@ -545,7 +544,7 @@ agentdesk.kanban.setStatus(cardId, "in_progress")
 agentdesk.kanban.setStatus(cardId, "done", true)        // force
 agentdesk.kanban.getCard(cardId)
 agentdesk.kanban.reopen(cardId, "ready")
-agentdesk.kanban.setReviewStatus(cardId, "awaiting_dod", { awaiting_dod_at: "now" })
+agentdesk.kanban.setReviewStatus(cardId, "rework_pending", { suggestion_pending_at: null })
 
 // Review state
 agentdesk.reviewState.sync(cardId, "idle")
