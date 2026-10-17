@@ -171,7 +171,7 @@ impl TmuxPane {
             // Unsuccessful paste can follow partial mutation; never infer absence from exit status.
             Ok(output) => {
                 #[cfg(test)]
-                if super::super::transition::mutant("paste_not_sent") {
+                if super::super::mutant("paste_not_sent") {
                     return SendOutcome::NotSent(stderr_of(&output));
                 }
                 return SendOutcome::Indeterminate(stderr_of(&output));
@@ -209,7 +209,7 @@ fn stderr_of(output: &std::process::Output) -> String {
 
 pub(crate) fn canonical(provider: ShadowProvider, text: &str) -> String {
     #[cfg(test)]
-    if super::super::transition::mutant("busy_raw_paste") {
+    if super::super::mutant("busy_raw_paste") {
         return text.into();
     }
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -336,7 +336,7 @@ impl Pane for TmuxPane {
             result
         };
         #[cfg(test)]
-        if super::super::transition::mutant("shared_lock") {
+        if super::super::mutant("shared_lock") {
             return Some(callback());
         }
         match provider {

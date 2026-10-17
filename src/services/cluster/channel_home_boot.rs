@@ -287,7 +287,7 @@ impl ChannelWriters {
     }
 }
 
-/// Test-only mutants of the watch's writer return.
+/// Test-only mutants of the watch's writer return, a never-held home's drain reads and first init.
 #[cfg(test)]
 pub(crate) fn writer_mutant(name: &str) -> bool {
     std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some(name)
@@ -332,7 +332,7 @@ impl BootPort {
     pub(crate) fn reading(channel: u64, restored: Arc<AtomicBool>, reset: LegacyReset) -> Self {
         let readiness = crate::services::tui_o::writer::host::process_readiness();
         let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
-        Self::new(reads, reset).restored_by(restored)
+        Self::new(reads.stored_under(writer_root()), reset).restored_by(restored)
     }
 
     /// [`BootPort::reading`] that also counts the channel's persisted queue and marker as busy.
@@ -344,8 +344,18 @@ impl BootPort {
     ) -> Self {
         let readiness = crate::services::tui_o::writer::host::process_readiness();
         let reads = ChannelHomePort::new(channel, readiness, Arc::clone(&restored));
-        Self::new(reads.persisted_by(persisted), reset).restored_by(restored)
+        let reads = reads.persisted_by(persisted).stored_under(writer_root());
+        Self::new(reads, reset).restored_by(restored)
     }
+}
+
+/// The runtime root the writer host lays out O stores under (`o_writer_host` parts).
+fn writer_root() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if writer_mutant("store_root_unset") {
+        return None;
+    }
+    crate::config::runtime_root()
 }
 
 impl<R: DrainPort + Send + Sync> DrainPort for BootPort<R> {

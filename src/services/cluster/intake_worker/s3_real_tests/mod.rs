@@ -5,6 +5,8 @@
 mod drain_pg;
 #[path = "force_pg_tests.rs"]
 mod force_pg;
+#[path = "fresh_drain_pg_tests.rs"]
+mod fresh_drain_pg;
 #[path = "harness_tests.rs"]
 mod harness;
 #[path = "holder_pg_tests.rs"]
@@ -42,6 +44,9 @@ fn s3_node_child() {
         "th7_settles_unresolved" => Box::pin(drain_pg::settles_unresolved_node(&env)),
         "th7_waiting_boundary" => Box::pin(drain_pg::waiting_boundary_node(&env)),
         "th7_first_check" => Box::pin(drain_pg::first_check_node(&env)),
+        "th7_fresh_unhosted" => Box::pin(fresh_drain_pg::fresh_unhosted_node(&env)),
+        "th7_fresh_parked" => Box::pin(fresh_drain_pg::fresh_parked_node(&env)),
+        "th7_store_without_actor" => Box::pin(fresh_drain_pg::store_without_actor_node(&env)),
         "th6_restart_first" => Box::pin(holder_pg::first_generation_node(&env)),
         "th6_restart_second" => Box::pin(holder_pg::second_generation_node(&env)),
         "th6_release_first" => Box::pin(holder_pg::release_first_node(&env)),

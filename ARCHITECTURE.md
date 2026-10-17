@@ -120,6 +120,8 @@ src/
 │   │   ├── phase_gate_verdict.rs
 │   │   ├── phase_gates.rs
 │   │   ├── queries.rs
+│   │   ├── run_completion_contract_tests.rs
+│   │   ├── run_completion_pg_tests.rs
 │   │   ├── run_status.rs
 │   │   ├── runs.rs
 │   │   ├── slot_predicate.rs
@@ -603,6 +605,7 @@ src/
 │   │   ├── route.rs
 │   │   ├── route_generate.rs
 │   │   ├── route_types.rs
+│   │   ├── run_completion_activate_pg_tests.rs
 │   │   ├── runtime.rs
 │   │   ├── slot_routes.rs
 │   │   ├── view.rs
@@ -736,6 +739,7 @@ src/
 │   │   │   ├── s3_real_tests/
 │   │   │   │   ├── drain_pg_tests.rs
 │   │   │   │   ├── force_pg_tests.rs
+│   │   │   │   ├── fresh_drain_pg_tests.rs
 │   │   │   │   ├── harness_tests.rs
 │   │   │   │   ├── holder_pg_tests.rs
 │   │   │   │   ├── mod.rs
@@ -930,6 +934,7 @@ src/
 │   │   │   ├── fast_mode.rs
 │   │   │   ├── goals.rs
 │   │   │   ├── help.rs
+│   │   │   ├── help_tests.rs
 │   │   │   ├── meeting_cmd.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── model_picker.rs
@@ -1846,6 +1851,7 @@ src/
 │   │   │   │   │   │   └── native_turn_tests.rs
 │   │   │   │   │   ├── boundary_tests.rs
 │   │   │   │   │   └── runtime_switch_tests.rs
+│   │   │   │   ├── absent_tmux_host_tests.rs
 │   │   │   │   ├── background_child_close_pg_tests.rs
 │   │   │   │   ├── codex_direct_owner_tests.rs
 │   │   │   │   ├── compact_summary_tests.rs
@@ -2345,6 +2351,7 @@ src/
 │   │   │   ├── guard.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── orchestration.rs
+│   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
 │   │   ├── dtos.rs
@@ -2631,46 +2638,25 @@ src/
 │   │   │   ├── gate/
 │   │   │   │   ├── claude_guarded/
 │   │   │   │   │   └── acceptance_tests.rs
-│   │   │   │   └── claude_guarded.rs
+│   │   │   │   ├── claude_guarded.rs
+│   │   │   │   └── own_draft_tests.rs
 │   │   │   ├── pane/
 │   │   │   │   └── submit_tests.rs
-│   │   │   ├── busy_tests.rs
-│   │   │   ├── capability.rs
 │   │   │   ├── gate.rs
-│   │   │   ├── pane.rs
-│   │   │   ├── resume.rs
-│   │   │   ├── resume_actor_tests.rs
-│   │   │   ├── token.rs
-│   │   │   └── witness.rs
+│   │   │   └── pane.rs
 │   │   ├── submission_tmux/
 │   │   │   ├── guarded/
 │   │   │   │   ├── protocol_tests.rs
 │   │   │   │   └── transport_tests.rs
 │   │   │   └── guarded.rs
 │   │   ├── actor.rs
-│   │   ├── actor_tests.rs
-│   │   ├── attempt.rs
-│   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
-│   │   ├── durability_tests.rs
-│   │   ├── durable.rs
-│   │   ├── g1b_receipt_identity_tests.rs
-│   │   ├── g1b_rows_tests.rs
-│   │   ├── g1b_transition_tests.rs
-│   │   ├── handover.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
-│   │   ├── ledger.rs
 │   │   ├── mod.rs
-│   │   ├── receipt_identity.rs
-│   │   ├── rows.rs
-│   │   ├── rows_tests.rs
 │   │   ├── submission.rs
-│   │   ├── submission_tmux.rs
-│   │   ├── transition.rs
-│   │   ├── transition_fixture_tests.rs
-│   │   └── transition_tests.rs
+│   │   └── submission_tmux.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
@@ -2884,7 +2870,6 @@ src/
 │   │   ├── exact_pg_tests.rs
 │   │   ├── exact_submission.rs
 │   │   ├── gates_m1.rs
-│   │   ├── gates_m1_compact_tests.rs
 │   │   ├── gates_m1_spool_tests.rs
 │   │   ├── gates_m1_support.rs
 │   │   ├── ownership.rs
@@ -3030,7 +3015,6 @@ src/
 │   ├── dispatch_watchdog.rs
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
-│   ├── escalation_settings.rs
 │   ├── explicit_auth_route.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs

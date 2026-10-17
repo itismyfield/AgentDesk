@@ -2089,10 +2089,7 @@ mod reconcile_phase_gate_pg_tests {
         pg_db.drop().await;
     }
 
-    /// Helper: seed a `pending` auto-queue entry so the run still has work
-    /// remaining after a gate clear. This prevents `maybe_finalize_run_if_ready_pg`
-    /// from automatically finalizing the run, exposing the resume-only
-    /// behavior we want to assert.
+    /// Seeds a pending entry so a gate clear resumes the run instead of finalizing it.
     async fn seed_pending_entry(pool: &PgPool, run_id: &str, entry_id: &str, batch_phase: i64) {
         sqlx::query(
             "INSERT INTO kanban_cards (id, repo_id, title, status)
@@ -2194,7 +2191,11 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        // No pending entries — drained run, ready to finalize.
+        seed_pending_entry(&pool, "run-pg-test", "entry-drained", 0).await;
+        sqlx::query("UPDATE auto_queue_entries SET status = 'done' WHERE id = 'entry-drained'")
+            .execute(&pool)
+            .await
+            .expect("drain entry");
         let mut final_context = gate_context();
         final_context["phase_gate"]["final_phase"] = json!(true);
         insert_dispatch(
@@ -2244,7 +2245,6 @@ mod reconcile_phase_gate_pg_tests {
             other => panic!("expected Cleared, got {other:?}"),
         }
         assert_eq!(run_status(&pool, "run-pg-test").await, "completed");
-        // Completion notification should be queued in the outbox.
         let notify_count: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE bot = 'notify'",
         )

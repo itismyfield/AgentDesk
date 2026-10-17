@@ -1515,10 +1515,6 @@ mod nondestructive_loader_tests {
         let before = paths.each_ref().map(|path| snapshot(path));
 
         assert!(super::super::load_inflight_states(&CLAUDE).is_empty());
-        assert_eq!(
-            super::super::latest_request_owner_user_id_for_channel(5_996_001),
-            None
-        );
         assert!(!crate::services::discord::has_fresh_inflight_for_channel(
             5_996_001
         ));

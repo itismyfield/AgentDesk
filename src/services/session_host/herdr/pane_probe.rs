@@ -31,7 +31,8 @@ pub(crate) enum EvidenceGap {
     ServerChanged,
     /// No foreground child of the root shell when the window closed.
     NoneYet,
-    /// Several foreground children of the root shell; read once, never waited out.
+    /// Several foreground children of the root shell when the window closed; a login-startup
+    /// pipeline runs several for a moment, so it is read again until then.
     Ambiguous(Vec<u32>),
     /// A process's parent or start could not be read.
     ProcessUnreadable(u32),
@@ -149,13 +150,44 @@ pub(crate) fn start_text(start: StartIdentity) -> String {
     }
 }
 
-/// Root shell and provider of the pane `read` reports, as launch evidence, or why not.
+/// Root shell and provider of the pane `read` reports, as launch evidence, or why not. Each
+/// attempt is the whole proof; a gap a shell-startup child can cause is read again in the window.
 pub(crate) fn probe(
     read: &dyn Fn() -> PaneProcesses,
     os: &dyn ProcessOs,
     request: &ProbeRequest,
 ) -> Result<ExpectedExecution, EvidenceGap> {
-    let (root, provider) = await_candidate(read, os, request)?;
+    let deadline = Instant::now() + request.window;
+    loop {
+        match attempt(read, os, request) {
+            Err(gap) if before_provider(&gap) && Instant::now() + PROVIDER_POLL < deadline => {
+                thread::sleep(PROVIDER_POLL);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Gaps root-shell children that are not yet the provider leave: login-startup tools (a pipeline
+/// runs several) and the launch command before its exec, with a hidden or context-free environment.
+fn before_provider(gap: &EvidenceGap) -> bool {
+    matches!(
+        gap,
+        EvidenceGap::NoneYet
+            | EvidenceGap::Ambiguous(_)
+            | EvidenceGap::ProcessUnreadable(_)
+            | EvidenceGap::Replaced
+            | EvidenceGap::EnvUnreadable
+            | EvidenceGap::NonceMissing
+    )
+}
+
+fn attempt(
+    read: &dyn Fn() -> PaneProcesses,
+    os: &dyn ProcessOs,
+    request: &ProbeRequest,
+) -> Result<ExpectedExecution, EvidenceGap> {
+    let (root, provider) = candidate(read(), os, request.witness)?;
     let (root_start, provider_start) = still_running(read, os, request.witness, root, provider)?;
     if provider_start.wall_clock + START_SLACK < request.launched_at {
         return Err(EvidenceGap::StartedBeforeLaunch);
@@ -179,37 +211,13 @@ pub(crate) fn probe(
     })
 }
 
-enum Reading {
-    One { root: u32, provider: u32 },
-    Wait(EvidenceGap),
-}
-
-/// Reads again while no single child of the root shell shows up and the window is open.
-fn await_candidate(
-    read: &dyn Fn() -> PaneProcesses,
-    os: &dyn ProcessOs,
-    request: &ProbeRequest,
-) -> Result<(u32, u32), EvidenceGap> {
-    let deadline = Instant::now() + request.window;
-    loop {
-        let gap = match candidate(read(), os, request.witness)? {
-            Reading::One { root, provider } => return Ok((root, provider)),
-            Reading::Wait(gap) => gap,
-        };
-        if Instant::now() + PROVIDER_POLL >= deadline {
-            return Err(gap);
-        }
-        thread::sleep(PROVIDER_POLL);
-    }
-}
-
 /// The provider is the foreground process whose OS parent is the root shell; the provider's
 /// own children share its process group, so "not the shell" alone would name several.
 fn candidate(
     reading: PaneProcesses,
     os: &dyn ProcessOs,
     witness: &ServerWitness,
-) -> Result<Reading, EvidenceGap> {
+) -> Result<(u32, u32), EvidenceGap> {
     let (root, listed) = from_server(reading, witness)?;
     let mut children = Vec::new();
     let mut unreadable = None;
@@ -222,12 +230,9 @@ fn candidate(
     }
     match (children.as_slice(), unreadable) {
         ([_, _, ..], _) => Err(EvidenceGap::Ambiguous(children)),
-        ([provider], None) => Ok(Reading::One {
-            root,
-            provider: *provider,
-        }),
-        (_, Some(pid)) => Ok(Reading::Wait(EvidenceGap::ProcessUnreadable(pid))),
-        ([], None) => Ok(Reading::Wait(EvidenceGap::NoneYet)),
+        ([provider], None) => Ok((root, *provider)),
+        (_, Some(pid)) => Err(EvidenceGap::ProcessUnreadable(pid)),
+        ([], None) => Err(EvidenceGap::NoneYet),
     }
 }
 
