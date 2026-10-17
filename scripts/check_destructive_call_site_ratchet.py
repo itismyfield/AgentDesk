@@ -4,13 +4,18 @@
 This is a bounded lexical inventory, not a Rust/type/data-flow analysis and not
 proof that any listed destruction is safe.  It scans stripped source text for:
 tmux kill wrappers; watcher AtomicBool ``store(true, ...)`` calls; process kill
-calls; watcher-registry removal calls; and (#5071 relay-tail S4)
+calls; watcher-registry removal calls; direct filesystem unlink calls; and (#5071 relay-tail S4)
 ``under_identity_fence`` and ``with_terminal_delivery_fence`` bindings.  The
 first two categories include test call sites, matching the #5071 map.  Process,
-registry and fence categories reuse the repository's existing lexical
+registry, fence, and filesystem-unlink categories reuse the repository's existing lexical
 ``cfg(test)`` classifier and exclude whole test modules.  Aliases, re-exports,
 macros that construct names, indirection, and semantically equivalent spellings
 can remain unseen.
+
+Filesystem unlink call sites are counted only in production code; ``cfg(test)``
+functions and whole test files are excluded. This lexical category recognizes
+``fs::remove_*`` and ``std::fs::remove_*`` spellings; aliases and wrappers may
+remain unseen.
 
 The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
 inverse of the others: they count the FENCED entry points, not unfenced
@@ -75,10 +80,10 @@ not the caller, resolves the inflight path.  Its limits:
 * A SPELLING count, not a semantic one.  Definitions and re-export wrappers are
   counted too.  Harmless for a no-growth ratchet, wrong if read as "number of
   destruction sites".
-* Direct ``fs::remove_file`` unlinks are INVISIBLE.  ``inflight/removal.rs``,
-  ``inflight/rebind_reap.rs`` and ``inflight.rs`` unlink directly and count 0 for
-  those unlinks.  Helper-mediated class only; the direct-unlink surface is a
-  separate issue.
+* Direct filesystem unlink spellings (`fs::remove_*` and `std::fs::remove_*`)
+  are pinned in `fs_unlink`. This category scans production code only and counts
+  spellings, not semantic deletion sites; aliases, wrappers and indirection may
+  remain unseen.
 * The generation-fenced ``*_for_reconcile`` wrappers count AS destruction, not as
   a separate fenced-entry-point category.  They delegate to the same unlink, and
   excluding them would blind the category on the very reconcile sites it exists
@@ -141,6 +146,7 @@ CATEGORIES = (
     "identity_fence_bind",
     "delivery_fence_bind",
     "inflight_row_clear_call",
+    "fs_unlink",
     "structural_candidate_apply",
     "destructive_warrant_bind",
     "host_terminate",
@@ -202,6 +208,9 @@ INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
     r"|delete_inflight_state_file"
     r"|clear_inflight_by_tmux_name"
     r"|request_inflight_abandon_if_matches\w*)\s*\("
+)
+FS_UNLINK_PATTERN = re.compile(
+    r"\b(?:(?:std\s*::\s*)?fs\s*::\s*remove_[A-Za-z_]\w*)\s*\("
 )
 INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
 HOST_TERMINATE_OWNER = "src/services/termination_audit/host_terminate.rs"
@@ -609,6 +618,9 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         if _is_whole_test_file(path, rel):
             continue
         production = RUST_LEXER._production_text(path)
+        unlink_found = len(FS_UNLINK_PATTERN.findall(production))
+        if unlink_found:
+            counts["fs_unlink"][rel] = unlink_found
         structural_found = len(STRUCTURAL_CANDIDATE_PATTERN.findall(production))
         if structural_found:
             counts["structural_candidate_apply"][rel] = structural_found
@@ -810,6 +822,14 @@ def _snapshot(
                     "docstring for the full limits."
                 ),
                 "files": dict(sorted(counts["inflight_row_clear_call"].items())),
+            },
+            "fs_unlink": {
+                "comment": (
+                    "Production spellings of fs::remove_* and std::fs::remove_*; "
+                    "whole test files and cfg(test) code are excluded. This lexical "
+                    "count does not see aliases, wrappers, or indirect calls."
+                ),
+                "files": dict(sorted(counts["fs_unlink"].items())),
             },
             "structural_candidate_apply": {
                 "comment": '#5464 T5 S6b-B: per-file structural/warrant counts are a two-sided pairing check, not no-growth; one-sided mismatch and per-file growth fail closed, while paired deletion or count-preserving relocation/replacement remain invisible. See the module docstring.',
