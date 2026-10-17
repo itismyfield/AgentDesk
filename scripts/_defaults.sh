@@ -730,17 +730,19 @@ _health_json_deploy_nonblocking_ere() {
   # $1 allow_reconcile_degraded, $2 deploy verdict, $3 cluster_standby proven,
   # $4 providers whose TUI gateway restriction the body verifies (alternation).
   # A relay verdict label cycles with placeholder state, so it cannot judge a
-  # deploy (2026-09-07 measurement). A queue depth is backlog, so it only stops
-  # counting for a deploy verdict. Standby tokens join the set only once the
-  # body proves the node is a standby, and a TUI gateway reason only for a
-  # provider whose role the body verifies. A TUI O channel released to Legacy
-  # before any store write keeps its output there, so it never blocks. Everything
-  # else, including an unrecognised reason, blocks. No comma: the fallback splits on one.
+  # deploy (2026-09-07 measurement). Queue and deferred-hook depths are backlog,
+  # so they only stop counting for a deploy verdict. Standby tokens join the set
+  # only once the body proves the node is a standby. A TUI gateway reason is
+  # accepted only for a provider whose role the body verifies. A TUI O channel
+  # released to Legacy before any store write keeps its output there, so it never
+  # blocks. Everything else, including an unrecognised reason, blocks. No comma:
+  # the fallback splits on one.
   # $5 joins smoke E2E and pre-existing reader alarm channel ids; only their
   # reader-count reason is accepted, and only for a deploy verdict.
   local ere='^(relay_verdict_[^,]+|tui_o:released:[0-9]+' ids_re='^[0-9]+([|][0-9]+)*$'
   [ "${1:-0}" = "1" ] && ere="$ere|provider:[^:,]+:reconcile_in_progress"
   [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:pending_queue_depth:[0-9]+"
+  [ "${2:-0}" = "1" ] && ere="$ere|provider:[^:,]+:deferred_hooks_backlog:[1-9][0-9]*"
   [ "${2:-0}" = "1" ] && [[ "${5:-}" =~ $ids_re ]] && ere="$ere|tui_o:too_many_readers:(${5})"
   [ "${3:-0}" = "1" ] && ere="$ere|gateway_standby|provider:[^:,]+:gateway_standby"
   [ -n "${4:-}" ] && ere="$ere|provider:(${4}):tui_output_requires_gateway"
@@ -941,7 +943,10 @@ health_json_is_ready() {
   [ -n "$health_json" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
 
-  if [ "$require_dashboard" = "1" ]; then
+  # A profile that never runs the dashboard (runner) reports dashboard_required
+  # false; only that explicit false waives it, anything else still requires it.
+  if [ "$require_dashboard" = "1" ] \
+    && ! _health_json_field_is_false "$health_json" "dashboard_required"; then
     _health_json_field_is_true "$health_json" "dashboard" || return 1
   fi
 

@@ -212,7 +212,6 @@ class Fixture(unittest.TestCase):
             self.at(probe, "super::alive", WRAP),
             self.at(probe, "super::probe::alive", WRAP),
             self.at(relay, "crate::services::platform::tmux", TMUX),
-            self.at(relay, "TmuxBackend)", TYPE, lint="clippy::disallowed_types"),
             self.at(relay, "TmuxBackend;", TYPE, lint="clippy::disallowed_types"),
             diag("src/services/platform/tmux.rs", 1, 1, TMUX),  # owner: liveness only
             self.at(probe, "nested(name)", "some::other::thing"),
@@ -271,6 +270,73 @@ class DiagnosticsAndItems(Fixture):
         self.assertLessEqual({"bash", "cmd.exe", "env", "ssh", "launchctl", "perl"}, set(h2.DISPATCHERS))
 
 class Measurement(Fixture):
+    def test_type_value_constructors_are_measured_without_synthetic_clippy_rows(self) -> None:
+        rel = "src/services/relay_impl.rs"
+        source = textwrap.dedent("""\
+            // 한글 주석 makes compiler byte spans differ from code-point columns.
+            pub struct TmuxBackend;
+            pub struct NamedBackend { pub value: u8 }
+            pub struct TupleBackend(u8);
+            pub fn values() {
+                let _: TmuxBackend;
+                let _ = TmuxBackend;
+                let _ = NamedBackend { value: 1 };
+                let _ = TupleBackend(1);
+                let _ = (TupleBackend(1), match true { true => 1, false => 0 });
+                let _ = stringify!(TmuxBackend);
+            }
+            pub fn match_named(value: NamedBackend) {
+                match value {
+                    NamedBackend { value: _ } => (),
+                    _ => (),
+                }
+            }
+            pub fn match_tuple(value: TupleBackend) {
+                match value {
+                    TupleBackend(_) => (),
+                }
+            }
+            pub fn match_nested(value: (TupleBackend, u8)) {
+                match value {
+                    (TupleBackend(_), _) => (),
+                }
+            }
+            pub fn let_patterns(named: NamedBackend, tuple: TupleBackend) {
+                let NamedBackend { value: _ } = named;
+                let TupleBackend(_) = tuple;
+            }
+            pub fn let_nested(value: (TupleBackend, u8)) {
+                let (TupleBackend(_), _) = value;
+            }
+            pub fn for_pattern(values: Vec<TupleBackend>) {
+                for TupleBackend(_) in values {}
+            }
+            pub fn for_nested(values: Vec<(TupleBackend, u8)>) {
+                for (TupleBackend(_), _) in values {}
+            }
+            pub fn typed(value: TmuxBackend) -> TmuxBackend { value }
+            """)
+        self.sources[rel] = source
+        (self.root / rel).write_text(source, encoding="utf-8")
+        config = {
+            "agentdesk::services::relay::TmuxBackend": ("TYPES", frozenset(h2.LANES)),
+            "agentdesk::services::relay::NamedBackend": ("TYPES", frozenset(h2.LANES)),
+            "agentdesk::services::relay::TupleBackend": ("TYPES", frozenset(h2.LANES)),
+        }
+        sites = set(h2._type_value_sites(self.root, config))
+        self.assertEqual(
+            {(file, callee) for file, _line, _col, callee, _lo, _hi in sites},
+            {
+                (rel, "agentdesk::services::relay::TmuxBackend"),
+                (rel, "agentdesk::services::relay::NamedBackend"),
+                (rel, "agentdesk::services::relay::TupleBackend"),
+            },
+        )
+        self.paths[(rel, "values")] = "agentdesk::services::relay::values"
+        result = h2.measure(self.root, self.items([]), config)
+        self.assertEqual(result["derived"]["W"], {"agentdesk::services::relay::values"})
+        self.assertEqual(sum(result["rows"]["types"].values()), 4)
+
     def test_rows_sets_and_derivation(self) -> None:
         result = h2.measure(self.root, self.items(self.lines()), self.config)
         rows = result["rows"]
@@ -280,7 +346,7 @@ class Measurement(Fixture):
         self.assertEqual(rows["w"][(probe, "Probe::check", WRAP)], 1)
         self.assertEqual(sum(rows["types"].values()), 2)
         self.assertFalse(any(k[0].endswith("platform/tmux.rs") for s in rows.values() for k in s))
-        self.assertEqual(result["total"], 14)  # owner site counted, unrelated/test/std excluded
+        self.assertEqual(result["total"], 14)  # owner site and measured value constructor are included
         # compiler item paths: a nested fn folds, a trait impl registers its trait method, a type site in a fn its fn
         self.assertEqual(result["derived"]["W"], {
             "agentdesk::services::probe::alive", "agentdesk::services::probe::inner::twice",
@@ -323,7 +389,7 @@ class Measurement(Fixture):
         other = self.items([self.at("src/services/probe.rs", "super::alive", WRAP)])
         items.messages = other.messages  # the lines stay, the attributed lib messages decide
         result = h2.measure(self.root, items, self.config)
-        self.assertEqual((result["total"], set(result["rows"]["w"])), (1, {("src/services/probe.rs", "inner::twice", WRAP)}))
+        self.assertEqual((result["total"], set(result["rows"]["w"])), (2, {("src/services/probe.rs", "inner::twice", WRAP)}))
 
 class Baseline(Fixture):
     def run_main(self, *args: str) -> tuple[int, str, str]:

@@ -12,7 +12,7 @@ pub enum Hook {
     OnTick,
     /// Fast tick (30s) — retry, notification recovery, [I] deadlock, [K] orphan
     OnTick30s,
-    /// Normal tick (1m) — non-critical timeouts [A][C][D][E][L]
+    /// Normal tick (1m) — non-critical timeouts [A][C][E][N]
     OnTick1min,
     /// Slow tick (5m) — non-critical reconciliation [R][B][F][G][H], context check
     OnTick5min,

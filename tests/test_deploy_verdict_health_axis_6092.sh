@@ -128,6 +128,23 @@ if health_json_is_ready "$QUEUE" 1 1 1 >/dev/null 2>&1; then
 else
     pass "a non-deploy caller still refuses it"
 fi
+DEFERRED_BACKLOG="$(body '["provider:codex:deferred_hooks_backlog:1"]' true)"
+if health_json_is_ready "$DEFERRED_BACKLOG" 1 1 1 1 >/dev/null 2>&1; then
+    pass "the deploy verdict accepts its deferred hook backlog"
+else
+    fail "the deploy verdict refused its deferred hook backlog"
+fi
+if health_json_is_ready "$DEFERRED_BACKLOG" 1 1 1 >/dev/null 2>&1; then
+    fail "a non-deploy caller accepted deferred hook backlog"
+else
+    pass "a non-deploy caller still refuses deferred hook backlog"
+fi
+ZERO_DEFERRED_BACKLOG="$(body '["provider:codex:deferred_hooks_backlog:0"]' true)"
+if health_json_is_ready "$ZERO_DEFERRED_BACKLOG" 1 1 1 1 >/dev/null 2>&1; then
+    fail "a zero deferred hook count was accepted as backlog"
+else
+    pass "a zero deferred hook count is not treated as backlog"
+fi
 if health_json_is_ready "$(body '["relay_verdict_unknown_codex_c1"]' true)" 1 0 0 >/dev/null 2>&1; then
     pass "a relay verdict stays acceptable to every caller, as it was before"
 else
@@ -158,6 +175,27 @@ if health_json_is_ready "$UNHEALTHY" 1 1 0 1 >/dev/null 2>&1; then
 else
     pass "allow_no_provider_runtimes=0 still refuses it"
 fi
+
+echo "§9e a profile that declares no dashboard is not held to one; anything else still is"
+
+# $1 the dashboard_required pair (empty omits the field), $2 extra degraded reasons
+runner() {
+    local pair="${1:+$1,}" extra="${2:+,$2}"
+    printf '{"ok":false,"status":"degraded","server_up":true,"db":true,"dashboard":false,%s' "$pair"
+    printf '"cluster_standby":false,"runtime_profile":"runner","fully_recovered":true,'
+    printf '"degraded_reasons":["provider:claude:tui_output_requires_gateway","provider:codex:tui_output_requires_gateway"%s],' "$extra"
+    printf '"tui_output_gateway_channels":["claude:worker:complete:20","codex:worker:complete:3"]}'
+}
+RUNNER="$(runner '"dashboard_required":false' '')"
+RUNNER_REQUIRED="$(runner '"dashboard_required":true' '')"
+RUNNER_UNDECLARED="$(runner '' '')"
+RUNNER_UNKNOWN_REASON="$(runner '"dashboard_required":false' '"provider:claude:something_else"')"
+expect_ready "a runner reporting dashboard_required=false verifies without a dashboard" "$RUNNER"
+expect_blocked "dashboard_required=true still requires the dashboard" "$RUNNER_REQUIRED"
+expect_blocked "a body without dashboard_required still requires the dashboard" "$RUNNER_UNDECLARED"
+expect_blocked "a non-boolean dashboard_required does not waive it" \
+    "$(runner '"dashboard_required":"false"' '')"
+expect_blocked "the waiver does not admit an unverified reason" "$RUNNER_UNKNOWN_REASON"
 
 echo "§10 the blocking reasons are named, so a timeout says what it waited on"
 
@@ -303,6 +341,8 @@ if ! command -v jq >/dev/null 2>&1; then
 else
     for shape in "$INCIDENT" '["relay_verdict_unknown_codex_c1","db_unavailable"]' \
         '["a_reason_this_script_has_never_seen"]' '["provider:codex:pending_queue_depth:4"]' \
+        '["provider:codex:deferred_hooks_backlog:1"]' \
+        '["provider:codex:deferred_hooks_backlog:0"]' \
         '["relay_verdict_unknown_codex_c1","provider:codex:reconcile_in_progress"]' \
         '["relay_verdict_unknown_codex_c1",""]' '["provider:a,b:pending_queue_depth:4"]' \
         '["tui_o:released:7"]' '["tui_o:released:7","tui_o:halted:8"]'; do
@@ -321,6 +361,19 @@ else
         fi
     done
 fi
+for want in "0 $RUNNER" "1 $RUNNER_REQUIRED" "1 $RUNNER_UNDECLARED" "1 $RUNNER_UNKNOWN_REASON"; do
+    b="${want#* }"
+    without_jq=0
+    (
+        _health_json_has_jq() { return 1; }
+        health_json_is_ready "$b" 1 1 1 1 >/dev/null 2>&1
+    ) || without_jq=1
+    if [ "$without_jq" = "${want%% *}" ]; then
+        pass "the fallback gives the §9e verdict ($without_jq) without jq"
+    else
+        fail "the fallback said $without_jq, §9e expects ${want%% *}: $b"
+    fi
+done
 
 if [ "$FAILURES" -gt 0 ]; then
     echo "$FAILURES failure(s)" >&2

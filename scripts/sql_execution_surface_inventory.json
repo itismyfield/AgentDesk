@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "a3bca605fdf93153a62f18bf53caff1863f6b8bf",
+  "measured_at_sha": "6b8f865e170244c3bb3627b1988515eb89ecc119",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2377,15 +2377,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:11691db054c7a8ab579b5c43f89ec406ef1dbb17d6e17ddde1e5c79144426273"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/review-timeouts.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:305794909b96a79209137aeace3a785881bcae9eadfd42e1d8242870716644cf"
     },
     {
       "root": "policies",
@@ -11475,15 +11466,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:5d66eb3fde29849abdaa0885c3a24101ccb758cec5667ebb044f16a373ce55d9"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/kanban_cards/transitions.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:6c69ca3a7ba2666057593aa5f635c0474c3ee893feb6f53d5e7fc0781fbad25a"
     },
     {
@@ -11556,7 +11538,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:7ce2fc943a03776975ed73c3b5741ed5f0b9a20beb2f225541a4f278f9097cde"
+      "fingerprint": "sha256:96399f6ceb79dbc8ece08b1fafb0c548754b227208ca86df0f5934b89122b764"
     },
     {
       "root": "src",
@@ -11565,7 +11547,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
-      "fingerprint": "sha256:96399f6ceb79dbc8ece08b1fafb0c548754b227208ca86df0f5934b89122b764"
+      "fingerprint": "sha256:ba77c6742204342b72c322d6bbf5e8149729954c0cc090d524aee431bfddec8a"
     },
     {
       "root": "src",
