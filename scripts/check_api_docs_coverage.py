@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import generate_inventory_docs as inventory  # noqa: E402
+import rust_lex  # noqa: E402
 
 DOCS_RS = REPO_ROOT / "src" / "server" / "routes" / "docs.rs"
 PARAM_RE = re.compile(r"\{[^}/]+\}")
@@ -169,11 +170,20 @@ def collect_mounted_root_surface_endpoints() -> list[EndpointPair]:
     repo_root = inventory.REPO_ROOT
     web_surface_path = repo_root / "src" / "server" / "web_surface.rs"
     web_surface = inventory.read_text(web_surface_path)
+    state = rust_lex.StripState()
+    active_web_surface = "\n".join(
+        rust_lex.strip_line(line, state).ljust(len(line))
+        for line in web_surface.splitlines()
+    )
     source_paths = [web_surface_path]
-    if re.search(r"\btui_relay::router\s*\(", web_surface):
-        source_paths.append(repo_root / "src" / "services" / "claude_tui" / "tui_relay.rs")
-    if re.search(r"\bhook_receiver_router\s*\(", web_surface):
-        source_paths.append(repo_root / "src" / "services" / "claude_tui" / "hook_server.rs")
+    if re.search(r"\btui_relay::router\s*\(", active_web_surface):
+        source_paths.append(
+            repo_root / "src" / "services" / "claude_tui" / "tui_relay.rs"
+        )
+    if re.search(r"\bhook_receiver_router\s*\(", active_web_surface):
+        source_paths.append(
+            repo_root / "src" / "services" / "claude_tui" / "hook_server.rs"
+        )
 
     function_paths = sorted(
         path

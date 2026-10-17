@@ -38,6 +38,8 @@ class ApiDocsCoverageTest(unittest.TestCase):
                     Router::new()
                         .route("/ws", get(ws_handler))
                         .merge(crate::services::claude_tui::tui_relay::router());
+                    // hook_receiver_router() is mentioned here only as history.
+                    let note = "hook_receiver_router()";
                 }
                 """
             )
