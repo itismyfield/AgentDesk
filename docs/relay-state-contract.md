@@ -177,22 +177,14 @@ Repair, in priority order:
    `spawn_wiring_claims_process_latch_before_observed_task`. Copy the half that
    bears the load: it reads **the module that holds the production call site**,
    here through `include_str!("../framework_setup.rs")`, and asserts that call
-   site appears exactly once. Identify that file by what it CONTAINS, never by
-   how it is related to the test — the relation is an accident of the example.
-   Choose a needle that identifies the executable expression, not a bare
-   identifier that a comment or docstring can repeat. A qualified call with
-   its arguments is one option; a distinctive predicate such as
-   `&& !preserve_on_cancel` is another. Prefer counting matches in source with
-   comments and strings excluded. If the guard searches raw source, assert the
-   needle occurs exactly once and verify that match is the intended expression;
-   `find()` alone can accept an earlier prose match while the real call is gone.
-   Here `framework_setup` is a sibling of the module under test; elsewhere the
-   wiring may sit in a parent or further away. "Read the parent module" is
-   specifically the wrong generalization, because the parent of
-   `intake_delivery_sweep::tests` is `intake_delivery_sweep` itself, which is
-   the source read by this test's OTHER half — an ordering guard that pins no
-   production entrypoint. A guard copied from that half alone leaves exactly
-   the nominal coverage this gate rejects.
+   site appears exactly once. Identify its source by content, not test relation.
+   Use distinctive executable syntax—a qualified call with arguments or a
+   predicate such as `&& !preserve_on_cancel`—never a bare identifier prose can
+   repeat. Count after excluding comments and strings. A raw-source guard must
+   find exactly one intended executable match; `find()` can accept earlier prose.
+   `framework_setup` is a sibling here, but wiring may live elsewhere. The test
+   parent can mislead: `intake_delivery_sweep::tests` is under
+   `intake_delivery_sweep`, whose other half only pins ordering, not production.
 
 A lexical guard is the fallback, not the goal: it pins that the call site
 *exists*, not that the call is *meaningfully wired*. The exemplar says so in its
