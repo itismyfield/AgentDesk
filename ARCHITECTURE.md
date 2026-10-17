@@ -1156,53 +1156,6 @@ src/
 │   │   │   ├── shadow_tests.rs
 │   │   │   ├── telemetry.rs
 │   │   │   └── worker.rs
-│   │   ├── input_runtime/
-│   │   │   ├── activation/
-│   │   │   │   ├── plan.rs
-│   │   │   │   ├── scope.rs
-│   │   │   │   ├── scope_tests.rs
-│   │   │   │   └── selection_tests.rs
-│   │   │   ├── fence/
-│   │   │   │   └── modes.rs
-│   │   │   ├── intake/
-│   │   │   │   ├── admit.rs
-│   │   │   │   ├── admit_tests.rs
-│   │   │   │   ├── classify.rs
-│   │   │   │   ├── client.rs
-│   │   │   │   └── source.rs
-│   │   │   ├── runtime/
-│   │   │   │   ├── dormant_tests.rs
-│   │   │   │   ├── drive.rs
-│   │   │   │   ├── notice.rs
-│   │   │   │   ├── notice_tests.rs
-│   │   │   │   └── ports.rs
-│   │   │   ├── supervisor/
-│   │   │   │   ├── drive.rs
-│   │   │   │   ├── drive_tests.rs
-│   │   │   │   └── reserve.rs
-│   │   │   ├── activation.rs
-│   │   │   ├── admission.rs
-│   │   │   ├── clear.rs
-│   │   │   ├── command.rs
-│   │   │   ├── effect.rs
-│   │   │   ├── effect_tests.rs
-│   │   │   ├── external.rs
-│   │   │   ├── external_tests.rs
-│   │   │   ├── fence.rs
-│   │   │   ├── fence_tests.rs
-│   │   │   ├── g1b_command_tests.rs
-│   │   │   ├── g1b_ordering_tests.rs
-│   │   │   ├── intake.rs
-│   │   │   ├── mapping.rs
-│   │   │   ├── mod.rs
-│   │   │   ├── ordering.rs
-│   │   │   ├── ordering_tests.rs
-│   │   │   ├── receipt.rs
-│   │   │   ├── receipt_tests.rs
-│   │   │   ├── reconcile.rs
-│   │   │   ├── runtime.rs
-│   │   │   ├── source.rs
-│   │   │   └── supervisor.rs
 │   │   ├── live_bridge/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
