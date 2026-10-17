@@ -94,14 +94,31 @@ async fn seed_row(rig: &Rig, name: &str, case: Case) {
     .await;
 }
 
+/// Registers the channel by id alone, live and on disk, as a config without name or aliases does.
+fn unname(rig: &Rig, id: u64) {
+    let yaml = format!(
+        "server: {{}}\ncluster: {{instance_id: test-node}}\nagents:\n  - id: fixture\n    name: fixture\n    provider: claude\n    channels:\n      claude: {{id: '{id}', runtime: tui}}\n"
+    );
+    let mut config: crate::config::Config = serde_yaml::from_str(&yaml).unwrap();
+    config.session_hosts =
+        crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+    crate::config_live_reload::install(config.clone());
+    let path = crate::runtime_layout::config_file_path(rig.root.path());
+    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+}
+
 /// A restarted Herdr channel with no watcher yet, a queued head and the transcript `case` leaves;
 /// returns the reason presence settles on and whether the queue gate took the head.
-async fn drained(id: u64, case: Case) -> (&'static str, bool) {
+async fn drained(id: u64, case: Case, named: bool) -> (&'static str, bool) {
     let rig = Rig::new(id, true, false).await;
     let channel = rig.channel;
-    // A restart restores no core session for a Herdr channel; its configured name is the basis.
+    // A restart restores no core session for a Herdr channel.
     rig.shared.core.lock().await.sessions.remove(&channel);
-    let name = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{id}"));
+    let basis = if named { "s1e" } else { "unnamed" };
+    if !named {
+        unname(&rig, id);
+    }
+    let name = ProviderKind::Claude.build_tmux_session_name(&format!("{basis}-{id}"));
     seed_row(&rig, &name, case).await;
     match case {
         Case::Withheld => withhold_herdr_execution(&name, Some("restarted")),
@@ -153,24 +170,28 @@ async fn drained(id: u64, case: Case) -> (&'static str, bool) {
 #[tokio::test(flavor = "current_thread")]
 async fn restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg() {
     let cases = [
-        (Case::Admitted, "closed", true),
-        (Case::Open, "open", false),
-        (Case::Withheld, "session_identity_unresolved", false),
-        (Case::Pending, "session_identity_unresolved", false),
-        (Case::OtherNode, "session_identity_unresolved", false),
+        (Case::Admitted, true, "closed", true),
+        (Case::Open, true, "open", false),
+        (Case::Withheld, true, "session_identity_unresolved", false),
+        (Case::Pending, true, "session_identity_unresolved", false),
+        (Case::OtherNode, true, "session_identity_unresolved", false),
         (
             Case::OtherExecutionNode,
+            true,
             "session_identity_unresolved",
             false,
         ),
-        (Case::Retired, "no_session", true),
-        (Case::Missing, "no_session", true),
+        (Case::Retired, true, "no_session", true),
+        (Case::Missing, true, "no_session", true),
+        (Case::Admitted, false, "closed", true),
+        (Case::Open, false, "open", false),
+        (Case::Withheld, false, "session_identity_unresolved", false),
     ];
     let mut wrong = Vec::new();
-    for (index, (case, reason, taken)) in cases.into_iter().enumerate() {
-        let observed = drained(71_340_100 + index as u64, case).await;
+    for (index, (case, named, reason, taken)) in cases.into_iter().enumerate() {
+        let observed = drained(71_340_100 + index as u64, case, named).await;
         if observed != (reason, taken) {
-            wrong.push((case, observed));
+            wrong.push((case, named, observed));
         }
     }
     assert!(wrong.is_empty(), "{wrong:?}");
