@@ -378,6 +378,7 @@ src/
 │   │   │   │       ├── part_10.rs
 │   │   │   │       ├── part_11.rs
 │   │   │   │       └── session_evidence.rs
+│   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
 │   │   │   └── taxonomy.rs

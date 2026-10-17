@@ -1310,6 +1310,8 @@ server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_sta
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
+server::routes::docs::group_response::tests::colliding_group_paths_advertise_resolvable_category_details
+server::routes::docs::group_response::tests::kanban_category_docs_include_single_card_get
 server::routes::docs::inventory::endpoints::part_06::tests::queue_generate_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::add_run_entry_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::docs_group_example_advertises_canonical_paths
