@@ -2634,28 +2634,13 @@ src/
 │   │   │   │   └── transport_tests.rs
 │   │   │   └── guarded.rs
 │   │   ├── actor.rs
-│   │   ├── attempt.rs
-│   │   ├── blob.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
-│   │   ├── durability_tests.rs
-│   │   ├── durable.rs
-│   │   ├── g1b_receipt_identity_tests.rs
-│   │   ├── g1b_rows_tests.rs
-│   │   ├── g1b_transition_tests.rs
-│   │   ├── handover.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
-│   │   ├── ledger.rs
 │   │   ├── mod.rs
-│   │   ├── receipt_identity.rs
-│   │   ├── rows.rs
-│   │   ├── rows_tests.rs
 │   │   ├── submission.rs
-│   │   ├── submission_tmux.rs
-│   │   ├── transition.rs
-│   │   ├── transition_fixture_tests.rs
-│   │   └── transition_tests.rs
+│   │   └── submission_tmux.rs
 │   ├── tui_o/
 │   │   ├── channel_policy/
 │   │   │   ├── adoption/
