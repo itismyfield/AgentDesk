@@ -1354,7 +1354,8 @@ src/
 │   │   │   ├── turn_admission.rs
 │   │   │   └── turn_admission_tests.rs
 │   │   ├── queue_park_ledger/
-│   │   │   └── cancel_park_tests.rs
+│   │   │   ├── cancel_park_tests.rs
+│   │   │   └── promote_hold.rs
 │   │   ├── recovery_engine/
 │   │   │   ├── legacy_restart_replay/
 │   │   │   │   └── proof.rs
@@ -2960,6 +2961,7 @@ src/
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_policy/
+│   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
 │   │   │   │   ├── provenance/
@@ -2983,6 +2985,7 @@ src/
 │   │   │   ├── codex_policy.rs
 │   │   │   ├── codex_verified.rs
 │   │   │   ├── codex_verified_executed_resume_tests.rs
+│   │   │   ├── codex_verified_hold_detail_tests.rs
 │   │   │   ├── codex_verified_tests.rs
 │   │   │   └── pane_registration.rs
 │   │   ├── binding_context.rs

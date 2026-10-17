@@ -3669,6 +3669,13 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
     "/api/claude-accounts"
     "/api/docs"
 )
+# Paths served only by the admin routers (agents, integrations, ops) that
+# compose_api_router skips when modules.admin_api=false, as on a runner.
+POST_DEPLOY_SMOKE_ADMIN_API_ENDPOINTS=(
+    "/api/agents"
+    "/api/claude-accounts"
+    "/api/docs"
+)
 POST_DEPLOY_SMOKE_LOG_LINES="${AGENTDESK_POST_DEPLOY_SMOKE_LOG_LINES:-500}"
 POST_DEPLOY_SMOKE_WARN_LIMIT="${AGENTDESK_POST_DEPLOY_SMOKE_WARN_LIMIT:-5}"
 POST_DEPLOY_SMOKE_RECOVERY_GATE_S="${AGENTDESK_POST_DEPLOY_SMOKE_RECOVERY_GATE_S:-120}"
@@ -3725,6 +3732,44 @@ _post_deploy_smoke_optional_accounts_absent() {
         "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" >/dev/null 2>&1
 }
 
+# Echo /api/health `modules.<name>` as true/false, read as a value (not `jq -e`).
+# Non-zero when the body, `modules` object or boolean field is missing, so callers keep full checks.
+_post_deploy_smoke_resolve_health_module() {
+    local health_body="$1" module="$2" value
+    if [ -z "$health_body" ] || [ ! -s "$health_body" ]; then
+        return 1
+    fi
+    if ! value=$(jq -r --arg module "$module" '
+        if (type == "object") and ((.modules | type) == "object")
+            and ((.modules[$module] | type) == "boolean") then
+            .modules[$module]
+        else
+            error("modules.\($module) is not boolean")
+        end
+    ' "$health_body"); then
+        return 1
+    fi
+    case "$value" in
+        true | false) printf '%s\n' "$value" ;;
+        *) return 1 ;;
+    esac
+}
+
+# An admin-router path answering 404 is an unmounted router only when this run's
+# /api/health says modules.admin_api=false; any other status or health shape still fails.
+_post_deploy_smoke_profile_unmounted() {
+    local endpoint="$1" http_code="$2" admin_path admin_api
+    [ "$http_code" = "404" ] || return 1
+    for admin_path in "${POST_DEPLOY_SMOKE_ADMIN_API_ENDPOINTS[@]}"; do
+        [ "$admin_path" = "$endpoint" ] || continue
+        admin_api=$(_post_deploy_smoke_resolve_health_module \
+            "${POST_DEPLOY_SMOKE_HEALTH_BODY:-}" admin_api 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || return 1
+        [ "$admin_api" = "false" ]
+        return
+    done
+    return 1
+}
+
 _post_deploy_smoke_probe_apis() {
     local endpoint body_path http_code
     local failed=0
@@ -3747,6 +3792,10 @@ _post_deploy_smoke_probe_apis() {
         if [ "$http_code" != "200" ]; then
             if _post_deploy_smoke_optional_accounts_absent "$endpoint" "$http_code" "$body_path"; then
                 _post_deploy_smoke_note "api endpoint=${endpoint} optional=not_installed; no Claude runtime configured" || return 1
+                continue
+            fi
+            if _post_deploy_smoke_profile_unmounted "$endpoint" "$http_code"; then
+                _post_deploy_smoke_note "api endpoint=${endpoint} skipped=profile(admin_api=false)" || return 1
                 continue
             fi
             _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
@@ -4101,7 +4150,7 @@ _post_deploy_smoke_classified_note() {
 }
 
 _post_deploy_smoke_check_relay_round_trip() {
-    local cluster_standby channel_id relay_output relay_log
+    local cluster_standby gateway channel_id relay_output relay_log
     local resolve_rc cell_busy cell_guard_rc rc=0 verdict
     local run_id
     local config_path="$ADK_REL/config/agentdesk.yaml"
@@ -4116,6 +4165,14 @@ _post_deploy_smoke_check_relay_round_trip() {
     fi
     if [ "$cluster_standby" = "true" ]; then
         _post_deploy_smoke_note "relay E-1=skipped cluster_standby=true (no standby injection)" || return 1
+        return 0
+    fi
+    # A runner (modules.gateway=false) owns no relay; skip before any config read.
+    # An unreadable gateway flag falls through to the round-trip.
+    if gateway=$(_post_deploy_smoke_resolve_health_module \
+        "$POST_DEPLOY_SMOKE_HEALTH_BODY" gateway 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") \
+        && [ "$gateway" = "false" ]; then
+        _post_deploy_smoke_note "relay E-1=skipped modules.gateway=false (runner: relay belongs to the gateway)" || return 1
         return 0
     fi
     # Positive breadcrumb (#5026): the standby gate passed and the round-trip is

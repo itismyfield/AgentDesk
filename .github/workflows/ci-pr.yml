@@ -156,6 +156,7 @@ jobs:
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
+              - 'src/services/tui_prompt_dedupe/**'
               # #5147: the forensics module, the health-path DB awaits it
               # brackets, and the boot site that starts the self-watchdog (and
               # with it the runtime beacon). Load-bearing now that the `!`
@@ -1472,7 +1473,6 @@ jobs:
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
           # The other half of the same guard: that every Postgres await on the
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1
-
       # #5034: watchdog/operational alerts are notifications, not queued turns;
       - name: Operational alert intake admission regressions
         env:
@@ -1485,7 +1485,6 @@ jobs:
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
-
       - name: Accepted turn lifetime regressions
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
@@ -1501,12 +1500,13 @@ jobs:
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
-
       - name: Cancel-preserved queue observation regression
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
-        run: env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
-
+        run: |
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1
       # #5003: this production-path E2E previously ran only in main's broad
       # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Local model durable queue wake regression
@@ -2088,7 +2088,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
+          expected=a537f123df62fce3db942713df836929fe91e50777488de38508f978cdf6b308
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2340,7 +2340,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=5e0ca7224cbfcb3dd61666e5fd1a0c53eb5eb6373b2cd4991fdb86f60194eeb8
+          expected=a537f123df62fce3db942713df836929fe91e50777488de38508f978cdf6b308
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

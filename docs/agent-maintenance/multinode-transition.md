@@ -896,7 +896,10 @@ redeploy leaves the old values live in the plist.
   E2E channel from machine-local `agentdesk.yaml`, and requires the target cell's
   loopback health/session snapshots to be idle. A standby, a node with no E2E
   cell, or a cell with a foreign live turn therefore never receives an injected
-  turn. The stage owns no shared queue, durable lease, or singleton and is
+  turn. A runner whose public `modules.gateway` / `modules.admin_api` are
+  boolean `false` also skips E-1 and notes its unmounted admin-router 404s
+  instead of failing them; any other shape keeps the full-node checks.
+  The stage owns no shared queue, durable lease, or singleton and is
   deliberately fail-open: findings only warn, alert, and write a node-local
   issue draft before peer propagation/source-manifest work continues. Core API
   probes and the alert POST use same-port loopback `Origin` authentication
