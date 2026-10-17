@@ -101,9 +101,9 @@ async fn check_reclaim(site: &'static str, channel_id: u64, pending_start: bool)
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
     if site == "leaked_row_after_runtime" {
-        discord::health::legacy_supervision::test_support::seed_backfill_row(&row);
+        discord::health::test_support::seed_backfill_row(&row);
     }
-    let before = discord::health::legacy_supervision::test_support::fingerprint(&path);
+    let before = discord::health::test_support::fingerprint(&path);
     let record = TuiDirectPendingStart {
         provider: "claude".to_string(),
         channel_id,
@@ -153,7 +153,7 @@ async fn check_reclaim(site: &'static str, channel_id: u64, pending_start: bool)
         assert!(!applied);
         assert!(!token.cancelled.load(Ordering::Relaxed));
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
-        let after = discord::health::legacy_supervision::test_support::fingerprint(&path);
+        let after = discord::health::test_support::fingerprint(&path);
         assert_ne!(after, before, "the Legacy loader must persist its backfill");
         let mut written: discord::inflight::InflightTurnState =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

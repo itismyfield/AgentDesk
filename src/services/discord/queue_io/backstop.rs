@@ -231,11 +231,6 @@ async fn release_cancelled_backstop_anchor(
     let snapshot = super::mailbox_snapshot(shared.as_ref(), channel_id).await;
     if !idle_queue_snapshot_blocked_by_cancelled_anchor(&snapshot)
         || matching_residue_owns_anchor(shared, channel_id, &snapshot)
-        || health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id.get(),
-            "idle_queue_backstop",
-        )
     {
         return false;
     }
@@ -244,14 +239,7 @@ async fn release_cancelled_backstop_anchor(
         provider,
         channel_id,
         "idle_queue_backstop",
-        |observed| {
-            !matching_residue_owns_anchor(shared, channel_id, observed)
-                && !health::legacy_supervision::legacy_retired(
-                    provider.as_str(),
-                    channel_id.get(),
-                    "idle_queue_backstop_before_finish",
-                )
-        },
+        |observed| !matching_residue_owns_anchor(shared, channel_id, observed),
     )
     .await
     .released

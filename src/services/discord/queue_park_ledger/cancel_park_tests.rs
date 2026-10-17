@@ -987,7 +987,7 @@ async fn dequeued_then_represerved_source_remains_waiting() {
             relay_last_offset: None,
         },
     );
-    let api = discord::health::legacy_supervision::test_support::MockDiscord::start_with(
+    let api = discord::health::test_support::MockDiscord::start_with(
         Arc::new(move |method, path| {
             if method == axum::http::Method::GET && path.ends_with(&format!("/channels/{}", channel.get())) {
                 Some((200, serde_json::json!({

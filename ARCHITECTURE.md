@@ -967,8 +967,6 @@ src/
 │   │   ├── gateway/
 │   │   │   └── outbound_messages.rs
 │   │   ├── health/
-│   │   │   ├── legacy_supervision/
-│   │   │   │   └── test_support.rs
 │   │   │   ├── reachability/
 │   │   │   │   ├── composite.rs
 │   │   │   │   ├── composite_tests.rs
@@ -1036,7 +1034,6 @@ src/
 │   │   │   │   ├── live_bridge_guard.rs
 │   │   │   │   └── live_bridge_guard_tests.rs
 │   │   │   ├── headless_turn.rs
-│   │   │   ├── legacy_supervision.rs
 │   │   │   ├── liveness_authority.rs
 │   │   │   ├── mailbox.rs
 │   │   │   ├── o_transition.rs
@@ -1055,6 +1052,7 @@ src/
 │   │   │   ├── stall_liveness.rs
 │   │   │   ├── stall_verdict.rs
 │   │   │   ├── tail_evidence.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── transcript_binding_stall.rs
 │   │   │   ├── turn_deliver.rs
 │   │   │   ├── unpaired_active_token.rs

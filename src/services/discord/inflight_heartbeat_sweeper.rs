@@ -307,9 +307,7 @@ mod legacy_channel_tests {
 
     use super::run_heartbeat_sweep_pass_inner;
     use crate::config::TestEnvVarGuard;
-    use crate::services::discord::health::legacy_supervision::test_support::{
-        fingerprint, seed_backfill_row,
-    };
+    use crate::services::discord::health::test_support::{fingerprint, seed_backfill_row};
     use crate::services::discord::inflight::InflightTurnState;
     use crate::services::provider::ProviderKind;
 
@@ -376,9 +374,7 @@ mod legacy_channel_tests {
         let abandon_root =
             crate::services::discord::runtime_store::discord_abandon_requests_root().unwrap();
         let abandon =
-            crate::services::discord::health::legacy_supervision::test_support::tree_fingerprint(
-                &abandon_root,
-            );
+            crate::services::discord::health::test_support::tree_fingerprint(&abandon_root);
         for channel in channels {
             assert!(
                 abandon

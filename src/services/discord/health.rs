@@ -21,7 +21,6 @@ use crate::services::provider::ProviderKind;
 //   * `outbound::{send_target,send_gate,manual_delivery,send_api}` — manual
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 mod headless_turn;
-pub(in crate::services::discord) mod legacy_supervision;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 pub(crate) mod o_transition;
@@ -62,6 +61,8 @@ mod snapshot;
 mod stall_liveness;
 mod stall_verdict;
 pub(in crate::services::discord) mod tail_evidence;
+#[cfg(test)]
+pub(in crate::services::discord) mod test_support;
 pub(in crate::services::discord) use tail_evidence::TailObservation;
 // #5188 (R5/R6): a delivery binding pointed at a transcript Claude abandoned.
 mod transcript_binding_stall;
