@@ -148,11 +148,47 @@ def parse_docs_endpoints(docs_path: Path = DOCS_RS) -> list[EndpointPair]:
 
 
 def collect_mounted_api_endpoints() -> list[EndpointPair]:
-    return [
+    entries = [
         EndpointPair(entry.method.upper(), entry.path)
         for entry in inventory.collect_mounted_api_route_entries()
         if entry.path.startswith("/api/")
     ]
+    entries.extend(collect_mounted_root_surface_endpoints())
+    return entries
+
+
+def collect_mounted_root_surface_endpoints() -> list[EndpointPair]:
+    """Collect documented control routes mounted outside the nested /api router.
+
+    The root web surface composes the TUI and hook routers separately. Keep the
+    route scan tied to those mount points so a docs entry becomes stale when a
+    router is no longer mounted, while newly declared routes in those mounted
+    modules are discovered automatically.
+    """
+
+    repo_root = inventory.REPO_ROOT
+    web_surface_path = repo_root / "src" / "server" / "web_surface.rs"
+    web_surface = inventory.read_text(web_surface_path)
+    source_paths = [web_surface_path]
+    if re.search(r"\btui_relay::router\s*\(", web_surface):
+        source_paths.append(repo_root / "src" / "services" / "claude_tui" / "tui_relay.rs")
+    if re.search(r"\bhook_receiver_router\s*\(", web_surface):
+        source_paths.append(repo_root / "src" / "services" / "claude_tui" / "hook_server.rs")
+
+    function_paths = sorted(
+        path
+        for path in (repo_root / "src").rglob("*.rs")
+        if path.is_file() and not inventory.is_test_file(path)
+    )
+    by_file, by_name = inventory.build_function_index(function_paths)
+
+    entries: list[EndpointPair] = []
+    for source_path in source_paths:
+        for entry in inventory.parse_route_file(source_path, "", by_file, by_name):
+            # / and /settings are browser UI pages, not API/control surfaces.
+            if entry.path == "/ws" or entry.path.startswith(("/tui/", "/hooks/")):
+                entries.append(EndpointPair(entry.method.upper(), entry.path))
+    return entries
 
 
 def _validate_allowlist(
