@@ -204,6 +204,14 @@ No policy merges pull requests. Every merge goes through a PR that an agent baby
 
 Repository policy files under `policies/` are canonical for shipped behavior. Release copies under `~/.adk/release/policies/` are deployment replicas, and operator-local policy directories are extensions selected by `policies.dir`. For the complete policy/config source map, see [`docs/source-of-truth.md`](docs/source-of-truth.md).
 
+**Upgrade note (PM Decision Gate removal).** Completed work now enters review directly, and nothing advances a card still parked in the old `awaiting_dod` review sub-state. Before and after upgrading, check for leftovers:
+
+```sql
+SELECT id, title FROM kanban_cards WHERE status = 'review' AND review_status = 'awaiting_dod';
+```
+
+Recover each one with `POST /api/kanban-cards/{id}/rereview` (body `{"reason": "awaiting_dod cleanup"}`, plus the `Authorization: Bearer` / `X-Channel-Id` headers when `server.auth_token` / `kanban.manager_channel_id` are set). It clears the sub-state and starts a fresh counter-model review; `/resume` rejects this sub-state.
+
 ### Policy Tests
 Local policy development now has a dedicated Node runner for the repository copies under `policies/`.
 
