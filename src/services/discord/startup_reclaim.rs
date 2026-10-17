@@ -867,8 +867,8 @@ mod tests {
 
     /// Answers the bot identity and one page per channel holding an old frozen panel and an
     /// old exact placeholder.
-    fn reclaim_answer() -> super::super::health::legacy_supervision::test_support::Answer {
-        use super::super::health::legacy_supervision::test_support::message_json;
+    fn reclaim_answer() -> super::super::health::test_support::Answer {
+        use super::super::health::test_support::message_json;
         Arc::new(move |method: &axum::http::Method, path: &str| {
             if method != axum::http::Method::GET {
                 return None;
@@ -895,7 +895,7 @@ mod tests {
     /// Both startup passes claim a Legacy channel and finalize its frozen panel and placeholder.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn startup_passes_claim_and_reclaim_legacy_channels() {
-        use super::super::health::legacy_supervision::test_support::MockDiscord;
+        use super::super::health::test_support::MockDiscord;
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -939,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn startup_outer_sweep_builds_durable_plan_and_keeps_linked_placeholders() {
-        use super::super::health::legacy_supervision::test_support::{
+        use super::super::health::test_support::{
             MockDiscord, fingerprint, message_json, seed_backfill_row,
         };
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

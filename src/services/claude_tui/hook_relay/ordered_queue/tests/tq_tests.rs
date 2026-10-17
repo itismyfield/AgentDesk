@@ -128,20 +128,39 @@ impl Tq {
         event: &str,
         payload: Value,
     ) -> std::thread::JoinHandle<(Duration, Result<Value, String>)> {
+        self.waiting_cli_with_start(event, payload).0
+    }
+
+    fn waiting_cli_with_start(
+        &self,
+        event: &str,
+        payload: Value,
+    ) -> (
+        std::thread::JoinHandle<(Duration, Result<Value, String>)>,
+        std::sync::mpsc::Receiver<Instant>,
+    ) {
         let (endpoint, event, a) = (self.endpoint.clone(), event.to_owned(), self.a.clone());
-        std::thread::spawn(move || {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
             let started = Instant::now();
+            let _ = started_tx.send(started);
             let result = handoff_ordered_hook_event_response_with_timeout(
                 &endpoint, "claude", &event, &a, payload, REPLY_WAIT,
             );
             (started.elapsed(), result)
-        })
+        });
+        (handle, started_rx)
+    }
+
+    fn hold_producer_lock(&self) -> RelayQueueFileLock {
+        lock_relay_queue_file(&self.queue_dir.join("producer.lock"), false)
+            .expect("lock the producer queue")
+            .expect("producer lock acquired")
     }
 
     /// Holds the producer lock like a slow concurrent enqueue, released after `hold`.
     fn delay_producers(&self, hold: Duration) -> std::thread::JoinHandle<()> {
-        let lock = self.queue_dir.join("producer.lock");
-        let held = lock_relay_queue_file_with_mode(&lock, false, true).unwrap();
+        let held = self.hold_producer_lock();
         std::thread::spawn(move || {
             std::thread::sleep(hold);
             drop(held);
@@ -200,6 +219,36 @@ impl Tq {
 
     fn feedback_pending(&self) -> usize {
         self.state.memento_feedback_pending_for_tests(&self.a)
+    }
+
+    fn queued_response_budget_millis(&self, event: &str) -> Option<u64> {
+        queue_ingress_paths(&self.queue_dir)
+            .ok()?
+            .into_iter()
+            .filter_map(|path| std::fs::read(path).ok())
+            .filter_map(|bytes| serde_json::from_slice::<OrderedHookRelayRequest>(&bytes).ok())
+            .find(|request| request.event == event)
+            .and_then(|request| request.response.map(|response| response.timeout_millis))
+    }
+
+    fn hold_worker_lock(&self) -> RelayQueueFileLock {
+        lock_relay_queue_file(&self.queue_dir.join("worker.lock"), false)
+            .expect("lock the production queue worker")
+            .expect("worker lock acquired")
+    }
+
+    async fn wait_for_queued_response_budget_millis(&self, event: &str) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(budget_millis) = self.queued_response_budget_millis(event) {
+                return budget_millis;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {event} ingress"
+            );
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 
     /// A memento recall on A whose feedback the next attached Stop of A must flush.
@@ -320,25 +369,48 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration, fault_off_a
     let (registry_before, mut rx) = ((buffered(&tq.a), buffered(&tq.b)), tq.state.subscribe());
 
     APPEND_FAULT.with(|fault| fault.set(Some("write")));
-    let t0 = Instant::now();
-    let producers = (!producer_delay.is_zero()).then(|| tq.delay_producers(producer_delay));
-    let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})));
-    tokio::time::sleep(fault_off_at.saturating_sub(t0.elapsed())).await;
+    let worker_lock = tq.hold_worker_lock();
+    let producer_lock = (!producer_delay.is_zero()).then(|| tq.hold_producer_lock());
+    let (cli, started_rx) = tq.waiting_cli_with_start("Stop", tq.payload(&tq.b, json!({})));
+    let cli_started = started_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("waiting CLI thread started");
+    if let Some(producer_lock) = producer_lock {
+        tokio::time::sleep(producer_delay.saturating_sub(cli_started.elapsed())).await;
+        drop(producer_lock);
+    }
+    let queued_budget_millis = tq.wait_for_queued_response_budget_millis("Stop").await;
+    let allowed_budget_millis = REPLY_WAIT
+        .saturating_sub(producer_delay)
+        .as_millis()
+        .saturating_add(100) as u64;
+    assert!(
+        queued_budget_millis <= allowed_budget_millis,
+        "enqueue delay must consume the caller's existing reply budget: \
+         queued {queued_budget_millis}ms, allowed at most {allowed_budget_millis}ms"
+    );
+    drop(worker_lock);
+    tokio::time::sleep(fault_off_at.saturating_sub(cli_started.elapsed())).await;
     // A loaded runner may reach the first delivery attempt only after `fault_off_at`; the fault
     // stays until that attempt is refused so the refusal below is observed, not raced.
     tq.settled(|tq| tq.refused("Stop") > 0).await;
     APPEND_FAULT.with(|fault| fault.set(None));
     let cli = join_within(cli, Duration::from_secs(5)).await;
-    if let Some(producers) = producers {
-        join(producers).await;
-    }
     tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (elapsed, result) = cli.expect("elapsed < 850ms (the CLI was still waiting after 5s)");
+    let (elapsed, result) = cli.expect("the CLI was still waiting after 5s");
+    // The 300ms enqueue-delay run previously overshot the 750ms caller deadline by 235ms
+    // on a loaded runner. Keep a 275ms fixed allowance there: enough for that observed
+    // scheduler delay, but below the ~1050ms caller-side timeout-reset mutant.
+    let scheduler_tolerance = if producer_delay.is_zero() {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_millis(275)
+    };
     assert!(
-        elapsed < Duration::from_millis(850),
-        "elapsed < 850ms (got {elapsed:?})"
+        elapsed < REPLY_WAIT + scheduler_tolerance,
+        "CLI wait exceeded its 750ms caller budget plus {scheduler_tolerance:?} scheduler tolerance: {elapsed:?}"
     );
     assert!(
         result.is_err_and(|e| e.contains("timed out")),
@@ -424,8 +496,10 @@ fn a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepte
         );
         tq.until("SessionStart refused", |tq| tq.refused("SessionStart") > 0)
             .await;
-        let cli_started = Instant::now();
-        let cli = tq.waiting_cli("Stop", tq.payload(&tq.b, json!({})));
+        let (cli, started_rx) = tq.waiting_cli_with_start("Stop", tq.payload(&tq.b, json!({})));
+        let cli_started = started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("waiting CLI thread started");
         let fault_off = Duration::from_millis(1_000).saturating_sub(cli_started.elapsed());
         tokio::time::sleep(fault_off).await;
         APPEND_FAULT.with(|fault| fault.set(None));
@@ -435,7 +509,7 @@ fn a_refused_session_start_keeps_the_later_stop_behind_it_until_both_are_accepte
 
         assert!(
             elapsed < Duration::from_millis(850),
-            "CLI < 850ms (got {elapsed:?})"
+            "CLI wait exceeded its existing 850ms bound: {elapsed:?}"
         );
         assert!(
             result.is_err(),

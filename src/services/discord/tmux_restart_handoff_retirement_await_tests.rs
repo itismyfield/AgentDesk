@@ -6,7 +6,7 @@ use tokio::sync::Notify;
 
 use crate::services::discord;
 use crate::services::provider::ProviderKind;
-use discord::health::legacy_supervision::test_support::{MockDiscord, fingerprint, message_json};
+use discord::health::test_support::{MockDiscord, fingerprint, message_json};
 use discord::inflight::InflightTurnState;
 use discord::turn_finalizer::tests::with_isolated_runtime_root;
 

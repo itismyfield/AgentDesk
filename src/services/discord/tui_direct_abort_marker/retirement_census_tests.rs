@@ -1,7 +1,5 @@
 use super::*;
-use crate::services::discord::health::legacy_supervision::test_support::{
-    MockDiscord, age_file, fingerprint,
-};
+use crate::services::discord::health::test_support::{MockDiscord, age_file, fingerprint};
 
 async fn assert_legacy_marker_consumed(covered: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
