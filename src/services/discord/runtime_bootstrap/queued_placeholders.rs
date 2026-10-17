@@ -119,8 +119,8 @@ pub(in crate::services::discord) trait StalePlaceholderDeleter:
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
-struct SerenityStalePlaceholderDeleter {
-    http: Arc<serenity::Http>,
+pub(in crate::services::discord) struct SerenityStalePlaceholderDeleter {
+    pub(in crate::services::discord) http: Arc<serenity::Http>,
 }
 
 impl StalePlaceholderDeleter for SerenityStalePlaceholderDeleter {
@@ -232,40 +232,67 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
     for (channel, rows) in by_channel {
         let lock = shared.queued_placeholders_persist_lock(channel);
         let _guard = lock.lock_owned().await;
-        let snapshot = mailbox_snapshot(shared, channel).await;
-        let queued = queued_message_ids(&snapshot);
-        for (owner, card) in rows {
-            let current = shared
-                .queued
-                .queued_placeholders
-                .get(&(channel, owner))
-                .map(|v| *v);
-            if !queued.contains(&owner.get()) {
-                uninstalled.push((channel, owner, card));
-            } else if let Some(current) = current {
-                if current != card {
-                    uninstalled.push((channel, owner, card));
-                }
-            } else if shared
-                .queued
-                .queued_placeholders
-                .iter()
-                .any(|entry| entry.key().0 == channel && *entry.value() == card)
-            {
-                uninstalled.push((channel, owner, card));
-            } else {
-                shared.insert_queued_placeholder_locked(channel, owner, card);
-            }
-        }
-        // Also prune stale-only/conflict-only snapshots. Save remains best-effort.
-        queued_placeholders_store::persist_channel_from_map(
-            &shared.queued.queued_placeholders,
-            &shared.provider,
-            &shared.token_hash,
-            channel,
-        );
+        let (_, refused) = install_channel_rows_locked(shared, channel, rows, true).await;
+        uninstalled.extend(refused);
     }
     uninstalled
+}
+
+/// Installs one channel's rows while the caller holds its persist lock, then saves the channel.
+/// A row is refused when its owner is not queued (checked only when `check_queued`), already owns
+/// another card, or its card belongs to another owner. Returns the rows now installed and the
+/// refused ones.
+pub(in crate::services::discord) async fn install_channel_rows_locked(
+    shared: &SharedData,
+    channel: ChannelId,
+    rows: Vec<(MessageId, MessageId)>,
+    check_queued: bool,
+) -> (
+    Vec<(MessageId, MessageId)>,
+    Vec<(ChannelId, MessageId, MessageId)>,
+) {
+    let queued = match check_queued {
+        true => Some(queued_message_ids(&mailbox_snapshot(shared, channel).await)),
+        false => None,
+    };
+    let (mut installed, mut uninstalled) = (Vec::new(), Vec::new());
+    for (owner, card) in rows {
+        let current = shared
+            .queued
+            .queued_placeholders
+            .get(&(channel, owner))
+            .map(|v| *v);
+        if queued
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&owner.get()))
+        {
+            uninstalled.push((channel, owner, card));
+        } else if let Some(current) = current {
+            if current != card {
+                uninstalled.push((channel, owner, card));
+            } else {
+                installed.push((owner, card));
+            }
+        } else if shared
+            .queued
+            .queued_placeholders
+            .iter()
+            .any(|entry| entry.key().0 == channel && *entry.value() == card)
+        {
+            uninstalled.push((channel, owner, card));
+        } else {
+            shared.insert_queued_placeholder_locked(channel, owner, card);
+            installed.push((owner, card));
+        }
+    }
+    // Also prune stale-only/conflict-only snapshots. Save remains best-effort.
+    queued_placeholders_store::persist_channel_from_map(
+        &shared.queued.queued_placeholders,
+        &shared.provider,
+        &shared.token_hash,
+        channel,
+    );
+    (installed, uninstalled)
 }
 
 #[cfg(test)]

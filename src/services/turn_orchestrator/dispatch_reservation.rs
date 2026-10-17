@@ -10,13 +10,27 @@ use super::active_source_dedup::{
 };
 use super::pending_queue_persistence::{
     load_channel_pending_dispatch_marker, load_channel_pending_queue_checked,
-    remove_channel_pending_dispatch_marker,
+    pending_queue_file_path, remove_channel_pending_dispatch_marker,
 };
 use super::{
     ChannelMailboxState, DispatchLease, HydratePendingQueueResult, Intervention, InterventionMode,
     QueuePersistenceContext, RequeueInterventionResult, TakeNextSoftResult,
     persist_queue_or_restore,
 };
+
+pub(super) mod held_settle;
+
+/// Marks an error that came from reading or parsing a channel's pending queue file.
+const QUEUE_UNREAD: &str = "pending queue unread: ";
+
+pub(super) fn queue_unread(error: String) -> String {
+    format!("{QUEUE_UNREAD}{error}")
+}
+
+/// Whether `error` is a pending queue file that could not be read or parsed.
+pub(crate) fn is_queue_unread(error: &str) -> bool {
+    error.starts_with(QUEUE_UNREAD)
+}
 
 pub(crate) const PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER: Duration = Duration::from_secs(10);
 pub(crate) const VALVE_CLEARED_DISPATCH_MARKER_GRACE: Duration = Duration::from_secs(600);
@@ -446,7 +460,9 @@ fn load_trusted_queue(
         return Ok((Vec::new(), None));
     }
     let (provider, token_hash) = (&persistence.provider, &persistence.token_hash);
+    let rooted = pending_queue_file_path(provider, token_hash, channel_id).is_some();
     load_channel_pending_queue_checked(provider, token_hash, channel_id)
+        .map_err(|error| if rooted { queue_unread(error) } else { error })
 }
 
 /// `absorb_disk_queue` for arms that only need its read error to stop before their write.
