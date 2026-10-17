@@ -2516,6 +2516,7 @@ services::cluster::channel_home_drain::tests::two_nodes_never_hold_or_post_at_on
 services::cluster::channel_home_port::b3a2_failure_tests::s3act_b3a2_failure_string_roundtrip_property
 services::cluster::channel_home_port::tests::a_last_send_from_an_ending_actor_reads_as_unknown
 services::cluster::channel_home_port::tests::a_poll_begun_before_a_read_asked_does_not_answer_it
+services::cluster::channel_home_port::tests::an_unreadable_p5_log_is_not_a_channel_never_bound_here
 services::cluster::channel_home_port::tests::hosted::a_halted_writer_reads_as_unknown_until_its_resume_publishes_its_real_projection
 services::cluster::channel_home_port::tests::hosted::a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits
 services::cluster::channel_home_port::tests::no_mailbox_is_unknown_until_restored_and_an_inflight_row_alone_still_runs
@@ -10558,6 +10559,7 @@ services::health_diagnostics::tests::dispatch_outbox_stats_json_contract_keeps_f
 services::health_diagnostics::tests::every_health_path_database_await_is_bracketed
 services::herdr_admission::tests::herdr_admission_failed_stop_file_check_stops_only_that_call
 services::herdr_admission::tests::herdr_admission_stop_file_latches_until_restart_and_any_env_value_but_on_stops
+services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
 services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
