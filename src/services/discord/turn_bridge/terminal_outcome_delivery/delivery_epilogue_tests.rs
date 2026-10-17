@@ -232,6 +232,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             cancelled: false,
             is_prompt_too_long: false,
             transport_error: false,
+            provider_failure: false,
             recovery_retry: false,
             resume_failure_detected: false,
             claude_tui_followup_pre_submit_requeue_candidate: false,

@@ -342,14 +342,12 @@ pub(super) async fn handle_delivery_epilogue(
             && !delivery_response.trim().is_empty()
             && let Some(user_msg_id) = user_msg_id
         {
-            tv_done(
-                &shared_owned,
-                channel_id,
-                user_msg_id,
-                inflight_generation,
-                "done",
-            )
-            .await;
+            // A delivered provider failure notice marks the request failed, not done.
+            if ctx.provider_failure {
+                tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
+            } else {
+                tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
+            }
         }
 
         td_warn(

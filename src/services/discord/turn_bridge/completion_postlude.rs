@@ -79,6 +79,7 @@ pub(super) async fn run_completion_postlude(
     let mut accumulated_memory_input_tokens = state.accumulated_memory_input_tokens;
     let mut accumulated_memory_output_tokens = state.accumulated_memory_output_tokens;
     let transport_error = state.transport_error;
+    let provider_failure = state.provider_failure;
     let api_friction_reports = state.api_friction_reports;
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
@@ -145,7 +146,8 @@ pub(super) async fn run_completion_postlude(
             super::super::single_message_panel::single_message_panel_spinner_frame(spin_idx);
         let (terminal_projection_settled, committed) =
             followup_requeue::TerminalProjectionSettled::after(
-                complete_bridge_terminal_footer_or_status_panel(
+                super::status_panel::provider_failure::complete_terminal_projection(
+                    provider_failure,
                     shared_owned.as_ref(),
                     gateway.as_ref(),
                     channel_id,

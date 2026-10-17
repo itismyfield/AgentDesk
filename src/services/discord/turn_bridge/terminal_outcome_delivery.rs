@@ -49,6 +49,7 @@ mod empty_response_recovery;
 mod foreign_terminal_handoff;
 pub(in crate::services::discord) use foreign_terminal_handoff::resume as resume_foreign_terminal_custody;
 mod prompt_too_long_guidance;
+mod provider_failure_notice;
 mod queue_retry_silence;
 mod recovery_retry;
 pub(super) mod rowless_receipt;
@@ -150,6 +151,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (mut claude_tui_busy_requeue_pending, mut auto_retry) = (false, AutoRetry::default());
     let mut busy_requeue_outcome = None;
     let (mut terminal_delivery_committed, mut terminal_body_visible) = (false, false);
+    let mut provider_failure = false;
     let mut status_panel_terminal_committed = false;
     let mut completion_footer_terminal_text: Option<String> = None;
     // #2161 (Codex round-2 H1): hoisted into the outer scope so the
@@ -374,8 +376,37 @@ pub(super) async fn run_terminal_outcome_delivery(
         let answerless = no_answer(&full_response, response_sent_offset, &delivery_response);
         let body_claim =
             (!answerless).then(|| bridge_body_claim(channel_id, &inflight_state, direct));
+        provider_failure = status_panel::provider_failure::is_provider_failure_turn(
+            transport_error,
+            resume_failure_detected,
+            busy_requeue_outcome.is_some() || claude_tui_followup_pre_submit_requeue_candidate,
+            inflight_state.silent_turn,
+            &full_response,
+        );
         if o_body_cut.is_err() || silent_turn_handled {
             preserve_inflight_for_cleanup_retry |= o_body_cut.is_err();
+        } else if provider_failure && direct && o_body_cut == Ok(true) {
+            // O posts only native answers, so the bridge shows its own failure notice in full,
+            // and the turn counts as delivered only once that replace is confirmed.
+            delivery_response = full_response.clone();
+            let (committed, fallback) = provider_failure_notice::replace_on_o_channel(
+                shared_owned.as_ref(),
+                gateway.as_ref(),
+                &provider,
+                channel_id,
+                current_msg_id,
+                &inflight_state,
+                dispatch_id.as_deref(),
+                adk_session_key.as_deref(),
+                &turn_id,
+                &delivery_response,
+            )
+            .await;
+            (terminal_delivery_committed, terminal_body_visible) = (committed, committed);
+            preserve_inflight_for_cleanup_retry |= !committed;
+            if fallback && !committed {
+                inflight_state.response_sent_offset = full_response.len();
+            }
         } else if delivery_response.trim().is_empty() {
             if empty_sink_commits_fully_consumed_response(&full_response, response_sent_offset) {
                 if o_body_cut == Ok(true) {
@@ -794,6 +825,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 cancelled,
                 is_prompt_too_long,
                 transport_error,
+                provider_failure,
                 recovery_retry,
                 resume_failure_detected,
                 busy_attempt_cost,
@@ -863,6 +895,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         new_session_id,
         new_raw_provider_session_id,
         full_response,
+        provider_failure,
         active_background_child_session_ids,
         pending_long_running_open_after_state_save,
         pending_long_running_retarget_after_state_save,

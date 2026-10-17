@@ -20,6 +20,10 @@ pub(super) fn make_owner_now(
 }
 
 pub(super) fn bridge_single_message_panel_footer_enabled(status_panel_v2_enabled: bool) -> bool {
+    #[cfg(test)]
+    if SEPARATE_PANEL_FOR_TESTS.get() {
+        return false;
+    }
     super::single_message_panel::footer_mode_enabled(
         crate::services::discord::single_message_panel_enabled(),
         status_panel_v2_enabled,
@@ -447,38 +451,14 @@ where
     SniffFuture: std::future::Future<Output = bool>,
 {
     let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-    // #3805 P2: a completion edit is skipped when EITHER a different real turn
-    // now owns this panel (identity aliasing, unchanged) OR — under the
-    // two-message path — a NEWER panel epoch has superseded this stale edit for
-    // the SAME owned panel. On the default-OFF path every generation is 0, so
-    // the generation term is inert and this stays byte-identical.
-    let (aliases_newer_turn, generation_superseded) =
-        match super::inflight::load_inflight_state(provider, channel_id.get()) {
-            Some(on_disk) => {
-                let identity_alias =
-                    super::status_panel::status_panel_completion_edit_aliases_newer_turn(
-                        this_turn_user_msg_id,
-                        status_panel_msg_id,
-                        on_disk.user_msg_id,
-                        on_disk.status_message_id,
-                    );
-                let panel_owned_on_disk = match status_panel_msg_id {
-                    Some(id) if !is_synthetic_headless_message_id(id) => {
-                        on_disk.status_message_id == Some(id.get())
-                    }
-                    _ => false,
-                };
-                let generation_superseded =
-                    super::two_message_panel::two_message_status_edit_generation_is_stale(
-                        this_turn_status_panel_generation,
-                        panel_owned_on_disk,
-                        on_disk.status_panel_generation,
-                    );
-                (identity_alias, generation_superseded)
-            }
-            None => (false, false),
-        };
-    if (aliases_newer_turn || generation_superseded) && !single_message_panel_footer_mode {
+    let superseded = super::status_panel::completion_panel_superseded(
+        provider,
+        channel_id,
+        this_turn_user_msg_id,
+        status_panel_msg_id,
+        this_turn_status_panel_generation,
+    );
+    if superseded && !single_message_panel_footer_mode {
         tracing::debug!(
             "[turn_bridge] skipping status-panel-v2 completion edit of msg {:?} in channel {}: a newer turn now owns the panel (this turn user_msg_id {})",
             status_panel_msg_id,
