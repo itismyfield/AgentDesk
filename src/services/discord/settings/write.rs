@@ -696,7 +696,7 @@ relay_authority_dial_from_a_newer_binary: enforce\n"
     fn invalid_config_is_not_written_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
-        let original = format!("{FIXTURE}escalation:\n  schedule:\n    timezone: Invalid/Zone\n");
+        let original = format!("{FIXTURE}providers:\n  claude:\n    runtime: claude-e\n");
         fs::write(&path, &original).unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
         assert!(

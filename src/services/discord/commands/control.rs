@@ -575,7 +575,7 @@ pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
         .map(MessageId::new)
 }
 
-/// /cancel-queued — Remove one queued message without affecting active work.
+/// /cancel-queued <message_id> — Remove one queued message (`/queue` shows IDs)
 ///
 /// The target is an exact Discord message id. The mailbox actor serializes the
 /// removal against dispatch, so a queued-to-active race is reported as stale

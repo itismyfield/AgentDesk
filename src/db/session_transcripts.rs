@@ -240,12 +240,12 @@ async fn native_clear_row(pool: &PgPool, channel_id: &str) -> Result<Option<Nati
         .await
         .map_err(|error| anyhow!("native channel clear state lookup failed: {error}"))
 }
+#[cfg(test)]
 #[path = "session_transcripts_native_clear_record.rs"]
 mod native_clear_record;
 #[cfg(test)]
 #[path = "session_transcripts_native_clear_seed.rs"]
 mod native_clear_seed;
-pub(crate) use native_clear_record::NativeClearRecord;
 #[cfg(test)]
 pub(crate) use native_clear_record::native_channel_clear_record;
 #[cfg(test)]

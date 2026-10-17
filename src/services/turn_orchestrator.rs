@@ -23,8 +23,6 @@ mod herdr_user_stop;
 mod inbound_order;
 mod incarnation;
 mod injected_inputs;
-#[allow(dead_code)]
-pub(crate) mod input_fence;
 mod intervention;
 mod lease_release;
 mod mailbox_observation;
@@ -1186,10 +1184,6 @@ impl ChannelMailboxRegistry {
         let mut queued_total = 0usize;
         let mut persistence_errors = Vec::new();
         for (channel_id, handle) in handles {
-            // A held input channel's queue is already durable and owned by its transition.
-            if input_fence::held(provider, channel_id.get()) {
-                continue;
-            }
             let persistence = QueuePersistenceContext::new(
                 provider,
                 token_hash,
@@ -1213,13 +1207,6 @@ impl ChannelMailboxRegistry {
 // Once `CloseIfIdle` sets `state.closed`, the exhaustive `registry_purge::gate_closed_arm` passes
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
-    FreezeInput {
-        closing: Arc<crate::services::discord::input_runtime::fence::Closing>,
-        persistence: QueuePersistenceContext,
-        reply: oneshot::Sender<
-            Result<input_fence::FreezeAck, crate::services::discord::input_runtime::fence::Failure>,
-        >,
-    },
     CommitCapturedReadyDelivery {
         commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
         reply: oneshot::Sender<Option<Box<crate::services::discord::CapturedReadyDeliveryCommit>>>,
@@ -1730,20 +1717,7 @@ fn spawn_channel_mailbox(
             ..Default::default()
         };
         while let Some(msg) = rx.recv().await {
-            if crate::services::discord::input_runtime::fence::channel_gate(channel_id.get())
-                .is_some()
-            {
-                let signal = own_recovery_done.clone();
-                state = tokio::task::spawn_blocking(move || {
-                    crate::services::discord::input_runtime::fence::blocking(|| {
-                        input_mailbox_step(state, channel_id, msg, &signal)
-                    })
-                })
-                .await
-                .expect("input mailbox step panicked");
-            } else {
-                state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
-            }
+            state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
         }
     });
     ChannelMailboxHandle {
@@ -1763,18 +1737,6 @@ fn input_mailbox_step(
         return state;
     };
     match msg {
-        ChannelMailboxMsg::FreezeInput {
-            closing,
-            persistence,
-            reply,
-        } => {
-            let _ = reply.send(input_fence::freeze(
-                &mut state,
-                channel_id,
-                &closing,
-                &persistence,
-            ));
-        }
         ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
             let committed = (!state.closed)
                 .then(|| commit.commit(state.cancel_token.as_ref()))

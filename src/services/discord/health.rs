@@ -156,8 +156,8 @@ use runtime_resolve::{resolve_direct_meeting_runtime, resolve_direct_meeting_sha
 pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
 #[allow(unused_imports)]
 pub use snapshot::{
-    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
-    build_health_snapshot, build_public_health_snapshot,
+    DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, build_health_snapshot,
+    build_public_health_snapshot,
 };
 
 /// Per-provider snapshot for the health response.
@@ -548,9 +548,7 @@ impl HealthRegistry {
     /// a `String` per provider; the registry list is a handful of entries.
     ///
     /// The cost is that a provider registered or removed mid-build is not
-    /// observed by that build. That was already the contract for
-    /// `active_request_owner_for_channel`, and a health snapshot is a sample,
-    /// not a transaction.
+    /// observed by that build; a health snapshot is a sample, not a transaction.
     pub(super) async fn provider_entries_snapshot(&self) -> Vec<ProviderEntry> {
         self.providers.lock().await.clone()
     }
