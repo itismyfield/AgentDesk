@@ -350,28 +350,7 @@ impl Closing {
             epoch,
         })
     }
-    pub(crate) fn freeze(
-        &self,
-        ack: crate::services::turn_orchestrator::input_fence::FreezeAck,
-    ) -> Result<(), Failure> {
-        let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.mode != Mode::Closing
-            || state.effects != 0
-            || state.epoch != self.epoch.load(std::sync::atomic::Ordering::Acquire)
-            || ack.channel() != self.channel()
-            || ack.provider() != self.provider()
-            || !ack.matches(self)
-        {
-            return Err(Failure::Busy);
-        }
-        let epoch = next_epoch(&mut state)?;
-        state.mode = Mode::Frozen;
-        state.epoch = epoch;
-        self.epoch
-            .store(state.epoch, std::sync::atomic::Ordering::Release);
-        Ok(())
-    }
-    /// Refuses an invalid or exhausted freeze before queue persistence; `freeze` still rechecks.
+    /// Refuses an invalid or exhausted freeze before queue persistence.
     /// Only a current, drained and protected Closing may latch generation exhaustion.
     pub(crate) fn check_freeze(&self) -> Result<(), Failure> {
         #[cfg(test)]

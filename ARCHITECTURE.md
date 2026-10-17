@@ -1163,35 +1163,26 @@ src/
 │   │   │   │   ├── scope_tests.rs
 │   │   │   │   └── selection_tests.rs
 │   │   │   ├── fence/
-│   │   │   │   ├── g1b_modes_tests.rs
-│   │   │   │   ├── modes.rs
-│   │   │   │   └── modes_tests.rs
+│   │   │   │   └── modes.rs
 │   │   │   ├── intake/
 │   │   │   │   ├── admit.rs
 │   │   │   │   ├── admit_tests.rs
 │   │   │   │   ├── classify.rs
 │   │   │   │   ├── client.rs
-│   │   │   │   ├── client_tests.rs
 │   │   │   │   └── source.rs
 │   │   │   ├── runtime/
 │   │   │   │   ├── dormant_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── notice_tests.rs
-│   │   │   │   ├── ports.rs
-│   │   │   │   └── ports_tests.rs
+│   │   │   │   └── ports.rs
 │   │   │   ├── supervisor/
 │   │   │   │   ├── drive.rs
-│   │   │   │   ├── drive_entry_tests.rs
 │   │   │   │   ├── drive_tests.rs
-│   │   │   │   ├── g1b_entry_tests.rs
-│   │   │   │   ├── g2b_entry_tests.rs
-│   │   │   │   ├── receipt_entry_tests.rs
 │   │   │   │   └── reserve.rs
 │   │   │   ├── activation.rs
 │   │   │   ├── admission.rs
 │   │   │   ├── clear.rs
-│   │   │   ├── clear_tests.rs
 │   │   │   ├── command.rs
 │   │   │   ├── effect.rs
 │   │   │   ├── effect_tests.rs
@@ -1203,18 +1194,15 @@ src/
 │   │   │   ├── g1b_ordering_tests.rs
 │   │   │   ├── intake.rs
 │   │   │   ├── mapping.rs
-│   │   │   ├── mapping_guard_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── ordering.rs
 │   │   │   ├── ordering_tests.rs
 │   │   │   ├── receipt.rs
 │   │   │   ├── receipt_tests.rs
 │   │   │   ├── reconcile.rs
-│   │   │   ├── reserve_tests.rs
 │   │   │   ├── runtime.rs
 │   │   │   ├── source.rs
-│   │   │   ├── supervisor.rs
-│   │   │   └── supervisor_tests.rs
+│   │   │   └── supervisor.rs
 │   │   ├── live_bridge/
 │   │   │   └── guard_tests.rs
 │   │   ├── mailbox_finish/
@@ -1613,7 +1601,7 @@ src/
 │   │   │   ├── session_gc.rs
 │   │   │   ├── shared_data.rs
 │   │   │   ├── shutdown.rs
-│   │   │   ├── shutdown_input_fence_tests.rs
+│   │   │   ├── shutdown_sigterm_tests.rs
 │   │   │   ├── spawns.rs
 │   │   │   ├── spawns_tests.rs
 │   │   │   ├── startup_doctor.rs
@@ -3026,8 +3014,6 @@ src/
 │   │   ├── incarnation.rs
 │   │   ├── injected_inputs.rs
 │   │   ├── injected_inputs_tests.rs
-│   │   ├── input_fence.rs
-│   │   ├── input_fence_tests.rs
 │   │   ├── intervention.rs
 │   │   ├── lease_release.rs
 │   │   ├── mailbox_observation.rs

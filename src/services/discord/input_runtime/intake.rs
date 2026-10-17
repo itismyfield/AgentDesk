@@ -14,8 +14,6 @@ pub(in crate::services::discord) use classify::{
 };
 #[cfg(test)]
 pub(in crate::services::discord) use classify::{Refusal, Retry, classify};
-#[cfg(test)]
-pub(in crate::services::discord) use client::{Access, Applied, apply_from_scan, lookup};
 pub(in crate::services::discord) use source::{Origin, SourceDraft, prepare_source};
 pub(in crate::services::discord) use source::{PreparedSource, StagedAttachment};
 

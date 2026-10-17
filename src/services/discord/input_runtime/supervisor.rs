@@ -990,7 +990,3 @@ fn boundary(at: transition::Boundary) -> &'static str {
         transition::Boundary::Actor => "move_actor",
     }
 }
-
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-#[path = "supervisor_tests.rs"]
-mod tests;

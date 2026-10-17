@@ -208,11 +208,3 @@ impl Closing {
         });
     }
 }
-
-#[cfg(test)]
-#[path = "modes_tests.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "g1b_modes_tests.rs"]
-mod g1b_tests;

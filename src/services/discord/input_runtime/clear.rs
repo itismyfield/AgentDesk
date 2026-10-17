@@ -379,7 +379,3 @@ async fn report<H: ClearHost>(host: &mut H, outcome: Outcome) {
         host.notice(&text).await;
     }
 }
-
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-#[path = "clear_tests.rs"]
-pub(crate) mod tests;

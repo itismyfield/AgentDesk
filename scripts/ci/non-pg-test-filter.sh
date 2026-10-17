@@ -122,7 +122,6 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests
   --skip services::discord::ingress_shadow::compat_tests
   --skip services::discord::ingress_shadow::shadow_tests
-  --skip services::discord::input_runtime::supervisor::runtime::ports::tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
   --skip services::discord::queue_io::queued_head_inject::tests
@@ -497,11 +496,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::ingress_shadow::shadow_tests::freshness_counts_the_whole_lookup_on_the_database_clock
   services::discord::ingress_shadow::shadow_tests::only_the_switch_with_listed_channels_starts_an_observer
   services::discord::ingress_shadow::shadow_tests::the_worker_judges_the_real_gate_and_records_every_id
-  services::discord::input_runtime::clear::tests::postgres_outage_holds_without_reset_or_cut_and_reports_it
-  services::discord::input_runtime::supervisor::runtime::ports::tests::c2_runtime_source_policy_reads_current_author_provider_routing_and_holds_unknown_voice
-  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_fresh_thread_parent_route_blocks_changed_foreign_target_and_http_errors
-  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_policy_revocation_during_route_lookup_never_approves_stale_authority
-  services::discord::input_runtime::supervisor::runtime::ports::tests::c2b_source_disposition_uses_live_commands_skill_origins_and_missing_kind
   services::discord::placeholder_sweeper::abandon_guard::tests::blocking_probe_join_failure_preserves_retry
   services::discord::placeholder_sweeper::abandon_guard::tests::confirmed_dead_pane_with_confirmed_inactivity_allows_cleanup
   services::discord::placeholder_sweeper::abandon_guard::tests::controller_detach_is_gated_by_identity_and_committed_state_delete

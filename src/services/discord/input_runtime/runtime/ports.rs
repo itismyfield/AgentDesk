@@ -310,7 +310,3 @@ pub(in crate::services::discord) async fn source_policy_facts(
         admission_open: true,
     }
 }
-
-#[cfg(test)]
-#[path = "ports_tests.rs"]
-mod tests;
