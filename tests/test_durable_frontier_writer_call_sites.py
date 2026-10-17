@@ -224,6 +224,35 @@ class CfgTestNestingTests(unittest.TestCase):
         self.assertTrue(lines["production_call();"])
         self.assertTrue(lines["next_production_call();"])
 
+    def test_cfg_tokens_inside_doc_rhs_and_macro_inputs_do_not_hide_owner_items(self):
+        lines = self.classify(
+            "#[doc = stringify!(\n"
+            "    #[cfg(test)]\n"
+            ")]\n"
+            "pub fn after_doc_rhs() {}\n"
+            'pub fn carries_literal() { let _ = "#[cfg(test)]"; }\n'
+            "pub fn carries_macro_token() {\n"
+            "    stringify!(\n"
+            "        #[cfg(test)]\n"
+            "    );\n"
+            "}\n"
+            "macro_rules! make_test_item { () => { #[cfg(test)] fn generated() {} } }\n"
+            "pub fn after_macro_definition() {}\n"
+            "#[cfg(test)]\n"
+            "mod tests { fn hidden() {} }\n"
+            "pub fn after_real_cfg_item() {}\n"
+        )
+        self.assertTrue(lines["pub fn after_doc_rhs() {}"])
+        self.assertTrue(lines["pub fn carries_literal() { let _ =               ; }"])
+        self.assertTrue(lines["pub fn carries_macro_token() {"])
+        self.assertTrue(lines["stringify!("])
+        self.assertTrue(
+            lines["macro_rules! make_test_item { () => { #[cfg(test)] fn generated() {} } }"]
+        )
+        self.assertTrue(lines["pub fn after_macro_definition() {}"])
+        self.assertTrue(lines["pub fn after_real_cfg_item() {}"])
+        self.assertFalse(lines["mod tests { fn hidden() {} }"])
+
     def test_literal_and_comment_delimiters_do_not_disarm(self):
         for literal in ['";)"', 'r#";)\n;)"#', "';'", "')'"]:
             with self.subTest(literal=literal):
