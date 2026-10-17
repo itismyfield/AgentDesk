@@ -133,7 +133,7 @@ Create Discord bots in the [Discord Developer Portal](https://discord.com/develo
 
 | Bot key | Role | Required Permissions |
 |---------|------|---------------------|
-| **`announce`** | Authoritative trigger source: posts dispatch envelopes (`DISPATCH:<uuid>`), PM/escalation cards, and agent-to-agent routing via `/api/discord/send`. Other agent bots treat its messages as turn triggers. | Administrator (simplest) or Send Messages + Manage Messages + Manage Channels + Manage Roles |
+| **`announce`** | Authoritative trigger source: posts dispatch envelopes (`DISPATCH:<uuid>`), PM cards, and agent-to-agent routing via `/api/discord/send`. Other agent bots treat its messages as turn triggers. | Administrator (simplest) or Send Messages + Manage Messages + Manage Channels + Manage Roles |
 | **`notify`** | Informational notifications only — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`), system alerts. Its user id is intentionally NOT in `allowed_bot_ids`, so its messages do not trigger agent turns (#1448 follow-up). | Send Messages, Read Message History |
 | **Per-provider** (`claude`, `codex`, …) | User-facing bots humans @-mention in agent channels. When a user posts in a channel mapped to one of these bots, AgentDesk runs a turn for that provider. Add one bot per provider you plan to use. | Send Messages, Read Message History, Manage Messages, Create Public Threads, Send Messages in Threads (the wizard's generated invite includes all of these — required for dispatch threads) |
 
@@ -182,7 +182,7 @@ backlog → ready → requested → in_progress → review → done
 - **Counter-model review** — Claude reviews Codex's work and vice versa, with configurable max rounds
 - **Auto-queue with batch phases** — Automatic card progression with priority scoring, dependency-aware phased execution, and phase gate verification
 - **GitHub sync** — Bidirectional issue synchronization with DoD checklist mirroring
-- **Escalation routing** — PM/user/time-based escalation mode switching
+- **Escalation alerts** — Cards that need a person are sent as a Discord DM to `discord.owner_id`
 - **Audit logging** — Every state transition and dispatch event is recorded
 
 ### Policy Engine
@@ -190,7 +190,7 @@ Business logic lives in JavaScript files under `policies/`, hot-reloaded without
 
 | Policy | Purpose |
 |--------|---------|
-| `00-escalation.js` | Manual-intervention routing, PM cooldown management, escalation flush loop |
+| `00-escalation.js` | Manual-intervention alerts: dedupe, re-alert cooldown, escalation flush loop |
 | `00-pr-tracking.js` | Card→PR linkage cache and PR sync helpers |
 | `kanban-rules.js` | Core lifecycle: dispatch completion → review entry |
 | `review-automation.js` | Counter-model review dispatch, verdict processing, review state sync |
@@ -252,7 +252,7 @@ Policies hook into a 3-tier periodic tick system running on a dedicated OS threa
 ### Multi-Bot Architecture
 Each bot identity has a distinct role so message intent stays unambiguous:
 
-- **`announce`** is the authoritative trigger source. It posts dispatch envelopes (`── implementation dispatch ──\nDISPATCH:<uuid>…`), PM/escalation cards, and agent-to-agent messages routed through `/api/discord/send`. Other agent bots accept its messages as turn triggers when its user id is listed under `auth.allowed_bot_ids`.
+- **`announce`** is the authoritative trigger source. It posts dispatch envelopes (`── implementation dispatch ──\nDISPATCH:<uuid>…`), PM cards, and agent-to-agent messages routed through `/api/discord/send`. Other agent bots accept its messages as turn triggers when its user id is listed under `auth.allowed_bot_ids`.
 - **`notify`** delivers informational notifications — issue announcement cards (`📋 새 이슈 #N`, `✅ #N 완료`) and system alerts. Its user id is intentionally omitted from `allowed_bot_ids`, so its posts never trigger an agent turn (the routing change landed in #1448 follow-up).
 - **Per-provider bots** (`claude`, `codex`, optionally `gemini` / `opencode` / `qwen`) are the user-facing identities humans @-mention in agent channels. A user message in a channel mapped to one of these bots starts a turn for that provider. Each agent can be wired to multiple provider bots — see `agents[].channels` in `agentdesk.yaml` — letting Claude and Codex (or any combination) work side-by-side on the same agent role.
 
@@ -263,7 +263,7 @@ A React-based dashboard served from the same binary:
 - **Agent Manager** — Agent configuration, skills, timeline, sessions, kanban tab
 - **Analytics** — Streaks, achievements, activity heatmaps, audit logs
 - **Meeting Minutes** — Round-table meeting transcripts with issue extraction
-- **Settings** — Runtime configuration, onboarding re-run, policy management, escalation routing
+- **Settings** — Runtime configuration, onboarding re-run, policy management
 
 ### Round-Table Meetings
 Coordinate multi-agent discussions with structured rounds, automatic transcript recording, and post-meeting issue extraction to GitHub.
@@ -449,7 +449,6 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | Company settings | General settings UI / callers that own the merged JSON | `kv_meta['settings']` only. No YAML baseline. | Persists until replaced. `PUT /api/settings` is full replace, so callers must merge hidden keys before saving. Retired legacy keys are stripped server-side. | `GET/PUT /api/settings` |
 | Runtime config | Dashboard live-runtime controls | Hardcoded defaults < `agentdesk.yaml` `runtime:` < `kv_meta['runtime-config']` override JSON | Applies immediately. On reboot, YAML-backed keys are re-applied; saved keys without YAML baselines persist unless `runtime.reset_overrides_on_restart=true`, in which case the whole surface resets to baseline. | `GET/PUT /api/settings/runtime-config` |
 | Policy/config keys | Dashboard policy controls and automation helpers | Hardcoded defaults < YAML sections (`review:`, `runtime:`, `kanban:`) < individual `kv_meta` rows | `PATCH` writes live overrides. YAML-backed keys are re-seeded on restart, while hardcoded-only keys keep their DB override unless the reset flag is on. `server_port` is surfaced as read-only config metadata. | `GET/PATCH /api/settings/config` |
-| Escalation routing | Dashboard escalation panel and Discord `!escalation` command | `escalation:` config baseline plus fallback owner/channel defaults, overridden by `kv_meta['escalation-settings-override']` | Override persists until changed back to defaults. When `runtime.reset_overrides_on_restart=true`, the stored escalation override is cleared on boot. | `GET/PUT /api/settings/escalation` |
 | Onboarding/secrets | Dedicated onboarding wizard | Dedicated onboarding keys and flows | Tokens and setup secrets stay outside the general settings form. | `/api/onboarding/*` |
 | Channel provider rules | `onboarding.provider_suffix_map` / `default_provider` | Registry defaults, then YAML entries: add a key, replace its provider, or set its value to `null` to remove that suffix. An empty section preserves registry behavior. | Applied from the server config snapshot (including successful hot reload); offline `show session-name` reads the same YAML. Explicit provider selections win. | Channel dispatch and onboarding |
 
@@ -589,7 +588,7 @@ agentdesk.agents.get(agentId)
 agentdesk.config.get("review_max_rounds")
 
 // Messaging — third arg picks the bot:
-//   "announce" → trigger-bearing card (DISPATCH, PM, escalation routing)
+//   "announce" → trigger-bearing card (DISPATCH, PM)
 //   "notify"   → informational only (does NOT trigger an agent turn, post-#1448)
 agentdesk.message.queue("channel:123456", "Hello", "announce", "system")
 agentdesk.message.queue("channel:123456", "📋 새 이슈 #42", "notify", "issue-sync")
@@ -690,7 +689,7 @@ AgentDesk exposes 270 REST API endpoints. Key groups:
 | `/api/round-table-meetings` | Start, transcript, issues | Multi-agent meetings |
 | `/api/departments` | CRUD + ordering | Department management |
 | `/api/pipeline` | Stages, config, graphs, card history | Pipeline configuration |
-| `/api/settings` | Company + config/runtime/escalation subroutes | Platform configuration surfaces |
+| `/api/settings` | Company + config/runtime subroutes | Platform configuration surfaces |
 | `/api/github` | Repo sync, dashboard views, issue actions | GitHub integration |
 | `/api/discord` | `/send`, `/send-to-agent`, `/send-dm`, channel messages, bindings, DM reply hooks. Legacy top-level `/api/send*` aliases were removed. | Discord access layer |
 | `/api/cluster` | Nodes, routing diagnostics, resource locks, task-dispatch claims, issue specs, phase evidence | Multinode coordination |

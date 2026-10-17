@@ -1195,6 +1195,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_deliver
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_rejects_superseded_manual_decision_cards_without_discord_send
+server::routes::escalation::manual_decision_gate_tests::emit_escalation_pg_sends_only_to_configured_owner_dm
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_defers_before_the_tmux_probe_unless_the_row_is_legacy_pg
 server::routes::health_api::host_guard_tests::stale_mailbox_repair_names_and_records_an_unmeasured_tail_pg
 server::routes::herdr_legacy_tests::m2t_t8_auth_unlink_cleans_auth_only_and_refuses_a_herdr_claim_pg
