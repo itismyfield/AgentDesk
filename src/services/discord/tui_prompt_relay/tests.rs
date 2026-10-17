@@ -3290,16 +3290,17 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
 
 // #5464 S2 — the completion ACK partition, pinned by BEHAVIOR.
 //
-// `finish_idle_bridge_completion` takes four dispositions and EXACTLY ONE —
-// `Finalized` — is an acknowledgement: only it may return `Ok`, and only it
-// may clear the prompt anchor. Three were already pinned (s3t1/s3t5 for
-// `EntryAborted`/`RecvError`, s3t4 for `Finalized`); `Err(Elapsed)` had no
-// behavioral coverage, so `docs/relay-state-contract.md:41` — "Never use
-// `>= N`, another turn's ACK, timeout-as-success, blind skip, or blind
-// resend" — rested on nothing executable for the timeout case. Driving all
-// four against ONE anchor makes a changed production disposition RED on its
-// per-arm assertion. The expected-table invariant separately guarantees that
-// the table itself names exactly one acknowledgement before any arm runs.
+// `finish_idle_bridge_completion` accepts four completion dispositions, but
+// has a fifth outcome when `Finalized` arrives with OUR uncommitted durable
+// row: delivery validation returns `Err` and the prompt anchor must survive.
+// `s3t1`/`s3t5` pin `EntryAborted`/`RecvError`, `s3t4` pins the absent/foreign
+// `Finalized` acknowledgement, and `completion_timeout_is_not_an_ack...` pins
+// `Err(Elapsed)`. The matching-own-row `Finalized` outcome is exercised in
+// `bridge_completion::tests::tui_direct_bridge_completion_rejects_uncommitted_matching_inflight`;
+// its retained-anchor assertion kills X6 (clearing before delivery validation).
+// These checks keep the contract at `docs/relay-state-contract.md:41` — never
+// use timeout-as-success, blind skip, or blind resend — executable on each
+// completion path.
 #[cfg(unix)]
 #[test]
 fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
