@@ -469,39 +469,6 @@ mod tests {
         );
     }
 
-    /// A worker's own retired-channel residue is its reason, never a process-global alarm,
-    /// though both are named `tui_o:`.
-    #[tokio::test]
-    async fn worker_own_legacy_residue_is_not_taken_for_a_process_alarm() {
-        let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-        let registry = HealthRegistry::new();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        registry
-            .register_worker("codex".to_string(), shared.clone())
-            .await;
-        let channel = ChannelId::new(NEXT_STANDBY_TEST_CHANNEL.fetch_add(1, Ordering::Relaxed));
-        assert!(
-            crate::services::discord::mailbox_try_start_turn(
-                shared.as_ref(),
-                channel,
-                Arc::new(CancelToken::new()),
-                UserId::new(1),
-                MessageId::new(2),
-            )
-            .await
-        );
-        shared.restart.global_active.store(1, Ordering::Relaxed);
-        let _retired = crate::services::discord::health::legacy_supervision::RetiredForTest::new(
-            "codex",
-            channel.get(),
-        );
-
-        let (status, _, own) = snapshot_apart_from_process_alarms(&registry).await;
-
-        assert_eq!(own, [format!("tui_o:legacy_residue:{channel}")]);
-        assert_eq!(status, HealthStatus::Degraded);
-    }
-
     #[tokio::test]
     async fn standby_live_and_finalizing_evidence_remains_visible_for_fail_closed_restart() {
         let registry = HealthRegistry::new();

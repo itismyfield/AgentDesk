@@ -430,7 +430,7 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     );
 }
 
-/// A handback whose four writes all fail ends the message with the owner's refusal notice: it is
+/// A handback whose four writes all fail ends the message with the owner's resend notice: it is
 /// neither queued behind input sent meanwhile nor marked, and the checkpoint stays before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
@@ -447,10 +447,9 @@ async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
     );
     busy.pane.set("go", "");
     request.await.unwrap();
-    let replies =
-        rt.h.messages()
-            .into_iter()
-            .filter(|(to, _)| *to == Some(message));
+    let resend = "입력을 저장하지 못했습니다. 원본을 유지하고 다시 시도해 주세요.";
+    let replies = rt.h.messages().into_iter();
+    let replies = replies.filter(|(to, text)| *to == Some(message) && text == resend);
     let observed = (
         hook::seen(message).outcomes,
         rt.queue().await,

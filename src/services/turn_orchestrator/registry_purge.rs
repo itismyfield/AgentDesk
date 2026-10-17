@@ -290,7 +290,8 @@ impl ChannelMailboxRegistry {
 /// #3029(D): outcome of a `PurgeQueue` request.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub(crate) struct PurgeQueueResult {
-    pub(crate) input_refusal: Option<crate::services::discord::input_runtime::fence::Failure>,
+    /// The protected queued head refused the purge; queue and files are left untouched.
+    pub(crate) queued_head_refused: bool,
     /// Number of intervention-queue entries drained.
     pub(crate) drained: usize,
     /// Number of persisted pending-queue/dispatch files removed across token

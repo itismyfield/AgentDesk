@@ -26,7 +26,6 @@ SWAP_ACTION = "./.github/actions/ensure-swap"
 # Ubuntu jobs that link the lib test binary or run workspace clippy, per workflow.
 EXPECTED_SWAP_JOBS = {
     ".github/workflows/ci-pr.yml": {
-        "check_fast",
         "test_fast",
         "high-risk-recovery",
         "library_sweep",

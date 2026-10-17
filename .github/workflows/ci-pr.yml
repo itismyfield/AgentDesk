@@ -41,12 +41,12 @@ jobs:
       pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       # rust_or_policy for the library sweep, which still runs when an include! call
-      # reads a changed file; check_fast and lint keep the raw filter.
+      # reads a changed file; lint keeps the raw filter.
       rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
-      # (`check_fast`, which compiles the `relay_state_contract_refs` blocks)
+      # (`lint`, whose clippy compiles the `relay_state_contract_refs` blocks)
       # even for doc-only contract changes (#4268).
       relay_contract: ${{ steps.filter.outputs.relay_contract }}
       # True when a Rust-compile change touches a source surface that needs
@@ -681,7 +681,7 @@ jobs:
               - 'routines/**'
             # relay_contract: the doc<->code binding surface for the #4268
             # contract symbol-ref gate. When any of these change, the
-            # compile-existence half (check_fast, which compiles the
+            # compile-existence half (lint, whose clippy compiles the
             # `relay_state_contract_refs` blocks so a renamed/removed contract
             # symbol fails to compile) MUST run even for doc-only changes.
             # Mirrors REFERENCE_SOURCE_MODULES in scripts/check_contract_symbol_refs.py;
@@ -933,75 +933,6 @@ jobs:
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
 
-  # Ubuntu Rust lane: canonical fast compile check. Gated on the broad rust_or_policy
-  # filter so a `policies/*.js`, `scripts/*.sh`, `.github/workflows/**`, or
-  # Node package change still gets a Rust check on Linux.
-  #
-  # The `relay_contract == 'true'` OR-clause forces this lane for a #4268
-  # contract anchor, doc, or sync-gate change, including doc-only changes. This
-  # job compiles the `relay_state_contract_refs` blocks, which is the only proof
-  # that each contract symbol still exists.
-  check_fast:
-    name: Fast compile check (${{ matrix.os }})
-    needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-          components: clippy, rustfmt
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just@1.51.0
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
-      # compiled rustc output, and caching multi-GB `target/` directories
-      # starves the 10GB GHA cache quota, evicting sccache shards (observed
-      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
-      # docs/ci/sccache-setup.md §4.2.
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the workspace check
-        uses: ./.github/actions/ensure-swap
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Policy JS unit tests
-        run: npm run test:policies
-
-      # `lint` owns fmt/clippy in its independent required mirror. Keep this
-      # required Ubuntu lane to compilation and policy tests; main and nightly
-      # retain the longer non-PG test coverage outside the PR critical path.
-      - name: cargo check
-        run: just cargo-check
-
-      - name: sccache stats
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
-
   # Cross-OS Rust compile lane. The required-context mirror below makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
   # skip it. Nightly retains the broader macOS/Windows test matrix.
@@ -1178,11 +1109,12 @@ jobs:
       - shell: pwsh
         run: git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663
 
+  # Publishes the required Fast check context from `lint`, whose clippy compiles the workspace.
   fast_check_required_context:
     name: Fast check (ubuntu-latest)
     needs:
       - changes
-      - check_fast
+      - lint
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -1194,8 +1126,8 @@ jobs:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: rust_or_policy
           FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
-          UPSTREAM_JOB_NAME: check_fast
-          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+          UPSTREAM_JOB_NAME: lint
+          UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
 
       # Contract changes use their own filter identity so a doc-only contract
@@ -1207,8 +1139,8 @@ jobs:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: relay_contract
           FILTER_OUTPUT: ${{ needs.changes.outputs.relay_contract }}
-          UPSTREAM_JOB_NAME: check_fast
-          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+          UPSTREAM_JOB_NAME: lint
+          UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
 
   fast_targeted_tests_required_context:
@@ -1390,7 +1322,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale: `target/` excluded to protect the
+      # See `lint` for rationale: `target/` excluded to protect the
       # sccache GHA cache quota.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -1510,7 +1442,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale.
+      # See `lint` for rationale.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -1693,7 +1625,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale: `target/` excluded to protect the
+      # See `lint` for rationale: `target/` excluded to protect the
       # sccache GHA cache quota.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -1749,8 +1681,8 @@ jobs:
   lint:
     name: Lint runner
     needs: changes
-    # Match check_fast's composite gate so relay-contract-only changes retain
-    # fmt/clippy coverage after duplicate linting was removed from that job.
+    # Relay-contract changes, doc-only included, run this job too: its clippy
+    # compile is the existence proof for the `relay_state_contract_refs` blocks.
     if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -1772,7 +1704,11 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale.
+      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
+      # compiled rustc output, and caching multi-GB `target/` directories
+      # starves the 10GB GHA cache quota, evicting sccache shards (observed
+      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
+      # docs/ci/sccache-setup.md §4.2.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -1783,6 +1719,14 @@ jobs:
 
       - name: just fmt-check
         run: just fmt-check
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Policy JS unit tests
+        run: npm run test:policies
 
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy

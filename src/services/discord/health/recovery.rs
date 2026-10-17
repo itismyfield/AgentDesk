@@ -1676,14 +1676,6 @@ pub(crate) async fn run_stall_watchdog_pass(
         {
             continue;
         }
-        // Retired channels skip the writing row loader, liveness publish and reattach.
-        if super::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id.get(),
-            "stall_watchdog",
-        ) {
-            continue;
-        }
         let now_mono_secs = super::liveness_authority::monotonic_now_secs();
         let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
         let capture_assessment = super::liveness_authority::observe_and_publish_from_tick(
@@ -1711,14 +1703,6 @@ pub(crate) async fn run_stall_watchdog_pass(
             if reattach_lane.counts_as_cleaned() {
                 cleaned += 1;
             }
-            continue;
-        }
-        // The reattach await can outlive Legacy supervision for this channel.
-        if super::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id.get(),
-            "stall_watchdog_after_reattach",
-        ) {
             continue;
         }
         // #3668 F2: if JSONL still holds an unrelayed final answer after

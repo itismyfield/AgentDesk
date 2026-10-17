@@ -343,14 +343,11 @@ class Census(unittest.TestCase):
         self.assertLess(writes[0], compact.index("asyncfnredirect_dispatch("))
         inserts = [m.start() for m in re.finditer(r"parent=Some\(channel_id\);", compact)]
         self.assertEqual(len(inserts), 2)
-        admission = "redirected_permit=crate::services::discord::input_runtime::fence::effect::admit("
+        # A reused thread passes its host judgment before it is bootstrapped.
+        start = compact.index("host_refusal::admitted_uploads(http,shared,provider,target,input)")
         for index, target in enumerate(["tid", "thread.id"]):
-            start = compact.index(admission + "provider," + target + ".get(),)")
-            bootstrap = compact.index("bootstrap_admitted(redirected_permit.clone(),shared," + target + ",", start)
-            self.assertLess(start, bootstrap)
+            bootstrap = compact.index("bootstrap_thread_session(shared," + target + ",", start)
             self.assertLess(bootstrap, inserts[index])
-            self.assertNotIn("redirected_permit=None", compact[start:inserts[index]])
-            self.assertNotIn("drop(redirected_permit", compact[start:inserts[index]])
         root = re.sub(r"\s+", "", self.sources[D + "router/message_handler/intake_turn.rs"])
         claim = root.index(".complete_mailbox_claim(")
         self.assertEqual(root.count("route.publish(shared,&provider);"), 1)

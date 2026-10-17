@@ -292,7 +292,7 @@ fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
             let marker = path(channel).with_extension("dispatch");
             let marker_before = std::fs::read(&marker).unwrap();
             let purged = handle.purge_queue(ctx(), true).await;
-            assert!(purged.input_refusal.is_some(), "{phase}");
+            assert!(purged.queued_head_refused, "{phase}");
             assert_eq!((purged.drained, purged.disk_files_removed), (0, 0));
             assert!(!purged.cleared_active_anchor);
             assert_eq!(queue(&handle).await, before_queue, "{phase}");
