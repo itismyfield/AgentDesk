@@ -18,6 +18,8 @@ use crate::services::tui_input::submission::SubmitContext;
 use crate::services::tui_o::shadow::ShadowProvider;
 
 pub(crate) mod claude_guarded;
+#[cfg(test)]
+mod own_draft_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneVerdict {

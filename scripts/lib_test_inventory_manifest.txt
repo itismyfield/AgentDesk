@@ -11859,6 +11859,8 @@ services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_off_ke
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_real_tmux_plan_transport_and_capture_draft_without_spy
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_utf16_800_801_includes_emoji_and_hangul
 services::tui_input::actor::gate::claude_guarded::acceptance_tests::cg_b1_whitespace_is_exact_and_unknown_wraps_hold
+services::tui_input::actor::gate::own_draft_tests::a_flat_claude_paste_is_owned_only_as_drawn
+services::tui_input::actor::gate::own_draft_tests::folded_own_draft_requires_exact_k_empty_attestation_and_no_other_text
 services::tui_input::actor::pane::submit_tests::an_ungated_submit_loads_pastes_and_enters_once
 services::tui_input::bounded_tmux_tests::bounded_tmux_caller_cancellation_preserves_deadline_cleanup
 services::tui_input::bounded_tmux_tests::bounded_tmux_effect_uncertainty_is_independent_of_cleanup
