@@ -31,7 +31,8 @@ pub(crate) enum EvidenceGap {
     ServerChanged,
     /// No foreground child of the root shell when the window closed.
     NoneYet,
-    /// Several foreground children of the root shell; read once, never waited out.
+    /// Several foreground children of the root shell when the window closed; a login-startup
+    /// pipeline runs several for a moment, so it is read again until then.
     Ambiguous(Vec<u32>),
     /// A process's parent or start could not be read.
     ProcessUnreadable(u32),
@@ -167,12 +168,13 @@ pub(crate) fn probe(
     }
 }
 
-/// Gaps a root-shell child that is not yet the provider leaves: login-startup tools and the launch
-/// command before its exec, whose environment is hidden (macOS platform binary) or context-free.
+/// Gaps root-shell children that are not yet the provider leave: login-startup tools (a pipeline
+/// runs several) and the launch command before its exec, with a hidden or context-free environment.
 fn before_provider(gap: &EvidenceGap) -> bool {
     matches!(
         gap,
         EvidenceGap::NoneYet
+            | EvidenceGap::Ambiguous(_)
             | EvidenceGap::ProcessUnreadable(_)
             | EvidenceGap::Replaced
             | EvidenceGap::EnvUnreadable

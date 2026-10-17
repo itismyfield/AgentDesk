@@ -311,7 +311,7 @@ fn probe_waits_for_the_provider_only_within_its_window() {
     assert_eq!(result.map(|e| e.provider_process.pid), Ok(PROVIDER));
 }
 
-// Two children of the shell are never waited out.
+// With no window, as the input gate reads, two children of the shell end the first reading.
 #[test]
 fn probe_ends_at_the_first_ambiguous_reading() {
     let pane = Pane::new(vec![listed(&[PROVIDER, 40]), listed(&[PROVIDER])]);
@@ -319,11 +319,36 @@ fn probe_ends_at_the_first_ambiguous_reading() {
     os.parents.insert(40, SHELL);
     let started = Instant::now();
     assert_eq!(
-        run(&pane, &os, PROVIDER_WINDOW),
+        run(&pane, &os, Duration::ZERO),
         Err(EvidenceGap::Ambiguous(vec![PROVIDER, 40]))
     );
     assert_eq!(pane.reads.get(), 1);
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+// A login-startup pipeline runs two children of the shell at once; the provider after it is
+// taken, and a pair that outlasts the window ends it as the same ambiguity.
+#[test]
+fn probe_waits_out_a_startup_pipeline_within_its_window() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let pipeline = [STARTUP, STARTUP + 1];
+    let mut os = FakeOs::launched(env_naming(&context(NONCE)));
+    for pid in pipeline {
+        os.parents.insert(pid, SHELL);
+    }
+    let pane = Pane::new(vec![listed(&pipeline), listed(&[PROVIDER])]);
+    let result = run(&pane, &os, PROVIDER_WINDOW);
+    assert_eq!(result.map(|e| e.provider_process.pid), Ok(PROVIDER));
+
+    let window = Duration::from_millis(700);
+    let pane = Pane::new(vec![listed(&pipeline)]);
+    let started = Instant::now();
+    assert_eq!(
+        run(&pane, &os, window),
+        Err(EvidenceGap::Ambiguous(pipeline.to_vec()))
+    );
+    assert!(started.elapsed() < window + PROVIDER_POLL * 2);
+    assert!(pane.reads.get() > 1, "read {} times", pane.reads.get());
 }
 
 #[test]
