@@ -130,6 +130,33 @@ async fn only_a_channel_never_stored_nor_bound_here_reads_as_nothing_owed() {
     p5::set_test_root(saved.as_deref());
 }
 
+// A P5 log that cannot be read is no empty one: a channel without a store whose log is corrupt
+// stays unknown, never read as one O never held here.
+#[tokio::test]
+async fn an_unreadable_p5_log_is_not_a_channel_never_bound_here() {
+    use crate::services::tui_o::writer::binding::BindingLog;
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    const CORRUPT: u64 = 9_100_000_000_000_015;
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join(p5::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(log.join(format!("{CORRUPT}.log")), b"not json\n").unwrap();
+    let saved = p5::test_root();
+    p5::set_test_root(Some(root.path()));
+    assert!(
+        BindingLog.binding_events_since(CORRUPT, 0).is_err(),
+        "the log reads as an error, not as no event"
+    );
+    let port = ChannelHomePort::new(CORRUPT, Arc::default(), restored());
+    let port = port.stored_under(Some(root.path().to_path_buf()));
+    assert_eq!(
+        (port.owed().await, port.posts_in_flight().await),
+        (None, None),
+        "a corrupt log is unknown"
+    );
+    p5::set_test_root(saved.as_deref());
+}
+
 fn hosted_owing(ready: &Readiness, channel: u64) -> Owing {
     let owing = Owing::default();
     let published = owing.published.subscribe();

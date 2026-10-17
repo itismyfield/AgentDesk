@@ -73,6 +73,10 @@ impl ChannelHomePort {
                 return true;
             }
             let events = BindingLog.binding_events_since(self.channel, 0);
+            #[cfg(test)]
+            if channel_home_boot::writer_mutant("p5_err_as_empty") {
+                return events.unwrap_or_default().is_empty();
+            }
             events.is_ok_and(|events| events.is_empty())
         };
         (skip_store || store::no_channel_store(root, self.channel)) && unbound()

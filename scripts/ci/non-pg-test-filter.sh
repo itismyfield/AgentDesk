@@ -72,6 +72,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::automation_candidate_materializer::iteration_result_tests
   --skip services::cluster::attachment_transfer::storage_tests
   --skip services::cluster::channel_home::tests
+  --skip services::cluster::channel_home_boot::home_writers::tests
   --skip services::cluster::channel_home_boot::tests
   --skip services::cluster::channel_home_drain::tests
   --skip services::cluster::execution_capacity::tests
@@ -393,6 +394,9 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+  services::cluster::channel_home_boot::home_writers::tests::a_home_closed_after_its_facts_were_read_owned_admits_no_first_init
+  services::cluster::channel_home_boot::home_writers::tests::a_stop_keeps_or_settles_the_late_reservation_by_its_reason
+  services::cluster::channel_home_boot::home_writers::tests::the_precheck_refuses_what_the_first_init_would
   services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
   services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
   services::cluster::channel_home_boot::tests::writer_return::unreadable_boot_rows_start_no_first_writer
@@ -777,6 +781,7 @@ NON_PG_FILTER_REPLAY=(
   services::dispatches::wait_queue::tests::wake_history_keeps_only_recent_entries
   services::dispatches::wait_queue::tests::wake_query_preserves_fifo_ordering
   services::health_diagnostics::tests::diagnostics_without_pg_pool_stay_safe
+  services::herdr_launch::tests::a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn
   services::herdr_launch::tests::herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_no_store
   services::herdr_launch::tests::herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_any_io
   services::maintenance::jobs::worktree_orphan_sweep::managed_root_recursion_tests::no_pg_is_noop_even_with_managed_orphans

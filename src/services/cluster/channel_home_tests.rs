@@ -805,3 +805,18 @@ async fn command_registration_never_discards_a_preexisting_local_execution() {
     assert!(Arc::ptr_eq(&registered(old.channel_id()).unwrap(), &new));
     unregister(old.channel_id());
 }
+
+/// This thread's home registry for another thread, until the returned guard drops there: both
+/// then register, read and withdraw the same gates.
+pub(crate) fn shared_homes() -> impl FnOnce() -> SharedHomes + Send + 'static {
+    let homes = HOMES.with(|homes| Arc::clone(&homes.borrow()));
+    move || SharedHomes(HOMES.with(|slot| slot.replace(homes)))
+}
+
+pub(crate) struct SharedHomes(Arc<Registry>);
+
+impl Drop for SharedHomes {
+    fn drop(&mut self) {
+        HOMES.with(|slot| slot.replace(Arc::clone(&self.0)));
+    }
+}

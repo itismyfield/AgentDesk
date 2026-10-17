@@ -281,7 +281,10 @@ fn create(
 }
 
 /// Every source the log names must still be empty, and no bind may be left pending.
-fn empty_sources<B: BindingEvents>(bindings: &B, channel: u64) -> Result<Vec<InitSource>, String> {
+pub(super) fn empty_sources<B: BindingEvents>(
+    bindings: &B,
+    channel: u64,
+) -> Result<Vec<InitSource>, String> {
     let events = bindings.binding_events_since(channel, 0);
     let events = events.map_err(|error| format!("binding log: {error}"))?;
     let events = super::renumbered::first_named(events);
@@ -334,6 +337,8 @@ pub(crate) mod test_hook {
         DeferredTick,
         BeforeFence,
         AfterFence,
+        /// A first init's admission is asked for next, after the facts were read Owned.
+        BeforeAdmit,
         /// Before the serial and adoption locks are taken.
         BeforeLock,
         BeforeWrite,
@@ -344,6 +349,22 @@ pub(crate) mod test_hook {
 
     type Hook = Box<dyn FnOnce() -> Result<(), String> + Send>;
     static HOOKS: Mutex<Vec<(u64, Step, Hook)>> = Mutex::new(Vec::new());
+    static REFUSED: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+    /// A first init's admission found the gate not Owned and wrote nothing.
+    pub(crate) fn note_refused(channel: u64) {
+        REFUSED.lock().unwrap().push(channel);
+    }
+
+    /// How many first-init admissions of `channel` were refused so far.
+    pub(crate) fn refused(channel: u64) -> usize {
+        REFUSED
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| **c == channel)
+            .count()
+    }
 
     pub(crate) fn set(
         channel: u64,

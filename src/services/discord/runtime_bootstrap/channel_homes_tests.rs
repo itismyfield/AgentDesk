@@ -204,8 +204,8 @@ async fn a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_p
     db.drop().await;
 }
 
-/// A REST worker booted as target of a released row adopts it through the runtime's own port only
-/// once its turns are restored: before, two watch rounds leave the row and the gate untouched.
+/// A REST worker targeted by a released row adopts it through its own port only once restored
+/// and with a writer under its home; until then the home says what it waits on.
 #[tokio::test]
 async fn a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg() {
     const RELEASED: u64 = 9_300_000_000_000_014;
@@ -251,29 +251,32 @@ async fn a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored
     assert_eq!(started[0].ownership(), HomeOwnership::Lost);
 
     mark_reconcile_complete(&shared);
-    let mut owned = None;
-    for _ in 0..500 {
-        if let HomeOwnership::Owned { home_epoch, .. } = started[0].ownership() {
-            owned = Some(home_epoch);
+    let judged = channel_home_boot::rounds(RELEASED) + 2;
+    for _ in 0..1_000 {
+        if channel_home_boot::rounds(RELEASED) >= judged {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert_eq!(
-        owned,
-        Some(released.epoch),
-        "the adopted row's lease opens the gate"
-    );
-    let adopted = read().await.unwrap().expect("the home row");
-    let held = (adopted.state, adopted.holder.as_deref(), adopted.target);
-    assert_eq!(
-        held,
-        (o_channel_homes::HomeState::Worker, Some("mini"), None)
+    assert!(
+        channel_home_boot::rounds(RELEASED) >= judged,
+        "judged twice restored"
     );
     assert_eq!(
-        channel_home_boot::running(&channel),
-        (true, Some(released.epoch))
+        read().await.unwrap(),
+        Some(released.clone()),
+        "adopted with no writer to run its first init"
     );
+    assert_eq!(started[0].ownership(), HomeOwnership::Lost);
+    let health = channel_home::health().expect("its home is registered");
+    let waits = health["home_draining"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| {
+            entry["channel"] == channel.as_str() && entry["blocker"] == "adopt_waits_writer"
+        });
+    assert!(waits, "{health}");
     channel_home_boot::stop(&channel).await;
     channel_home::unregister(&channel);
     pool.close().await;
@@ -716,6 +719,85 @@ async fn th6_standby_reclaim_restart_restores_turns_pg() {
         channel_home_boot::stop(&channel).await;
         channel_home::unregister(&channel);
     }
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A REST worker whose boot started no writer arms its own start, so a channel delegated later
+/// gets a writer under its home; the precheck keeps the row released while P5 binds no source.
+#[tokio::test]
+async fn a_channel_delegated_after_a_rest_worker_boot_gets_a_writer_under_its_home_pg() {
+    use crate::services::cluster::channel_home_boot::events::{self, Event};
+    const LATER: u64 = 9_300_000_000_000_016;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = LATER.to_string();
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    shared.restart.reconcile_done.store(true, Ordering::SeqCst);
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(LATER, "mini")]);
+    let _selected = test_override::force_candidates(&[(LATER, ClaudeTui)]);
+    let (_log, _rest) = super::super::shared_state::test_rest::recording_mock(1, LATER).await;
+    events::clear(LATER);
+    let settings_on = settings(Some(true));
+    let started = start_channel_homes(
+        &shared,
+        &ProviderKind::Claude,
+        HomeRole::RestWorker,
+        &settings_on,
+    );
+    assert!(started.await.is_empty(), "no row names this node at boot");
+    let writers = o_writer_host::spawn_delegated(&shared, &ProviderKind::Claude, None);
+    assert!(writers.is_empty(), "nothing is delegated here yet");
+
+    let applied = |write: Result<HomeWrite<o_channel_homes::ChannelHome>, _>| match write {
+        Ok(HomeWrite::Applied(row)) => row,
+        other => panic!("{other:?}"),
+    };
+    let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
+    applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
+    let mut home = None;
+    for _ in 0..1_000 {
+        home = channel_home::registered(&channel);
+        let gate = home.as_ref().map(|home| Arc::as_ptr(&home.gate()) as usize);
+        let under = |event: &Event| matches!(event, Event::Started(_, at) if Some(*at) == gate);
+        if events::of(LATER).iter().any(under) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let home = home.expect("the delegation mounted a home");
+    let gate = Arc::as_ptr(&home.gate()) as usize;
+    let under = |event: &Event| matches!(event, Event::Started(_, at) if *at == gate);
+    assert!(
+        events::of(LATER).iter().any(under),
+        "{:?}",
+        events::of(LATER)
+    );
+    let readiness = crate::services::tui_o::writer::host::process_readiness();
+    assert!(readiness.hosted_by(LATER).is_some());
+    let refused = Event::Adoptable(Err("adopt_refused:no_bound_source"));
+    for _ in 0..1_000 {
+        if events::of(LATER).contains(&refused) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        events::of(LATER).contains(&refused),
+        "{:?}",
+        events::of(LATER)
+    );
+    let row = o_channel_homes::read_home(&pool, &channel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, o_channel_homes::HomeState::Released);
+    use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
+    let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
+    homes.stop_and_join(StopReason::Sigterm).await;
+    channel_home::unregister(&channel);
+    events::clear(LATER);
     pool.close().await;
     db.drop().await;
 }

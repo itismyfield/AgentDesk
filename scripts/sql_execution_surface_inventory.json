@@ -27995,6 +27995,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/cluster/channel_home_boot/home_writers_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:f16f2695c7d67d70d903d82d0cdf8743c20f36f41a87ef63494ea7eae09d5a61"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/cluster/channel_home_boot_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
