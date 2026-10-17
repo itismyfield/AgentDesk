@@ -941,7 +941,10 @@ health_json_is_ready() {
   [ -n "$health_json" ] || return 1
   _health_json_field_is_true "$health_json" "db" || return 1
 
-  if [ "$require_dashboard" = "1" ]; then
+  # A profile that never runs the dashboard (runner) reports dashboard_required
+  # false; only that explicit false waives it, anything else still requires it.
+  if [ "$require_dashboard" = "1" ] \
+    && ! _health_json_field_is_false "$health_json" "dashboard_required"; then
     _health_json_field_is_true "$health_json" "dashboard" || return 1
   fi
 

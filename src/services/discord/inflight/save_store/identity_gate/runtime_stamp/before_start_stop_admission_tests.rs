@@ -524,3 +524,14 @@ fn off_scheduler_caller_cancel_lets_the_worker_finish_and_restore() {
         assert_eq!(after, (thread, true), "and restored its own switch");
     });
 }
+
+/// A lock-held transition runs on a blocking worker, never the calling scheduler thread, and a
+/// worker panic reads as `None`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_transition_runs_on_a_blocking_worker_and_its_panic_is_none() {
+    let caller = std::thread::current().id();
+    let worker = off_scheduler(|| Some(std::thread::current().id())).await;
+    assert!(worker.is_some_and(|worker| worker != caller), "{worker:?}");
+    let panicked: Option<()> = off_scheduler(|| panic!("transition worker panic")).await;
+    assert_eq!(panicked, None);
+}
