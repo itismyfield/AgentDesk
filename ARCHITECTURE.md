@@ -1906,6 +1906,8 @@ src/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   └── contracts.rs
+│   │   │   ├── entry_abort_cold_error_tests/
+│   │   │   │   └── provider_failure_tests.rs
 │   │   │   ├── finalize_epilogue/
 │   │   │   │   └── r1_transition_busy_tests.rs
 │   │   │   ├── followup_requeue/
@@ -1926,6 +1928,7 @@ src/
 │   │   │   │   └── watcher_handoff.rs
 │   │   │   ├── status_panel/
 │   │   │   │   ├── fallback.rs
+│   │   │   │   ├── provider_failure.rs
 │   │   │   │   ├── purge.rs
 │   │   │   │   └── singleton.rs
 │   │   │   ├── stream_loop/
@@ -1965,6 +1968,7 @@ src/
 │   │   │   │   │   │   ├── o_after_done_chain_tests.rs
 │   │   │   │   │   │   ├── pg_tests.rs
 │   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   ├── provider_failure_tests.rs
 │   │   │   │   │   ├── recovery_retry_guard_tests.rs
 │   │   │   │   │   ├── rest_delivery_tests.rs
 │   │   │   │   │   └── rowless_receipt_tests.rs
