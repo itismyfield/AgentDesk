@@ -132,6 +132,8 @@ cli::doctor::mailbox::tests::frontier_provenance_changes_no_doctor_verdict
 cli::doctor::mailbox::tests::live_tmux_process_or_dispatch_still_suppresses_the_busy_mailbox_finding
 cli::doctor::mailbox::tests::no_unread_progress_field_changes_a_doctor_verdict
 cli::doctor::mailbox::tests::queue_depth_alone_no_longer_suppresses_the_busy_mailbox_finding
+cli::doctor::orchestrator::api_exposure::tests::intentional_tokenless_non_loopback_bind_is_informational
+cli::doctor::orchestrator::api_exposure::tests::rejected_tokenless_non_loopback_bind_is_informational_too
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::empty_directory_passes_with_zero_counts
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::fully_registered_scripts_pass
 cli::doctor::orchestrator::config_dir_checks::routine_script_registration_tests::unregistered_scripts_are_reported_as_one_warn_item
@@ -1313,6 +1315,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dis
 server::routes::docs::inventory::endpoints::part_06::tests::queue_generate_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::add_run_entry_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::docs_group_example_advertises_canonical_paths
+server::routes::docs::inventory::endpoints::public_surfaces::tests::root_mounted_control_surfaces_are_listed_with_their_auth_boundary
 server::routes::docs::tests::advertised_group_category_paths_resolve_without_behavior_regressions
 server::routes::docs::tests::api_friction_marker_guide_is_indexed_and_describes_collection
 server::routes::docs::tests::auto_queue_docs_surface_slot_recovery_identifiers
