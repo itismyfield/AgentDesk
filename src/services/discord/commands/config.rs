@@ -957,7 +957,7 @@ pub(in crate::services::discord) fn build_allowall_policy_note() -> String {
          access. High-risk commands stay owner-only on BOTH the `!` text and \
          `/` slash surfaces, regardless:\n\
          • shell/tool-grant (`!shell`/`!allowed`, `/shell`/`/allowed`) — {shell_state}\n\
-         • credential/system (`!allowall`/`!adduser`/`!removeuser`/`!escalation`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
+         • credential/system (`!allowall`/`!adduser`/`!removeuser`, `/allowall`/`/adduser`/`/removeuser`) — owner-only"
     )
 }
 #[cfg(test)]

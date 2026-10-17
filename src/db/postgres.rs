@@ -2574,14 +2574,6 @@ mod tests {
             Some("pg-agent-cdx".to_string())
         );
 
-        let escalation_override_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM kv_meta WHERE key = $1")
-                .bind("escalation-settings-override")
-                .fetch_one(&pool)
-                .await
-                .expect("count escalation override");
-        assert_eq!(escalation_override_count, 0);
-
         close_test_pool(pool, "db::postgres migration test pool")
             .await
             .expect("close postgres pool");
@@ -2633,6 +2625,8 @@ mod tests {
         snapshot
     }
 
+    const RETIRED_ESCALATION_KEY: &str = concat!("escalation-settings", "-override");
+
     #[tokio::test]
     async fn postgres_worker_reseed_preserves_all_leader_configuration_and_overrides() {
         let test_db = TestDatabase::create().await;
@@ -2646,7 +2640,7 @@ mod tests {
         startup_reseed(&pool, &leader).await.expect("seed leader");
         for (key, value) in [
             ("runtime-config", r#"{"maxRetries":8}"#),
-            ("escalation-settings-override", r#"{"enabled":false}"#),
+            (RETIRED_ESCALATION_KEY, r#"{"mode":"pm"}"#),
             ("workspace_root", "/leader/workspaces"),
         ] {
             super::shared_config::upsert_kv_meta(&pool, key, value)
@@ -2673,6 +2667,15 @@ mod tests {
             );
         }
 
+        // A plain leader boot deletes the retired escalation routing row.
+        startup_reseed(&pool, &leader).await.expect("leader reseed");
+        let retired: i64 = sqlx::query_scalar("SELECT count(*) FROM kv_meta WHERE key = $1")
+            .bind(RETIRED_ESCALATION_KEY)
+            .fetch_one(&pool)
+            .await
+            .expect("retired row count");
+        assert_eq!(retired, 0);
+
         // The same reset flag remains effective for the configured owner.
         leader.runtime.reset_overrides_on_restart = true;
         leader.runtime.max_retries = Some(5);
@@ -2684,13 +2687,6 @@ mod tests {
                 .expect("runtime config");
         let runtime: serde_json::Value = serde_json::from_str(&raw).expect("runtime JSON");
         assert_eq!(runtime["maxRetries"], 5);
-        let overrides: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM kv_meta WHERE key = 'escalation-settings-override'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("override count");
-        assert_eq!(overrides, 0);
         close_test_pool(pool, "shared config ownership")
             .await
             .expect("close");

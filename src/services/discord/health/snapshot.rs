@@ -759,23 +759,6 @@ async fn watcher_state_snapshot_for_shared(
     })
 }
 
-pub async fn active_request_owner_for_channel(
-    registry: &HealthRegistry,
-    channel_id: u64,
-) -> Option<u64> {
-    let channel_id = ChannelId::new(channel_id);
-    for entry in registry.provider_entries_snapshot().await {
-        let snapshots = entry.shared.mailboxes.snapshot_all().await;
-        if let Some(owner) = snapshots
-            .get(&channel_id)
-            .and_then(|snapshot| snapshot.active_request_owner)
-        {
-            return Some(owner.get());
-        }
-    }
-    None
-}
-
 /// Build the detailed health check snapshot for authenticated/local diagnostics.
 pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
     build_health_snapshot_with_options(registry, HealthSnapshotOptions::new(true)).await

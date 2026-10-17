@@ -60,10 +60,6 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(settings::get_operator_connectors),
             )
             .route(
-                "/settings/escalation",
-                get(escalation::get_escalation_settings).put(escalation::put_escalation_settings),
-            )
-            .route(
                 "/voice/config",
                 get(voice_config::get_voice_config).put(voice_config::put_voice_config),
             )

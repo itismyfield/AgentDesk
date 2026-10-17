@@ -477,16 +477,6 @@ prompt_manifest_retention:
 #   startup_grace_secs: 120
 #   max_consecutive_failures: 3
 
-# 자동/수동 escalation 대상 설정입니다. 기본값은 mode=pm, owner_user_id/pm_channel_id 없음,
-# schedule은 pm_hours=00:00-08:00, timezone=Asia/Seoul로 해석됩니다. user/scheduled 라우팅 때 설정하세요.
-# escalation:
-#   mode: pm
-#   owner_user_id: "YOUR_DISCORD_USER_ID"
-#   pm_channel_id: "YOUR_PM_CHANNEL_ID"
-#   schedule:
-#     pm_hours: "00:00-08:00"
-#     timezone: "Asia/Seoul"
-
 # Onboarding wizard / project-agentfactory rules — externalize what was once
 # hardcoded inside the Discord factory prompt. (#1110, Epic #912 Phase P6)
 #

@@ -364,7 +364,6 @@ pub(in crate::services::discord) use dispatch_policy::{
     stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
     strip_monitor_auto_turn_origin,
 };
-pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
