@@ -6679,8 +6679,8 @@ services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches
 services::discord::router::intake_dispatch::attachment::tests::local_attachment_admission_runs_materialization_once
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
+services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_gateway_intake_to_its_holder_before_the_o_hold_pg
 services::discord::router::intake_dispatch::home_order_tests::dormant_owner_admission_primitive_preserves_full_sources_without_receipt_key_pg
-services::discord::router::intake_dispatch::home_order_tests::only_a_registered_delegated_channel_skips_the_placement_hold_and_reaches_its_holder_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_active_foreign_delivery_carries_every_source_to_the_actual_claim_fence_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_dormant_forwarding_and_old_null_source_delivery_keep_the_legacy_claim_path_pg
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
