@@ -122,6 +122,7 @@ src/services/cluster/intake_worker/owner_fence_pg_tests.rs
 src/services/cluster/intake_worker/replay_hold_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs
+src/services/cluster/intake_worker/s3_real_tests/fresh_drain_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs
 src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs
 src/services/cluster/machine_resources/store.rs
@@ -446,6 +447,7 @@ services::cluster::intake_worker::home_accept_tests
 services::cluster::intake_worker::home_route_tests
 services::cluster::intake_worker::home_route_tests::s3_real::drain_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::route_pg
 services::cluster::intake_worker::o_route_tests
@@ -1463,6 +1465,9 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_fresh_parked_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_fresh_unhosted_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_store_without_actor_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_both_restart_only_one_owner_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_reclaim_roundtrip_restores_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_restart_under_a_worker_starts_no_writer_pg

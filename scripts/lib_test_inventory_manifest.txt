@@ -2501,6 +2501,7 @@ services::cluster::channel_home_port::tests::a_poll_begun_before_a_read_asked_do
 services::cluster::channel_home_port::tests::hosted::a_halted_writer_reads_as_unknown_until_its_resume_publishes_its_real_projection
 services::cluster::channel_home_port::tests::hosted::a_hosted_herdr_actor_reads_what_it_owes_only_while_a_drain_waits
 services::cluster::channel_home_port::tests::no_mailbox_is_unknown_until_restored_and_an_inflight_row_alone_still_runs
+services::cluster::channel_home_port::tests::only_a_channel_never_stored_nor_bound_here_reads_as_nothing_owed
 services::cluster::channel_home_port::tests::the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero
 services::cluster::channel_ingress::tests::a_routed_input_keeps_its_original_epoch_and_never_compares_the_gate_epoch
 services::cluster::channel_ingress::tests::an_earlier_candidate_admits_nothing_after_a_handoff
@@ -2651,6 +2652,9 @@ services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th6_force
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_orphan_holds_every_consumer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9_force_preserves_old_durable_debt_pg
 services::cluster::intake_worker::home_route_tests::s3_real::force_pg::th9w_real_h_post_timeout_and_force_after_f_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_fresh_parked_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_fresh_unhosted_reclaim_pg
+services::cluster::intake_worker::home_route_tests::s3_real::fresh_drain_pg::th7_store_without_actor_holds_pg
 services::cluster::intake_worker::home_route_tests::s3_real::harness::a_commit_publishes_before_it_unlocks_the_events
 services::cluster::intake_worker::home_route_tests::s3_real::harness::a_ready_stretch_restarts_after_any_false_sample
 services::cluster::intake_worker::home_route_tests::s3_real::harness::a_watch_with_a_window_long_gap_is_too_thin
@@ -12830,7 +12834,10 @@ services::tui_o::writer::tests::actor::host_start::deferred::stall::legacy_intak
 services::tui_o::writer::tests::actor::host_start::f6_every_hosted_actor_runs_the_hosts_repost_turn
 services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_source_holding_only_metadata_starts_at_its_end
 services::tui_o::writer::tests::actor::host_start::first_init::a_bound_codex_source_that_already_holds_output_gets_no_init
+services::tui_o::writer::tests::actor::host_start::first_init::a_close_racing_the_first_init_returns_only_after_its_write
+services::tui_o::writer::tests::actor::host_start::first_init::a_gate_closed_before_the_held_write_creates_nothing_until_owned_again
 services::tui_o::writer::tests::actor::host_start::first_init::a_legacy_claim_before_the_activation_lock_leaves_no_init_and_legacy_sends
+services::tui_o::writer::tests::actor::host_start::first_init::a_transition_waits_while_its_activation_waits_on_the_serial_lock
 services::tui_o::writer::tests::actor::host_start::first_init::an_unbound_codex_channel_commits_an_empty_init_and_posts_a_late_source_once
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_legacy_body_after_the_baseline_skips_that_rollout_until_the_next_bind
 services::tui_o::writer::tests::actor::host_start::first_init::codex_takeover::a_metadata_only_rollout_is_taken_only_once_its_first_prompt_lands
