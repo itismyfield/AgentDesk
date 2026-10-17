@@ -88,9 +88,17 @@ def module_revivals(root):
 
 
 INPUT_ROOT = "src/services/tui_input"
-# The ledger-owned input actor; gate/ and pane/ under actor/ stay live.
-REMOVED_INPUT_FILES = ("actor/capability", "actor/resume", "actor/token", "actor/witness")
-REMOVED_INPUT_NAMES = ("Input" + "Actor",)
+# The ledger-owned input actor and its persistence closure; gate/ and pane/ under actor/ stay live.
+REMOVED_INPUT_FILES = (
+    "actor/capability", "actor/resume", "actor/token", "actor/witness",
+    "attempt", "blob", "durable", "handover", "ledger", "receipt_identity", "rows", "transition",
+    "durability_tests", "g1b_receipt_identity_tests", "g1b_rows_tests", "g1b_transition_tests",
+    "rows_tests", "transition_fixture_tests", "transition_tests",
+)
+REMOVED_INPUT_NAMES = (
+    "Input" + "Actor", "EXTERNAL" + "_KEY_BASE", "EXTERNAL" + "_KEY_SPAN", "EXTERNAL" + "_KEY_END",
+    "is_" + "external_key", "external" + "_key_v1",
+)
 
 
 def input_engine_revivals(root):

@@ -1,6 +1,6 @@
 /// Lower bound of the synthetic-headless message-id range. Real Discord
 /// snowflake ids never reach this value, so any id at or above it is a
-/// synthetic id (headless placeholders, voice, external input-ledger keys).
+/// synthetic id (headless placeholders or voice).
 /// Centralized here so both `turn_bridge::is_synthetic_headless_message_id`
 /// and the typed `inflight` status-panel ownership ops (#3077) agree on the
 /// boundary without coupling `inflight` to the serenity `MessageId` newtype.
