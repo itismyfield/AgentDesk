@@ -1405,11 +1405,9 @@ reachability obligations, I16 and I19 are #5943's, I17 #5941's, I18 #5948's.
   nothing. `SessionEnrichment` holds those operands but publishes no
   such grade, which is why the derivation belongs at the source rather than at either
   struct's boundary.
-  Publishing the attribution grade is L2's FIRST task, ahead of any gate it wires that
-  reads this term. A lane that publishes that grade owns correcting this bullet in the
-  same change, or the contract starts lying about its own surface — an obligation this
-  document cannot enforce on itself, which is why #6025 tracks the pattern instead of
-  this sentence predicting its own repair.
+  Publishing the attribution grade alone does not close this gap: both consumers must
+  read the grade before this contract's claim can change. Until then, no lane may cite
+  the grade as a repair.
   Duplicate relays after a retirement stay I18's and I19's.
 - It also puts nothing in conflict with the pinned "normal", and no lane may weaken
   that to land a repair. `relay_recovery::tests::unpaired_active_token_is_observe_only`

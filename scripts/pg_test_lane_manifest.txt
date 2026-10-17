@@ -254,6 +254,7 @@ src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
+src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
 src/services/discord/turn_presence/activity/unbound/unit_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
@@ -587,6 +588,7 @@ services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
 services::discord::turn_presence::activity::unbound::dormancy_tests
+services::discord::turn_presence::activity::unbound::herdr_bound::tests
 services::discord::turn_presence::activity::unbound::live::review_tests
 services::discord::turn_presence::activity::unbound::tests
 services::discord::turn_teardown_clearance::tests
@@ -2099,6 +2101,7 @@ services::discord::turn_bridge::voice_completion::voice_completion_tests::backgr
 services::discord::turn_bridge::voice_completion::voice_completion_tests::rehydrate_preserves_remaining_ttl_for_aged_rows_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::voice_turn_link_playback_lookup_falls_back_to_announce_message_pg
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
+services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg

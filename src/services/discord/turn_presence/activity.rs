@@ -300,11 +300,18 @@ async fn read_now(
         ProviderKind::Codex => ShadowProvider::Codex,
         _ => return unstamped(observed(Activity::Unknown, "provider_unsupported")),
     };
-    let target = match shared.tmux_watchers.channel_binding(&channel) {
-        Some(watcher) if watcher.owner_channel_id == channel => {
-            Target::Bound(watcher.tmux_session_name)
-        }
-        _ => {
+    let bound = (shared.tmux_watchers.channel_binding(&channel))
+        .filter(|watcher| watcher.owner_channel_id == channel)
+        .map(|watcher| watcher.tmux_session_name);
+    // Decided before the Unbound read, which resets the watch a Bound judgment builds on.
+    #[cfg(unix)]
+    let bound = match bound {
+        None => unbound::herdr_bound::admitted(shared, provider, channel).await,
+        bound => bound,
+    };
+    let target = match bound {
+        Some(session) => Target::Bound(session),
+        None => {
             let watch = lock(&WATCHES).entry(channel.get()).or_default().clone();
             #[cfg(unix)]
             {

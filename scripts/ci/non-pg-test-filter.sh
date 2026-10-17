@@ -197,6 +197,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_bridge::tmux_runtime::stop_host::tests
   --skip services::discord::turn_bridge::voice_completion::voice_completion_tests
   --skip services::discord::turn_presence::activity::unbound::dormancy_tests
+  --skip services::discord::turn_presence::activity::unbound::herdr_bound::tests
   --skip services::discord::turn_presence::activity::unbound::live::review_tests
   --skip services::discord::turn_presence::activity::unbound::tests
   --skip services::discord::turn_teardown_clearance::tests

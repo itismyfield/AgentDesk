@@ -169,18 +169,21 @@ def supervised_signals(signals: Iterable[signal.Signals] | None = None,
     return tuple(sorted(chosen))
 
 
-def wait_timeout_secs(env: Mapping[str, str]) -> float:
-    """Read the wait deadline, falling back to the default on any unusable value."""
-    raw = env.get(WAIT_TIMEOUT_ENV)
-    if raw is None:
-        return DEFAULT_WAIT_TIMEOUT_SECS
+def usable_wait_timeout_secs(raw: str | None) -> float | None:
+    """Share the finite-positive timeout contract with the deploy-lock preflight."""
     try:
         parsed = float(raw)
     except (TypeError, ValueError):
-        return DEFAULT_WAIT_TIMEOUT_SECS
+        return None
     if not (0 < parsed < float("inf")):
-        return DEFAULT_WAIT_TIMEOUT_SECS
+        return None
     return parsed
+
+
+def wait_timeout_secs(env: Mapping[str, str]) -> float:
+    """Read the wait deadline, falling back to the default on any unusable value."""
+    parsed = usable_wait_timeout_secs(env.get(WAIT_TIMEOUT_ENV))
+    return DEFAULT_WAIT_TIMEOUT_SECS if parsed is None else parsed
 
 
 def assert_live_token(fd: int, path: str = CANONICAL_TOKEN_PATH) -> None:
@@ -691,6 +694,13 @@ def parse_command(argv: Sequence[str]) -> list[str]:
 
 def main(argv: Sequence[str]) -> int:
     args = list(argv)
+    if args[1:2] == ["--validate-deploy-lock-timeout"]:
+        if len(args) != 3 or usable_wait_timeout_secs(args[2]) is None:
+            print("AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS must be a finite number greater than 0",
+                  file=sys.stderr)
+            return EXIT_USAGE
+        print(args[2])
+        return 0
     delegate = len(args) > 1 and args[1] == "--delegate-lease"
     if delegate:  # Only before --; everything after -- remains command argv.
         del args[1]

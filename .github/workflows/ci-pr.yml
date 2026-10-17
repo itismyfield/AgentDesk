@@ -461,6 +461,7 @@ jobs:
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/live_review_tests.rs'
               - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'

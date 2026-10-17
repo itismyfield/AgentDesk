@@ -170,7 +170,7 @@ DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DELAY_SECS:-2}"
 DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-60}"
 DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$ADK_REL/runtime/deploy-release.lock}"
-DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
+DEPLOY_LOCK_TIMEOUT_SECS="$(python3 "$SCRIPT_DIR/build_token.py" --validate-deploy-lock-timeout "${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}")"
 DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
@@ -2515,12 +2515,8 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ -n "$(_schema_order_peers)" ]; the
     DEPLOY_BUILT_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-    # #5855: the deploy lock is already held here, and a queued peer deploy only
-    # waits DEPLOY_LOCK_TIMEOUT_SECS for it while the token wait below defaults to
-    # four hours -- so a deploy that is merely queued for the token can starve a
-    # peer that never needed the token at all (artifact deploys included). Bound
-    # the wait by the same deadline every peer already agreed to wait. An explicit
-    # operator override still wins.
+    # Cap token wait duration by the deploy-lock wait; this is not a shared absolute deadline.
+    # An explicit operator override still wins.
     export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
