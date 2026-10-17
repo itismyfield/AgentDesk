@@ -350,6 +350,188 @@ def _all_scalar_literals(text: str) -> bool:
     tokens = [tok for tok in re.split(r"[\s&\[\](),]+|vec!", code) if tok]
     return all(SCALAR_TOKEN_RE.fullmatch(tok) for tok in tokens)
 
+
+def _macro_argument_ranges(code: str) -> list[tuple[int, int]]:
+    """Delimiter spans opened by a Rust macro invocation in comment/literal-free code."""
+    ranges = []
+    stack = []
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    for index, char in enumerate(code):
+        if char in closing_for:
+            previous = index - 1
+            while previous >= 0 and code[previous].isspace():
+                previous -= 1
+            stack.append((closing_for[char], index, previous >= 0 and code[previous] == "!"))
+        elif char in ")]}":
+            if stack and stack[-1][0] == char:
+                _closing, opening, is_macro = stack.pop()
+                if is_macro:
+                    ranges.append((opening + 1, index))
+    return ranges
+
+
+def _matching_delimiter(code: str, opening: int) -> int | None:
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    first = code[opening:opening + 1]
+    if first not in closing_for:
+        return None
+    stack = [closing_for[first]]
+    for index in range(opening + 1, len(code)):
+        char = code[index]
+        if char in closing_for:
+            stack.append(closing_for[char])
+        elif char in ")]}":
+            if not stack or stack.pop() != char:
+                return None
+            if not stack:
+                return index
+    return None
+
+
+def _followed_by_pattern_terminator(code: str, closing: int) -> bool:
+    """Whether a constructor-shaped pattern ends at =>, =, or for-loop in."""
+    stack = []
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    index = closing + 1
+    while index < len(code):
+        char = code[index]
+        if char.isspace() or char == "," or char in "&|@":
+            index += 1
+            continue
+        if not stack and code.startswith("=>", index):
+            return True
+        if not stack and char == "=" and not code.startswith("==", index):
+            return True
+        if not stack and re.match(r"in\b", code[index:]):
+            return True
+        if char in closing_for:
+            stack.append(closing_for[char])
+            index += 1
+            continue
+        if char in ")]}":
+            if stack and stack[-1] == char:
+                stack.pop()
+            index += 1
+            continue
+        if char == "_" or char.isalpha():
+            identifier = re.match(r"[A-Za-z_]\w*", code[index:])
+            if identifier is None:
+                return False
+            index += len(identifier.group(0))
+            continue
+        if code.startswith("..", index):
+            index += 2
+            continue
+        return False
+    return False
+
+
+def _type_value_sites(root: Path, config: dict):
+    """Find expression-position constructors for H2 TYPES paths in production code.
+
+    Clippy's disallowed_types lint reports type positions and declarations, but
+    not values such as `Box::new(Unit)`, `Tuple(1)`, or `Named { field: 1 }`.
+    Keep this supplemental scan deliberately limited to exact local H2 type
+    paths and clear expression positions; uncertain syntax remains unmeasured.
+    """
+    type_modules: dict[str, set[str]] = collections.defaultdict(set)
+    for type_path, (set_name, _lanes) in config.items():
+        if set_name == "TYPES":
+            module, name = type_path.rsplit("::", 1)
+            type_modules[module].add(name)
+    if not type_modules:
+        return
+
+    checker_path = REPO_ROOT / "scripts/check_durable_frontier_writer_call_sites.py"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("h2_measure_cfg_tracker", checker_path)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    module_table = _module_table(root)
+    targets = {type_path for module, names in type_modules.items() for name in names
+               for type_path in (f"{module}::{name}",)}
+    target_names = {path.rsplit("::", 1)[-1] for path in targets}
+    for rel, module in module_table.items():
+        if rel.startswith("tests/"):
+            continue
+        path = root / rel
+        raw = path.read_text(encoding="utf-8")
+        raw_lines = raw.split("\n")
+        raw_char_offsets = [0]
+        for raw_line in raw_lines:
+            raw_char_offsets.append(raw_char_offsets[-1] + len(raw_line) + 1)
+        if not any(re.search(rf"\b{re.escape(name)}\b", raw) for name in target_names):
+            continue
+        production = [code if keep else " " * len(code)
+                      for _lineno, code, keep in checker.production_lines(path)]
+        text = "\n".join(production)
+        macro_ranges = _macro_argument_ranges(text)
+        imports = {}
+        for imported in re.finditer(
+            r"\buse\s+((?:(?:agentdesk|crate|self|super)::)[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)"
+            r"(?:\s+as\s+([A-Za-z_]\w*))?\s*;", text
+        ):
+            imported_path = imported.group(1)
+            if imported_path.startswith("crate::"):
+                imported_path = "agentdesk::" + imported_path[len("crate::"):]
+            elif imported_path.startswith("self::"):
+                imported_path = module + "::" + imported_path[len("self::"):]
+            elif imported_path.startswith("super::"):
+                parent = module.rsplit("::", 1)[0]
+                imported_path = parent + "::" + imported_path[len("super::"):]
+            imports[imported_path] = imported.group(2) or imported_path.rsplit("::", 1)[-1]
+        patterns: dict[str, set[str]] = collections.defaultdict(set)
+        for type_path in targets:
+            type_module, name = type_path.rsplit("::", 1)
+            if module == type_module:
+                patterns[name].add(type_path)
+            if (alias := imports.get(type_path)) is not None:
+                patterns[alias].add(type_path)
+            patterns[type_path].add(type_path)
+        matches = {}
+        for name, type_paths in patterns.items():
+            for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+                if "::" not in name and text[max(0, match.start() - 2):match.start()] == "::":
+                    continue  # the full qualified path is considered at its own start
+                matches[match.start()] = (match, type_paths)
+        for match, type_paths in matches.values():
+            for callee in type_paths:
+                pos = match.start()
+                if any(start <= pos < end for start, end in macro_ranges):
+                    continue
+                before = text[max(0, pos - 160):pos].rstrip()
+                after = text[match.end():].lstrip()
+                statement = re.split(r"[;{}]", before)[-1]
+                if re.search(r"\b(?:struct|enum|impl|trait|type|use|fn)\b", statement):
+                    continue
+                if before.endswith(":") or re.search(r"->\s*(?:&\s*)?$", before):
+                    continue
+                if after.startswith(("{", "(")):
+                    after_start = text.find(after[:1], match.end())
+                    closing = _matching_delimiter(text, after_start)
+                    if closing is not None and _followed_by_pattern_terminator(text, closing):
+                        continue  # destructuring pattern in match/let/for context
+                    # A return type followed by a function body is not a value
+                    # constructor. Item declarations were excluded above.
+                    if after.startswith("{") and re.search(r"->\s*[^;{}]*$", before):
+                        continue
+                    expression = True
+                else:
+                    tail = after[:1]
+                    expression = tail in {";", ",", ")", "]", "}"} and bool(
+                        re.search(r"(?:=|\(|,|=>|\breturn|\bSome\(|\bBox::new\(|\bArc::new\()\s*$", before)
+                    )
+                if not expression:
+                    continue
+                line = text.count("\n", 0, pos) + 1
+                char_column = pos - text.rfind("\n", 0, pos) - 1
+                raw_line = raw_lines[line - 1]
+                column = len(raw_line[:char_column].encode("utf-8")) + 1
+                raw_char_start = raw_char_offsets[line - 1] + char_column
+                byte_start = len(raw[:raw_char_start].encode("utf-8"))
+                byte_end = len(raw[:raw_char_start + match.end() - match.start()].encode("utf-8"))
+                yield rel, line, column, callee, byte_start, byte_end
+
 def subproc_seed(src: SourceFile, pos: int, item_range: tuple[int, int]) -> bool:
     """R-D plus the non-literal-program rule for one `Command::new` site."""
     match = re.compile(r"[\w:\s<>]*?\bnew\b\s*").match(src.stripped, pos)
@@ -373,6 +555,7 @@ def measure(root: Path, items, config) -> dict:
     derived = {"W": set(), "SUBPROC_W": set(), "unregistrable": set()}
     sites = {section: collections.defaultdict(list) for section in SECTIONS}  # H8 aux, key unchanged
     reg = collections.defaultdict(list)  # R-W: each site's path, None when unregistrable
+    clippy_type_sites = set()
     total = 0
     for (file, line, col, code, callee), span in sorted(_sites(items.messages).items()):
         if callee not in config:
@@ -386,6 +569,8 @@ def measure(root: Path, items, config) -> dict:
         set_name = config[callee][0]
         key = (file, item, callee)
         rows[SET_SECTION[set_name]][key] += 1
+        if set_name == "TYPES":
+            clippy_type_sites.add((file, line, col, callee))
         if src.ambiguous(item):
             sites[SET_SECTION[set_name]][key].append(line)
         target = "W" if set_name in ("EXEC", "W", "TYPES") else None
@@ -402,6 +587,32 @@ def measure(root: Path, items, config) -> dict:
             derived[target].add(path)
         else:
             derived["unregistrable"].add(f"{file}::{item} ({'module-call' if reason == 'module-level' else reason})")
+    module_table = _module_table(root)
+    for file, line, col, callee, byte_start, byte_end in _type_value_sites(root, config):
+        if (file, line, col, callee) in clippy_type_sites:
+            continue
+        total += 1
+        src = sources.get(file) or sources.setdefault(
+            file, SourceFile((root / file).read_text(encoding="utf-8"))
+        )
+        span = dict(file_name=file, line_start=line, column_start=col,
+                    byte_start=byte_start, byte_end=byte_end)
+        path, reason = h2_items.resolve(items, span)
+        module = module_table.get(file)
+        if path and module and path.startswith(module + "::"):
+            item = path[len(module) + 2:]
+        else:
+            item = "<module>"
+        key = (file, item, callee)
+        rows["types"][key] += 1
+        if src.ambiguous(item):
+            sites["types"][key].append(line)
+        if path is None:
+            reg[key].append(None)
+            derived["unregistrable"].add(f"{file}::{item} ({reason or 'unregistrable'})")
+            continue
+        reg[key].append(path)
+        derived["W"].add(path)
     sites = {section: {key: sorted(v) for key, v in found.items()} for section, found in sites.items()}
     return {"rows": rows, "derived": derived, "total": total, "sites": sites, "reg": dict(reg)}
 
