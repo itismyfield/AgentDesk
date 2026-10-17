@@ -265,3 +265,25 @@ fn an_overflow_eviction_before_the_merge_stays_evicted() {
         assert!(!disk_ids(channel).contains(&first));
     });
 }
+
+#[test]
+fn a_queue_file_the_merge_cannot_read_merges_nothing_and_reports_its_error() {
+    with_root(|| async {
+        let channel = ChannelId::new(6_258_013);
+        let snapshot = boot_snapshot(channel, &[item(6_258_131)]);
+        let path = pending_queue_file_path(&ProviderKind::Claude, TOKEN, channel).unwrap();
+        let torn = br#"[{"message_id": 6258131, "te"#;
+        std::fs::write(&path, torn).unwrap();
+        let handle = ChannelMailboxRegistry::default().handle(channel);
+
+        let merged = handle.merge_restored_queue_items(snapshot, ctx()).await;
+        assert_eq!(merged.absorbed, 0);
+        assert!(merged.persistence_error.is_some(), "{merged:?}");
+        assert!(memory(&handle).await.is_empty(), "Q is not merged");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            torn,
+            "the file is left as it was"
+        );
+    });
+}

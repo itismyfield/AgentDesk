@@ -120,9 +120,13 @@ fn boot_restore_installs_a_bound_channels_queue_marker_override_and_placeholder(
     );
 }
 
-type Restored = Vec<(ChannelId, MessageId, MessageId)>;
-/// The root the restore ran under, kept until the test has read it.
-type Root = (crate::config::TestEnvVarGuard, tempfile::TempDir);
+/// A boot restore run by `restore_around`, with the root it ran under kept until the test reads it.
+struct Restored {
+    stale: Vec<(ChannelId, MessageId, MessageId)>,
+    token: String,
+    memory: Vec<u64>,
+    _root: (crate::config::TestEnvVarGuard, tempfile::TempDir),
+}
 
 /// Runs the boot restore of a bound channel holding `[queued]` and a placeholder for it,
 /// with `between` run after the boot read and before the merge.
@@ -130,7 +134,7 @@ fn restore_around<F: std::future::Future<Output = ()>>(
     channel: u64,
     queued: u64,
     between: impl FnOnce(Arc<SharedData>, std::path::PathBuf) -> F,
-) -> (Restored, String, Root) {
+) -> Restored {
     let tmp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
@@ -158,7 +162,7 @@ fn restore_around<F: std::future::Future<Output = ()>>(
         .enable_all()
         .build()
         .unwrap();
-    let stale = runtime.block_on(async {
+    let (stale, memory) = runtime.block_on(async {
         // The restore reads the queue files, then waits on the settings this guard holds.
         let settings = shared.settings.write().await;
         let (http, task_shared) = (
@@ -173,15 +177,20 @@ fn restore_around<F: std::future::Future<Output = ()>>(
         }
         between(shared.clone(), path.clone()).await;
         drop(settings);
-        restore.await.unwrap()
+        let stale = restore.await.unwrap();
+        let queue = shared.mailbox(id).snapshot().await.intervention_queue;
+        (
+            stale,
+            queue.iter().map(|item| item.message_id.get()).collect(),
+        )
     });
-    #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(&path) {
-        let mut permissions = meta.permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o644);
-        std::fs::set_permissions(&path, permissions).unwrap();
+    let _root = (_env, tmp);
+    Restored {
+        stale,
+        token,
+        memory,
+        _root,
     }
-    (stale, token, (_env, tmp))
 }
 
 /// The message ids the channel's queue file holds.
@@ -196,46 +205,66 @@ fn disk_ids(token: &str, channel: u64) -> Vec<u64> {
 fn a_queue_cleared_while_boot_restore_waits_is_not_restored() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (channel, queued) = (6_258_301_u64, 6_258_311_u64);
-    let (stale, token, _root) = restore_around(channel, queued, |shared, _| async move {
+    let restored = restore_around(channel, queued, |shared, _| async move {
         let id = ChannelId::new(channel);
         let context = crate::services::discord::queue_persistence_context;
         let persistence = context(&shared, &ProviderKind::Claude, id);
         shared.mailbox(id).clear(persistence).await;
     });
+    assert!(restored.memory.is_empty(), "Q is not merged back");
     assert_eq!(
-        disk_ids(&token, channel),
+        disk_ids(&restored.token, channel),
         Vec::<u64>::new(),
         "Q is not written back"
     );
     assert!(
-        stale.iter().any(|card| card.1.get() == queued),
-        "the cleared item's card is stale: {stale:?}"
+        restored.stale.iter().any(|card| card.1.get() == queued),
+        "the cleared item's card is stale: {:?}",
+        restored.stale
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_queue_the_merge_cannot_read_keeps_its_file_and_placeholder() {
-    use std::os::unix::fs::PermissionsExt;
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (channel, queued) = (6_258_401_u64, 6_258_411_u64);
-    let (stale, token, _root) = restore_around(channel, queued, |_, path| async move {
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (id, provider) = (ChannelId::new(channel), ProviderKind::Claude);
+    let load = crate::services::turn_orchestrator::load_channel_pending_queue_checked;
+    let torn = br#"[{"message_id": 6258411, "te"#;
+    let restored = restore_around(channel, queued, |shared, path| async move {
+        // The boot read already holds Q; the file the merge reads is torn.
+        std::fs::write(&path, torn).unwrap();
+        let read = load(&ProviderKind::Claude, &shared.token_hash, id);
+        assert!(read.is_err(), "the fixture makes the merge's read fail");
     });
+    let token = restored.token.as_str();
     assert!(
-        !stale.iter().any(|card| card.1.get() == queued),
-        "an unread queue is not a discarded one: {stale:?}"
+        load(&provider, token, id).is_err(),
+        "the file still cannot be read"
     );
+    assert!(
+        restored.memory.is_empty(),
+        "Q is not merged: {:?}",
+        restored.memory
+    );
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = root
+        .join(provider.as_str())
+        .join(token)
+        .join(format!("{channel}.json"));
     assert_eq!(
-        disk_ids(&token, channel),
-        [queued],
-        "the queue file is left as it was"
+        std::fs::read(path).unwrap(),
+        torn,
+        "the file's bytes are left as they were"
     );
-    let provider = ProviderKind::Claude;
-    let cards =
-        super::super::queued_placeholders_store::load_queued_placeholders(&provider, &token);
     assert!(
-        cards.contains_key(&(ChannelId::new(channel), MessageId::new(queued))),
+        !restored.stale.iter().any(|card| card.1.get() == queued),
+        "an unread queue's card is not deleted: {:?}",
+        restored.stale
+    );
+    let cards = super::super::queued_placeholders_store::load_queued_placeholders(&provider, token);
+    assert!(
+        cards.contains_key(&(id, MessageId::new(queued))),
         "the placeholder row is kept: {cards:?}"
     );
 }

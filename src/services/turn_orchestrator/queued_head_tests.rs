@@ -142,7 +142,7 @@ async fn queued(handle: &ChannelMailboxHandle) -> Vec<(u64, Vec<u64>, String)> {
     queue.iter().map(row).collect()
 }
 
-/// Puts `item` at the front of the channel's queue file and keeps the actor's metadata, as a
+/// Appends `item` to the channel's queue file and keeps the actor's metadata and head, as a
 /// restore finds an item its boot read saw and the actor has not absorbed.
 pub(super) fn plant(token: &str, channel: ChannelId, item: &Intervention) {
     let provider = ProviderKind::Claude;
@@ -166,7 +166,7 @@ pub(super) fn plant(token: &str, channel: ChannelId, item: &Intervention) {
         true => &mut file,
         false => &mut file["items"],
     };
-    items.as_array_mut().unwrap().insert(0, planted);
+    items.as_array_mut().unwrap().push(planted);
     std::fs::write(path(token), serde_json::to_string_pretty(&file).unwrap()).unwrap();
 }
 
@@ -736,10 +736,23 @@ fn overflow_and_restore_never_displace_a_reserved_head() {
             1_001
         );
         plant(TOKEN, channel, &human(999, 98, "restored"));
+        let load = crate::services::turn_orchestrator::load_channel_pending_queue_checked;
+        let planted = load(&ProviderKind::Claude, TOKEN, channel).expect("the planted file parses");
+        assert_eq!(
+            planted.0.last().map(|item| item.message_id.get()),
+            Some(999)
+        );
+        let (before, file) = (queued(&handle).await, disk(channel));
         let restored = handle
             .merge_restored_queue_items(vec![human(999, 98, "restored")], ctx())
             .await;
-        assert!(restored.persistence_error.is_some());
+        let error = restored.persistence_error.expect("the restore is refused");
+        assert!(
+            error.contains("a write that moves or changes it is refused"),
+            "{error}"
+        );
+        assert_eq!(queued(&handle).await, before, "memory is rolled back");
+        assert_eq!(disk(channel), file, "the file is not rewritten");
         let queue = queued(&handle).await;
         assert_eq!(
             (queue.len(), queue[0].0),
