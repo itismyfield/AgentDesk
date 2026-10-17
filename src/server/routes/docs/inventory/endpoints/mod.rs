@@ -13,6 +13,7 @@ mod part_08;
 mod part_09;
 mod part_10;
 mod part_11;
+mod public_surfaces;
 mod session_evidence;
 
 pub(super) fn all() -> Vec<EndpointDoc> {
@@ -28,6 +29,7 @@ pub(super) fn all() -> Vec<EndpointDoc> {
     endpoints.extend(part_09::endpoints());
     endpoints.extend(part_10::endpoints());
     endpoints.extend(part_11::endpoints());
+    endpoints.extend(public_surfaces::endpoints());
     endpoints.extend(cluster_execution::endpoints());
     endpoints.extend(kakao_calendar::endpoints());
     endpoints.extend(session_evidence::endpoints());
