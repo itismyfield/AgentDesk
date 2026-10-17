@@ -23,7 +23,6 @@ mod herdr_user_stop;
 mod inbound_order;
 mod incarnation;
 mod injected_inputs;
-#[allow(dead_code)]
 mod intervention;
 mod lease_release;
 mod mailbox_observation;
