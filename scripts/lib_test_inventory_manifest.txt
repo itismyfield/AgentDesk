@@ -11799,6 +11799,7 @@ services::session_host::herdr::pane_probe::tests::probe_refuses_readings_from_an
 services::session_host::herdr::pane_probe::tests::probe_takes_the_provider_its_launch_command_execs_into
 services::session_host::herdr::pane_probe::tests::probe_takes_the_root_shells_child_from_a_list_with_its_grandchild
 services::session_host::herdr::pane_probe::tests::probe_waits_for_the_provider_only_within_its_window
+services::session_host::herdr::pane_probe::tests::probe_waits_out_a_startup_pipeline_within_its_window
 services::session_host::herdr::provenance::tests::e7_config_read_refuses_a_file_changed_or_replaced_mid_read
 services::session_host::herdr::provenance::tests::e7_os_reads_prove_off_for_a_real_bootstrapped_process_only
 services::session_host::herdr::provenance::tests::e7_reads_off_only_from_a_bootstrapped_server_and_names_every_refusal
