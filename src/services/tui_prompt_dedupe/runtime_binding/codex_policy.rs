@@ -6,6 +6,9 @@ use super::*;
 use crate::services::tmux_common::{self as tc, TmuxSourceAuthority};
 use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext, SpawnNonceMarker};
 
+mod hold_detail;
+pub(crate) use hold_detail::codex_verified_hold_detail;
+
 pub(super) struct PinnedIncarnation(BindingContext);
 
 impl PinnedIncarnation {
