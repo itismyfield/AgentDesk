@@ -1779,7 +1779,7 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
         );
         assert!(captured.contains("channel_id=584531"), "{captured}");
         assert!(
-            captured.contains("hold_reason=\"verified_unavailable\""),
+            captured.contains("hold_reason=\"ownership_unreadable\""),
             "{captured}"
         );
         let after = crate::services::discord::mailbox_snapshot(&shared, channel).await;
@@ -1788,7 +1788,7 @@ fn verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission()
             .project(&shared, &provider, channel, &after);
         assert_eq!(
             projection.reason.as_deref(),
-            Some("codex_verified_held:verified_unavailable")
+            Some("codex_verified_held:ownership_unreadable")
         );
         assert_eq!(projection.owner, Some("codex_verified"));
         assert_eq!(after.intervention_queue.len(), 1);

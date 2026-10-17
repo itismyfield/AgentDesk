@@ -7,7 +7,7 @@ impl QueueParkLedger {
         channel: ChannelId,
         tmux: &str,
     ) {
-        let reason = crate::services::tui_prompt_dedupe::codex_verified_hold_reason(tmux);
+        let reason = crate::services::tui_prompt_dedupe::codex_verified_hold_detail(tmux);
         self.note_promote_hold(&ProviderKind::Codex, channel, "codex_verified", reason);
     }
 
