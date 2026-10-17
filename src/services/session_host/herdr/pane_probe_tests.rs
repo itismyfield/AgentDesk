@@ -358,9 +358,8 @@ fn probe_refuses_an_unreadable_or_contextless_environment() {
     refused(&os, EvidenceGap::NonceMissing);
 }
 
-// Login startup runs children of the root shell before the typed launch command: a platform
-// binary whose environment macOS hides, a tool without the launch's context, or one that exits
-// between the readings. The provider that follows is still taken.
+// Login startup runs root-shell children before the typed launch command: hidden environment,
+// no launch context, or exited between readings. The provider that follows is still taken.
 #[test]
 fn probe_reads_past_shell_startup_children_to_the_provider() {
     let _root = crate::config::TestRuntimeRootGuard::new();

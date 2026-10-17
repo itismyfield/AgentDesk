@@ -11787,13 +11787,16 @@ services::session_host::herdr::launch_host::tests::socket_launch_refuses_unknown
 services::session_host::herdr::launch_host::tests::socket_launch_types_nothing_into_a_replaced_server_and_keeps_the_pane
 services::session_host::herdr::launch_host::tests::socket_launch_types_the_command_into_the_server_that_created_the_pane
 services::session_host::herdr::pane_probe::recorded_process_tests::m1_recorded_provider_four_states_are_distinct
+services::session_host::herdr::pane_probe::tests::probe_ends_a_refusal_no_startup_child_causes_at_once
 services::session_host::herdr::pane_probe::tests::probe_ends_at_the_first_ambiguous_reading
+services::session_host::herdr::pane_probe::tests::probe_reads_past_shell_startup_children_to_the_provider
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_context_of_another_nonce
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_process_whose_start_changed_between_readings
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_provider_started_before_the_launch
 services::session_host::herdr::pane_probe::tests::probe_refuses_a_provider_that_sees_herdr_pane_variables
 services::session_host::herdr::pane_probe::tests::probe_refuses_an_unreadable_or_contextless_environment
 services::session_host::herdr::pane_probe::tests::probe_refuses_readings_from_another_server
+services::session_host::herdr::pane_probe::tests::probe_takes_the_provider_its_launch_command_execs_into
 services::session_host::herdr::pane_probe::tests::probe_takes_the_root_shells_child_from_a_list_with_its_grandchild
 services::session_host::herdr::pane_probe::tests::probe_waits_for_the_provider_only_within_its_window
 services::session_host::herdr::provenance::tests::e7_config_read_refuses_a_file_changed_or_replaced_mid_read
