@@ -3768,9 +3768,6 @@ services::discord::global_active_counter_tests::saturating_decrement_counter_doe
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_absent_reproduces_the_legacy_shared_starter_inputs
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_reaches_the_session_slot_without_moving_the_channel_hint
 services::discord::health::headless_turn::dm_reserved_label_tests::dm_starter_hands_its_own_label_to_the_shared_starter_call
-services::discord::health::legacy_supervision::tests::empty_set_reads_without_initializing_or_locking
-services::discord::health::legacy_supervision::tests::retired_channel_is_scoped_by_provider
-services::discord::health::legacy_supervision::tests::transcript_confirmed_channel_is_not_retired
 services::discord::health::liveness_authority::tests::bounded_none_transient_then_fail_closed
 services::discord::health::liveness_authority::tests::capture_decrease_preserves_main_two_tick_grace
 services::discord::health::liveness_authority::tests::capture_some_to_none_records_disappearance_and_preserves_main_grace
@@ -5983,14 +5980,12 @@ services::discord::prompt_builder::session_anchors::tests::session_anchors_use_n
 services::discord::prompt_builder::session_anchors::tests::session_anchors_use_native_codex_developer_instructions
 services::discord::queue_dispatch::input_effect_tests::automatic_dequeue_restores_a_head_capped_after_selection_and_takes_the_tail
 services::discord::queue_exit_feedback_reconciler_tests::apply_queue_exit_feedback_adds_feedback_reaction_through_reconciler
-services::discord::queue_io::cancel_backstop_tests::backstop_refuses_an_already_retired_channel
 services::discord::queue_io::cancel_backstop_tests::cancelled_anchor_is_rechecked_on_later_slow_backstop_cycle
 services::discord::queue_io::cancel_backstop_tests::cancelled_live_inflight_is_preserved_for_five_actual_slow_cycles
 services::discord::queue_io::cancel_backstop_tests::external_arm_at_shutdown_is_inherited_by_the_original_backstop_task
 services::discord::queue_io::cancel_backstop_tests::live_foreground_consumes_its_real_guard_skip_request_without_rearming
 services::discord::queue_io::cancel_backstop_tests::matching_residue_inserted_after_terminal_evidence_preserves_its_owner
 services::discord::queue_io::cancel_backstop_tests::matching_residue_keeps_release_priority_over_the_cancel_backstop
-services::discord::queue_io::cancel_backstop_tests::retirement_after_terminal_evidence_prevents_backstop_mutation
 services::discord::queue_io::ledger_settlement_tests::a_delivered_absorbed_copy_is_settled_before_a_new_input_merges
 services::discord::queue_io::ledger_settlement_tests::a_late_published_completion_settles_each_sources_original_enqueue
 services::discord::queue_io::ledger_settlement_tests::a_requeue_after_an_earlier_completed_episode_of_the_same_id_still_dispatches
