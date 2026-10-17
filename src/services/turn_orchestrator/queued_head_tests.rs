@@ -142,6 +142,34 @@ async fn queued(handle: &ChannelMailboxHandle) -> Vec<(u64, Vec<u64>, String)> {
     queue.iter().map(row).collect()
 }
 
+/// Appends `item` to the channel's queue file and keeps the actor's metadata and head, as a
+/// restore finds an item its boot read saw and the actor has not absorbed.
+pub(super) fn plant(token: &str, channel: ChannelId, item: &Intervention) {
+    let provider = ProviderKind::Claude;
+    let save = crate::services::turn_orchestrator::save_channel_queue;
+    save(
+        &provider,
+        "planted",
+        channel,
+        std::slice::from_ref(item),
+        None,
+    )
+    .unwrap();
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = |token: &str| (root.join("claude").join(token)).join(format!("{channel}.json"));
+    let read = |token: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path(token)).unwrap()).unwrap()
+    };
+    let planted = read("planted")[0].clone();
+    let mut file = read(token);
+    let items = match file.is_array() {
+        true => &mut file,
+        false => &mut file["items"],
+    };
+    items.as_array_mut().unwrap().push(planted);
+    std::fs::write(path(token), serde_json::to_string_pretty(&file).unwrap()).unwrap();
+}
+
 async fn taken(handle: &ChannelMailboxHandle) -> Option<u64> {
     let taken = handle.take_next_soft(ctx()).await;
     taken.intervention.map(|item| item.message_id.get())
@@ -707,10 +735,24 @@ fn overflow_and_restore_never_displace_a_reserved_head() {
             overflow.queue_exit_events[0].intervention.message_id.get(),
             1_001
         );
+        plant(TOKEN, channel, &human(999, 98, "restored"));
+        let load = crate::services::turn_orchestrator::load_channel_pending_queue_checked;
+        let planted = load(&ProviderKind::Claude, TOKEN, channel).expect("the planted file parses");
+        assert_eq!(
+            planted.0.last().map(|item| item.message_id.get()),
+            Some(999)
+        );
+        let (before, file) = (queued(&handle).await, disk(channel));
         let restored = handle
             .merge_restored_queue_items(vec![human(999, 98, "restored")], ctx())
             .await;
-        assert!(restored.persistence_error.is_some());
+        let error = restored.persistence_error.expect("the restore is refused");
+        assert!(
+            error.contains("a write that moves or changes it is refused"),
+            "{error}"
+        );
+        assert_eq!(queued(&handle).await, before, "memory is rolled back");
+        assert_eq!(disk(channel), file, "the file is not rewritten");
         let queue = queued(&handle).await;
         assert_eq!(
             (queue.len(), queue[0].0),
@@ -800,6 +842,7 @@ fn a_restored_item_drops_only_its_submitted_source() {
             SourceMessageTextSegment::new(MessageId::new(91), "h"),
             SourceMessageTextSegment::new(MessageId::new(92), "b"),
         ];
+        plant(TOKEN, channel, &merged);
         let restored = handle.merge_restored_queue_items(vec![merged], ctx()).await;
         assert!(restored.persistence_error.is_none());
         assert_eq!(queued(&handle).await, [(92, vec![92], "b".to_string())]);
