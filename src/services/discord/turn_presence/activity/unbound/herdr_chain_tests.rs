@@ -6,6 +6,7 @@ use crate::services::discord::recovery_engine::herdr_reader::{
     HerdrRig, ReconnectCounts, reconnect_counts, reconnect_restarted_herdr_panes,
 };
 use crate::services::discord::turn_presence::activity::tests::{BindingRoot, log_turn_source};
+use crate::services::discord::turn_presence::activity::unbound::live::review_tests::Rig;
 use crate::services::session_host::herdr_socket_rig_tests::PANE;
 
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
