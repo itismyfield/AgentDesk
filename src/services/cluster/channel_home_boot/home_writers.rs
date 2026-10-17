@@ -1,5 +1,5 @@
-//! A mounted home's writer as its watch judges it: whose gate hosts the channel here, the start or
-//! replacement that makes it the home's, and the confirmed end before the home leaves.
+//! A mounted home's writer as its watch judges it: whose gate hosts the channel, the start that
+//! makes it the home's, the confirmed end before a leave, and whether it could run its first init.
 
 use std::sync::Arc;
 
@@ -11,6 +11,8 @@ use crate::services::tui_o::writer::host::ManagedWriterHandle;
 
 /// Shown while a claim the supervisor cannot account for keeps the home from renewing.
 pub(crate) const WRITER_AUTHORITY: &str = "writer_authority";
+/// Shown while a released home has no live writer under its gate to adopt with.
+pub(crate) const ADOPT_WAITS_WRITER: &str = "adopt_waits_writer";
 
 /// How far the runtime's boot got with its writers: until it handed them over nothing may judge
 /// a channel free of them, as its first writer may still be claiming it.
@@ -129,15 +131,15 @@ impl Seen {
         }
     }
 
-    /// Whether a released home's writer may take the channel: one is started under its gate if
-    /// none runs; without supervised writers the restored flag alone decides.
+    /// Whether a released home's writer could take the channel: one is started under its gate if
+    /// none runs, then judged; without supervised writers the restored flag alone decides.
     pub(super) async fn adoptable(&mut self, home: &HomeGate) -> Result<(), &'static str> {
-        if self.writers.is_none() {
+        let Some(writers) = self.writers.clone() else {
             return Ok(());
-        }
+        };
         let judged = match self.ensure_home(home, true).await {
             Authority::Pending => Err(WRITER_AUTHORITY),
-            _ => Ok(()),
+            _ => writers.executable(self.id, home),
         };
         #[cfg(test)]
         events::record(self.id, events::Event::Adoptable(judged));
@@ -273,6 +275,27 @@ impl ChannelWriters {
             #[cfg(test)]
             _ if mutant("nonrunning_means_absent") => true,
             _ => false,
+        }
+    }
+
+    /// Whether a released home's writer could take the channel now: it runs, claims it under the
+    /// home's gate, and its first init could run once Owned; the reason is shown while it waits.
+    pub(crate) fn executable(&self, channel: u64, home: &HomeGate) -> Result<(), &'static str> {
+        let (gate, claim) = (gate_of(home), self.readiness.hosted_by(channel));
+        let running = self.supervisor.running(channel, |bundle| {
+            let handle = &bundle.handle;
+            let hosted = claim == Some(handle.generation()) && handle.authority() == gate;
+            (hosted && handle.live(), handle.ready())
+        });
+        #[cfg(test)]
+        let running = match running {
+            Some((_, ready)) if mutant("adopt_ignores_writer") => Some((true, ready)),
+            None if mutant("adopt_ignores_writer") => return Ok(()),
+            running => running,
+        };
+        match running {
+            Some((true, ready)) => ready(),
+            _ => Err(ADOPT_WAITS_WRITER),
         }
     }
 }

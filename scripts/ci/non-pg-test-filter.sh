@@ -394,7 +394,9 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::channel_home::tests::nothing_outside_the_owners_writes_a_home_or_runs_its_gate
   services::cluster::channel_home::tests::only_this_holders_current_renewals_keep_the_home
   services::cluster::channel_home::tests::standby_from_boot_changes_nothing_until_this_nodes_home_gate_takes_intake
+  services::cluster::channel_home_boot::home_writers::tests::a_home_closed_after_its_facts_were_read_owned_admits_no_first_init
   services::cluster::channel_home_boot::home_writers::tests::a_stop_keeps_or_settles_the_late_reservation_by_its_reason
+  services::cluster::channel_home_boot::home_writers::tests::the_precheck_refuses_what_the_first_init_would
   services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
   services::cluster::channel_home_boot::tests::writer_return::an_unreadable_row_returns_nothing_and_starts_no_writer
   services::cluster::channel_home_boot::tests::writer_return::unreadable_boot_rows_start_no_first_writer

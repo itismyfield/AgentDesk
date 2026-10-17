@@ -387,6 +387,7 @@ pub struct ManagedWriterHandle {
     stop: StopOnDrop,
     host: JoinHandle<()>,
     keep: Arc<AtomicBool>,
+    ready: hosting::Ready,
 }
 
 struct StopOnDrop {
@@ -441,6 +442,7 @@ impl ManagedWriterHandle {
             stop,
             host,
             keep: _,
+            ready: _,
         } = self;
         stop.signal.send_replace(true);
         let settle = tokio::spawn(async move {
@@ -517,6 +519,7 @@ pub fn start_managed<I: HostIo>(
         let authority = Arc::clone(&gate);
         let settled = Arc::clone(&claim.settled);
         let (stop, stopping) = watch::channel(false);
+        let ready = hosting::ready_probe(&io, channel, provider, &candidate);
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
             host_channel(
@@ -545,6 +548,7 @@ pub fn start_managed<I: HostIo>(
             },
             host,
             keep,
+            ready,
         });
     }
     tasks

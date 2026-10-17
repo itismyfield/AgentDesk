@@ -72,11 +72,11 @@ pub(super) async fn start<I: HostIo>(
             let decided = match legacy.clone() {
                 None if provider == ShadowProvider::Codex => {
                     let sources = || codex_sources(&*log, channel);
-                    admitted(gate, || {
+                    admitted(channel, gate, || {
                         activation::activate_with(&fresh, channel, facts, local, candidate, sources)
                     })
                 }
-                None => admitted(gate, || {
+                None => admitted(channel, gate, || {
                     activation::activate(&fresh, channel, facts, &*log, local, candidate)
                 }),
                 Some(legacy) => 'held: {
@@ -134,7 +134,7 @@ pub(super) async fn start<I: HostIo>(
                             .recheck(&*legacy, &*log, channel)
                             .map_err(String::from)
                     };
-                    admitted(gate, || {
+                    admitted(channel, gate, || {
                         activation::activate_with(&fresh, channel, facts, local, candidate, sources)
                     })
                 }
@@ -174,6 +174,7 @@ pub(super) async fn start<I: HostIo>(
 /// Writes the first `init` under the gate's admission: a drain's close or a lease transition waits
 /// for its synchronous I/O and the activation serial lock. `None` once the gate is not Owned.
 fn admitted(
+    _channel: u64,
     gate: &OwnershipGate,
     activate: impl FnOnce() -> Result<(), String>,
 ) -> Option<Result<(), String>> {
@@ -181,12 +182,28 @@ fn admitted(
     if std::env::var("ADK_S3B_MUTANT").ok().as_deref() == Some("first_init_unfenced") {
         return Some(activate());
     }
+    #[cfg(test)]
+    {
+        use activation::test_hook::{Step, note_refused, run};
+        if let Err(detail) = run(_channel, Step::BeforeAdmit) {
+            return Some(Err(detail));
+        }
+        let admitted = gate.admit(|_| activate());
+        if admitted.is_none() {
+            note_refused(_channel);
+        }
+        admitted
+    }
+    #[cfg(not(test))]
     gate.admit(|_| activate())
 }
 
 /// A Codex init judged under the adoption lock: none while the typed log names no source, else
 /// each bound source from the end of a prefix holding only metadata.
-fn codex_sources<B: BindingEvents>(bindings: &B, channel: u64) -> Result<Vec<InitSource>, String> {
+pub(super) fn codex_sources<B: BindingEvents>(
+    bindings: &B,
+    channel: u64,
+) -> Result<Vec<InitSource>, String> {
     let events = bindings.binding_events_since(channel, 0);
     let events = events.map_err(|error| format!("binding log: {error}"))?;
     if !events.iter().any(names_source) {

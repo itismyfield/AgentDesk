@@ -7,15 +7,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::super::*;
-use super::Authority;
 use super::events::{self, Event};
+use super::{ADOPT_WAITS_WRITER, Authority};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
 use crate::services::cluster::channel_home_port::ChannelHomePort;
 use crate::services::cluster::home_supervisor::{HomeBundle, HomeLifecycle, Phase, StopReason};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::cutover::test_override;
 use crate::services::tui_o::shadow::{ShadowProvider, binding_reader::source_id_for};
+use crate::services::tui_o::store::{OStore, no_channel_store};
 use crate::services::tui_o::writer::WriterAlarm;
 use crate::services::tui_o::writer::activation::ActivationFacts;
 use crate::services::tui_o::writer::adoption::LegacyView;
@@ -66,6 +67,11 @@ impl Io {
             park: Mutex::default(),
             panic_once: AtomicBool::new(false),
         })
+    }
+
+    /// First inits wait at their facts read until [`Io::unpark`].
+    fn park(&self) {
+        *self.park.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
     }
 
     fn unpark(&self) {
@@ -207,6 +213,14 @@ fn started_under(channel: u64, gate: usize) -> Option<(usize, u64)> {
         })
 }
 
+/// Waits until the watch judged the released home twice, or once it found it adoptable; then the
+/// row tells whether it was adopted.
+async fn judged_twice(channel: u64) -> bool {
+    let judged = || count(channel, |e| matches!(e, Event::Adoptable(_))) >= 2;
+    let adoptable = || count(channel, |e| *e == Event::Adoptable(Ok(()))) >= 1;
+    eventually(30, || judged() || adoptable()).await
+}
+
 fn gate_of(home: &Arc<HomeGate>) -> usize {
     gate_address(home)
 }
@@ -221,6 +235,7 @@ struct Node {
     gate: Arc<OwnershipGate>,
     ready: Arc<Readiness>,
     writers: Arc<ChannelWriters>,
+    restored: Arc<AtomicBool>,
     provider: ShadowProvider,
     delegated: bool,
     _p5: P5Root,
@@ -326,6 +341,7 @@ impl Node {
             gate,
             ready,
             writers,
+            restored,
             provider: knobs.provider,
             delegated: knobs.delegated,
             _p5: p5_root,
@@ -402,6 +418,17 @@ impl Node {
         self.ready.hosted_by(self.channel)
     }
 
+    /// What the channel's home shows it waits on in health, if anything.
+    fn blocker(&self) -> Option<String> {
+        let health = channel_home::health()?;
+        let channel = self.channel.to_string();
+        let draining = health.get("home_draining")?.as_array()?;
+        let ours = draining
+            .iter()
+            .find(|entry| entry["channel"] == channel.as_str())?;
+        Some(ours["blocker"].as_str()?.to_owned())
+    }
+
     async fn end(self) {
         self.io.unpark();
         let _ = self.writers.stop_and_join(StopReason::Sigterm).await;
@@ -429,6 +456,26 @@ async fn reclaimed(pool: &PgPool, channel: &str) {
     let epoch = applied(o_channel_homes::adopt(pool, channel, "mini", row.epoch).await).epoch;
     applied(o_channel_homes::begin_reclaim(pool, channel, epoch, "gw").await);
     applied(o_channel_homes::finish_reclaim(pool, channel, "mini", epoch).await);
+}
+
+/// Binds `path` for the channel in this thread's P5 log, as a Claude hook would at session start.
+fn bind_claude(channel: u64, path: &std::path::Path) {
+    let hook =
+        p5::HookSignal::from_payload("session_start", &serde_json::json!({"source": "startup"}));
+    let proposal = p5::Proposal {
+        channel_id: channel,
+        provider: "claude",
+        tmux_session: "tmux-claude",
+        session_id: Some("s1"),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: p5::CauseSource::Hook(hook.cause()),
+        hook: Some(&hook),
+    };
+    assert_eq!(
+        p5::record_source(&proposal).unwrap(),
+        p5::Committed::Appended
+    );
 }
 
 // ---- Leave: the boot's writer counts, and a leave joins the home's writer before its gate goes.
@@ -770,6 +817,121 @@ async fn a_reclaim_then_redelegation_takes_work_again_pg() {
     pg_db.drop().await;
 }
 
+/// A pending Codex channel with no bound source, reclaimed before its first init, drains off the
+/// P5 log its precheck read; the next delegation's writer commits an empty init and posts.
+#[tokio::test]
+async fn a_fresh_codex_reclaim_then_redelegation_takes_work_pg() {
+    const WC: &str = "1490141479707087107";
+    const WID: u64 = 1_490_141_479_707_087_107;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, CodexTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let knobs = Knobs {
+        provider: ShadowProvider::Codex,
+        p5: true,
+        ..Knobs::worker()
+    };
+    let mini = Node::boot(&pool, WID, knobs).await;
+    let seen = mini
+        .io
+        .bindings(WID, ShadowProvider::Codex)
+        .binding_events_since(WID, 0);
+    assert_eq!(
+        seen,
+        BindingLog.binding_events_since(WID, 0),
+        "the precheck reads the drain's log"
+    );
+    assert_eq!(seen, Ok(Vec::new()));
+    mini.io.park();
+    mini.first_spawn();
+    released(&pool, WC, "codex").await;
+    let _new = redelegate(&mini, &pool, WC, "codex").await;
+    assert!(
+        no_channel_store(mini.root.path(), WID),
+        "the first writer never activated"
+    );
+    assert!(!mini.halted());
+    mini.io.unpark();
+    assert!(
+        eventually(30, || mini.ready.accepts(WID)).await,
+        "{:?}",
+        events::of(WID)
+    );
+    let store = OStore::existing(mini.root.path()).expect("a store");
+    let init = store.read_init(WID).unwrap().expect("an init");
+    assert!(init.sources.is_empty(), "{:?}", init.sources);
+    assert!(
+        eventually(10, || store.peek_binding_checkpoint(WID).ok()
+            == Some(Some(0)))
+        .await,
+        "the binding checkpoint a Herdr turn needs"
+    );
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A pending Claude channel with a source bound, reclaimed before its first init: the drain reads
+/// that bind and waits, owed unknown, until the first init resumes, then leaves normally.
+#[tokio::test]
+async fn a_bound_claude_reclaim_before_its_first_init_waits_for_it_pg() {
+    const WC: &str = "1490141479707087108";
+    const WID: u64 = 1_490_141_479_707_087_108;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let knobs = Knobs {
+        p5: true,
+        ..Knobs::worker()
+    };
+    let mini = Node::boot(&pool, WID, knobs).await;
+    bind_claude(WID, &mini.transcript);
+    let seen = mini
+        .io
+        .bindings(WID, ShadowProvider::Claude)
+        .binding_events_since(WID, 0);
+    assert_eq!(
+        seen,
+        BindingLog.binding_events_since(WID, 0),
+        "the precheck reads the drain's log"
+    );
+    assert_eq!(seen.unwrap().len(), 1);
+    mini.io.park();
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    let worker = row_until(&pool, WC, 40, |row| {
+        row.is_some_and(|row| row.state == HomeState::Worker)
+    })
+    .await
+    .unwrap();
+    applied(o_channel_homes::begin_reclaim(&pool, WC, worker.epoch, "gw").await);
+    let before = rounds(WID);
+    assert!(eventually(30, || rounds(WID) >= before + 3).await);
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.state,
+        HomeState::Reclaiming,
+        "a bound channel is not left as never held"
+    );
+    assert_eq!(mini.blocker().as_deref(), Some("owed_unreadable"));
+    mini.io.unpark();
+    row_until(&pool, WC, 60, |row| {
+        row.is_some_and(|row| row.state == HomeState::Reclaimed)
+    })
+    .await;
+    assert!(eventually(30, || channel_home::registered(WC).is_none()).await);
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
 /// A watch that misses the leave's aftermath (the row removed and delegated again before its next
 /// read) keeps its home and writer: the home confirms the new epoch and the writer takes work.
 #[tokio::test]
@@ -885,6 +1047,503 @@ async fn a_stop_keeps_or_settles_the_late_reservation_by_its_reason() {
     drop(candidate.late_cleanup_guard(WID, None).unwrap());
     assert_eq!(candidate.peek(), Adoption::Released);
     events::clear(WID);
+}
+
+// ---- Adoption: a released home's writer must run and could run its first init.
+
+/// A released target adopts only once its turns are restored, and then only with its writer: a
+/// boot that starts no writer for the channel leaves the row released and says why.
+#[tokio::test]
+async fn a_released_target_adopts_only_restored_and_with_a_live_writer_pg() {
+    const WC: &str = "1490141479707087111";
+    const WID: u64 = 1_490_141_479_707_087_111;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let mini = Node::boot(&pool, WID, Knobs::worker()).await;
+    mini.restored.store(false, Ordering::SeqCst);
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    let before = rounds(WID);
+    assert!(eventually(30, || rounds(WID) >= before + 2).await);
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, HomeState::Released, "unrestored, nothing adopts");
+    assert_eq!(
+        count(WID, |e| matches!(e, Event::Adoptable(_))),
+        0,
+        "{:?}",
+        events::of(WID)
+    );
+    mini.restored.store(true, Ordering::SeqCst);
+    row_until(&pool, WC, 30, |row| {
+        row.is_some_and(|row| row.state == HomeState::Worker)
+    })
+    .await;
+    assert!(count(WID, |e| *e == Event::Adoptable(Ok(()))) >= 1);
+    assert!(eventually(30, || mini.ready.accepts(WID)).await);
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// No writer can start for a released target (its boot holds no candidate for the channel): the
+/// row stays released and the home says it waits on its writer.
+#[tokio::test]
+async fn a_released_target_without_a_writer_stays_released_pg() {
+    const WC: &str = "1490141479707087112";
+    const WID: u64 = 1_490_141_479_707_087_112;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _foreign = test_override::force_foreign(&[(WID, ClaudeTui)], "gw");
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let mini = Node::boot(&pool, WID, Knobs::worker()).await;
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+    let waits = Event::Adoptable(Err(ADOPT_WAITS_WRITER));
+    assert!(count(WID, |e| *e == waits) >= 2, "{:?}", events::of(WID));
+    assert_eq!(mini.blocker().as_deref(), Some(ADOPT_WAITS_WRITER));
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A released target whose writer runs but whose adoption Legacy already took stays released.
+#[tokio::test]
+async fn a_released_target_whose_candidate_was_released_stays_released_pg() {
+    const WC: &str = "1490141479707087113";
+    const WID: u64 = 1_490_141_479_707_087_113;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let mini = Node::boot(&pool, WID, Knobs::worker()).await;
+    let candidate = cutover::boot_ownership()
+        .into_iter()
+        .find(|(c, ..)| *c == WID)
+        .unwrap()
+        .2
+        .unwrap();
+    candidate.release(WID);
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+    let refused = Event::Adoptable(Err("adopt_refused:released"));
+    assert!(count(WID, |e| *e == refused) >= 2, "{:?}", events::of(WID));
+    assert!(mini.generation().is_some(), "its writer runs");
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A pending Claude channel whose P5 log binds no source could not commit its first init, so its
+/// released home is not adopted; once a source is bound it is, and the writer takes work.
+#[tokio::test]
+async fn an_unbound_claude_target_adopts_only_once_a_source_is_bound_pg() {
+    const WC: &str = "1490141479707087114";
+    const WID: u64 = 1_490_141_479_707_087_114;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let knobs = Knobs {
+        p5: true,
+        ..Knobs::worker()
+    };
+    let mini = Node::boot(&pool, WID, knobs).await;
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+    let refused = Event::Adoptable(Err("adopt_refused:no_bound_source"));
+    assert!(count(WID, |e| *e == refused) >= 2, "{:?}", events::of(WID));
+    bind_claude(WID, &mini.transcript);
+    row_until(&pool, WC, 30, |row| {
+        row.is_some_and(|row| row.state == HomeState::Worker)
+    })
+    .await;
+    assert!(
+        eventually(30, || mini.ready.accepts(WID)).await,
+        "{:?}",
+        events::of(WID)
+    );
+    mini.post("m1", "bound");
+    assert!(eventually(10, || mini.posts() == ["bound"]).await);
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// A writer whose host ended abnormally keeps its claim but runs nothing: its released home waits.
+#[tokio::test]
+async fn a_released_target_whose_host_died_with_its_claim_stays_released_pg() {
+    const WC: &str = "1490141479707087115";
+    const WID: u64 = 1_490_141_479_707_087_115;
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let pg_db = TestPostgresDb::create().await;
+    let pool = pg_db.connect_and_migrate().await;
+    events::clear(WID);
+    let knobs = Knobs {
+        p5: true,
+        ..Knobs::worker()
+    };
+    let mini = Node::boot(&pool, WID, knobs).await;
+    bind_claude(WID, &mini.transcript);
+    mini.io.panic_once.store(true, Ordering::SeqCst);
+    mini.first_spawn();
+    released(&pool, WC, "claude").await;
+    assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+    let row = o_channel_homes::read_home(&pool, WC)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+    let waits = Event::Adoptable(Err(ADOPT_WAITS_WRITER));
+    assert!(count(WID, |e| *e == waits) >= 2, "{:?}", events::of(WID));
+    assert!(mini.generation().is_some(), "the dead host kept its claim");
+    mini.end().await;
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+/// Late-reserved Claude channels over the production boot seed: late adoption off now keeps the
+/// released home waiting with its source bound; on again, it adopts and its writer takes work.
+mod late {
+    use super::*;
+    use crate::services::tui_o::channel_policy::{self, BootChannels};
+    use crate::services::tui_o::writer::adoption::LegacyCursor;
+
+    fn seed(root: &std::path::Path, channel: u64) -> test_override::ChannelsGuard {
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "server": {},
+            "tui_o": {"writer": {"channels": [channel], "late_adopt": true}},
+            "agents": [{"id": "late", "name": "Late", "channels": {
+                "claude": {"id": channel.to_string(), "runtime": "tui"}
+            }}]
+        }))
+        .unwrap();
+        let snapshot = BootChannels::validate(&config)
+            .unwrap()
+            .seeded(true, &config, |channels, _| {
+                Ok(channel_policy::stored(Some(root), channels))
+            })
+            .unwrap();
+        test_override::force_boot(snapshot)
+    }
+
+    /// Legacy's relay with its cursor at the end of the bound transcript, all of it delivered.
+    struct Legacy(PathBuf);
+
+    impl LegacyView for Legacy {
+        fn started(&self) -> bool {
+            true
+        }
+
+        fn cursor(&self, _: &str) -> LegacyCursor {
+            let offset = std::fs::metadata(&self.0).map_or(0, |meta| meta.len());
+            LegacyCursor::Bound {
+                path: self.0.clone(),
+                offset,
+            }
+        }
+
+        fn late_cursor(&self, tmux: &str) -> Result<LegacyCursor, String> {
+            Ok(self.cursor(tmux))
+        }
+
+        fn frontier(&self, _: u64, _: &str, _: u64) -> Option<u64> {
+            std::fs::metadata(&self.0).ok().map(|meta| meta.len())
+        }
+
+        fn tail_running(&self, _: &str) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_late_target_waits_while_late_adoption_is_off_pg() {
+        const WC: &str = "1490141479707087116";
+        const WID: u64 = 1_490_141_479_707_087_116;
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        events::clear(WID);
+        let seed_root = tempfile::tempdir().unwrap();
+        let _seeded = seed(seed_root.path(), WID);
+        let reserved = cutover::boot_ownership()
+            .into_iter()
+            .find(|(c, ..)| *c == WID);
+        assert!(
+            reserved
+                .and_then(|(.., c)| c)
+                .is_some_and(|c| c.late_adopt_origin())
+        );
+        let knobs = Knobs {
+            p5: true,
+            ..Knobs::worker()
+        };
+        let mini = Node::boot(&pool, WID, knobs).await;
+        bind_claude(WID, &mini.transcript);
+        let legacy = Arc::new(Legacy(mini.transcript.clone()));
+        *mini.io.host.legacy.lock().unwrap() = Some(legacy);
+        mini.first_spawn();
+        released(&pool, WC, "claude").await;
+        assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+        let row = o_channel_homes::read_home(&pool, WC)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+        let refused = Event::Adoptable(Err("adopt_refused:late_disabled"));
+        assert!(count(WID, |e| *e == refused) >= 2, "{:?}", events::of(WID));
+        assert!(mini.generation().is_some());
+        mini.io.late.store(true, Ordering::SeqCst);
+        row_until(&pool, WC, 30, |row| {
+            row.is_some_and(|row| row.state == HomeState::Worker)
+        })
+        .await;
+        assert!(
+            eventually(60, || mini.ready.accepts(WID)).await,
+            "{:?}",
+            mini.io.host.alarms.0.lock().unwrap()
+        );
+        mini.post("m1", "late");
+        assert!(eventually(10, || mini.posts() == ["late"]).await);
+        mini.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A late reservation with no source bound yet waits; bound, the next round adopts it.
+    #[tokio::test]
+    async fn a_late_target_without_a_bound_source_waits_for_one_pg() {
+        const WC: &str = "1490141479707087117";
+        const WID: u64 = 1_490_141_479_707_087_117;
+        let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(WID, "mini")]);
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        events::clear(WID);
+        let seed_root = tempfile::tempdir().unwrap();
+        let _seeded = seed(seed_root.path(), WID);
+        let knobs = Knobs {
+            p5: true,
+            ..Knobs::worker()
+        };
+        let mini = Node::boot(&pool, WID, knobs).await;
+        mini.io.late.store(true, Ordering::SeqCst);
+        mini.first_spawn();
+        released(&pool, WC, "claude").await;
+        assert!(judged_twice(WID).await, "{:?}", events::of(WID));
+        let row = o_channel_homes::read_home(&pool, WC)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, HomeState::Released, "{:?}", events::of(WID));
+        let refused = Event::Adoptable(Err("adopt_refused:late_awaits_binding"));
+        assert!(count(WID, |e| *e == refused) >= 2, "{:?}", events::of(WID));
+        bind_claude(WID, &mini.transcript);
+        row_until(&pool, WC, 30, |row| {
+            row.is_some_and(|row| row.state == HomeState::Worker)
+        })
+        .await;
+        mini.end().await;
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
+// ---- The precheck alone, through the real host's handle.
+
+/// The first-init precheck refuses what the first init would (output in a Codex source, an
+/// unreadable log, an unbound late Codex, late adoption off) and passes an unbound pending Codex.
+#[tokio::test]
+async fn the_precheck_refuses_what_the_first_init_would() {
+    const WID: u64 = 1_490_141_479_707_087_118;
+    let root = tempfile::tempdir().unwrap();
+    let _p5 = P5Root::install(root.path());
+    let check = |provider, candidate: Candidate, late: bool| {
+        let transcript = root.path().join("o.jsonl");
+        std::fs::write(&transcript, b"").unwrap();
+        let io = Io::new(
+            TestHost::new([(WID, source_id_for("s1", &transcript).unwrap())]),
+            true,
+        );
+        io.late.store(late, Ordering::SeqCst);
+        let parts = HostParts {
+            io,
+            runtime_root: Some(root.path().to_path_buf()),
+            gate: Arc::new(OwnershipGate::default()),
+            readiness: Arc::default(),
+        };
+        let kind = match provider {
+            ShadowProvider::Claude => ClaudeTui,
+            ShadowProvider::Codex => CodexTui,
+        };
+        let owned = vec![(WID, Some(kind), Some(candidate))];
+        let handle = host::start_managed(provider, true, owned, || parts)
+            .pop()
+            .unwrap();
+        let ready = handle.ready()();
+        drop(handle.stop_and_join());
+        ready
+    };
+    let pending = || Candidate::new(Adoption::Pending);
+    assert_eq!(
+        check(ShadowProvider::Codex, pending(), false),
+        Ok(()),
+        "unbound pending Codex"
+    );
+    assert_eq!(
+        check(ShadowProvider::Codex, Candidate::reserved_late(), true),
+        Err("adopt_refused:late_awaits_turn")
+    );
+    assert_eq!(
+        check(ShadowProvider::Claude, Candidate::reserved_late(), false),
+        Err("adopt_refused:late_disabled")
+    );
+    // A Codex rollout that already holds an answer is more than metadata.
+    let rollout = root.path().join("rollout.jsonl");
+    let answer = serde_json::json!({"type": "response_item", "timestamp": chrono::Utc::now().to_rfc3339(),
+        "payload": {"type": "message", "role": "assistant", "id": "m", "content": [{"type": "output_text", "text": "x"}]}});
+    let mut bytes = serde_json::to_vec(&answer).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&rollout, bytes).unwrap();
+    bind_codex(WID, &rollout);
+    assert_eq!(
+        check(ShadowProvider::Codex, pending(), false),
+        Err("adopt_refused:source_not_metadata")
+    );
+    // A corrupt P5 log is no shorter list.
+    let log = root
+        .path()
+        .join(p5::BINDING_EVENTS_DIR)
+        .join(format!("{WID}.log"));
+    std::fs::write(&log, b"not json\n").unwrap();
+    p5::forget_channel_for_tests(WID);
+    assert!(BindingLog.binding_events_since(WID, 0).is_err());
+    assert_eq!(
+        check(ShadowProvider::Codex, pending(), false),
+        Err("adopt_refused:binding_unreadable")
+    );
+    assert_eq!(
+        check(ShadowProvider::Claude, pending(), false),
+        Err("adopt_refused:binding_unreadable")
+    );
+}
+
+fn bind_codex(channel: u64, path: &std::path::Path) {
+    let hook =
+        p5::HookSignal::from_payload("session_start", &serde_json::json!({"source": "startup"}));
+    let proposal = p5::Proposal {
+        channel_id: channel,
+        provider: "codex",
+        tmux_session: "tmux-codex",
+        session_id: Some("s-codex"),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: p5::CauseSource::Hook(hook.cause()),
+        hook: Some(&hook),
+    };
+    assert_eq!(
+        p5::record_source(&proposal).unwrap(),
+        p5::Committed::Appended
+    );
+}
+
+// ---- The fence at the first init's admission.
+
+/// A home closed after the first init read its facts Owned, just before it asks for admission,
+/// admits nothing: no init is written and the adoption stays pending.
+#[tokio::test]
+async fn a_home_closed_after_its_facts_were_read_owned_admits_no_first_init() {
+    use crate::services::tui_o::writer::activation::test_hook::{self, Step};
+    const WID: u64 = 1_490_141_479_707_087_119;
+    let _selected = test_override::force_candidates(&[(WID, ClaudeTui)]);
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("o.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let io = Io::new(
+        TestHost::new([(WID, source_id_for("s1", &transcript).unwrap())]),
+        false,
+    );
+    let home = channel_home::register_for_test(WID, Some(HomeState::Worker));
+    let closing = Arc::clone(&home);
+    test_hook::set(WID, Step::BeforeAdmit, move || {
+        closing.close();
+        Ok(())
+    });
+    let wrote = Arc::new(AtomicBool::new(false));
+    let write = Arc::clone(&wrote);
+    test_hook::set(WID, Step::AfterWrite, move || {
+        write.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+    let parts = HostParts {
+        io: Arc::clone(&io),
+        runtime_root: Some(root.path().to_path_buf()),
+        gate: Arc::new(OwnershipGate::default()),
+        readiness: Arc::default(),
+    };
+    let owned = cutover::boot_ownership();
+    let candidate = owned
+        .iter()
+        .find(|(c, ..)| *c == WID)
+        .and_then(|(.., c)| c.clone())
+        .unwrap();
+    let handle = host::start_managed(ShadowProvider::Claude, false, owned, || parts)
+        .pop()
+        .unwrap();
+    assert_eq!(
+        handle.authority(),
+        gate_of(&home),
+        "the host took the home's gate"
+    );
+    let settled = || test_hook::refused(WID) >= 1 || wrote.load(Ordering::SeqCst);
+    assert!(
+        eventually(10, settled).await,
+        "the first init reached its admission"
+    );
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "nothing was written past the close"
+    );
+    assert!(test_hook::refused(WID) >= 1, "the admission was refused");
+    assert!(no_channel_store(root.path(), WID));
+    assert_eq!(candidate.peek(), Adoption::Pending);
+    let halted = io
+        .host
+        .alarms
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, alarm)| matches!(alarm, WriterAlarm::Halted { .. }));
+    assert!(!halted);
+    let _ = handle.stop_and_join().await;
+    channel_home::unregister(&WID.to_string());
 }
 
 // ---- A gateway writer mid-admission when its channel's home mounts, on its own thread.
