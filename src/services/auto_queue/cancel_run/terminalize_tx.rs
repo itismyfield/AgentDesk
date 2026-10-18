@@ -231,16 +231,17 @@ pub(super) async fn terminalize_selected_runs_on_pg_tx(
     } else {
         Vec::new()
     };
-    let cleanup_task_id = crate::services::auto_queue::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
-        tx,
-        &locked_run_ids,
-        &cancelled_dispatch_ids,
-        &released_slot_keys,
-        &cancel_metas,
-        &card_rollback_tasks,
-        Some(reason),
-    )
-    .await?;
+    let cleanup_task_id =
+        crate::services::auto_queue::cleanup_tasks::enqueue_run_cleanup_task_on_tx(
+            tx,
+            &locked_run_ids,
+            &cancelled_dispatch_ids,
+            &released_slot_keys,
+            &cancel_metas,
+            &card_rollback_tasks,
+            Some(reason),
+        )
+        .await?;
     let remaining_live_dispatches =
         super::remaining_live_census::count_live_dispatches_associated_with_runs_on_pg_tx(
             tx,

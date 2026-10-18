@@ -497,13 +497,8 @@ async fn terminalize_selected_runs_with_pg(
         cleanup_task_id,
         remaining_live_dispatches,
         rollback_candidate_card_ids,
-    } = terminalize_selected_runs_on_pg_tx(
-        &mut tx,
-        target_run_ids,
-        reason,
-        should_rollback_cards,
-    )
-    .await?;
+    } = terminalize_selected_runs_on_pg_tx(&mut tx, target_run_ids, reason, should_rollback_cards)
+        .await?;
 
     tx.commit()
         .await
