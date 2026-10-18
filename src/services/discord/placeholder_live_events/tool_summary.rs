@@ -140,7 +140,8 @@ fn credential_command(input: &str) -> bool {
 
 fn credential_executable_line(line: &str) -> bool {
     static MARKERS: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^\s*(?:(?:[-*+•└▶✓✗?]|\[[ xX✓]\]|\d+[.)])\s*)*").expect("leading list markers")
+        Regex::new(r"^\s*(?:(?:[-*+•└▶✓✗?]|\[[ xX✓]\]|\d+[.)])(?:\s+|$))*")
+            .expect("leading list markers")
     });
     let stripped = MARKERS.replace(line, "");
     let mut words = stripped.split_whitespace();

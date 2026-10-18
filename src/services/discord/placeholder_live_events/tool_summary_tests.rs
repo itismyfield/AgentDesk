@@ -372,11 +372,7 @@ fn repair_credential_commands_show_only_class() {
         Some("**Plan**\n- [ ] fix mysql loader")
     );
     assert!(render("Bash", json!({"command":"echo ';' mysql loader"})).is_some());
-    assert!(
-        !safe_section("**Tasks**\n└ redis-cli -a CmdLeak9")
-            .unwrap()
-            .contains("CmdLeak9")
-    );
+    assert!(safe_section("**Tasks**\n└ redis-cli -a CmdLeak9").is_none());
     assert!(safe_section("Tasks\n└ Bash Launch codex").is_some());
     assert!(safe_section("Tasks\n└ Bash cargo test -p ordinary\\_crate · running").is_some());
     for title in ["redis-cli -a CmdLeak9", "-c 'redis-cli -a CmdLeak9'"] {
@@ -743,7 +739,7 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
     for command in [
         "echo $HOME ${PROJECT} $PASSWORD",
         "echo $PASSWORD $HOME",
-        "echo $THIS_IS_A_LONG_ORDINARY_VARIABLE_NAME",
+        "echo $GITHUB_TOKEN",
         "echo $(pwd)",
         "echo `pwd`",
         "echo $(echo $(pwd))",
@@ -751,6 +747,33 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
     ] {
         let output = render("Bash", json!({"command":command})).unwrap();
         assert_eq!(output.replace('\\', ""), command, "{output}");
+    }
+    for command in [
+        "echo 'Pa$Kd8f7g6h5j4k3l2m1n0b9v8c7x6z5a4s3d2SENT'",
+        "echo ${Kd8f7g6h5j4k3l2m1n0b9v8c7x6z5a4s3d2SENT}",
+    ] {
+        let output = render("Bash", json!({"command":command})).unwrap();
+        assert!(!output.contains("SENT"), "{output}");
+    }
+    for braces in [false, true] {
+        for length in [31, 32] {
+            let name = "N".repeat(length);
+            let reference = if braces {
+                format!("${{{name}}}")
+            } else {
+                format!("${name}")
+            };
+            let output = render("Bash", json!({"command":format!("echo {reference}")})).unwrap();
+            let visible = output.replace('\\', "");
+            assert_eq!(
+                visible,
+                if length == 31 {
+                    format!("echo {reference}")
+                } else {
+                    "echo $***".to_string()
+                }
+            );
+        }
     }
     for command in [
         "echo $HOME; client --password SubLeak9",
@@ -846,6 +869,58 @@ fn shell_wrappers_unwrap_one_argument_without_rejecting_non_shell_tools() {
     ] {
         assert!(render(tool, input).is_some(), "{tool}");
     }
+    assert!(
+        render(
+            "Task",
+            json!({"description":"docker login -u me -p NonshellSENT"})
+        )
+        .is_none()
+    );
+    assert!(safe_section("Plan\n- [ ] mysql -u root -p NonshellSENT 확인").is_none());
+    for command in [
+        "sshpass",
+        "htpasswd",
+        "redis-cli",
+        "mysql",
+        "mysqladmin",
+        "psql",
+        "op",
+        "vault",
+        "mongo",
+        "mongosh",
+        "docker login",
+        "podman login",
+        "gh auth",
+        "aws configure",
+    ] {
+        let description = format!("{command} -u me -p NonshellSENT");
+        assert!(
+            render("Task", json!({"description":description})).is_none(),
+            "{command}"
+        );
+        for marker in ["- [ ]", "▶", "└", "1.", "* [x]"] {
+            assert!(safe_section(&format!("Plan\n{marker} /usr/bin/{description}")).is_none());
+        }
+    }
+    assert!(
+        render(
+            "Task",
+            json!({"description":"inspect\nvault login NonshellSENT"})
+        )
+        .is_none()
+    );
+    assert_eq!(
+        render("Task", json!({"description":"bash 스크립트 정리"})).as_deref(),
+        Some("bash 스크립트 정리")
+    );
+    assert_eq!(
+        safe_section("Plan\n- [ ] bash 스크립트 정리").as_deref(),
+        Some("Plan\n- [ ] bash 스크립트 정리")
+    );
+    assert_eq!(
+        render("Task", json!({"description":"-mysql status"})).as_deref(),
+        Some("-mysql status")
+    );
     assert!(safe_section("Plan\n- [ ] bash script 정리").is_some());
 }
 
@@ -880,6 +955,24 @@ fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
         );
     }
     for phrase in [
+        "비밀번호 정책 문서화",
+        "api key 로테이션",
+        "pw 정책 검토",
+        "bash 스크립트 정리",
+    ] {
+        for tool in ["Task", "WebSearch"] {
+            assert_eq!(
+                render(tool, json!({"description":phrase,"query":phrase})).as_deref(),
+                Some(phrase)
+            );
+        }
+        assert_eq!(safe_section(phrase).as_deref(), Some(phrase));
+        assert_eq!(
+            render("Bash", json!({"command":format!("echo {phrase}")})).as_deref(),
+            Some(format!("echo {phrase}").as_str())
+        );
+    }
+    for phrase in [
         "npm config set _authToken SpacedLeak9",
         "rclone config secret_access_key SpacedLeak9",
         "password was ProseLeak9",
@@ -887,6 +980,10 @@ fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
         "passphrase ProseLeak9",
         "비밀번호는 ProseLeak9",
         "비밀번호: ProseLeak9",
+        "비밀번호은 ProseLeak9",
+        "pw = ProseLeak9",
+        "pw was ProseLeak9",
+        "api key is ProseLeak9",
     ] {
         for tool in ["Bash", "Task", "WebSearch"] {
             let output = render(
