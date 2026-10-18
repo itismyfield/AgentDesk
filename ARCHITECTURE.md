@@ -619,6 +619,7 @@ src/
 │   │   └── worker.rs
 │   ├── claude/
 │   │   ├── herdr_turn/
+│   │   │   ├── never_attached.rs
 │   │   │   └── provider_terminal_tests.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
