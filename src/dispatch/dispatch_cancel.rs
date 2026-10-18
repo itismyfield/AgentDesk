@@ -2,29 +2,14 @@ use anyhow::Result;
 use serde_json::json;
 use sqlx::{PgPool, Row as SqlxRow};
 
+use crate::db::auto_queue::run_owner_guard::RUN_OWNERS_FOR_DISPATCH;
+
 /// Cancel reasons that represent an explicit operator stop, not a system
 /// retry or supersession (#815). When we see one of these reasons we
 /// preserve the user's intent by moving the linked auto-queue entry to a
 /// non-dispatchable terminal status instead of resetting it back to
 /// `pending`, which would let the next tick re-dispatch the same work.
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
-
-/// Runs owning dispatch `td`. The context arm uses the migration `json_extract(text, text)`
-/// helper, which yields NULL for malformed JSON on PostgreSQL 15 and later.
-const RUN_OWNERS_FOR_DISPATCH: &str = r#"
-    SELECT e.run_id
-    FROM auto_queue_entries e
-    WHERE e.dispatch_id = td.id
-      AND e.status IN ('pending', 'dispatched', 'user_cancelled')
-    UNION ALL
-    SELECT pg.run_id
-    FROM auto_queue_phase_gates pg
-    WHERE pg.dispatch_id = td.id
-    UNION ALL
-    SELECT owner_ctx.run_id
-    FROM (SELECT json_extract(td.context, '$.phase_gate.run_id') AS run_id) owner_ctx
-    WHERE owner_ctx.run_id IS NOT NULL
-"#;
 
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
@@ -275,10 +260,13 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
 ) -> Result<CancelOutcome, String> {
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
+    // Lock the row before reading its status so a claim that commits mid-cancel is
+    // re-read here instead of silently failing the status CAS below.
     let current = sqlx::query(
         "SELECT status, kanban_card_id, to_agent_id, dispatch_type, thread_id
          FROM task_dispatches
-         WHERE id = $1",
+         WHERE id = $1
+         FOR UPDATE",
     )
     .bind(dispatch_id)
     .fetch_optional(&mut **tx)
