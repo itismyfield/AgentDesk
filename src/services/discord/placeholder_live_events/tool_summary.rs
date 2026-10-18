@@ -126,8 +126,9 @@ fn sanitized(raw: &str) -> Option<String> {
     .iter()
     .any(|key| lower.contains(key));
     // Encoded or incomplete secret-bearing syntax cannot be safely summarized.
-    if raw.contains('%')
-        || raw.contains('\0')
+    if raw.as_bytes().windows(3).any(|bytes| {
+        bytes[0] == b'%' && bytes[1].is_ascii_hexdigit() && bytes[2].is_ascii_hexdigit()
+    }) || raw.contains('\0')
         || (credential_syntax && !balanced_quotes(raw))
         || (raw.contains('\\')
             && (credential_syntax

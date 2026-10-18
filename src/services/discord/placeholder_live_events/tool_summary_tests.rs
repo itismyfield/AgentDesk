@@ -416,6 +416,10 @@ fn markdown_mentions_lengths_and_unrecognized_inputs_fail_safely() {
 
 #[test]
 fn existing_sections_share_the_secret_boundary_without_losing_lines_or_markdown() {
+    assert_eq!(
+        safe_section("Context 90% · auto-compact 80%").as_deref(),
+        Some("Context 90% · auto-compact 80%")
+    );
     let raw = "**Subagents**\n└ inspect ghp_ShortFakeLeak9\n  ▶ @everyone\n**Tasks**\n└ mysql --password 'SECTION_HEAD SECTION_TAIL'";
     let output = safe_section(raw).unwrap();
     assert!(output.starts_with("**Subagents**\n"), "{output}");
