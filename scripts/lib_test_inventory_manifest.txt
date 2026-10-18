@@ -1678,6 +1678,9 @@ services::analytics::session_metrics::tests::parse_machine_config_uses_host_and_
 services::api_friction::issue_body::tests::issue_body_evidence_formatting_stays_stable
 services::api_friction::issue_body::tests::issue_body_evidence_query_cap_stays_stable
 services::api_friction::issue_body::tests::issue_body_fallback_copy_stays_stable_without_evidence
+services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch
@@ -2491,9 +2494,11 @@ services::cluster::channel_home::ingress_snapshot::tests::a_taken_or_poisoned_lo
 services::cluster::channel_home::ingress_snapshot::tests::sampling_expires_prunes_closes_and_initializes_nothing
 services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
 services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
+services::cluster::channel_home::tests::a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set
 services::cluster::channel_home::tests::a_read_never_opens_the_home_and_force_leaves_nobody_holding_pg
 services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
 services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+services::cluster::channel_home::tests::a_restore_finishing_after_its_home_was_lost_opens_no_intake
 services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
 services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
 services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
@@ -2529,6 +2534,7 @@ services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg
+services::cluster::channel_home_boot::tests::a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::the_switch_and_the_rows_decide_what_the_boot_registers
@@ -2725,6 +2731,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gate
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_restart_under_a_worker_starts_no_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_standby_adopts_closed_then_opens_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_unregister_during_the_adopt_leaves_one_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
@@ -4342,6 +4349,13 @@ services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_
 services::discord::health::turn_deliver::inject_tests::shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg
 services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
 services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_configured_herdr_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_large_single_record_keeps_injection_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_live_rollover_bypasses_legacy_unknown_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_and_person_draft_keep_zero_paste_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_non_turn_mode_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_queued_rollover_bypasses_legacy_idle_pg
 services::discord::health::turn_deliver::tests::an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
 services::discord::health::turn_deliver::tests::only_listed_authors_of_an_owned_bot_pass_even_when_allow_all_is_on
@@ -6928,7 +6942,9 @@ services::discord::runtime_bootstrap::bootstrap_tests::voice_auto_join_provider_
 services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_returns_quickly_when_port_is_bound
 services::discord::runtime_bootstrap::channel_homes_tests::a_channel_delegated_after_a_rest_worker_boot_gets_a_writer_under_its_home_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_whose_restore_fails_keeps_intake_closed_until_a_restart_restores_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_writers_port_posts_over_the_bot_tokens_rest_client
 services::discord::runtime_bootstrap::channel_homes_tests::a_switched_on_runtime_it_cannot_prepare_holds_its_herdr_channels
 services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg
@@ -8708,6 +8724,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_paren
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_of_an_injected_message_never_runs_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_takes_a_message_whose_parent_owner_died_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once

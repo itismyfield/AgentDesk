@@ -42,7 +42,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
-| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of the standby boot restore. |
+| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs`, `src/services/cluster/channel_home_boot.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
 | `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |

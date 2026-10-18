@@ -88,6 +88,7 @@ src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/campaign_handoff_tests.rs
 src/services/auto_queue/cancel_run.rs
+src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs
 src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
 src/services/auto_queue/command.rs
@@ -145,6 +146,7 @@ src/services/discord/health/recovery.rs
 src/services/discord/health/recovery/live_agent_recovery.rs
 src/services/discord/health/recovery/stall_alert.rs
 src/services/discord/health/turn_deliver/inject/herdr_tests.rs
+src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs
 src/services/discord/health/turn_deliver/inject_codex_tests.rs
 src/services/discord/health/turn_deliver/inject_tests.rs
 src/services/discord/herdr_terminate.rs
@@ -229,6 +231,7 @@ src/services/discord/tui_prompt_relay/herdr_source_tests.rs
 src/services/discord/tui_prompt_relay/rehydration.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs
@@ -413,6 +416,7 @@ server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
+services::auto_queue::cancel_run::malformed_context_pg_tests
 services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
 services::auto_queue::cleanup_tasks::ownership_pg_tests
@@ -483,6 +487,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests
 services::discord::health::turn_deliver::inject::herdr::tests
 services::discord::health::turn_deliver::inject_codex_tests
 services::discord::health::turn_deliver::inject_tests
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading
 services::discord::herdr_terminate::exit_tests
 services::discord::herdr_terminate::route_tests
 services::discord::herdr_terminate::tests
@@ -576,6 +581,7 @@ services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
@@ -1283,6 +1289,9 @@ services::agent_recovery::durable::postgres_tests::postgres_same_provider_error_
 services::agent_recovery::durable::postgres_tests::postgres_stale_completion_cannot_claim_a_restarted_takeover
 services::agent_recovery::durable::postgres_tests::postgres_takeover_is_invisible_until_commit
 services::agent_recovery::durable::postgres_tests::postgres_wal_frontier_rejects_same_generation_stale_progress
+services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch
@@ -1395,6 +1404,7 @@ services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg
+services::cluster::channel_home_boot::tests::a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
@@ -1518,6 +1528,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gate
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_restart_under_a_worker_starts_no_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_standby_adopts_closed_then_opens_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_unregister_during_the_adopt_leaves_one_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
@@ -1621,6 +1632,13 @@ services::discord::health::turn_deliver::inject_tests::input_left_on_disk_for_an
 services::discord::health::turn_deliver::inject_tests::input_queued_or_claimed_while_the_host_lookup_waits_still_goes_first_pg
 services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_claimed_before_a_deliver_stays_ahead_of_it_pg
 services::discord::health::turn_deliver::inject_tests::shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_configured_herdr_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_large_single_record_keeps_injection_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_live_rollover_bypasses_legacy_unknown_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_and_person_draft_keep_zero_paste_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_non_turn_mode_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_queued_rollover_bypasses_legacy_idle_pg
 services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after_close_recovers_pg
 services::discord::herdr_terminate::route_tests::act_route_endpoint_lost_after_close_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_foreign_runtime_refused_pg
@@ -1903,7 +1921,9 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_channel_delegated_after_a_rest_worker_boot_gets_a_writer_under_its_home_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_whose_restore_fails_keeps_intake_closed_until_a_restart_restores_pg
 services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg
@@ -2063,6 +2083,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_paren
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_of_an_injected_message_never_runs_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_takes_a_message_whose_parent_owner_died_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::cancelled_anchor_recovery_keeps_a_person_draft_and_q_until_lift_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg
