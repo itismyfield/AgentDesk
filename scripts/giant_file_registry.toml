@@ -706,22 +706,6 @@ keep_reason = "Retain per-channel health snapshot composition and relay-verdict 
 # verbatim into `watchers/lifecycle/` child modules. Remove the [[entry]] and
 # frozen baseline path so future growth cannot be re-grandfathered.
 
-[[entry]]
-# #3721 first-batch promotion: residual tmux relay helper root remains giant
-# after earlier tmux.rs extraction rounds.
-file = "src/services/discord/tmux.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
-# #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
-# marker persistence, parser, tail loop, and completion heuristics.
-file = "src/services/codex_tui/rollout_tail.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
 
 # TRANSITION-LIST CLEANUP 2026-09-07 (#5742): four paths were still listed in
 # scripts/giant_file_closed_issue_transition_list.txt after their decompositions
@@ -779,17 +763,6 @@ decompose_issue = "#4712"
 # the 1000-prod-LoC giant threshold, so its promoted registry entry is removed
 # and cannot remain as a ghost.
 
-
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
-# claim/adoption and idle-tail cleanup now route releases through finalizer
-# authority with identity/session-key guards and preserve the global_active 1:1
-# mailbox-activation invariant. Decomposition would lift claim/adoption,
-# finalizer cleanup, and pending-start glue into narrower siblings.
-file = "src/services/discord/tui_prompt_relay/synthetic_start.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #3924: the recovery-net

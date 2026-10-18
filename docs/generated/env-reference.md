@@ -149,7 +149,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `APPDATA` | `src/services/platform/binary_resolver.rs` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs`, `src/services/claude_tui/transcript_tail.rs`, `src/services/discord/mcp_credential_watcher.rs`, `src/services/discord/recovery_engine/manual_rebind_override.rs` | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
-| `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
+| `CODEX_HOME` | `src/services/codex_tui/rollout_tail/discovery.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
 | `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
