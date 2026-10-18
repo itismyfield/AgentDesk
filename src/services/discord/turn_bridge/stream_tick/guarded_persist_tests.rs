@@ -1096,6 +1096,24 @@ fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
     assert!(rollover_send < immediate_rollover_bind);
     assert!(immediate_rollover_bind < post_rollover_panel);
 
+    let parent_tick = include_str!("../stream_tick.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production parent tick prefix");
+    let parent_relay_gate = parent_tick
+        .find("if !bridge_stream_relay_suppressed(")
+        .expect("parent relay gate remains present");
+    let rollover_call = parent_tick
+        .find("output::run_rollover_loop(")
+        .expect("parent tick calls the rollover phase");
+    let response_call = parent_tick
+        .find("output::refresh_streaming_response(")
+        .expect("parent tick calls the response refresh phase");
+    assert!(
+        parent_relay_gate < rollover_call && rollover_call < response_call,
+        "parent tick gates rollover before refreshing the response"
+    );
+
     let stream_loop = include_str!("../stream_loop.rs");
     let persistent_dirty = stream_loop
         .find("let mut state_dirty = false;")

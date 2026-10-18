@@ -2712,7 +2712,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/server/routes/agents.rs`
 - `src/server/routes/agents_crud.rs`
 - `src/server/routes/agents_setup.rs`
-- `src/server/routes/escalation.rs`
 - `src/server/routes/health_api.rs`
 - `src/server/routes/kanban.rs`
 - `src/server/routes/meetings.rs`
@@ -2742,7 +2741,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/discord/tmux_watcher.rs`
 - `src/services/discord/tmux_watcher/turn_stream_collector.rs`
 - `src/services/discord/tui_prompt_relay/synthetic_start.rs`
-- `src/services/discord/turn_bridge/stream_tick.rs`
 - `src/services/discord_config_audit.rs`
 - `src/services/dispatched_sessions.rs`
 - `src/services/dispatches/discord_delivery/orchestration.rs`
@@ -2757,7 +2755,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/agent_executor.rs`
 - `src/services/routines/discord_log.rs`
 - `src/services/routines/store.rs`
-- `src/services/settings.rs`
 - `src/services/tmux_common.rs`
 - `src/services/turn_orchestrator.rs`
 <!-- END GENERATED: GIANT PATHS -->
