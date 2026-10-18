@@ -384,6 +384,8 @@ jobs:
               - 'src/services/discord/queue_io/queued_head_auto_tests.rs'
               - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_guard_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_rig_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
