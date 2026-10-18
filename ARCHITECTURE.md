@@ -1206,6 +1206,12 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── validation.rs
 │   │   │   │   └── validation_tests.rs
+│   │   │   ├── delivery_record/
+│   │   │   │   ├── content.rs
+│   │   │   │   ├── frontier.rs
+│   │   │   │   ├── owner_context.rs
+│   │   │   │   ├── rollout.rs
+│   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
@@ -1606,6 +1612,7 @@ src/
 │   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
+│   │   │   ├── routing.rs
 │   │   │   ├── short_controller.rs
 │   │   │   ├── supervision.rs
 │   │   │   ├── task_notification_context.rs

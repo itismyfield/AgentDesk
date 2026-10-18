@@ -106,6 +106,7 @@ TARGETS = {
 DEFER_RE = re.compile(r"DEFER_[A-Z0-9_]+")
 R_EVID = (
     "src/services/discord/outbound/delivery_record.rs",
+    "src/services/discord/outbound/delivery_record/",
     "src/services/discord/outbound/completed_turn_ledger.rs",
     "src/services/discord/catch_up.rs",
     "src/services/discord/catch_up/",

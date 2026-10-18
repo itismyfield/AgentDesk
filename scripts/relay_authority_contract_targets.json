@@ -67,6 +67,13 @@
       ]
     },
     {
+      "path": "src/services/discord/session_relay_sink/routing.rs",
+      "decides": "whether the session-bound sink may own terminal delivery and the delivery lease it holds",
+      "guards": [
+        "named_target:t1-sink-terminal-handoff"
+      ]
+    },
+    {
       "path": "src/services/discord/tmux_watcher_registry/fences.rs",
       "decides": "the destructive watcher fence against a live delivery lease",
       "guards": [
