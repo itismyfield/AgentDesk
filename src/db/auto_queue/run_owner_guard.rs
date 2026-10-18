@@ -1,32 +1,5 @@
-//! Shared run-owner guard: serializes publication of a live dispatch owner with
-//! run cancellation on the `aq_run:<run_id>` advisory token.
-//!
-//! A live (`pending`/`dispatched`) dispatch is owned by run R through an
-//! `auto_queue_entries` link, an `auto_queue_phase_gates` row, or the context's
-//! `phase_gate.run_id` ([`RUN_OWNERS_FOR_DISPATCH`]). A commit that makes R an owner
-//! takes R's token first, re-reads R after the wait, and refuses when R is no longer
-//! live. Cancellation takes the same token before it reads candidate dispatches, so a
-//! writer either commits before cancel reads or wakes up to a terminal run.
-//!
-//! Lock order: `aq_retry` < sorted `aq_run` < dispatch rows (`FOR UPDATE`) < two-argument
-//! phase key < phase-gate rows. No participant waits for `aq_run` while holding a row.
-//!
-//! | participant | order |
-//! |---|---|
-//! | terminalize (cancel/end) | sorted `aq_run` → entries `FOR UPDATE` → each dispatch `FOR UPDATE` → gate rows → runs → entries → slots → cards |
-//! | force-pause cleanup | sorted `aq_run` → each dispatch `FOR UPDATE` (same body as terminalize) |
-//! | entry attach choke point | `aq_run` → dispatch `FOR SHARE` → entry CAS |
-//! | activate create / consultation / done reactivation / reopen / reset | `aq_run` first, then their own rows |
-//! | retry | `aq_retry` → entry run `aq_run`, or the context run when no entry owns the origin → origin row → phase key → gate row → INSERT |
-//! | context-bearing create | context run `aq_run` → stale review-decision rows → INSERT |
-//! | phase-gate save with dispatches | sorted `aq_run` (target and current gate owners) → dispatch rows `FOR UPDATE` → owner re-read → phase key → gate rows |
-//! | phase-gate save without dispatches, terminal status writer, gate repair | dispatch rows → phase key → gate rows (no `aq_run`) |
-//! | finalize | `aq_run` try-lock only, never waits |
-//! | cluster claim, outbox delivery | dispatch row only (live → live, not an owner publication) |
-//!
-//! Raw owner-write SQL lives in the private `writes` module and is reached only through
-//! the guarded functions below. `scripts/check_run_owner_raw_writer_call_sites.py` flags
-//! raw owner writes elsewhere; the PG contention tests prove the guard itself.
+//! Serializes live-dispatch owner publication with run cancellation on `aq_run:<run_id>`:
+//! a publisher takes the owner run token first, re-reads the run and refuses a terminal one.
 
 mod writes;
 
@@ -120,7 +93,8 @@ pub(crate) struct NormalizedPhaseGateState {
     pub(crate) created_at: Option<String>,
 }
 
-/// Take the run tokens of the existing runs in `run_ids`, sorted by creation.
+/// Lock order: `aq_retry` < sorted `aq_run` < dispatch rows < two-argument phase key < gate
+/// rows. Raw owner SQL stays in `writes`; no caller waits here while holding a row lock.
 pub(crate) async fn lock_owner_runs_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_ids: &[String],
@@ -172,9 +146,8 @@ async fn context_owner_run_id_on_pg_tx(
         .map_err(|error| format!("read phase-gate owner from dispatch context: {error}"))
 }
 
-/// Guard a new dispatch whose context may name a `phase_gate.run_id` owner. Callers
-/// that already hold an entry owner's token pass it; a different context run is refused
-/// instead of taking a second token out of order.
+/// Guard a new dispatch whose context names a `phase_gate.run_id` owner. A caller holding an
+/// entry owner's token passes it, and a different context run is refused, not locked late.
 pub(crate) async fn guard_context_owner_publication_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     context: Option<&str>,
@@ -240,10 +213,8 @@ async fn phase_gate_source_runs_on_pg_tx(
     .map_err(|error| format!("load phase-gate owners for run {run_id} phase {phase}: {error}"))
 }
 
-/// Save one (run, phase) gate state. With dispatches, the target run and every run
-/// whose gate row currently holds one of them are locked in token order, the dispatch
-/// rows are locked, and the owners are re-read before the phase key: a save that waited
-/// behind another save or a cancellation sees the committed owners and refuses.
+/// Save one (run, phase) gate state. With dispatches it locks the target and current gate-owner
+/// runs, then the dispatch rows, and re-reads the owners so a save that waited sees them.
 pub(crate) async fn publish_phase_gate_state_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &str,
