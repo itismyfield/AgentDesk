@@ -827,16 +827,6 @@ decompose_issue = "#4712"
 # the 1000-prod-LoC giant threshold, so its promoted registry entry is removed
 # and cannot remain as a ghost.
 
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery
-# record sidecar gained bounded content fingerprints for degenerate watcher
-# lease-key duplicate suppression. Decomposition should split the lease,
-# delivered-frontier, owner-context, and recent-content fingerprint stores into
-# narrower outbound/delivery_record siblings.
-file = "src/services/discord/outbound/delivery_record.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4019 R2: synthetic TUI-direct
