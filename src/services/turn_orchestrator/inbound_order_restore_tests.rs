@@ -106,9 +106,8 @@ impl Channel {
     }
 }
 
-/// A head whose dispatch keeps failing is handed back every round with no
-/// cap. Each return may wipe the window only for the backstop rounds the window
-/// spans; past those the clock keeps running and later input fails open.
+/// A head whose dispatch keeps failing comes back every round. Only the first returns, one per
+/// backstop round the window spans, wipe it; past those the stalled window fails open.
 #[tokio::test]
 async fn a_head_that_keeps_returning_unclaimed_stops_wiping_the_stall_window() {
     let channel = Channel::new(5_985_101);
