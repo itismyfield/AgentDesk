@@ -81,6 +81,15 @@ pub(crate) struct NewRetryDispatchRow<'a> {
     pub(crate) retry_count: i64,
 }
 
+/// A canonical status write that applies only while the row still has `current_status`.
+pub(crate) struct StatusRowUpdate<'a> {
+    pub(crate) dispatch_id: &'a str,
+    pub(crate) current_status: &'a str,
+    pub(crate) to_status: &'a str,
+    pub(crate) result_json: Option<&'a str>,
+    pub(crate) touch_completed_at: bool,
+}
+
 /// Phase-gate state after the caller trimmed and defaulted every field.
 pub(crate) struct NormalizedPhaseGateState {
     pub(crate) status: String,
@@ -289,4 +298,82 @@ pub(crate) async fn publish_phase_gate_state_on_pg_tx(
         persisted_dispatch_ids: persisted,
         removed_stale_rows,
     })
+}
+
+async fn dispatch_owner_runs_on_pg_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    dispatch_id: &str,
+) -> Result<Vec<String>, String> {
+    sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+        "SELECT DISTINCT owner.run_id
+         FROM task_dispatches td
+         CROSS JOIN LATERAL ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+         WHERE td.id = $1
+         ORDER BY owner.run_id"
+    )))
+    .bind(dispatch_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("load owner runs of dispatch {dispatch_id}: {error}"))
+}
+
+/// Before a write to a live status, lock the dispatch's owner runs and then its row. Reviving a
+/// terminal row is refused when an owner run is no longer live or appeared after the lock.
+async fn guard_dispatch_revival_on_pg_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    to_status: &str,
+) -> Result<(), String> {
+    if !matches!(to_status, "pending" | "dispatched") {
+        return Ok(());
+    }
+    let owners = dispatch_owner_runs_on_pg_tx(tx, dispatch_id).await?;
+    lock_owner_runs_on_pg_tx(tx, &owners).await?;
+    let Some(status) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT status FROM task_dispatches WHERE id = $1 FOR UPDATE",
+    )
+    .bind(dispatch_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("lock dispatch {dispatch_id} before revival: {error}"))?
+    else {
+        return Ok(());
+    };
+    if matches!(status.as_deref(), Some("pending" | "dispatched")) {
+        return Ok(());
+    }
+    // Owners without a run row were never locked; they pass like a missing run does.
+    let fresh = dispatch_owner_runs_on_pg_tx(tx, dispatch_id).await?;
+    if let Some(gained) = fresh.iter().find(|run_id| !owners.contains(run_id)) {
+        return Err(format!(
+            "dispatch {dispatch_id} gained owner run {gained} outside the locked set; retry"
+        ));
+    }
+    require_live_owner_runs_on_pg_tx(tx, &fresh).await
+}
+
+/// Apply a canonical status write; one to a live status first passes the revival guard.
+pub(crate) async fn update_dispatch_status_row_on_pg_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    update: &StatusRowUpdate<'_>,
+) -> Result<u64, OwnerWriteError> {
+    guard_dispatch_revival_on_pg_tx(tx, update.dispatch_id, update.to_status).await?;
+    writes::update_dispatch_status_row(tx, update)
+        .await
+        .map_err(OwnerWriteError::Db)
+}
+
+/// Rewrite a review dispatch's target context and status while it is still `from_status`,
+/// after the revival guard.
+pub(crate) async fn update_review_recovery_row_on_pg_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    context: &str,
+    from_status: &str,
+    to_status: &str,
+) -> Result<u64, OwnerWriteError> {
+    guard_dispatch_revival_on_pg_tx(tx, dispatch_id, to_status).await?;
+    writes::update_review_recovery_row(tx, dispatch_id, context, from_status, to_status)
+        .await
+        .map_err(OwnerWriteError::Db)
 }

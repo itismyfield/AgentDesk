@@ -3,7 +3,7 @@
 
 use sqlx::{Postgres, Transaction};
 
-use super::{NewDispatchRow, NewRetryDispatchRow, NormalizedPhaseGateState};
+use super::{NewDispatchRow, NewRetryDispatchRow, NormalizedPhaseGateState, StatusRowUpdate};
 
 pub(super) async fn insert_dispatch_row(
     tx: &mut Transaction<'_, Postgres>,
@@ -211,4 +211,99 @@ pub(super) async fn move_phase_gate_dispatch_row(
         )
     })?;
     Ok(())
+}
+
+pub(super) async fn update_dispatch_status_row(
+    tx: &mut Transaction<'_, Postgres>,
+    update: &StatusRowUpdate<'_>,
+) -> Result<u64, sqlx::Error> {
+    let query = match (update.result_json, update.touch_completed_at) {
+        (Some(result_json), true) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 result = CAST($2 AS jsonb),
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
+                 completed_at = CASE
+                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
+                     ELSE completed_at
+                 END
+             WHERE id = $3
+               AND status = $4",
+        )
+        .bind(update.to_status)
+        .bind(result_json)
+        .bind(update.dispatch_id)
+        .bind(update.current_status),
+        (Some(result_json), false) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 result = CAST($2 AS jsonb),
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
+             WHERE id = $3
+               AND status = $4",
+        )
+        .bind(update.to_status)
+        .bind(result_json)
+        .bind(update.dispatch_id)
+        .bind(update.current_status),
+        (None, true) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL,
+                 completed_at = CASE
+                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
+                     ELSE completed_at
+                 END
+             WHERE id = $2
+               AND status = $3",
+        )
+        .bind(update.to_status)
+        .bind(update.dispatch_id)
+        .bind(update.current_status),
+        (None, false) => sqlx::query(
+            "UPDATE task_dispatches
+             SET status = $1,
+                 updated_at = NOW(),
+                 last_stuck_alert_at = NULL
+             WHERE id = $2
+               AND status = $3",
+        )
+        .bind(update.to_status)
+        .bind(update.dispatch_id)
+        .bind(update.current_status),
+    };
+    query
+        .execute(&mut **tx)
+        .await
+        .map(|done| done.rows_affected())
+}
+
+pub(super) async fn update_review_recovery_row(
+    tx: &mut Transaction<'_, Postgres>,
+    dispatch_id: &str,
+    context: &str,
+    from_status: &str,
+    to_status: &str,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "UPDATE task_dispatches
+         SET context = $1,
+             status = $2,
+             result = CASE WHEN status = 'failed' THEN NULL ELSE result END,
+             completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
+             updated_at = NOW(),
+             last_stuck_alert_at = NULL
+         WHERE id = $3
+           AND status = $4",
+    )
+    .bind(context)
+    .bind(to_status)
+    .bind(dispatch_id)
+    .bind(from_status)
+    .execute(&mut **tx)
+    .await
+    .map(|done| done.rows_affected())
 }

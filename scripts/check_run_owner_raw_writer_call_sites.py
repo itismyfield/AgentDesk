@@ -91,14 +91,6 @@ EXPECTED_EXCEPTIONS: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "delivery moves pending to dispatched behind a status CAS, not a revival",
     ),
-    ("src/dispatch/dispatch_status.rs", UPDATE_DISPATCH_LIVE): (
-        4,
-        "canonical status writer revival is guarded in the revival slice",
-    ),
-    ("src/server/routes/reviews.rs", UPDATE_DISPATCH_LIVE): (
-        1,
-        "review recovery revival is guarded in the revival slice",
-    ),
 }
 
 

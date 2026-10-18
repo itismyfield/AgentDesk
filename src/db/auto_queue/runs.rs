@@ -353,8 +353,8 @@ async fn run_entry_readiness_on_pg_tx(
 /// entry choke points, done-entry reactivation, retry attachment, campaign
 /// handoff append, activate's empty-run completion `complete_run_if_empty`,
 /// and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
-/// Owner publication joins them through `run_owner_guard`: phase-gate context creation, the
-/// context run of an entry-less retry, phase-gate saves that carry dispatches, force-pause cleanup.
+/// Owner publication joins them through `run_owner_guard`: context creation, entry-less retry,
+/// dispatch-carrying gate saves, force-pause cleanup, status-writer and review-recovery revival.
 /// Retry already takes the d1 retry token first and then the run token before its
 /// failed-sync and replacement attachment. Later cards/entries/runs/slots
 /// ordering is serialized by that first run token for these participants.
