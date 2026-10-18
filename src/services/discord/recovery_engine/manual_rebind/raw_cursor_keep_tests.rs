@@ -11,6 +11,8 @@ enum Cursor {
     Normalized,
     OtherRaw,
     Absent,
+    /// A normalized row whose rollout already holds the next user prompt.
+    Crossed,
 }
 
 /// Which public rebind entry the case drives.
@@ -88,6 +90,145 @@ impl Drop for CancelWatcher {
     }
 }
 
+fn file_identity(
+    path: &std::path::Path,
+) -> crate::services::cluster::stream_relay::SourceFileIdentity {
+    crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+        &std::fs::File::open(path).unwrap(),
+    )
+}
+
+fn codex_user(text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"timestamp":"2099-01-01T00:00:00Z", "type":"response_item", "payload":{
+            "type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]
+        }})
+    )
+}
+
+/// The row's turn, then the next user prompt with its answer and completion.
+fn crossed_rollout() -> String {
+    let complete = serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":"new-turn-7120"}});
+    format!(
+        "{}{}{}{}{complete}\n",
+        codex_user("current turn"),
+        native_text("cur", "old-answer-7120"),
+        codex_user("next turn"),
+        native_text("new", "new-turn-7120")
+    )
+}
+
+/// The crossed case's old relay is longer than any rebuilt answer, so the old
+/// watermark alone would hide every rebuilt byte.
+fn normalized_relay(cursor: Cursor) -> String {
+    normalized_line(&if cursor == Cursor::Crossed {
+        "stale-normalized-".repeat(64)
+    } else {
+        "normalized".into()
+    })
+}
+
+/// The rebuilt relay, read from the offset the rebind chose, reaches the sink
+/// parser after the old relay's frames already set a higher watermark.
+fn assert_crossed_rebuild_reaches_sink(
+    channel_id: u64,
+    tmux: &str,
+    relay: &std::path::Path,
+    before: crate::services::cluster::stream_relay::SourceFileIdentity,
+    initial_offset: u64,
+) {
+    use crate::services::cluster::stream_relay::{ReadSource, StreamFrame};
+    assert_eq!(
+        initial_offset, 0,
+        "a crossed-turn rebuild restarts the relay coordinates"
+    );
+    let after = file_identity(relay);
+    assert_ne!(
+        after, before,
+        "restarted relay coordinates must come with a new relay file"
+    );
+    let binding = crate::services::cluster::session_matcher::MatchedChannel {
+        channel_id: channel_id.to_string(),
+        agent_id: "raw-7120-cdx".into(),
+        provider: ProviderKind::Codex,
+        expected_session_name: tmux.to_string(),
+        expected_rollout_path: relay.display().to_string(),
+    };
+    let frame = |payload: String, sequence, file, producer| StreamFrame {
+        session_name: tmux.to_string(),
+        binding: binding.clone(),
+        source_span: Some((0, payload.len() as u64)),
+        payload,
+        sequence,
+        terminal_consumed_end: None,
+        turn_user_msg_id: 0,
+        turn_started_at: String::new(),
+        turn_start_offset: None,
+        relay_range: None,
+        relay_generation_mtime_ns: None,
+        relay_source_stamp: None,
+        read_source: Some(ReadSource { file, producer }),
+    };
+    let mut parser =
+        crate::services::discord::session_relay_sink::turn_parser::SessionRelayParser::default();
+    assert!(
+        parser
+            .ingest_frame(&frame(normalized_relay(Cursor::Crossed), 1, before, 5))
+            .is_empty()
+    );
+    let mut rebuilt = String::new();
+    for _ in 0..50 {
+        rebuilt = std::fs::read_to_string(relay).unwrap();
+        if rebuilt.contains("\"type\":\"result\"") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if rebuilt.contains("\"type\":\"result\"") {
+        println!("T-B2-6 writer->relay: PROVEN");
+    } else {
+        // Manual injection proves rebind planning and read->sink only.
+        println!("T-B2-6 writer->relay: NOT_PROVEN");
+        let manual = format!(
+            "{}{}\n",
+            normalized_line("new-turn-7120"),
+            serde_json::json!({"type":"result", "result":"new-turn-7120"})
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(relay)
+            .unwrap()
+            .write_all(manual.as_bytes())
+            .unwrap();
+        rebuilt = std::fs::read_to_string(relay).unwrap();
+    }
+    assert_eq!(file_identity(relay), after);
+    let deliveries = parser.ingest_frame(&frame(
+        rebuilt[initial_offset as usize..].to_string(),
+        2,
+        after,
+        6,
+    ));
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the rebuilt turn completes in the sink"
+    );
+    assert!(
+        deliveries[0].response_text.contains("new-turn-7120"),
+        "{:?}",
+        deliveries[0].response_text
+    );
+}
+
+fn normalized_line(text: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":text}]}})
+    )
+}
+
 fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
@@ -124,11 +265,12 @@ fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
         let head = format!("{old_turn}{}{}", "{}\n".repeat(8_192), native_text("prefix", "prefix-7120"));
         let cursor_offset = head.len() as u64;
         let gap = native_text("tail", "fresh-tail-7120");
-        std::fs::write(&raw, format!("{head}{gap}")).unwrap();
+        std::fs::write(&raw, if cursor == Cursor::Crossed { crossed_rollout() } else { format!("{head}{gap}") }).unwrap();
         std::fs::write(&other, &head).unwrap();
         if cursor != Cursor::Raw {
-            std::fs::write(&relay, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"normalized\"}]}}\n").unwrap();
+            std::fs::write(&relay, normalized_relay(cursor)).unwrap();
         }
+        let relay_before = (cursor == Cursor::Crossed).then(|| file_identity(&relay));
         let saved_path = match cursor {
             Cursor::Raw => &raw_saved, Cursor::OtherRaw => &other, _ => &relay,
         };
@@ -202,6 +344,8 @@ fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
                 assert_eq!(response.matches("prefix-7120").count(), 1);
                 assert!(!response.contains("old-turn-7120"));
             }
+        } else if let Some(relay_before) = relay_before {
+            assert_crossed_rebuild_reaches_sink(channel_id, &tmux, &relay, relay_before, outcome.initial_offset);
         } else {
             assert!(!outcome.watcher_spawned && !outcome.watcher_replaced);
             assert!(Arc::ptr_eq(&shared.tmux_watchers.get(&channel).unwrap().cancel, &original_cancel));
@@ -245,4 +389,11 @@ fn absent_inflight_still_uses_normalized_plan() {
 #[test]
 fn default_override_rebind_reuses_healthy_matching_raw_incumbent() {
     rebind_case(Cursor::Raw, false, Entry::Default, false);
+}
+
+/// The stall watchdog's pinned rebind of a normalized row whose rollout moved to
+/// the next prompt rebuilds the relay, and the new turn reaches the sink.
+#[test]
+fn crossed_turn_rebind_rebuilds_into_a_new_relay_file_and_delivers_the_new_turn() {
+    rebind_case(Cursor::Crossed, false, Entry::Default, false);
 }
