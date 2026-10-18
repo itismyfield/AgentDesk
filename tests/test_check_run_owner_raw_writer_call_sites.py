@@ -143,6 +143,24 @@ class SetClauseTests(FixtureTree):
                 hits = self.hits({PROD: rust_sql(sql)})
                 self.assertTrue(guard.violations(hits, {}))
 
+    def test_clause_keywords_inside_sql_strings_and_comments_do_not_end_set(self):
+        for sql in (
+            "UPDATE task_dispatches SET title='WHERE', status=$1 WHERE id=$2",
+            "UPDATE task_dispatches SET title='a FROM b', status='pending' WHERE id=$1",
+            "UPDATE task_dispatches SET title='x;y', status='dispatched' WHERE id=$1",
+            "UPDATE task_dispatches SET title='it''s WHERE', status=$1 WHERE id=$2",
+            "UPDATE task_dispatches SET title=$1 -- WHERE note\n, status=$2 WHERE id=$3",
+            "UPDATE task_dispatches SET title=$1 /* RETURNING ; */, status=$2 WHERE id=$3",
+        ):
+            with self.subTest(sql=sql):
+                self.assertEqual(self.owner_writes(sql), [guard.UPDATE_DISPATCH_LIVE])
+        self.assertEqual(
+            self.owner_writes(
+                "UPDATE task_dispatches SET status='failed', title='WHERE x' WHERE id=$1 AND status=$2"
+            ),
+            [],
+        )
+
     def test_owner_column_set_on_gate_and_entry_is_red(self):
         self.assertEqual(
             self.owner_writes("UPDATE auto_queue_phase_gates SET run_id = $1 WHERE id = $2"),

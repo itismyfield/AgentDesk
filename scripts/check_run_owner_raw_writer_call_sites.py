@@ -159,13 +159,39 @@ def test_spans(mask: str) -> list[tuple[int, int]]:
     return spans
 
 
+def skip_sql_quote_or_comment(sql: str, index: int) -> int:
+    """End of the SQL string or comment opening at `index`, or `index` when none opens there."""
+    if sql[index] == "'":
+        end = index + 1
+        while end < len(sql):
+            if sql[end] == "'":
+                if sql.startswith("''", end):
+                    end += 2
+                    continue
+                return end + 1
+            end += 1
+        return len(sql)
+    if sql.startswith("--", index):
+        end = sql.find("\n", index)
+        return len(sql) if end < 0 else end
+    if sql.startswith("/*", index):
+        end = sql.find("*/", index + 2)
+        return len(sql) if end < 0 else end + 2
+    return index
+
+
 def set_clause(sql: str, start: int) -> str:
     """The top-level SET clause of the UPDATE starting at `start`, or ''."""
     match = SET_RE.search(sql, start)
     if match is None:
         return ""
     depth = 0
-    for index in range(match.end(), len(sql)):
+    index = match.end()
+    while index < len(sql):
+        skipped = skip_sql_quote_or_comment(sql, index)
+        if skipped != index:
+            index = skipped
+            continue
         char = sql[index]
         if char == "(":
             depth += 1
@@ -177,6 +203,7 @@ def set_clause(sql: str, start: int) -> str:
             return sql[match.end() : index]
         elif depth == 0 and SET_END_RE.match(sql, index) and not sql[index - 1].isalnum():
             return sql[match.end() : index]
+        index += 1
     return sql[match.end() :]
 
 
