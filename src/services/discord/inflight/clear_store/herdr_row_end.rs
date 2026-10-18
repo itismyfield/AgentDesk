@@ -62,12 +62,7 @@ impl InflightTurnState {
     }
 }
 
-#[cfg(not(test))]
+/// The receipt recheck, which only a test build's mutant turns off.
 fn receipt_rechecked() -> bool {
-    true
-}
-
-#[cfg(test)]
-fn receipt_rechecked() -> bool {
-    std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() != Ok("receipt")
+    !cfg!(test) || std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() != Ok("receipt")
 }

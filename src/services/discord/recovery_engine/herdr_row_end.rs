@@ -176,32 +176,22 @@ async fn end_row(
     };
     let outcome = relay_recovery_body_notice(&http, shared, provider, &row, &text).await;
     if outcome != RecoveryRelayOutcome::Delivered {
-        tracing::warn!(
-            channel_id = row.channel_id,
-            ?outcome,
-            "herdr row end: notice not delivered; row kept"
-        );
-        return;
+        return kept(&row, "notice not delivered");
     }
     let report = super::restart_report::load_restart_report(provider, row.channel_id);
     #[cfg(test)]
-    test_hooks::run("before_clear").await;
+    tests::hook("before_clear").await;
     let (snapshot, owner) = (row.clone(), provider.clone());
     let cleared =
         tokio::task::spawn_blocking(move || snapshot.clear_restarted_herdr_row(&owner, current))
             .await;
     if !matches!(cleared, Ok(inflight::GuardedClearOutcome::Cleared)) {
-        tracing::warn!(
-            channel_id = row.channel_id,
-            ?cleared,
-            "herdr row end: fresh row is not this turn; kept"
-        );
-        return;
+        return kept(&row, "the fresh row is not this turn");
     }
     super::restart_report::clear_loaded_restart_report(report.as_ref());
     tracing::info!(
         channel_id = row.channel_id,
-        "herdr row end: restarted turn settled"
+        "herdr row end settled a restarted turn"
     );
     drop(transition);
     super::schedule_deferred_idle_queue_kickoff(
@@ -209,6 +199,14 @@ async fn end_row(
         provider.clone(),
         channel,
         "herdr_row_end",
+    );
+}
+
+fn kept(row: &inflight::InflightTurnState, why: &str) {
+    tracing::warn!(
+        channel_id = row.channel_id,
+        why,
+        "herdr row end kept the row"
     );
 }
 
@@ -330,7 +328,7 @@ async fn observe(
 async fn commit(pool: &sqlx::PgPool, seen: Seen) -> Option<Ended> {
     if let Some((observation, record)) = &seen.retire {
         #[cfg(test)]
-        test_hooks::run("before_retire").await;
+        tests::hook("before_retire").await;
         let retired = hosted::retire_pg(pool, observation, &record.owner, &seen.nonce).await;
         if !matches!(retired, Ok(HostedCasOutcome::Written)) {
             return None;
@@ -484,40 +482,11 @@ fn codex_last_turn_closed(file: &mut std::fs::File, len: u64) -> Option<bool> {
     Some(closed)
 }
 
-#[cfg(not(test))]
-fn mutant(_: &str) -> bool {
-    false
-}
-
-#[cfg(test)]
+/// A test build's mutant switch; always off otherwise.
 fn mutant(name: &str) -> bool {
-    std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
+    cfg!(test) && std::env::var("ADK_HERDR_ROW_END_MUTANT").as_deref() == Ok(name)
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) mod test_hooks {
-    use std::future::Future;
-    use std::pin::Pin;
-
-    type Hook = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
-
-    thread_local! {
-        static HOOKS: std::cell::RefCell<Vec<(&'static str, Hook)>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-
-    /// Runs `hook` once when an end task on this thread reaches `point`.
-    pub(in crate::services::discord) fn once(point: &'static str, hook: Hook) {
-        HOOKS.with(|hooks| hooks.borrow_mut().push((point, hook)));
-    }
-
-    pub(super) async fn run(point: &'static str) {
-        let hook = HOOKS.with(|hooks| {
-            let mut hooks = hooks.borrow_mut();
-            let at = hooks.iter().position(|(name, _)| *name == point)?;
-            Some(hooks.remove(at).1)
-        });
-        if let Some(hook) = hook {
-            hook().await;
-        }
-    }
-}
+#[path = "herdr_row_end_tests.rs"]
+mod tests;
