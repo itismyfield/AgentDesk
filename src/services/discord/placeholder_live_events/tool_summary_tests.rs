@@ -299,8 +299,12 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         ("the password was ProseLeak9", &["ProseLeak9"]),
         ("비밀번호는 KoreanLeak9", &["KoreanLeak9"]),
         ("비밀번호: KoreanLeak9", &["KoreanLeak9"]),
+        ("echo $ghp_RefTokenLeak9 $HOME", &["RefTokenLeak9"]),
+        ("echo ${ghp_RefTokenLeak9} $HOME", &["RefTokenLeak9"]),
+        ("echo $sk-RefTokenLeak9 $HOME", &["RefTokenLeak9"]),
+        ("export $KEY=RefAssignLeak9", &["RefAssignLeak9"]),
     ];
-    assert_eq!(cases.len(), 80);
+    assert_eq!(cases.len(), 84);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let input =
@@ -739,6 +743,7 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
     for command in [
         "echo $HOME ${PROJECT} $PASSWORD",
         "echo $PASSWORD $HOME",
+        "echo $THIS_IS_A_LONG_ORDINARY_VARIABLE_NAME",
         "echo $(pwd)",
         "echo `pwd`",
         "echo $(echo $(pwd))",
@@ -749,6 +754,9 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
     }
     for command in [
         "echo $HOME; client --password SubLeak9",
+        "echo $ghp_SubLeak9 $HOME",
+        "echo ${ghp_SubLeak9} $HOME",
+        "echo $sk-SubLeak9 $HOME",
         "DB_PASS=$(printf SubLeak9) echo $HOME",
         "client --password $(printf SubLeak9)",
         "client --password `printf SubLeak9`",
@@ -768,6 +776,8 @@ fn shell_references_and_substitutions_remain_visible_with_masked_values() {
     }
     for command in [
         "echo $(redis-cli -a SubLeak9)",
+        "export $KEY=SubLeak9",
+        "export ${NAME}=SubLeak9",
         "echo `redis-cli -a SubLeak9`",
         "echo $(pwd",
         "echo `pwd",

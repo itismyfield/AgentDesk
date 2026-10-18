@@ -269,14 +269,18 @@ fn redact_urls(input: &str) -> String {
     QUERY.replace_all(&masked, "${1}***").into_owned()
 }
 
-fn redact_tokens(input: &str) -> String {
+fn redact_token_prefixes(input: &str) -> String {
     static KNOWN: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)(?:gh[pousr]_[a-z0-9_]+|github_pat_[a-z0-9_]+|sk-(?:ant-)?[a-z0-9_-]+|xox[bp]-[a-z0-9-]+|(?:AKIA|ASIA)[a-z0-9]+|AIza[a-z0-9_-]+|eyJ[a-z0-9_-]+(?:\.[a-z0-9_-]+){0,2})").expect("known token prefixes")
     });
+    let masked = redact_extra_tokens(input);
+    KNOWN.replace_all(&masked, "***").into_owned()
+}
+
+fn redact_tokens(input: &str) -> String {
     static OPAQUE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+/_=-]{32,}").expect("opaque credential chunks"));
-    let masked = redact_extra_tokens(input);
-    let masked = KNOWN.replace_all(&masked, "***");
+    let masked = redact_token_prefixes(input);
     OPAQUE.replace_all(&masked, "***").into_owned()
 }
 
@@ -459,6 +463,9 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
                     .expect("variable name references")
             });
             let reference = REFERENCE.find(tail)?.as_str();
+            if tail[reference.len()..].trim_start().starts_with('=') {
+                return None;
+            }
             masked.push_str(reference);
             cursor += reference.len();
             continue;
@@ -473,6 +480,8 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
         Regex::new(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
             .expect("visible variable references")
     });
+    let masked = redact_token_prefixes(&masked);
+    let masked = crate::utils::redact::redact_known_secrets(&masked);
     let mut references = Vec::new();
     let protected = REFERENCES.replace_all(&masked, |capture: &regex::Captures<'_>| {
         references.push(capture[0].to_string());
