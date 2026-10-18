@@ -30,6 +30,34 @@ pub(crate) fn provider_error_from_completion(completion: &AgentTurnCompletion) -
     let message = completion.assistant_message.as_deref()?;
     is_strong_provider_error_transcript(message).then(|| assistant_preview(message))
 }
+/// A terminal `turn_error` waits this long so a transcript persisted right after
+/// the quality event still completes the run.
+pub(super) const TERMINAL_TURN_ERROR_SETTLE_SECS: i64 = 30;
+
+/// Turn-bridge outcomes that end a turn without a deliverable and without an
+/// in-place retry; `empty_response` is a completion, `recovery_retry` reruns.
+const TERMINAL_TURN_ERROR_OUTCOMES: [&str; 3] = ["cancelled", "transport_error", "prompt_too_long"];
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(super) struct TerminalTurnErrorRow {
+    outcome: String,
+    created_at: DateTime<Utc>,
+}
+
+/// The settled terminal outcome of a fresh run's turn, if any. Persistent-session
+/// runs keep waiting for their transcript or the timeout.
+pub(super) fn settled_terminal_turn_error(
+    run: &RunningAgentRoutineRun,
+    row: Option<TerminalTurnErrorRow>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let row = row?;
+    (run.execution_strategy == "fresh"
+        && now.signed_duration_since(row.created_at)
+            >= Duration::seconds(TERMINAL_TURN_ERROR_SETTLE_SECS))
+    .then_some(row.outcome)
+}
+
 pub(super) fn fresh_provider_session_probe_allowed(
     run: &RunningAgentRoutineRun,
     now: DateTime<Utc>,
@@ -122,6 +150,69 @@ impl RoutineAgentExecutor {
                     run.run_id
                 )
             })
+    }
+    /// Failure that ends a running fresh turn before the completion timeout:
+    /// a settled terminal turn error, or a provider session that died.
+    pub(super) async fn fresh_run_failure(
+        &self,
+        run: &RunningAgentRoutineRun,
+    ) -> Result<Option<(&'static str, String)>> {
+        if let Some(outcome) = self.fresh_turn_terminal_error(run).await? {
+            let message = format!("routine agent turn ended without a deliverable ({outcome})");
+            return Ok(Some(("turn_failed", message)));
+        }
+        Ok(self
+            .fresh_provider_session_failure(run)
+            .await
+            .map(|message| ("provider_session_dead", message)))
+    }
+
+    /// Terminal `turn_error` for the run's turn, unless a `turn_complete`
+    /// for the same turn shows it finished normally.
+    async fn fresh_turn_terminal_error(
+        &self,
+        run: &RunningAgentRoutineRun,
+    ) -> Result<Option<String>> {
+        let Some(turn_id) = run
+            .turn_id
+            .as_deref()
+            .filter(|_| run.execution_strategy == "fresh")
+        else {
+            return Ok(None);
+        };
+        let row = sqlx::query_as::<_, TerminalTurnErrorRow>(
+            r#"
+            SELECT payload #>> '{details,outcome}' AS outcome, created_at
+            FROM agent_quality_event
+            WHERE correlation_id = $1
+              AND source_event_id = $1
+              AND created_at >= $2
+              AND event_type = 'turn_error'::agent_quality_event_type
+              AND payload #>> '{details,outcome}' = ANY($3)
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_quality_event done
+                  WHERE done.correlation_id = $1
+                    AND done.source_event_id = $1
+                    AND done.created_at >= $2
+                    AND done.event_type = 'turn_complete'::agent_quality_event_type
+              )
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(turn_id)
+        .bind(run.started_at)
+        .bind(TERMINAL_TURN_ERROR_OUTCOMES.as_slice())
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "lookup routine agent turn error {} for run {}: {error}",
+                turn_id,
+                run.run_id
+            )
+        })?;
+        Ok(settled_terminal_turn_error(run, row, Utc::now()))
     }
     /// A fresh managed-tmux turn that lost its pane cannot produce a
     /// transcript or terminal quality event. Detect that state before the
@@ -241,6 +332,34 @@ mod tests {
         let completion = completion_with_evidence(AgentTurnCompletionEvidence::TerminalTurn);
 
         assert_eq!(provider_error_from_completion(&completion), None);
+    }
+
+    #[test]
+    fn terminal_turn_error_settles_only_for_fresh_runs() {
+        let now = DateTime::parse_from_rfc3339("2026-10-18T00:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let row = |age: i64| {
+            Some(TerminalTurnErrorRow {
+                outcome: "cancelled".to_string(),
+                created_at: now - Duration::seconds(age),
+            })
+        };
+        let mut run = running_run(None);
+        run.execution_strategy = "fresh".to_string();
+        let settle = TERMINAL_TURN_ERROR_SETTLE_SECS;
+
+        assert_eq!(
+            settled_terminal_turn_error(&run, row(settle - 1), now),
+            None
+        );
+        assert_eq!(
+            settled_terminal_turn_error(&run, row(settle), now).as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(settled_terminal_turn_error(&run, None, now), None);
+        run.execution_strategy = "persistent".to_string();
+        assert_eq!(settled_terminal_turn_error(&run, row(settle), now), None);
     }
 
     #[test]

@@ -2294,6 +2294,7 @@ services::routines::agent_executor::reliability::tests::fresh_probe_failure_stan
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg
 services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_per_streak_pg
+services::routines::reliability_pg_tests::fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
 services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
