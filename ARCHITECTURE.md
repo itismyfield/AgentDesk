@@ -846,6 +846,7 @@ src/
 │   │   │   ├── composer_content.rs
 │   │   │   ├── composer_lock.rs
 │   │   │   ├── composer_status.rs
+│   │   │   ├── herdr_cancel.rs
 │   │   │   ├── inline_banner.rs
 │   │   │   └── submission.rs
 │   │   ├── rollout_tail/

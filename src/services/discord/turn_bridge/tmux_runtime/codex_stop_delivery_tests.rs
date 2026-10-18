@@ -1329,3 +1329,6 @@ mod home_stop;
 
 #[path = "codex_stop_delivery_cut_tests.rs"]
 pub(super) mod cut;
+
+#[path = "herdr_stop_pane_tests.rs"]
+mod herdr_stop_pane;
