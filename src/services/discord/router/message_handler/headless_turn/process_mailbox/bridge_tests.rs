@@ -90,6 +90,7 @@ impl TurnGateway for RecordingDirectGateway {
 
 #[tokio::test]
 async fn actual_quiet_bridge_completion_retires_its_actor_and_durable_inflight() {
+    let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     with_isolated_runtime_root(|| async {
         const USER_MESSAGE: u64 = 9_100_000_000_000_000_123;
         const PLACEHOLDER: u64 = 9_100_000_000_000_000_456;
