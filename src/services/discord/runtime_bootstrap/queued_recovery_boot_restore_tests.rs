@@ -1,11 +1,52 @@
 //! Boot restore merges bound channels' persisted queues (with or without a dispatch marker),
 //! reinstalls the role override, and judges the queued placeholder.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
-fn item(id: u64) -> Intervention {
+/// A test's pause of a standby channel's restore, taken before it reads the channel's binding.
+pub(crate) struct Pause {
+    entered: AtomicBool,
+    go: tokio::sync::Semaphore,
+}
+
+impl Pause {
+    pub(crate) fn entered(&self) -> bool {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn release(&self) {
+        self.go.add_permits(1);
+    }
+}
+
+static PAUSES: Mutex<Vec<(u64, Arc<Pause>)>> = Mutex::new(Vec::new());
+
+/// Pauses the channel's next standby restore once, until the returned pause is released.
+pub(crate) fn pause(channel: u64) -> Arc<Pause> {
+    let (entered, go) = (AtomicBool::new(false), tokio::sync::Semaphore::new(0));
+    let pause = Arc::new(Pause { entered, go });
+    PAUSES.lock().unwrap().push((channel, Arc::clone(&pause)));
+    pause
+}
+
+pub(super) async fn paused(channel: u64) {
+    let armed = {
+        let mut armed = PAUSES.lock().unwrap();
+        let at = armed.iter().position(|(armed, _)| *armed == channel);
+        at.map(|at| armed.remove(at).1)
+    };
+    if let Some(pause) = armed {
+        pause.entered.store(true, Ordering::SeqCst);
+        drop(pause.go.acquire().await);
+    }
+}
+
+pub(crate) fn item(id: u64) -> Intervention {
     Intervention {
         author_id: UserId::new(7),
         author_is_bot: false,

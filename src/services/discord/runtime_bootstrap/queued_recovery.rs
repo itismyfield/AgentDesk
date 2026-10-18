@@ -365,7 +365,7 @@ async fn restore_standby_channel(
         return false;
     };
     #[cfg(test)]
-    restore_pause::reached(channel).await;
+    boot_restore_tests::paused(channel).await;
     if !matches!(
         resolve_runtime_channel_binding_status(&http, channel_id).await,
         RuntimeChannelBindingStatus::Owned
@@ -442,53 +442,9 @@ async fn restore_standby_channel(
     true
 }
 
-/// Test-only pauses of a standby channel's restore, taken before it reads the channel's binding.
-#[cfg(test)]
-pub(super) mod restore_pause {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    pub(crate) struct Pause {
-        entered: AtomicBool,
-        go: tokio::sync::Semaphore,
-    }
-
-    impl Pause {
-        pub(crate) fn entered(&self) -> bool {
-            self.entered.load(Ordering::SeqCst)
-        }
-
-        pub(crate) fn release(&self) {
-            self.go.add_permits(1);
-        }
-    }
-
-    static ARMED: Mutex<Vec<(u64, Arc<Pause>)>> = Mutex::new(Vec::new());
-
-    /// Pauses the channel's next standby restore once, until the returned pause is released.
-    pub(crate) fn arm(channel: u64) -> Arc<Pause> {
-        let (entered, go) = (AtomicBool::new(false), tokio::sync::Semaphore::new(0));
-        let pause = Arc::new(Pause { entered, go });
-        ARMED.lock().unwrap().push((channel, Arc::clone(&pause)));
-        pause
-    }
-
-    pub(super) async fn reached(channel: u64) {
-        let armed = {
-            let mut armed = ARMED.lock().unwrap();
-            let at = armed.iter().position(|(armed, _)| *armed == channel);
-            at.map(|at| armed.remove(at).1)
-        };
-        if let Some(pause) = armed {
-            pause.entered.store(true, Ordering::SeqCst);
-            drop(pause.go.acquire().await);
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "queued_recovery_boot_restore_tests.rs"]
-mod boot_restore_tests;
+pub(super) mod boot_restore_tests;
 
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_draft_tests.rs"]

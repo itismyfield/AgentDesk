@@ -115,6 +115,8 @@ impl<R> BootPort<R> {
         if restore_mutant("adopt_awaits_restore") {
             return self.restored();
         }
+        #[cfg(test)]
+        let candidate = candidate || restore_mutant("adopt_ignores_candidate");
         self.restored() || (self.restore.is_some() && candidate)
     }
 

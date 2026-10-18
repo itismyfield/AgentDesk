@@ -801,3 +801,291 @@ async fn a_channel_delegated_after_a_rest_worker_boot_gets_a_writer_under_its_ho
     pool.close().await;
     db.drop().await;
 }
+
+/// Binds each channel to an agent in this runtime's config, so a standby restore owns it.
+fn bind_agents(root: &std::path::Path, channels: &[u64]) {
+    let agent = |id: &u64| {
+        let channel = format!("    channels:\n      claude:\n        id: \"{id}\"\n");
+        format!("  - id: sbr-{id}\n    name: \"sbr {id}\"\n    provider: claude\n{channel}")
+    };
+    let agents: String = channels.iter().map(agent).collect();
+    let config = crate::runtime_layout::config_file_path(root);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, format!("server:\n  port: 8791\nagents:\n{agents}")).unwrap();
+}
+
+/// Binds an empty transcript for the channel in this thread's P5 log, as a Claude hook would.
+fn bind_claude(root: &std::path::Path, channel: u64) {
+    let path = root.join(format!("{channel}.jsonl"));
+    std::fs::write(&path, b"").unwrap();
+    let hook = binding_events::HookSignal::from_payload(
+        "session_start",
+        &serde_json::json!({"source": "startup"}),
+    );
+    let proposal = binding_events::Proposal {
+        channel_id: channel,
+        provider: "claude",
+        tmux_session: "tmux-claude",
+        session_id: Some("s1"),
+        path: path.to_str().unwrap(),
+        replaced: None,
+        cause: binding_events::CauseSource::Hook(hook.cause()),
+        hook: Some(&hook),
+    };
+    binding_events::record_source(&proposal).unwrap();
+}
+
+/// The message ids in the channel's mailbox queue.
+async fn queued(shared: &SharedData, channel: u64) -> Vec<u64> {
+    let mailbox = shared.mailbox(ChannelId::new(channel));
+    let queue = mailbox.try_snapshot().await.unwrap().intervention_queue;
+    queue.iter().map(|item| item.message_id.get()).collect()
+}
+
+/// The channel's home intake, if this node holds it at `epoch`.
+fn intake_at(home: &channel_home::HomeGate, epoch: i64) -> Option<channel_home::HomeIntake> {
+    match home.ownership() {
+        HomeOwnership::Owned {
+            home_epoch, intake, ..
+        } if home_epoch == epoch => Some(intake),
+        _ => None,
+    }
+}
+
+/// A standby the released row targets adopts it unrestored, and only once its writer could run the
+/// first init; while its restore of the channel runs, the home is held with intake closed and the
+/// channel's intake rows wait. The restored queue is in the mailbox before intake opens.
+#[tokio::test]
+async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg() {
+    use super::queued_recovery::boot_restore_tests::{item, pause};
+    use crate::services::cluster::channel_home::HomeIntake;
+    use crate::services::cluster::channel_home_boot::events::{self, Event};
+    use crate::services::tui_o::cutover::intake_route;
+    use crate::services::turn_orchestrator::save_channel_queue;
+    const CH: u64 = 9_300_000_000_000_041;
+    const ITEM: u64 = 9_300_000_000_000_042;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::runtime_root().expect("runtime root");
+    let _p5 = P5Root::install(&root);
+    bind_agents(&root, &[CH]);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = CH.to_string();
+    let applied = |write: Result<HomeWrite<o_channel_homes::ChannelHome>, _>| match write {
+        Ok(HomeWrite::Applied(row)) => row,
+        other => panic!("{other:?}"),
+    };
+    let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
+    let released = applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
+    let epoch = released.epoch;
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    shared.restart.reconcile_done.store(false, Ordering::SeqCst);
+    let provider = ProviderKind::Claude;
+    let token = shared.token_hash.clone();
+    save_channel_queue(&provider, &token, ChannelId::new(CH), &[item(ITEM)], None).unwrap();
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(CH, "mini")]);
+    let _selected = test_override::force_candidates(&[(CH, ClaudeTui)]);
+    let (_log, _rest) = super::super::shared_state::test_rest::recording_mock(1, CH).await;
+    events::clear(CH);
+    let paused = pause(CH);
+
+    // The production standby order: reconcile settles, then the homes, then the delegated writers.
+    let registry = Arc::new(health::HealthRegistry::new());
+    register_standby_and_settle_reconcile(&registry, &provider, &shared).await;
+    let on = settings(Some(true));
+    let started = start_channel_homes(&shared, &provider, HomeRole::Standby, &on).await;
+    assert_eq!(started.len(), 1, "the released row names this node");
+    o_writer_host::spawn_delegated(&shared, &provider, None);
+    let read = || o_channel_homes::read_home(&pool, &channel);
+    let refused = Event::Adoptable(Err("adopt_refused:no_bound_source"));
+    for _ in 0..1_500 {
+        if events::of(CH)
+            .iter()
+            .filter(|event| **event == refused)
+            .count()
+            >= 2
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let judged = events::of(CH)
+        .iter()
+        .filter(|event| **event == refused)
+        .count();
+    assert!(judged >= 2, "{:?}", events::of(CH));
+    let unbound = read().await.unwrap();
+    assert_eq!(
+        unbound,
+        Some(released.clone()),
+        "adopted with no first init"
+    );
+
+    bind_claude(&root, CH);
+    let mut adopted = None;
+    for _ in 0..1_500 {
+        adopted = read().await.unwrap();
+        if adopted.as_ref().is_some_and(|row| row.holder.is_some()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let adopted = adopted.expect("the home row");
+    let held = (
+        adopted.holder.as_deref(),
+        adopted.target.as_deref(),
+        adopted.epoch,
+    );
+    assert_eq!(held, (Some("mini"), None, epoch), "{:?}", events::of(CH));
+    for _ in 0..1_500 {
+        if paused.entered() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(paused.entered(), "the channel's restore runs once held");
+    let home = &started[0];
+    assert_eq!(
+        intake_at(home, epoch),
+        Some(HomeIntake::Closed),
+        "held, closed"
+    );
+    assert!(channel_home::intake_hold(&channel, Some(epoch)).is_some());
+    assert!(
+        intake_route::held_channels("claude").contains(&channel),
+        "rows wait"
+    );
+    assert_eq!(
+        queued(&shared, CH).await,
+        Vec::<u64>::new(),
+        "nothing restored yet"
+    );
+
+    paused.release();
+    let mut opened = None;
+    for _ in 0..1_500 {
+        if intake_at(home, epoch) == Some(HomeIntake::Open) {
+            opened = Some(queued(&shared, CH).await);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(opened, Some(vec![ITEM]), "opened with the queue restored");
+    assert_eq!(channel_home::intake_hold(&channel, Some(epoch)), None);
+    assert_eq!(channel_home_boot::running(&channel), (true, Some(epoch)));
+    use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
+    let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
+    homes.stop_and_join(StopReason::Sigterm).await;
+    channel_home::unregister(&channel);
+    events::clear(CH);
+    pool.close().await;
+    db.drop().await;
+}
+
+/// A standby restarted as its worker row's holder no longer takes intake from its first renewal:
+/// a failed restore keeps the home held and closed with the persisted queue untouched, and a
+/// restart after the cause is gone restores it and opens.
+#[tokio::test]
+async fn a_standby_holder_whose_restore_fails_keeps_intake_closed_until_a_restart_restores_pg() {
+    use super::queued_recovery::boot_restore_tests::item;
+    use crate::services::cluster::channel_home::HomeIntake;
+    use crate::services::tui_o::cutover::intake_route;
+    use crate::services::turn_orchestrator::save_channel_queue;
+    const CH: u64 = 9_300_000_000_000_043;
+    const ITEM: u64 = 9_300_000_000_000_044;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let root = crate::config::runtime_root().expect("runtime root");
+    bind_agents(&root, &[CH]);
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let channel = CH.to_string();
+    let applied = |write: Result<HomeWrite<o_channel_homes::ChannelHome>, _>| match write {
+        Ok(HomeWrite::Applied(row)) => row,
+        other => panic!("{other:?}"),
+    };
+    let row = applied(o_channel_homes::delegate(&pool, &channel, "claude", "gw", "mini").await);
+    let row = applied(o_channel_homes::finish_release(&pool, &channel, "gw", row.epoch).await);
+    let epoch = applied(o_channel_homes::adopt(&pool, &channel, "mini", row.epoch).await).epoch;
+    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    shared.restart.reconcile_done.store(false, Ordering::SeqCst);
+    let provider = ProviderKind::Claude;
+    let token = shared.token_hash.clone();
+    save_channel_queue(&provider, &token, ChannelId::new(CH), &[item(ITEM)], None).unwrap();
+    // An unreadable placeholder store fails the channel's restore.
+    let placeholders = crate::services::discord::runtime_store::discord_queued_placeholders_root();
+    let broken = placeholders.unwrap().join("claude").join(&token);
+    std::fs::create_dir_all(&broken).unwrap();
+    let broken = broken.join(format!("{CH}.json"));
+    std::fs::write(&broken, "not json").unwrap();
+    let _hosts = crate::config::session_hosts::force_for_test(Some("mini"), &[(CH, "mini")]);
+    let (_log, _rest) = super::super::shared_state::test_rest::recording_mock(1, CH).await;
+    let registry = Arc::new(health::HealthRegistry::new());
+    register_standby_and_settle_reconcile(&registry, &provider, &shared).await;
+    let on = settings(Some(true));
+    let started = start_channel_homes(&shared, &provider, HomeRole::Standby, &on).await;
+    assert_eq!(started.len(), 1);
+    o_writer_host::spawn_delegated(&shared, &provider, None);
+    let mut held = false;
+    for _ in 0..1_000 {
+        held = intake_at(&started[0], epoch).is_some();
+        if held {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(held, "the lease holds the home");
+    // Two more rounds: the renewal then the restore, which fails, have both run.
+    let judged = channel_home_boot::rounds(CH) + 2;
+    for _ in 0..1_000 {
+        if channel_home_boot::rounds(CH) >= judged {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(channel_home_boot::rounds(CH) >= judged);
+    let closed = intake_at(&started[0], epoch);
+    assert_eq!(
+        closed,
+        Some(HomeIntake::Closed),
+        "a failed restore keeps intake closed"
+    );
+    assert!(
+        intake_route::held_channels("claude").contains(&channel),
+        "rows wait"
+    );
+    use crate::services::turn_orchestrator::load_channel_pending_queue_checked as load;
+    let kept = load(&provider, &token, ChannelId::new(CH));
+    let kept = kept
+        .unwrap()
+        .0
+        .iter()
+        .map(|item| item.message_id.get())
+        .collect::<Vec<_>>();
+    assert_eq!(kept, [ITEM], "the persisted queue is kept");
+    assert_eq!(queued(&shared, CH).await, Vec::<u64>::new());
+
+    std::fs::remove_file(&broken).unwrap();
+    channel_home_boot::stop(&channel).await;
+    channel_home::unregister(&channel);
+    let restarted = start_channel_homes(&shared, &provider, HomeRole::Standby, &on).await;
+    assert_eq!(restarted.len(), 1);
+    let mut opened = None;
+    for _ in 0..1_500 {
+        if intake_at(&restarted[0], epoch) == Some(HomeIntake::Open) {
+            opened = Some(queued(&shared, CH).await);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        opened,
+        Some(vec![ITEM]),
+        "restarted, it restores the queue and opens"
+    );
+    use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
+    let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
+    homes.stop_and_join(StopReason::Sigterm).await;
+    channel_home::unregister(&channel);
+    pool.close().await;
+    db.drop().await;
+}

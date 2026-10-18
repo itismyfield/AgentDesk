@@ -545,6 +545,132 @@ async fn an_unrestored_target_adopts_a_released_channel_only_once_restored_pg() 
     pg_db.drop().await;
 }
 
+/// A restore the test settles: each run counts itself, then waits until `settle` names its result.
+fn held_restore() -> (
+    ChannelRestore,
+    Arc<AtomicUsize>,
+    tokio::sync::watch::Sender<Option<bool>>,
+) {
+    let (settle, settled) = tokio::sync::watch::channel(None);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&runs);
+    let run: ChannelRestore = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        let mut settled = settled.clone();
+        Box::pin(async move {
+            let result = settled
+                .wait_for(Option::is_some)
+                .await
+                .map(|result| *result);
+            result.ok().flatten().unwrap_or(false)
+        })
+    });
+    (run, runs, settle)
+}
+
+/// A target whose boot port restores the channel itself, `candidates` naming the channels whose
+/// Herdr endpoint runs here.
+fn restoring_boot(
+    pool: &PgPool,
+    run: &ChannelRestore,
+    candidates: Vec<u64>,
+) -> Option<Boot<impl Fn(u64) -> BootPort<Idle>>> {
+    let (run, reset) = (Arc::clone(run), counted(&Arc::default(), None));
+    let port =
+        move |_| BootPort::new(Idle, Arc::clone(&reset)).restoring("claude", Arc::clone(&run));
+    Some(Boot {
+        provider: "claude".into(),
+        local: "mini".into(),
+        pool: pool.clone(),
+        rows: listed(pool),
+        candidates,
+        port,
+        writers: None,
+    })
+}
+
+/// A target that restores the channel itself adopts the released channel unrestored when its
+/// Herdr endpoint runs here, takes no new intake while its restore runs under the recovery permit,
+/// and opens only once that restore installed; a failed one keeps the home held and closed.
+#[tokio::test]
+async fn a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg() {
+    for installs in [true, false] {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let delegated = applied(o_channel_homes::delegate(&pool, C, "claude", "gw", "mini").await);
+        let released = o_channel_homes::finish_release(&pool, C, "gw", delegated.epoch).await;
+        let released = applied(released);
+        let epoch = released.epoch;
+        let (run, runs, settle) = held_restore();
+        if installs {
+            start(Some(true), || restoring_boot(&pool, &run, vec![])).await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let waiting = o_channel_homes::read_home(&pool, C).await.unwrap();
+            assert_eq!(
+                waiting,
+                Some(released.clone()),
+                "not a candidate: row untouched"
+            );
+            stop(C).await;
+            channel_home::unregister(C);
+        }
+
+        start(Some(true), || restoring_boot(&pool, &run, vec![ID])).await;
+        let adopted = row_in(&pool, 8, HomeState::Worker).await;
+        let held = (
+            adopted.holder.as_deref(),
+            adopted.target.as_deref(),
+            adopted.epoch,
+        );
+        assert_eq!(held, (Some("mini"), None, epoch), "adopted unrestored");
+        let open = || owned(C) == Some((epoch, HomeIntake::Open));
+        let ran = eventually(10, || runs.load(Ordering::SeqCst) == 1 || open()).await;
+        assert!(ran, "neither its restore ran nor its intake opened");
+        assert_eq!(
+            owned(C),
+            Some((epoch, HomeIntake::Closed)),
+            "closed while it restores"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the restore runs once held");
+        assert!(intake_hold(C, Some(epoch)).is_some());
+        let home = channel_home::registered(C).expect("mounted");
+        let refused = (home.commands_in_flight(), channel_home::refusal(ID));
+        assert_eq!(
+            refused,
+            (1, Some(HomeRefusal::Draining)),
+            "the restore's permit"
+        );
+
+        settle.send(Some(installs)).unwrap();
+        if installs {
+            assert!(
+                eventually(5, open).await,
+                "opens once its restore installed"
+            );
+            assert_eq!(intake_hold(C, Some(epoch)), None);
+        } else {
+            assert!(eventually(5, || home.commands_in_flight() == 0).await);
+            tokio::time::sleep(RENEW_EVERY + Duration::from_secs(1)).await;
+            assert_eq!(
+                owned(C),
+                Some((epoch, HomeIntake::Closed)),
+                "a failed restore"
+            );
+            let row = o_channel_homes::read_home(&pool, C).await.unwrap().unwrap();
+            assert_eq!(
+                (row.state, row.holder.as_deref()),
+                (HomeState::Worker, Some("mini"))
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "restored once per process");
+        assert_eq!(running(C), (true, Some(epoch)));
+        stop(C).await;
+        channel_home::unregister(C);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+}
+
 /// A gateway runtime's return of a reclaimed channel to its own writer, through the real writer host.
 mod writer_return {
     use std::path::PathBuf;
