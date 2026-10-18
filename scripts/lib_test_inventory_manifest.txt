@@ -12657,6 +12657,7 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlo
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads
+services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg
 services::tui_o::writer::tests::actor::restored_prepared_uses_durable_utc_age_and_clamps_future_time
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it
 services::tui_o::writer::tests::actor::rotation::a_body_the_parent_only_announced_is_posted_from_the_resumed_source
@@ -12837,6 +12838,11 @@ services::tui_o::writer::tests::operator_resume::delivery::operator_resume_unsen
 services::tui_o::writer::tests::operator_resume::operator_resume_latest_legacy_posted_does_not_reblock_old_rejection
 services::tui_o::writer::tests::settlement_stays_ambiguous_or_unresolved_when_history_cannot_single_out_the_post
 services::tui_o::writer::tests::the_delivery_lease_is_held_until_the_post_task_ends
+services::tui_o::writer::tests::tool_result_tests::codex_tool_results_are_excluded_for_each_supported_output_shape
+services::tui_o::writer::tests::tool_result_tests::legacy_tool_result_retries_and_refusals_are_excluded_across_restart
+services::tui_o::writer::tests::tool_result_tests::tool_result_exclusion_keeps_changed_payload_conflicts_visible
+services::tui_o::writer::tests::tool_result_tests::tool_result_suppression_preserves_assistant_text_and_provider_api_errors
+services::tui_o::writer::tests::tool_result_tests::tool_results_are_excluded_durably_for_strings_arrays_success_and_replay
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_reports_a_drained_source_at_its_end_and_writes_nothing
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_sees_a_torn_tail_growth_and_a_rewritten_prefix
 services::tui_o::writer::transition_cleanup::observe::tests::transition_observe_tells_a_replaced_path_from_a_deleted_one

@@ -99,6 +99,7 @@ impl ReceiptOverlay {
     pub(crate) fn blocked(&self, ledger: &LedgerState) -> Option<(u64, u16)> {
         (0..ledger.next_serial())
             .filter_map(|serial| ledger.piece(serial))
+            .filter(|piece| ledger.excluded(&piece.unit_key).is_none())
             .find_map(
                 |piece| match self.disposition(ledger, &piece.unit_key, piece.piece_index) {
                     PieceDisposition::Blocked { serial, status } => Some((serial, status)),
