@@ -191,6 +191,10 @@ fn build_fallback_session_key_for_clear(
 
 #[cfg(test)]
 mod clear_wait_tests;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod codex_clear_relaunch_tests;
+#[cfg(all(test, unix))]
+mod codex_clear_retirement_tests;
 #[cfg(test)]
 #[cfg(unix)]
 mod codex_verified_clear_tests;

@@ -3,6 +3,8 @@ use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
+#[cfg(unix)]
+pub(in crate::services::discord) mod codex_clear_compat;
 pub(super) mod kickoff;
 
 #[cfg(test)]

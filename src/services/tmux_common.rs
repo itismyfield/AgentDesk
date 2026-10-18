@@ -1263,7 +1263,7 @@ pub(crate) fn cleanup_native_clear_fallback_under_source_authority(
     true
 }
 
-fn cleanup_session_temp_files_under_source_authority(
+pub(crate) fn cleanup_session_temp_files_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     session_name: &str,
 ) {

@@ -19,7 +19,7 @@ impl QueueParkLedger {
         self.note_promote_hold(provider, channel, "session_transition", "lock_busy");
     }
 
-    pub(super) fn note_promote_hold(
+    pub(in crate::services::discord) fn note_promote_hold(
         &self,
         provider: &ProviderKind,
         channel: ChannelId,
@@ -63,8 +63,11 @@ impl QueueParkLedger {
             .channels
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        for owner in ["codex_verified", "session_transition"] {
+        for owner in ["codex_clear_compat", "codex_verified", "session_transition"] {
             if let Some(reason) = state.promote_holds.get(&(channel, owner)) {
+                if owner == "codex_clear_compat" {
+                    return Some(((*reason).to_string(), owner));
+                }
                 return Some((format!("{owner}_held:{reason}"), owner));
             }
         }

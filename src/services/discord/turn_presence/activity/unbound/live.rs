@@ -694,6 +694,31 @@ async fn collect(
 }
 
 #[cfg(test)]
+pub(in crate::services::discord::turn_presence::activity) async fn verdict_for_tests(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<String, String> {
+    let ports = Arc::new(LivePorts {
+        root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
+    });
+    let (snapshot, namespace, next) =
+        Snapshot::collect_pair(shared, provider, channel, ports).await?;
+    if !snapshot.same_inputs(&next) {
+        return Err("superseded".into());
+    }
+    Ok(format!(
+        "{:?}",
+        decide_unbound(
+            snapshot.files.candidates.clone(),
+            snapshot.scope(shared),
+            &namespace.inventory,
+            &snapshot.owners,
+        )
+    ))
+}
+
+#[cfg(test)]
 #[path = "live_tests.rs"]
 mod tests;
 
