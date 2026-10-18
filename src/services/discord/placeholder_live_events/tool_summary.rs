@@ -138,6 +138,36 @@ fn credential_command(input: &str) -> bool {
     false
 }
 
+fn credential_executable_line(line: &str) -> bool {
+    static MARKERS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*(?:(?:[-*+•└▶✓✗?]|\[[ xX✓]\]|\d+[.)])\s*)*").expect("leading list markers")
+    });
+    let stripped = MARKERS.replace(line, "");
+    let mut words = stripped.split_whitespace();
+    let executable = words.next().unwrap_or("").trim_matches(['\'', '"']);
+    let executable = executable.rsplit('/').next().unwrap_or(executable);
+    matches!(
+        executable,
+        "sshpass"
+            | "htpasswd"
+            | "redis-cli"
+            | "mysql"
+            | "mysqladmin"
+            | "psql"
+            | "op"
+            | "vault"
+            | "mongo"
+            | "mongosh"
+    ) || matches!(
+        (executable, words.next().unwrap_or("")),
+        ("docker" | "podman", "login") | ("gh", "auth") | ("aws", "configure")
+    )
+}
+
+fn short_reference(reference: &str) -> bool {
+    reference.trim_matches(['$', '{', '}']).len() <= 31
+}
+
 fn credential_env_key(input: &str) -> Option<usize> {
     static KEY: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#"(?i)\b[a-z0-9_]*(?:pass|pwd|auth|cred)[a-z0-9_]*['"]?[ \t]*=[ \t]*"#)
@@ -186,7 +216,7 @@ fn redact_env(input: &str) -> String {
 fn redact_prose(input: &str) -> String {
     static PROSE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)((?:\b(?:password|passwd|secret|token|pw|passphrase|api[ _-]?key)\b|비밀번호(?:는)?)(?:[ \t]+|[ \t]*[:=][ \t]*)(?:(?:is\b|was\b|[:=])[ \t]*)*)({WORD})"
+            r"(?i)((?:\b(?:password|passwd|secret|token|passphrase)\b(?:[ \t]+|[ \t]*[:=][ \t]*)|\b(?:pw|api[ _-]?key)\b(?:[ \t]*[:=][ \t]*|[ \t]+(?:is|was)\b[ \t]*)|비밀번호[ \t]*(?:는|은|[:=])[ \t]*)(?:(?:is\b|was\b|[:=])[ \t]*)*)({WORD})"
         ))
         .expect("credential prose")
     });
@@ -363,6 +393,9 @@ fn sanitized(raw: &str) -> Option<String> {
 /// while applying the same credential and mention boundary to every line.
 pub(super) fn safe_section(raw: &str) -> Option<String> {
     for line in raw.lines() {
+        if credential_executable_line(line) {
+            return None;
+        }
         if let Some(command) = line.trim().strip_prefix("└ Bash ") {
             if credential_command(command) {
                 return None;
@@ -466,7 +499,11 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
             if tail[reference.len()..].trim_start().starts_with('=') {
                 return None;
             }
-            masked.push_str(reference);
+            masked.push_str(if short_reference(reference) {
+                reference
+            } else {
+                "$***"
+            });
             cursor += reference.len();
             continue;
         }
@@ -484,6 +521,9 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
     let masked = crate::utils::redact::redact_known_secrets(&masked);
     let mut references = Vec::new();
     let protected = REFERENCES.replace_all(&masked, |capture: &regex::Captures<'_>| {
+        if !short_reference(&capture[0]) {
+            return capture[0].to_string();
+        }
         references.push(capture[0].to_string());
         format!("\u{e000}{}\u{e001}", references.len() - 1)
     });
@@ -662,7 +702,13 @@ pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
                 None => Some(format!("\"{pattern}\"")),
             }
         }
-        "Task" => text(field(&value, &["description"])?, 60),
+        "Task" => {
+            let description = field(&value, &["description"])?;
+            if description.lines().any(credential_executable_line) {
+                return None;
+            }
+            text(description, 60)
+        }
         "WebSearch" => text(field(&value, &["query", "search_term"])?, 60),
         "WebFetch" => {
             let url = url::Url::parse(field(&value, &["url"])?).ok()?;
