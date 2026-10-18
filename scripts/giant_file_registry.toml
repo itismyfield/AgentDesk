@@ -715,14 +715,6 @@ decompose_issue = "#4712"
 # frozen baseline path so future growth cannot be re-grandfathered.
 
 [[entry]]
-# #3721 first-batch promotion: residual tmux relay helper root remains giant
-# after earlier tmux.rs extraction rounds.
-file = "src/services/discord/tmux.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
-[[entry]]
 # #3721 first-batch promotion: Codex TUI rollout tailer mixes discovery,
 # marker persistence, parser, tail loop, and completion heuristics.
 file = "src/services/codex_tui/rollout_tail.rs"
