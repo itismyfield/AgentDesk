@@ -209,8 +209,13 @@ async fn public_cancel_ignores_unrelated_malformed_context_pg() {
     let (run_id, dispatch_id, unrelated) =
         seed_run_beside_unrelated_malformed_dispatches(&pool, "cancel").await;
 
-    let result =
-        cancel_selected_runs_with_pg(None, &pool, &[run_id.clone()], "auto_queue_cancel").await;
+    let result = cancel_selected_runs_with_pg(
+        None,
+        &pool,
+        std::slice::from_ref(&run_id),
+        "auto_queue_cancel",
+    )
+    .await;
     let durable_run_status = run_status(&pool, &run_id).await;
     let response = result.unwrap_or_else(|error| {
         panic!("cancel returned Err with run status {durable_run_status}: {error}")
