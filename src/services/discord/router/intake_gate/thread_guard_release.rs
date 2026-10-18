@@ -1,7 +1,5 @@
-//! #6199 — the THREAD-GUARD clean releases only the stale episode its verdict witnessed. The
-//! thread's actor matches that episode, withdraws the witnessed parent routes and releases the
-//! token in one step; the row, the bookkeeping and the kicks follow outside it. A successor's
-//! token, row, queue and route are never touched, and the thread's queue is kept to run.
+//! The THREAD-GUARD clean releases only the witnessed stale episode: its actor matches it,
+//! withdraws its parent routes and releases its token in one step; the rest follows outside.
 
 use super::*;
 use crate::services::discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
@@ -23,7 +21,7 @@ pub(in crate::services::discord) struct ThreadGuardStaleWitness {
 
 impl ThreadGuardStaleWitness {
     /// The mailbox anchor and nonce and the stale row filed under `thread` must name one
-    /// episode; an unanchored (id 0) episode is #5996's and yields none.
+    /// episode; an unanchored (id 0) episode yields none.
     pub(super) fn bind(
         shared: &SharedData,
         thread: serenity::ChannelId,
@@ -93,9 +91,8 @@ impl ReleaseWithdrawal for ThreadParentWithdrawal {
     }
 }
 
-/// Releases the witnessed episode, then clears its row, finalizes its token without a session
-/// kill and kicks what it unblocked. `false` (the message queues behind the thread) when that
-/// episode no longer holds the thread, its row has a before-start receipt or the actor is gone.
+/// Releases the witnessed episode, clears its row, finalizes it without a session kill and kicks;
+/// `false` (queue behind the thread) on a successor, a before-start receipt or a gone actor.
 pub(super) async fn thread_guard_force_clean_stale_thread(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -166,7 +163,7 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
         "1446_thread_guard_stale_inflight",
     );
     // A parent remapped to another thread between the withdrawal and this kick is still kicked:
-    // the same race kind as every edge release, not the same window (#6199 follow-up).
+    // the same race kind as every edge release, though not the same window.
     crate::services::discord::turn_finalizer::cleanup::kickoff_thread_parents_after_finalize(
         shared,
         provider,

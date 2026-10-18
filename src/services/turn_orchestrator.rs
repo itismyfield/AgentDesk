@@ -1369,7 +1369,7 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
-    /// #6199 — the THREAD-GUARD's exact release with its route withdrawal (`witnessed_release.rs`).
+    /// The THREAD-GUARD's exact release with its route withdrawal (`witnessed_release.rs`).
     ReleaseWitnessedEpisode(Box<witnessed_release::Request>),
     /// A before-start policy close and its later tail claim on the same actor (`policy_close.rs`).
     PolicyClose {

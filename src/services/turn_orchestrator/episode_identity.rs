@@ -257,8 +257,8 @@ pub(super) struct FinishIfMatches {
     pub(super) persistence: QueuePersistenceContext,
 }
 
-/// #3016 — finalizes the active turn only while it is the expected one; a mismatch takes no
-/// token. #6199 — `before_release` runs only on a match, before the token leaves, in this step.
+/// Finalizes the active turn only while it is the expected one; `before_release` runs only on
+/// that match, before the token leaves, in this same actor step.
 pub(super) fn finish_turn_if_matches(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
@@ -274,9 +274,8 @@ pub(super) fn finish_turn_if_matches(
         turn_nonce_guard,
         persistence,
     } = request;
-    // #3016 — a mismatch (or no active turn) means the turn this caller belonged to already
-    // finalized and a newer turn may own the mailbox, so its token is not taken. The no-op
-    // mirrors `mailbox_finish_turn`'s idempotent second call and reports the live backlog.
+    // A mismatch means the caller's turn already finalized and a newer one may own the mailbox:
+    // take nothing, and report the live backlog as an idempotent second finish would.
     let matches = finish_turn_identity_matches(
         state,
         expected_user_message_id,

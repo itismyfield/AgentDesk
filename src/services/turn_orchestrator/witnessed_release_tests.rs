@@ -1,4 +1,4 @@
-//! #6199 — the witnessed release finishes only the exact episode and runs its withdrawal only
+//! The witnessed release finishes only the exact episode and runs its withdrawal only
 //! on that match, before the token leaves.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

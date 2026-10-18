@@ -145,8 +145,8 @@ async fn classify_channel_stale_active_turn_proof(
 /// unreachable is the conservative default — a missing registry happens
 /// during startup before the stall-watchdog would also be running, so
 /// deferring cleanup costs nothing. A session whose host is not a confirmed
-/// legacy tmux one is never force-cleaned either. #6199 — the verdict is the
-/// witness of the one episode the clean may release.
+/// legacy tmux one is never force-cleaned either.
+/// The verdict is the witness of the one episode the clean may release.
 pub(super) async fn thread_guard_should_force_clean_stale_thread(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
@@ -313,7 +313,7 @@ mod host_tests;
 #[path = "stale_turn_witness_tests.rs"]
 mod witness_tests;
 
-/// #6199 — the THREAD-GUARD verdict and clean as intake runs them, for tests outside intake.
+/// The THREAD-GUARD verdict and clean as intake runs them, for tests outside intake.
 #[cfg(test)]
 pub(in crate::services::discord) mod thread_guard_test_api {
     use super::*;

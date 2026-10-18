@@ -1104,10 +1104,10 @@ pub(in crate::services::discord) async fn handle_event(
             // the parent channel "unlocked").
             if is_allowed_bot {
                 // #1446 — copy the mapped thread_id and immediately drop the
-                // DashMap ref. `thread_guard_release_stale_thread` removes the
-                // route inside the thread's mailbox actor; a ref held across
-                // that await would deadlock the actor on the shard's RwLock.
-                // The narrow scope below releases the ref at the `}`.
+                // DashMap ref. `thread_guard_force_clean_stale_thread`
+                // re-acquires the same shard lock to call `.remove()`; if the
+                // ref were still held we would deadlock on the shard's
+                // RwLock. The narrow scope below releases the ref at the `}`.
                 let thread_id_opt = {
                     data.shared
                         .dispatch

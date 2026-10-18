@@ -1,4 +1,4 @@
-//! #6199 — a THREAD-GUARD verdict witnesses one episode only when the mailbox anchor and nonce
+//! A THREAD-GUARD verdict witnesses one episode only when the mailbox anchor and nonce
 //! and the stale row filed under the thread all name it.
 
 use poise::serenity_prelude::ChannelId;

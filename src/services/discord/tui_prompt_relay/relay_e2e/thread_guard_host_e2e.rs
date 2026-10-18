@@ -159,7 +159,7 @@ async fn intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg() {
     }
 }
 
-// ---- #6199: the THREAD-GUARD clean finishes only the witnessed episode ----
+// ---- The THREAD-GUARD clean finishes only the witnessed episode ----
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::router::thread_guard_test_api::{clean, witness};
@@ -353,7 +353,7 @@ async fn thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg() {
     drop(harness);
 }
 
-// A thread turn with no anchored message is #5996's: the bot message queues behind it and the
+// A thread turn with no anchored message is left alone: the bot message queues behind it and the
 // thread's turn, queue, row and route stay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thread_guard_leaves_an_unanchored_thread_turn_alone_pg() {
@@ -434,9 +434,8 @@ async fn thread_guard_leaves_an_unanchored_thread_turn_alone_pg() {
     drop(harness);
 }
 
-// A ends normally after the witness and B claims the thread, writes its row, queues a follow-up
-// and publishes its route: the clean leaves all of it, and the parent's next bot message queues
-// behind B through the THREAD-GUARD.
+// A ends normally after the witness and B claims, writes its row, queues and routes: the clean
+// leaves all of it, and the parent's next bot message queues behind B through the THREAD-GUARD.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thread_guard_keeps_a_successor_admitted_after_the_witness_pg() {
     let (harness, db, tmux, name) = legacy_thread_harness().await;
@@ -550,9 +549,8 @@ async fn thread_guard_keeps_a_successor_admitted_after_the_witness_pg() {
     drop(harness);
 }
 
-// The clean is held right after its actor release; B then claims the thread, publishes its route
-// and stops short of its row. Once the clean finishes, B writes its row and runs, its route
-// stays, and the idle parent's next bot message queues behind B through the THREAD-GUARD.
+// The clean is held after its actor release while B claims and routes; once it finishes, B runs
+// with its route kept and the idle parent's next bot message queues behind B (THREAD-GUARD).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn thread_guard_keeps_a_successor_route_published_after_the_release_pg() {
     use crate::services::discord::router::thread_guard_test_api::pause;

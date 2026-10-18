@@ -322,13 +322,12 @@ async fn s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg() {
     receipt_cleanup_case(true, false).await;
 }
 
-// ---- #6199: the THREAD-GUARD clean releases only the witnessed episode ----
+// ---- The THREAD-GUARD clean releases only the witnessed episode ----
 
 use super::thread_guard_test_api::{clean, witness};
 
-/// A Gemini runtime whose confirmed-legacy thread holds a stale turn A, its row's finalizer id
-/// pinned so no load rewrites it, mapped from a parent: the runtime, its registry, A's token and
-/// the parent.
+/// A confirmed-legacy Gemini thread with stale turn A (finalizer id pinned) mapped from a parent:
+/// the runtime, its registry, A's token and the parent.
 async fn stale_thread(
     pool: &sqlx::PgPool,
     thread: ChannelId,
@@ -590,9 +589,8 @@ async fn thread_guard_clean_requests_no_session_kill_pg() {
     db.drop().await;
 }
 
-// A watcher exit cleared A's row first and still awaits its terminal; the clean, paused after its
-// release, lets B claim, publish its route and write its own row. Resumed, the clean leaves B's
-// route, row and token, and A's late terminal does not release B.
+// A watcher exit cleared A's row first; the clean, held after its release, lets B claim, route
+// and write its row, then leaves all of it, and A's late terminal does not release B.
 #[tokio::test]
 async fn thread_guard_keeps_the_successor_route_across_a_watcher_exit_row_clear_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

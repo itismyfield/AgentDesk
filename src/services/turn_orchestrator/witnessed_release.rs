@@ -1,6 +1,5 @@
-//! #6199 — the THREAD-GUARD's release of one witnessed episode. The actor matches the exact
-//! episode, runs the caller's route withdrawal and releases the token in one step, so a
-//! successor's claim, and the route it publishes after that claim, come after the withdrawal.
+//! The THREAD-GUARD's release of one witnessed episode: match, route withdrawal and token
+//! release in one actor step, so a successor's claim and its route come after the withdrawal.
 
 use super::*;
 
