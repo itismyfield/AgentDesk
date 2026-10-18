@@ -310,38 +310,41 @@ fn activity_partial_tui_start_is_enriched_without_double_counting() {
 #[test]
 fn activity_background_task_ack_stays_running_until_terminal_evidence() {
     for name in ["Task", "Bash"] {
-        let mut state = StatusPanelState::default();
-        begin(
-            &mut state,
-            name,
-            json!({"description":"background audit","command":"cargo test","run_in_background":true}),
-            Some("bg"),
-        );
-        end(&mut state, name, Some("bg"), false);
-        let out = render(state.clone());
-        assert!(
-            out.contains(&format!("▶ {name}  ")) && !out.contains(&format!("✓ {name}")),
-            "{out}"
-        );
-        if name == "Task" {
-            state.apply(StatusEvent::SubagentEnd {
-                success: false,
-                agent_id: None,
-                desc: None,
-                tool_use_id: Some("bg".into()),
-                summary: None,
-                ack_only: false,
-            });
-        } else {
-            state.apply(StatusEvent::BackgroundTaskEnd {
-                tool_use_id: "bg".into(),
-                success: false,
-            });
+        for stringified in [false, true] {
+            let mut state = StatusPanelState::default();
+            let input = json!({"description":"background audit","command":"cargo test","run_in_background":true});
+            let input = if stringified {
+                Value::String(input.to_string())
+            } else {
+                input
+            };
+            begin(&mut state, name, input, Some("bg"));
+            end(&mut state, name, Some("bg"), false);
+            let out = render(state.clone());
+            assert!(
+                out.contains(&format!("▶ {name}")) && !out.contains(&format!("✓ {name}")),
+                "{out}"
+            );
+            if name == "Task" {
+                state.apply(StatusEvent::SubagentEnd {
+                    success: false,
+                    agent_id: None,
+                    desc: None,
+                    tool_use_id: Some("bg".into()),
+                    summary: None,
+                    ack_only: false,
+                });
+            } else {
+                state.apply(StatusEvent::BackgroundTaskEnd {
+                    tool_use_id: "bg".into(),
+                    success: false,
+                });
+            }
+            let out = render(state);
+            assert!(
+                out.contains(&format!("✗ {name}")) && out.contains("실패 1"),
+                "{out}"
+            );
         }
-        let out = render(state);
-        assert!(
-            out.contains(&format!("✗ {name}  ")) && out.contains("실패 1"),
-            "{out}"
-        );
     }
 }

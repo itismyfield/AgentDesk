@@ -92,7 +92,7 @@ impl ToolActivityRing {
                         background: matches!(class(name), "Task" | "Bash")
                             && input
                                 .as_deref()
-                                .and_then(|input| serde_json::from_str::<Value>(input).ok())
+                                .map(super::status_events::tool_input_value)
                                 .and_then(|value| {
                                     value.get("run_in_background").and_then(Value::as_bool)
                                 })
