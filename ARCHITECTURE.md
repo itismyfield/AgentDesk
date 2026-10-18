@@ -108,6 +108,7 @@ src/
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
+│   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
@@ -1280,6 +1281,8 @@ src/
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
+│   │   │   ├── footer_activity.rs
+│   │   │   ├── footer_activity_tests.rs
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── panel_cache_invalidation.rs
@@ -1295,6 +1298,10 @@ src/
 │   │   │   ├── subagent_summary.rs
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
+│   │   │   ├── tool_activity.rs
+│   │   │   ├── tool_activity_tests.rs
+│   │   │   ├── tool_summary.rs
+│   │   │   ├── tool_summary_tests.rs
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
@@ -1742,6 +1749,7 @@ src/
 │   │   │   │   ├── state.rs
 │   │   │   │   ├── stream_chunk.rs
 │   │   │   │   └── stream_seed.rs
+│   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
@@ -2002,11 +2010,13 @@ src/
 │   │   │   │   ├── tool_arms.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
+│   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
 │   │   │   │   ├── o_panel.rs
+│   │   │   │   ├── o_tool_activity_tests.rs
 │   │   │   │   ├── output.rs
 │   │   │   │   ├── rollover_guard.rs
 │   │   │   │   └── runtime.rs
