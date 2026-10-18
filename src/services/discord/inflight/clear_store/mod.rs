@@ -11,6 +11,8 @@
 //! explicit-root seams keep `pub(super)` for the parent's test re-imports.
 
 mod abandon;
+#[cfg(unix)]
+mod herdr_row_end;
 mod identity;
 pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;

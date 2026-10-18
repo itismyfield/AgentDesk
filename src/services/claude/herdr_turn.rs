@@ -802,59 +802,6 @@ pub(crate) fn herdr_terminal_frame(
     Some(read.frame(transcript, logical, start, token))
 }
 
-/// Admission's re-read of a Claude turn from its descriptor: from the first record stamped at or
-/// after the input, as the reader starts, to the first terminal `HerdrTurnLines` accepts.
-pub(crate) fn replay_herdr_turn(
-    file: &mut std::fs::File,
-    submitted_at: chrono::DateTime<chrono::Utc>,
-    len: u64,
-) -> Option<(u64, NativeTerminalKind, u64)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut bytes = Vec::new();
-    file.seek(SeekFrom::Start(0)).ok()?;
-    file.take(len).read_to_end(&mut bytes).ok()?;
-    let records = complete_records(&bytes);
-    let stamped = |line: &str| {
-        let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        let stamp = json.get("timestamp")?.as_str()?;
-        chrono::DateTime::parse_from_rfc3339(stamp).ok()
-    };
-    let (start, at) = records.iter().enumerate().find_map(|(at, (start, line))| {
-        stamped(line)
-            .filter(|stamp| *stamp >= submitted_at)
-            .map(|_| (*start, at))
-    })?;
-    let (local, _rx) = std::sync::mpsc::channel();
-    let mut lines = HerdrTurnLines::default();
-    for (record_start, line) in &records[at..] {
-        lines.process(line, &local);
-        if let Some(kind) = lines.terminal() {
-            let end = record_start + line.len() as u64 + 1;
-            return Some((start, kind, end));
-        }
-    }
-    None
-}
-
-/// Each newline-terminated record's start offset and trimmed text; a torn tail is not a record.
-fn complete_records(bytes: &[u8]) -> Vec<(u64, &str)> {
-    let mut records = Vec::new();
-    let mut offset = 0u64;
-    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
-        if raw.last() != Some(&b'\n') {
-            break;
-        }
-        let line = &raw[..raw.len() - 1];
-        if let Ok(text) = std::str::from_utf8(line)
-            && !text.trim().is_empty()
-        {
-            records.push((offset, text));
-        }
-        offset += raw.len() as u64;
-    }
-    records
-}
-
 /// An assistant or result record: a turn's own output, never metadata.
 fn is_turn_output(line: &str) -> bool {
     let json = serde_json::from_str::<serde_json::Value>(line).ok();
@@ -984,6 +931,10 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
 }
 
 mod never_attached;
+mod terminal_replay;
+pub(crate) use terminal_replay::{
+    Terminal, Unobserved, last_turn_closed, read_turn, replay_herdr_turn,
+};
 
 #[cfg(test)]
 mod provider_terminal_tests;

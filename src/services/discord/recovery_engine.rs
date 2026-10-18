@@ -124,6 +124,9 @@ pub(in crate::services::discord) mod herdr_admitted_restart;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_before_start_restart.rs"]
 mod herdr_before_start_restart;
+#[cfg(unix)]
+#[path = "recovery_engine/herdr_row_end.rs"]
+pub(in crate::services::discord) mod herdr_row_end;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_reader.rs"]
