@@ -1953,7 +1953,8 @@ pub(super) struct Booted {
 }
 
 /// The REST worker role restored its persisted turns before its homes start
-/// (`runtime_bootstrap.rs` `HomeRole::RestWorker`); a standby does not, and is not booted here.
+/// (`runtime_bootstrap.rs` `HomeRole::RestWorker`); a standby restores per channel once held,
+/// as [`Booted::boot_restoring`] boots it.
 pub(super) fn worker_restored() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
@@ -2058,6 +2059,17 @@ impl Booted {
         let port = move |id| BootPort::reading(id, Arc::clone(&restored), no_reset());
         let (discord, provider) = (Discord::default(), ShadowProvider::Claude);
         Self::boot_port_knobs(env, port, (discord, provider, GW), knobs).await
+    }
+
+    /// As [`Booted::boot_reading`] for a standby: each port restores its channel with `run` once
+    /// held, its home taking no new intake until then.
+    pub(super) async fn boot_restoring(env: &Env, run: channel_home_boot::ChannelRestore) -> Self {
+        let port = move |id| {
+            let port = BootPort::reading(id, Arc::default(), no_reset());
+            port.restoring("claude", Arc::clone(&run))
+        };
+        let on = (Discord::default(), ShadowProvider::Claude, GW);
+        Self::boot_port_knobs(env, port, on, HostKnobs::default()).await
     }
 
     async fn boot_port_on<R>(

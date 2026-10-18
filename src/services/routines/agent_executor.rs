@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 
+mod execution;
+mod launch;
 pub(crate) mod reliability;
 pub(crate) mod start_deferral;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
@@ -30,6 +32,7 @@ pub struct RoutineAgentExecutor {
     pool: Arc<PgPool>,
     health_registry: Option<Arc<HealthRegistry>>,
     default_completion_timeout_secs: u64,
+    headless_fresh_agents: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -91,7 +94,13 @@ impl RoutineAgentExecutor {
             pool,
             health_registry,
             default_completion_timeout_secs: default_completion_timeout_secs.max(1),
+            headless_fresh_agents: false,
         }
+    }
+
+    pub fn with_headless_fresh_agents(mut self, enabled: bool) -> Self {
+        self.headless_fresh_agents = enabled;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,14 +125,19 @@ impl RoutineAgentExecutor {
         let result = self
             .start_turn(
                 store,
-                &claimed,
-                &agent_id,
-                "primary",
-                &prompt,
-                dm_user_id.as_deref(),
-                &checkpoint,
-                next_due_at,
-                pause_on_terminal_failure,
+                start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: "primary",
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                    execution_mode: execution::AgentExecutionMode::for_new(
+                        &claimed.execution_strategy,
+                        self.headless_fresh_agents,
+                    ),
+                },
             )
             .await;
         match result {
@@ -182,6 +196,10 @@ impl RoutineAgentExecutor {
                     dm_user_id: dm_user_id.as_deref(),
                     checkpoint: &checkpoint,
                     next_due_at,
+                    execution_mode: execution::AgentExecutionMode::for_new(
+                        &claimed.execution_strategy,
+                        self.headless_fresh_agents,
+                    ),
                 };
                 if let Some(deferred) = self.defer_transient_start(start, None, &error).await? {
                     return Ok(deferred);
@@ -228,16 +246,22 @@ impl RoutineAgentExecutor {
                 retry_count_after_increment,
                 next_retry_at: retry_at,
             } => {
-                let result_json = Some(retry_scheduled_result_for_claimed(
-                    &claimed,
-                    failed_agent_id,
-                    attempt_kind,
-                    message,
-                    &prompt,
-                    retry_at,
-                    retry_count_after_increment,
-                    &checkpoint,
-                    next_due_at,
+                let result_json = Some(execution::with_mode(
+                    retry_scheduled_result_for_claimed(
+                        &claimed,
+                        failed_agent_id,
+                        attempt_kind,
+                        message,
+                        &prompt,
+                        retry_at,
+                        retry_count_after_increment,
+                        &checkpoint,
+                        next_due_at,
+                    ),
+                    execution::AgentExecutionMode::for_new(
+                        &claimed.execution_strategy,
+                        self.headless_fresh_agents,
+                    ),
                 ));
                 let scheduled = store
                     .schedule_agent_retry(
@@ -272,14 +296,19 @@ impl RoutineAgentExecutor {
                 match self
                     .start_turn(
                         store,
-                        &claimed,
-                        &fallback_agent_id,
-                        "fallback",
-                        &prompt,
-                        dm_user_id.as_deref(),
-                        &checkpoint,
-                        next_due_at,
-                        pause_on_terminal_failure,
+                        start_deferral::PendingAgentStart {
+                            claimed: &claimed,
+                            agent_id: &fallback_agent_id,
+                            attempt_kind: "fallback",
+                            prompt: &prompt,
+                            dm_user_id: dm_user_id.as_deref(),
+                            checkpoint: &checkpoint,
+                            next_due_at,
+                            execution_mode: execution::AgentExecutionMode::for_new(
+                                &claimed.execution_strategy,
+                                self.headless_fresh_agents,
+                            ),
+                        },
                     )
                     .await
                 {
@@ -467,18 +496,13 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
-            if let Some(message) = self.fresh_provider_session_failure(&run).await {
-                let result_json = Some(merge_pending_result(
-                    &run,
-                    "provider_session_dead",
-                    Some(&message),
-                    None,
-                ));
+            if let Some((status, message)) = self.fresh_run_failure(&run).await? {
+                let result_json = Some(merge_pending_result(&run, status, Some(&message), None));
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
                     result_json.as_ref(),
-                    "routine fresh provider session ended before completion",
+                    "routine fresh agent turn ended before completion",
                 )
                 .await;
                 let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
@@ -607,14 +631,18 @@ impl RoutineAgentExecutor {
         match self
             .start_turn(
                 store,
-                &claimed,
-                &agent_id,
-                &attempt_kind,
-                &prompt,
-                dm_user_id.as_deref(),
-                &checkpoint,
-                next_due_at,
-                pause_on_terminal_failure,
+                start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: &attempt_kind,
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                    execution_mode: execution::AgentExecutionMode::from_result(
+                        run.result_json.as_ref(),
+                    ),
+                },
             )
             .await
         {
@@ -662,6 +690,9 @@ impl RoutineAgentExecutor {
                     dm_user_id: dm_user_id.as_deref(),
                     checkpoint: &checkpoint,
                     next_due_at,
+                    execution_mode: execution::AgentExecutionMode::from_result(
+                        run.result_json.as_ref(),
+                    ),
                 };
                 let prior = run.result_json.as_ref();
                 if let Some(deferred) = self.defer_transient_start(start, prior, &error).await? {
@@ -768,14 +799,18 @@ impl RoutineAgentExecutor {
                 match self
                     .start_turn(
                         store,
-                        &claimed,
-                        &fallback_agent_id,
-                        "fallback",
-                        &prompt,
-                        None,
-                        &checkpoint,
-                        next_due_at,
-                        pause_on_terminal_failure,
+                        start_deferral::PendingAgentStart {
+                            claimed: &claimed,
+                            agent_id: &fallback_agent_id,
+                            attempt_kind: "fallback",
+                            prompt: &prompt,
+                            dm_user_id: None,
+                            checkpoint: &checkpoint,
+                            next_due_at,
+                            execution_mode: execution::AgentExecutionMode::from_result(
+                                run.result_json.as_ref(),
+                            ),
+                        },
                     )
                     .await
                 {
@@ -885,6 +920,12 @@ impl RoutineAgentExecutor {
         result_json: Option<&Value>,
         reason: &str,
     ) {
+        if execution::AgentExecutionMode::from_result(result_json)
+            == execution::AgentExecutionMode::Process
+        {
+            self.stop_process_attempt(result_json, reason).await;
+            return;
+        }
         let routine = match store.get_routine(routine_id).await {
             Ok(Some(routine)) => routine,
             Ok(None) => {
@@ -1034,273 +1075,6 @@ impl RoutineAgentExecutor {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn start_turn(
-        &self,
-        store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-        agent_id: &str,
-        attempt_kind: &str,
-        prompt: &str,
-        dm_user_id: Option<&str>,
-        checkpoint: &Option<Value>,
-        next_due_at: Option<DateTime<Utc>>,
-        _pause_on_terminal_failure: bool,
-    ) -> Result<StartedAgentTurn> {
-        let Some(registry) = self.health_registry.as_deref() else {
-            return Err(anyhow!(
-                "routine agent action requires discord runtime health registry"
-            ));
-        };
-
-        let bindings = crate::db::agents::load_agent_channel_bindings_pg(&self.pool, agent_id)
-            .await
-            .map_err(|error| anyhow!("load agent bindings for {agent_id}: {error}"))?
-            .ok_or_else(|| anyhow!("agent {agent_id} not found"))?;
-        let provider = bindings
-            .resolved_primary_provider_kind()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary provider is not configured"))?;
-        start_deferral::ensure_provider_registered(registry, &provider).await?;
-        let primary_channel = bindings
-            .primary_channel()
-            .ok_or_else(|| anyhow!("agent {agent_id} primary channel is not configured"))?;
-        let Some(channel_id_num) =
-            crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
-                .or_else(|| primary_channel.parse::<u64>().ok())
-        else {
-            return Err(anyhow!(
-                "agent {agent_id} primary channel is invalid: {primary_channel}"
-            ));
-        };
-        let channel_id = poise::serenity_prelude::ChannelId::new(channel_id_num);
-        let dm_user_id_num = match dm_user_id {
-            Some(value) => Some(value.parse::<u64>().map_err(|error| {
-                anyhow!("RoutineAction.agent.dmUserId must be a Discord snowflake string: {error}")
-            })?),
-            None => None,
-        };
-
-        let (turn_channel_id, discord_thread_id, delivery_bot, reservation) = if let Some(
-            dm_user_id_num,
-        ) = dm_user_id_num
-        {
-            let (dm_channel_id, reservation) = reserve_headless_agent_turn_in_dm(
-                    registry,
-                    channel_id,
-                    dm_user_id_num,
-                    &provider,
-                )
-                .await
-                .map_err(|error| {
-                    anyhow!(
-                        "reserve routine agent DM turn for {agent_id} and user {dm_user_id_num}: {error}"
-                    )
-                })?;
-            (dm_channel_id, None, "dm".to_string(), reservation)
-        } else {
-            let routine_channel = self
-                .resolve_or_create_routine_thread(
-                    store,
-                    registry,
-                    claimed,
-                    agent_id,
-                    provider.as_str(),
-                    channel_id,
-                )
-                .await;
-            let (turn_channel_id, discord_thread_id, delivery_bot) = match routine_channel {
-                Ok(target) => (
-                    target.channel_id,
-                    target.discord_thread_id,
-                    target.delivery_bot,
-                ),
-                Err(error) => {
-                    let warning = error.to_string();
-                    let _ = store
-                        .record_discord_log_result(&claimed.run_id, "failed", Some(&warning))
-                        .await;
-                    tracing::warn!(
-                        routine_id = claimed.routine_id,
-                        run_id = claimed.run_id,
-                        error = %warning,
-                        "routine thread setup failed; falling back to agent primary channel"
-                    );
-                    (channel_id, None, UtilityBotRole::Notify.alias().to_string())
-                }
-            };
-            (
-                turn_channel_id,
-                discord_thread_id,
-                delivery_bot,
-                reserve_headless_agent_turn(turn_channel_id),
-            )
-        };
-        let turn_id = reservation.turn_id().to_string();
-
-        let mut result_json = json!({
-            "status": "started",
-            "turn_id": turn_id.clone(),
-            "agent_id": agent_id,
-            "provider": provider.as_str(),
-            "channel_id": turn_channel_id.get().to_string(),
-            "parent_channel_id": channel_id_num.to_string(),
-            "discord_thread_id": discord_thread_id,
-            "dm_user_id": dm_user_id,
-            "is_dm": dm_user_id.is_some(),
-            "routine_id": claimed.routine_id,
-            "run_id": claimed.run_id,
-            "script_ref": claimed.script_ref,
-            "attempt_kind": attempt_kind,
-            "prompt": prompt,
-            "completion_evidence": "session_transcripts",
-            "fresh_context_guaranteed":
-                fresh_context_guaranteed(&claimed.execution_strategy, false),
-            "checkpoint": checkpoint,
-            "next_due_at": next_due_at.map(|value| value.to_rfc3339()),
-        });
-        let updated = store
-            .mark_agent_turn_started(
-                &claimed.run_id,
-                &turn_id,
-                Some(result_json.clone()),
-                agent_id,
-                attempt_kind,
-            )
-            .await?;
-        if !updated {
-            return Err(anyhow!(
-                "routine agent run {} vanished before turn_id could be stored",
-                claimed.run_id
-            ));
-        }
-
-        let metadata = Some(json!({
-            "agent_id": agent_id,
-            "delivery_bot": delivery_bot,
-            "routine_id": claimed.routine_id,
-            "routine_run_id": claimed.run_id,
-            "script_ref": claimed.script_ref,
-            "execution_strategy": claimed.execution_strategy,
-            "fresh_context_guaranteed":
-                fresh_context_guaranteed(&claimed.execution_strategy, false),
-            "turn_id": turn_id.clone(),
-            "parent_channel_id": channel_id_num.to_string(),
-            "discord_thread_id": discord_thread_id,
-            "dm_user_id": dm_user_id,
-            "is_dm": dm_user_id.is_some(),
-        }));
-        let outcome = if let Some(dm_user_id_num) = dm_user_id_num {
-            start_reserved_headless_agent_turn_in_dm(
-                registry,
-                channel_id,
-                turn_channel_id,
-                dm_user_id_num,
-                provider.clone(),
-                prompt.to_string(),
-                Some("routine".to_string()),
-                metadata,
-                // #5708 S1: None until S2/S3 land — see the starter's parameter doc.
-                None,
-                reservation,
-            )
-            .await
-        } else {
-            // #5: the agent's REAL primary channel/alias is the workspace hint so
-            // `resolve_workspace` resolves alias/by-name routine agents; the
-            // synthetic session name rides the tmux label (#3463 name-first).
-            let channel_name_hint = Some(primary_channel.clone());
-            let tmux_session_label = Some(routine_agent_session_name(&claimed.name, agent_id));
-            start_reserved_headless_agent_turn_with_owner_channel(
-                registry,
-                channel_id,
-                turn_channel_id,
-                provider.clone(),
-                prompt.to_string(),
-                Some("routine".to_string()),
-                metadata,
-                channel_name_hint,
-                tmux_session_label,
-                reservation,
-            )
-            .await
-        }
-        .map_err(|error| start_deferral::headless_start_error(agent_id, error))?;
-
-        if outcome.turn_id != turn_id {
-            return Err(anyhow!(
-                "reserved routine agent turn id mismatch: expected {} but started {}",
-                turn_id,
-                outcome.turn_id
-            ));
-        }
-        let started = outcome.status.as_str() == "started";
-        let provider_fresh_context = fresh_context_guaranteed(&claimed.execution_strategy, started);
-        if !started && let Some(object) = result_json.as_object_mut() {
-            object.insert(
-                "status".to_string(),
-                Value::String(outcome.status.as_str().to_string()),
-            );
-            object.insert(
-                "completion_evidence".to_string(),
-                Value::String("headless_start_outcome".to_string()),
-            );
-        }
-        let durable_confirmation_persisted = if provider_fresh_context {
-            let confirmed_result = result_with_fresh_context_guarantee(result_json.clone(), true);
-            match store
-                .confirm_agent_turn_started(&claimed.run_id, &turn_id)
-                .await
-            {
-                Ok(true) => {
-                    result_json = confirmed_result;
-                    true
-                }
-                Ok(false) => {
-                    tracing::warn!(
-                        routine_id = %claimed.routine_id,
-                        run_id = %claimed.run_id,
-                        turn_id = %turn_id,
-                        "fresh provider start confirmation found no matching routine agent turn"
-                    );
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        routine_id = %claimed.routine_id,
-                        run_id = %claimed.run_id,
-                        turn_id = %turn_id,
-                        error = %error,
-                        "failed to persist fresh provider start confirmation"
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        let fresh_context_guaranteed = confirmed_fresh_context_guarantee(
-            provider_fresh_context,
-            durable_confirmation_persisted,
-        );
-        result_json = result_with_fresh_context_guarantee(result_json, fresh_context_guaranteed);
-
-        // #3022: persist run -> fresh-session ownership now that the session is
-        // up, so boot recovery can reap this exact session if a dcserver restart
-        // orphans it. Best-effort: a failure here only loses the boot-recovery
-        // backstop (the in-line completion path still tears the session down),
-        // so it must never fail the started turn.
-        if started {
-            self.record_owned_fresh_session(store, claimed, &result_json)
-                .await;
-        }
-
-        Ok(StartedAgentTurn {
-            result_json,
-            started,
-            fresh_context_guaranteed,
-        })
-    }
-
     /// Records the tmux session a freshly-started fresh-routine run owns (#3022).
     /// No-op for non-fresh routines (they reuse a persistent session that must
     /// survive). Best-effort and non-fatal: every failure path only forgoes the
@@ -1319,7 +1093,10 @@ impl RoutineAgentExecutor {
         claimed: &ClaimedRoutineRun,
         result_json: &Value,
     ) {
-        if claimed.execution_strategy != "fresh" {
+        if claimed.execution_strategy != "fresh"
+            || execution::AgentExecutionMode::from_result(Some(result_json))
+                == execution::AgentExecutionMode::Process
+        {
             return;
         }
         if started_turn_is_dm(result_json) {
@@ -1829,6 +1606,7 @@ fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&
         "agent_id",
         "attempt_kind",
         "provider",
+        "execution_mode",
     ];
 
     let Some(started_result) = started_result else {
@@ -2193,7 +1971,7 @@ mod tests {
         }
     }
 
-    fn claimed_run() -> ClaimedRoutineRun {
+    pub(super) fn claimed_run() -> ClaimedRoutineRun {
         ClaimedRoutineRun {
             run_id: "run-1".to_string(),
             routine_id: "routine-1".to_string(),

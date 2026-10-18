@@ -5,7 +5,8 @@ use crate::services::discord::live_bridge::register_without_requeue;
 mod routine_metadata;
 use routine_metadata::{
     fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding,
-    scheduled_snapshot_session_label, session_key_basis_override, valid_routine_metadata,
+    routine_tmux_session_name, scheduled_snapshot_session_label, session_key_basis_override,
+    valid_routine_metadata,
 };
 
 use routine_metadata::persist_boundary_before_provider_clear;
@@ -370,18 +371,12 @@ async fn start_reserved_headless_turn_admitted(
             .get(&channel_id)
             .and_then(|session| session.channel_name.clone())
             .or_else(|| channel_name_hint.clone());
-        let tmux_session_name = if provider.uses_managed_tmux_backend() {
-            // #5: Prefer the synthetic routine label (when supplied) so the
-            // routine keeps its DISTINCT tmux session (#3463: routine-name-first
-            // label avoids two routines on one agent colliding) while
-            // `channel_name` stays the REAL channel for workspace/dispatch/role.
-            tmux_session_label
-                .as_deref()
-                .or(channel_name.as_deref())
-                .map(|name| provider.build_tmux_session_name(name))
-        } else {
-            None
-        };
+        let tmux_session_name = routine_tmux_session_name(
+            &provider,
+            metadata.as_ref(),
+            tmux_session_label.as_deref(),
+            channel_name.as_deref(),
+        );
         let category_name = data
             .sessions
             .get(&channel_id)
@@ -1454,7 +1449,8 @@ mod recovery_context_take_order_tests {
 mod fresh_routine_tests {
     use super::{
         fresh_routine_turn, metadata_parent_channel_id, persist_boundary_before_provider_clear,
-        routine_metadata_agent_id, routine_metadata_role_binding, session_key_basis_override,
+        routine_metadata_agent_id, routine_metadata_role_binding, routine_tmux_session_name,
+        session_key_basis_override,
     };
     use crate::services::provider::ProviderKind;
     use serde_json::json;
@@ -1781,33 +1777,16 @@ mod fresh_routine_tests {
         );
     }
 
-    // The two surfaces above are only wired together if the tmux name prefers
-    // the label over the channel name. That ordering lives inline in the giant
-    // start path, so pin it as a source contract next to the behavioral tests
-    // (it proves the selection order, NOT that no kill/warm-followup happens —
-    // that evidence belongs to the S3 transport harness). Needles are assembled
-    // by concatenation so `include_str!` cannot self-match.
     #[test]
     fn tmux_name_selection_prefers_the_routine_label_over_the_channel_name() {
-        let src = include_str!("headless_turn.rs");
-        let label_first = format!(
-            "{}{}",
-            "tmux_session_label\n                .as_deref()\n                ",
-            ".or(channel_name.as_deref())"
-        );
-        assert!(
-            src.contains(&label_first),
-            "the tmux session name must be built from the label first, channel name second"
-        );
-        let key_basis_takes_label = format!(
-            "{}{}",
-            "let session_key_basis_override = session_key_basis_override(\n",
-            "        scheduled_snapshot_label.as_deref(),"
-        );
-        assert!(
-            src.contains(&key_basis_takes_label)
-                && src.contains("        tmux_session_label.as_deref(),\n    );"),
-            "the ADK session key basis must be selected from the same tmux label"
+        assert_eq!(
+            routine_tmux_session_name(
+                &ProviderKind::Claude,
+                None,
+                Some(DM_ROUTINE_LABEL),
+                Some(DM_CHANNEL_NAME)
+            ),
+            Some(ProviderKind::Claude.build_tmux_session_name(DM_ROUTINE_LABEL)),
         );
     }
 

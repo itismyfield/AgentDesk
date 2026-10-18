@@ -247,6 +247,78 @@ impl ChannelMailboxHandle {
     }
 }
 
+/// One finish keyed to the expected episode (`FinishTurnIfMatches`).
+pub(super) struct FinishIfMatches {
+    pub(super) expected_actor: Option<Arc<CancelToken>>,
+    pub(super) preserve_queue: bool,
+    pub(super) expected_user_message_id: MessageId,
+    pub(super) active_started_before: Option<Instant>,
+    pub(super) turn_nonce_guard: TurnNonceGuard,
+    pub(super) persistence: QueuePersistenceContext,
+}
+
+/// Finalizes the active turn only while it is the expected one; `before_release` runs only on
+/// that match, before the token leaves, in this same actor step.
+pub(super) fn finish_turn_if_matches(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    request: FinishIfMatches,
+    before_release: Option<Box<dyn super::witnessed_release::ReleaseWithdrawal>>,
+    reply: impl FnOnce(FinishTurnResult, Vec<ChannelId>),
+) {
+    let FinishIfMatches {
+        expected_actor,
+        preserve_queue,
+        expected_user_message_id,
+        active_started_before,
+        turn_nonce_guard,
+        persistence,
+    } = request;
+    // A mismatch means the caller's turn already finalized and a newer one may own the mailbox:
+    // take nothing, and report the live backlog as an idempotent second finish would.
+    let matches = finish_turn_identity_matches(
+        state,
+        expected_user_message_id,
+        &expected_actor,
+        active_started_before,
+        &turn_nonce_guard,
+    );
+    if !matches {
+        let has_pending =
+            (state.intervention_queue.iter()).any(|item| item.mode == InterventionMode::Soft);
+        let unchanged = FinishTurnResult {
+            removed_token: None,
+            has_pending,
+            mailbox_online: true,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        };
+        reply(unchanged, Vec::new());
+        return;
+    }
+    let withdrawn = before_release.map_or_else(Vec::new, |step| step.withdraw());
+    state.last_persistence = Some(persistence.clone());
+    let finished_user_message_id = state.active_user_message_id;
+    let finished = finalize_turn_state(state, channel_id, Some(&persistence), preserve_queue);
+    if finished.removed_token.is_some()
+        && let Some(nonce) = turn_nonce_guard.named_nonce()
+    {
+        state
+            .remint_fence
+            .note_exact_release(expected_user_message_id, nonce);
+    }
+    reply(finished, withdrawn);
+    if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
+        consume_pending_dispatch_marker_if_matches(
+            state,
+            channel_id,
+            user_message_id,
+            "finish_turn_if_matches",
+        );
+    }
+    mark_turn_finished_signal_done(channel_id);
+}
+
 pub(super) fn finish_turn_identity_matches(
     state: &ChannelMailboxState,
     expected_user_message_id: MessageId,

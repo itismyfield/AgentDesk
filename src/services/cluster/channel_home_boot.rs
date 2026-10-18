@@ -53,7 +53,7 @@ struct BootRestore {
 }
 
 /// The drain's reads of the channel in this process, the reset its runtime supplies and the
-/// runtime's "persisted turns restored" flag a released channel's adoption waits on.
+/// "persisted turns restored" flag: adoption waits on it unless the port restores the channel.
 pub(crate) struct BootPort<R = ChannelHomePort> {
     reads: Arc<R>,
     reset: LegacyReset,
@@ -92,7 +92,8 @@ impl<R> BootPort<R> {
         self
     }
 
-    /// Restores the channel once this node holds it: `restored` turns true only if `run` says so.
+    /// Restores the channel once this node holds it: `restored` turns true only if `run` says so,
+    /// and its home takes no new intake until then.
     pub(crate) fn restoring(mut self, provider: &str, run: ChannelRestore) -> Self {
         let (provider, tried) = (provider.to_owned(), Arc::default());
         self.restore = Some(BootRestore {
@@ -105,6 +106,23 @@ impl<R> BootPort<R> {
 
     fn restored(&self) -> bool {
         self.restored.load(Ordering::Acquire)
+    }
+
+    /// Whether a released channel may be adopted: once restored, or by a port that restores it
+    /// itself once held, for a candidate whose Herdr endpoint runs here.
+    fn adopts(&self, candidate: bool) -> bool {
+        #[cfg(test)]
+        if restore_mutant("adopt_awaits_restore") {
+            return self.restored();
+        }
+        #[cfg(test)]
+        let candidate = candidate || restore_mutant("adopt_ignores_candidate");
+        self.restored() || (self.restore.is_some() && candidate)
+    }
+
+    /// The flag a self-restoring port's home holds new intake on until its restore installed.
+    fn opens_after(&self) -> Option<Arc<AtomicBool>> {
+        self.restore.as_ref().map(|_| Arc::clone(&self.restored))
     }
 
     /// Whether the boot restore is settled for `epoch`: none to run, already tried, or run now under
@@ -446,7 +464,10 @@ where
             continue;
         };
         stop(&channel).await;
-        let home = (index < mounted).then(|| Arc::new(HomeGate::new(&channel, &boot.local)));
+        let port = (boot.port)(id);
+        let opens_after = port.opens_after();
+        let gate = || HomeGate::new(&channel, &boot.local).opens_after(opens_after.clone());
+        let home = (index < mounted).then(|| Arc::new(gate()));
         if let Some(home) = &home {
             if unreadable {
                 home.note_drain(Some(Blocker::RowUnreadable.as_str()));
@@ -463,8 +484,9 @@ where
             candidate: boot.candidates.contains(&id),
             writers: boot.writers.clone(),
             tried: None,
+            opens_after,
         };
-        let watch = tokio::spawn(watch(seen, (boot.port)(id), Arc::clone(&lease)));
+        let watch = tokio::spawn(watch(seen, port, Arc::clone(&lease)));
         if let Some(writers) = &boot.writers {
             writers
                 .watches
@@ -554,14 +576,17 @@ struct Seen {
     writers: Option<Arc<ChannelWriters>>,
     /// The mounted home a missing writer was started for; cleared with the mount.
     tried: Option<usize>,
+    /// The port's restore flag each gate mounted here holds new intake on.
+    opens_after: Option<Arc<AtomicBool>>,
 }
 
 impl Seen {
     /// The mounted gate, registering a fresh one when none is.
     fn mount(&mut self) -> Arc<HomeGate> {
-        let (id, local) = (self.id, self.local.as_str());
+        let (id, local, opens_after) = (self.id, self.local.as_str(), &self.opens_after);
         let home = self.mounted.get_or_insert_with(|| {
-            let home = Arc::new(HomeGate::new(&id.to_string(), local));
+            let home = HomeGate::new(&id.to_string(), local).opens_after(opens_after.clone());
+            let home = Arc::new(home);
             channel_home::register(Arc::clone(&home));
             #[cfg(test)]
             events::record(id, events::Event::Mount(gate_address(&home)));
@@ -712,9 +737,10 @@ where
                     let releases_here =
                         row.state == HomeState::Released && row.target.as_deref() == local;
                     #[cfg(test)]
-                    let restored = port.restored() || writer_mutant("adopt_ignores_restored");
+                    let restored =
+                        port.adopts(seen.candidate) || writer_mutant("adopt_ignores_restored");
                     #[cfg(not(test))]
-                    let restored = port.restored();
+                    let restored = port.adopts(seen.candidate);
                     let adoptable = match releases_here && restored {
                         true => Some(seen.adoptable(&home).await),
                         false => None,

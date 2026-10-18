@@ -364,6 +364,8 @@ async fn restore_standby_channel(
     else {
         return false;
     };
+    #[cfg(test)]
+    boot_restore_tests::paused(channel).await;
     if !matches!(
         resolve_runtime_channel_binding_status(&http, channel_id).await,
         RuntimeChannelBindingStatus::Owned
@@ -442,7 +444,7 @@ async fn restore_standby_channel(
 
 #[cfg(test)]
 #[path = "queued_recovery_boot_restore_tests.rs"]
-mod boot_restore_tests;
+pub(super) mod boot_restore_tests;
 
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_draft_tests.rs"]
