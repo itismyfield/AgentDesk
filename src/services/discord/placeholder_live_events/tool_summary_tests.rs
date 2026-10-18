@@ -312,8 +312,9 @@ fn paths_are_relative_private_or_anonymous_before_display() {
         "C:\\Users\\SPACE_HEAD SPACE_TAIL\\file.rs",
     ] {
         let output = render("Read", json!({"file_path":path})).unwrap();
+        let visible = output.replace(['\\', '\u{200b}'], "");
         assert!(
-            !output.contains("SPACE_HEAD") && !output.contains("SPACE_TAIL"),
+            !visible.contains("SPACE_HEAD") && !visible.contains("SPACE_TAIL"),
             "{output}"
         );
     }
