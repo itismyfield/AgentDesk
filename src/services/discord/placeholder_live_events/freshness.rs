@@ -5,10 +5,8 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! The activity header shares the same renderer across separate panels and footers.
-//! Class mode preserves the static label; summary mode adds bounded, sanitized rows.
-//! Tool ages and panel times use stable event stamps, so heartbeat renders stay
-//! byte-identical while Discord refreshes relative ages on the client.
+//! Class and summary headers share one renderer across panels and footers.
+//! Stable event stamps keep heartbeat text identical; Discord refreshes relative ages.
 
 use poise::serenity_prelude::ChannelId;
 
