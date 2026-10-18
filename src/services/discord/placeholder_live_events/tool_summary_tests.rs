@@ -141,6 +141,17 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         ),
         ("mysql -pSHORTPWD", &["SHORTPWD"]),
         (
+            "mysql --pass\"word\" OBFUSCATED_VALUE",
+            &["OBFUSCATED_VALUE"],
+        ),
+        ("echo to\"ken\"=OBFUSCATED_TOKEN", &["OBFUSCATED_TOKEN"]),
+        ("echo gh\"p\"_QUOTE_LEAK9", &["QUOTE_LEAK9"]),
+        (
+            "curl ht\"tps\"://QUOTE_USER:QUOTE_PASS@example.test/path",
+            &["QUOTE_USER", "QUOTE_PASS"],
+        ),
+        ("cat /Us\"ers\"/FAKE_ACCOUNT/file.rs", &["FAKE_ACCOUNT"]),
+        (
             "mysql --PaSsWoRd='FLAG_HEAD'\"FLAG_TAIL\"",
             &["FLAG_HEAD", "FLAG_TAIL"],
         ),
@@ -229,7 +240,7 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
             &["COOKIE_HEAD", "COOKIE_TAIL"],
         ),
     ];
-    assert_eq!(cases.len(), 41);
+    assert_eq!(cases.len(), 46);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let output = render(
@@ -245,6 +256,16 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
                 );
             }
         }
+    }
+    for command in [
+        "mysql --password 'NORMAL_HEAD NORMAL_TAIL'",
+        "mysql --password='NORMAL_HEAD'\"NORMAL_TAIL\"",
+        "echo 'ordinary quoted words'",
+    ] {
+        assert!(
+            render("Bash", json!({"command":command})).is_some(),
+            "{command}"
+        );
     }
 }
 
@@ -389,4 +410,5 @@ fn existing_sections_share_the_secret_boundary_without_losing_lines_or_markdown(
     assert!(safe_section("**Task**\ninspect ghp\\_ShortFakeLeak9").is_none());
     assert!(safe_section("**Task**\ninspect /Users/FAKE\\_USER/file.rs").is_none());
     assert!(safe_section("**Task**\ninspect C:\\Users\\FAKE\\_USER\\file.rs").is_none());
+    assert!(safe_section("**Task**\nmysql --pass\"word\" SECTION_LEAK").is_none());
 }
