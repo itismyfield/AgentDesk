@@ -348,9 +348,11 @@ async fn run_entry_readiness_on_pg_tx(
 /// commit protected by the same token.
 ///
 /// Blocking participants take `aq_run:<run_id>` before row locks: cancel and
-/// terminalize, force-pause, phase-gate attachment (including its attachment-
-/// free branch), consultation attachment, explicit completion, dispatched-
-/// entry choke points, done-entry reactivation, retry attachment, campaign
+/// terminalize, force-pause and its cleanup transaction, phase-gate attachment
+/// (including its attachment-free branch), consultation attachment, explicit
+/// completion, dispatched-entry choke points, done-entry reactivation, retry
+/// attachment (or the copied context run when no entry owns the origin), phase-gate
+/// context dispatch creation, phase-gate saves that carry dispatches, campaign
 /// handoff append, activate's empty-run completion `complete_run_if_empty`,
 /// and the run-scoped reset `reset_run_scoped_with_pg` (#4880).
 /// Retry already takes the d1 retry token first and then the run token before its
@@ -358,10 +360,11 @@ async fn run_entry_readiness_on_pg_tx(
 /// ordering is serialized by that first run token for these participants.
 /// `maybe_finalize_run_if_ready_pg` is the exception: callers may already hold
 /// entry or run rows, so its try-lock is non-blocking and adds no wait edge.
+/// The full participant table lives in the `run_owner_guard` module doc.
 ///
 /// `lock_phase_gate_state_on_pg_tx` uses PostgreSQL's two-argument advisory
-/// key space. It is separate from the one-argument `aq_run:<run_id>` token and
-/// does not serialize phase-gate state writes with cancel.
+/// key space, separate from the one-argument `aq_run:<run_id>` token. A save that
+/// carries dispatches takes sorted run tokens and the dispatch rows before that key.
 ///
 /// The only other `completed` writers are the destructive admin owners pinned by
 /// `run_completion_contract_tests`: the operator `end` command and the two resets.
