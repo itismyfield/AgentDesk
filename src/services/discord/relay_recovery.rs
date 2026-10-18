@@ -915,11 +915,11 @@ mod axis_b_tests {
         );
         for (source, needle) in [
             (
-                include_str!("health/recovery.rs"),
+                include_str!("health/recovery/watchdog_pass.rs"),
                 "AxisBSite::WatchdogStaleIdle",
             ),
             (
-                include_str!("health/recovery.rs"),
+                include_str!("health/recovery/watchdog_pass.rs"),
                 "AxisBSite::WatchdogExplicitBackground",
             ),
             (

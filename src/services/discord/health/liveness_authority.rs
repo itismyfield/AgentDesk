@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn publish_precedes_relay_dead_reattach_in_health_tick() {
-        let recovery = include_str!("recovery.rs");
+        let recovery = include_str!("recovery/watchdog_pass.rs");
         let publish = recovery
             .find("observe_and_publish_from_tick(")
             .expect("health tick must publish a liveness verdict");
