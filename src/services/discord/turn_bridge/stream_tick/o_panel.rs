@@ -3,6 +3,10 @@
 
 use super::super::*;
 
+#[cfg(test)]
+#[path = "body_footer_rollover_tests.rs"]
+mod body_footer_rollover_tests;
+
 /// The status-only frame: spinner, last tool and turn times, with no body.
 pub(super) fn status_frame(
     shared: &SharedData,

@@ -217,11 +217,10 @@ pub(super) fn build_bridge_single_message_panel_status_block(
     full_response: &str,
 ) -> String {
     if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
-        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
-            channel_id,
-            provider,
-            started_at_unix,
-        );
+        let panel_text = shared
+            .ui
+            .placeholder_live_events
+            .render_footer_status_panel(channel_id, provider, started_at_unix, full_response);
         return super::single_message_panel::compose_footer_status_block(indicator, &panel_text);
     }
     if shared.ui.status_panel_v2_enabled {

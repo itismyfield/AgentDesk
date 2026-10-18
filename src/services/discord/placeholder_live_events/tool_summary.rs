@@ -39,6 +39,158 @@ fn field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
 // single quoted fragment would leave the tail of PASSWORD='head'"tail" visible.
 const WORD: &str = r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>])+"#;
 
+fn credential_command(input: &str) -> bool {
+    static TOKENS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?:'[^']*'|"[^"]*"|[^\s'"\\;&|<>()])+|[;&|()\r\n]"#).expect("command words")
+    });
+    static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*=").expect("command environment assignment")
+    });
+    if input
+        .replace(['\'', '"'], "")
+        .to_ascii_lowercase()
+        .contains("--password-stdin")
+    {
+        return true;
+    }
+    let words: Vec<_> = TOKENS.find_iter(input).map(|word| word.as_str()).collect();
+    let (mut command, mut wrapper, mut skip_value) = (true, false, false);
+    for (index, raw_word) in words.iter().enumerate() {
+        if matches!(*raw_word, ";" | "&" | "|" | "(" | ")" | "\r" | "\n") {
+            (command, wrapper, skip_value) = (true, false, false);
+            continue;
+        }
+        if !command {
+            continue;
+        }
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        let word = raw_word.replace(['\'', '"'], "").to_ascii_lowercase();
+        if ASSIGNMENT.is_match(&word)
+            || matches!(
+                word.as_str(),
+                "-" | "└" | "▶" | "✓" | "✗" | "?" | "[" | "]" | "[x]"
+            )
+        {
+            continue;
+        }
+        let executable = word.rsplit('/').next().unwrap_or(&word);
+        if matches!(executable, "sudo" | "env" | "command" | "exec" | "nohup") {
+            wrapper = true;
+            continue;
+        }
+        if wrapper && word.starts_with('-') {
+            skip_value = matches!(
+                word.as_str(),
+                "-u" | "-g"
+                    | "-h"
+                    | "-p"
+                    | "-c"
+                    | "--user"
+                    | "--group"
+                    | "--host"
+                    | "--prompt"
+                    | "--chdir"
+                    | "--unset"
+            );
+            continue;
+        }
+        if matches!(
+            executable,
+            "sshpass"
+                | "htpasswd"
+                | "redis-cli"
+                | "mysql"
+                | "mysqladmin"
+                | "psql"
+                | "op"
+                | "vault"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "dash"
+        ) || words.get(index + 1).is_some_and(|next| {
+            let next = next.replace(['\'', '"'], "").to_ascii_lowercase();
+            matches!(
+                (executable, next.as_str()),
+                ("docker" | "podman", "login") | ("gh", "auth") | ("aws", "configure")
+            )
+        }) {
+            return true;
+        }
+        command = false;
+    }
+    false
+}
+
+fn credential_env_key(input: &str) -> Option<usize> {
+    static KEY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?i)\b[a-z0-9_]*(?:pass|pwd|auth|cred)[a-z0-9_]*['"]?[ \t]*=[ \t]*"#)
+            .expect("credential environment names")
+    });
+    KEY.find(input).map(|key| key.end())
+}
+
+fn redact_userpass(input: &str) -> String {
+    static USERPASS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"(?i)((?:^|[\s;&|])(?:-u[ \t]*|--user(?:[ \t]*=[ \t]*|[ \t]+)))({WORD})"
+        ))
+        .expect("user password arguments")
+    });
+    USERPASS
+        .replace_all(input, |captures: &regex::Captures<'_>| {
+            if captures[2].contains(':') {
+                format!("{}***", &captures[1])
+            } else {
+                captures[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
+fn redact_env(input: &str) -> String {
+    static WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(WORD).expect("shell words"));
+    static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r#"(?i)(\b[a-z0-9_]*(?:pass|pwd|auth|cred)[a-z0-9_]*['"]?[ \t]*=[ \t]*)({WORD})"#
+        ))
+        .expect("credential environment assignments")
+    });
+    let masked = WORDS.replace_all(input, |captures: &regex::Captures<'_>| {
+        let word = &captures[0];
+        if credential_env_key(word).is_some_and(|end| end < word.len()) {
+            "***".to_string()
+        } else {
+            word.to_string()
+        }
+    });
+    ASSIGNMENT.replace_all(&masked, "${1}***").into_owned()
+}
+
+fn redact_prose(input: &str) -> String {
+    static PROSE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"(?i)(\b(?:password|passwd|secret|token)\b[ \t]*(?:(?:is\b|[:=])[ \t]*)?)({WORD})"
+        ))
+        .expect("credential prose")
+    });
+    PROSE.replace_all(input, "${1}***").into_owned()
+}
+
+fn redact_extra_tokens(input: &str) -> String {
+    static EXTRA: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)(?:(?:glpat-|glptt-|npm_|pypi-|hf_|xapp-|xox[ar]-|shpat_)[a-z0-9_-]+|SG\.[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)").expect("additional token prefixes")
+    });
+    EXTRA.replace_all(input, "***").into_owned()
+}
+
+fn suppress_links(input: &str) -> String {
+    input.replace("://", ":/\u{200b}/")
+}
+
 fn redact_credentials(input: &str) -> String {
     static WORDS: LazyLock<Regex> = LazyLock::new(|| Regex::new(WORD).expect("shell words"));
     static ASSIGNED: LazyLock<Regex> = LazyLock::new(|| {
@@ -96,7 +248,8 @@ fn redact_tokens(input: &str) -> String {
     });
     static OPAQUE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[a-zA-Z0-9+/_=-]{32,}").expect("opaque credential chunks"));
-    let masked = KNOWN.replace_all(input, "***");
+    let masked = redact_extra_tokens(input);
+    let masked = KNOWN.replace_all(&masked, "***");
     OPAQUE.replace_all(&masked, "***").into_owned()
 }
 
@@ -113,6 +266,7 @@ fn sanitized(raw: &str) -> Option<String> {
     // Inspect an unescaped probe and drop ambiguous escaped sensitive material.
     let probe = raw.replace('\\', "");
     let lower = probe.to_ascii_lowercase();
+    let env_key = credential_env_key(&probe);
     let credential_syntax = [
         "password",
         "passwd",
@@ -124,11 +278,14 @@ fn sanitized(raw: &str) -> Option<String> {
         "basic",
     ]
     .iter()
-    .any(|key| lower.contains(key));
+    .any(|key| lower.contains(key))
+        || env_key.is_some();
     // Encoded or incomplete secret-bearing syntax cannot be safely summarized.
     if raw.as_bytes().windows(3).any(|bytes| {
         bytes[0] == b'%' && bytes[1].is_ascii_hexdigit() && bytes[2].is_ascii_hexdigit()
     }) || raw.contains('\0')
+        || credential_command(raw)
+        || env_key.is_some_and(|end| probe[end..].trim().is_empty())
         || (credential_syntax && !balanced_quotes(raw))
         || (raw.contains('\\')
             && (credential_syntax
@@ -144,7 +301,10 @@ fn sanitized(raw: &str) -> Option<String> {
     {
         return None;
     }
-    let masked = redact_credentials(raw);
+    let masked = redact_userpass(raw);
+    let masked = redact_env(&masked);
+    let masked = redact_prose(&masked);
+    let masked = redact_credentials(&masked);
     let masked = redact_urls(&masked);
     let masked = redact_tokens(&masked);
     let masked = crate::services::discord::formatting::redact_sensitive_for_placeholder(&masked);
@@ -155,6 +315,9 @@ fn sanitized(raw: &str) -> Option<String> {
     let dequoted = masked.replace(['\'', '"'], "");
     if dequoted != masked
         && (redact_credentials(&dequoted) != dequoted
+            || redact_userpass(&dequoted) != dequoted
+            || redact_env(&dequoted) != dequoted
+            || redact_prose(&dequoted) != dequoted
             || redact_urls(&dequoted) != dequoted
             || redact_tokens(&dequoted) != dequoted
             || anonymize_home(&dequoted) != dequoted
@@ -162,7 +325,7 @@ fn sanitized(raw: &str) -> Option<String> {
     {
         return None;
     }
-    Some(masked)
+    Some(suppress_links(&masked))
 }
 
 /// Existing generated sections already escape Markdown; retain that structure

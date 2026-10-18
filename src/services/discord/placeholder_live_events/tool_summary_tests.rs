@@ -251,8 +251,39 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
             "curl --header 'Cookie: COOKIE_HEAD COOKIE_TAIL'",
             &["COOKIE_HEAD", "COOKIE_TAIL"],
         ),
+        (
+            "curl -u admin:PairLeak9 example.test",
+            &["admin", "PairLeak9"],
+        ),
+        (
+            "curl --user admin:PairLeak9 example.test",
+            &["admin", "PairLeak9"],
+        ),
+        ("sshpass -p CmdLeak9 ssh host", &["CmdLeak9"]),
+        ("MYSQL_PWD=EnvLeak9 client", &["EnvLeak9"]),
+        ("DB_PASS=EnvLeak9 client", &["EnvLeak9"]),
+        ("redis-cli -a CmdLeak9", &["CmdLeak9"]),
+        ("export GITLAB=glpat-SmallLeak9", &["glpat-SmallLeak9"]),
+        ("htpasswd -b f admin CmdLeak9", &["CmdLeak9"]),
+        (
+            "echo CmdLeak9 | docker login --password-stdin",
+            &["CmdLeak9"],
+        ),
+        ("the password is ProseLeak9", &["ProseLeak9"]),
+        ("SERVICE_AUTH=EnvLeak9 client", &["EnvLeak9"]),
+        ("SERVICE_CRED=EnvLeak9 client", &["EnvLeak9"]),
+        ("client --api-key APILEAK9", &["APILEAK9"]),
+        ("inspect glptt-SmallLeak9", &["glptt-SmallLeak9"]),
+        ("inspect npm_SmallLeak9", &["npm_SmallLeak9"]),
+        ("inspect pypi-SmallLeak9", &["pypi-SmallLeak9"]),
+        ("inspect hf_SmallLeak9", &["hf_SmallLeak9"]),
+        ("inspect xapp-SmallLeak9", &["xapp-SmallLeak9"]),
+        ("inspect xoxa-SmallLeak9", &["xoxa-SmallLeak9"]),
+        ("inspect xoxr-SmallLeak9", &["xoxr-SmallLeak9"]),
+        ("inspect shpat_SmallLeak9", &["shpat_SmallLeak9"]),
+        ("inspect SG.SmallLeak9.part", &["SG.SmallLeak9.part"]),
     ];
-    assert_eq!(cases.len(), 47);
+    assert_eq!(cases.len(), 69);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let input =
@@ -270,8 +301,8 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         }
     }
     for command in [
-        "mysql --password 'NORMAL_HEAD NORMAL_TAIL'",
-        "mysql --password='NORMAL_HEAD'\"NORMAL_TAIL\"",
+        "client --password 'NORMAL_HEAD NORMAL_TAIL'",
+        "client --password='NORMAL_HEAD'\"NORMAL_TAIL\"",
         "echo 'ordinary quoted words'",
     ] {
         assert!(
@@ -279,6 +310,238 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
             "{command}"
         );
     }
+}
+
+#[test]
+fn repair_credential_commands_show_only_class() {
+    for command in [
+        "sshpass -p CmdLeak9 ssh host",
+        "htpasswd -b f user CmdLeak9",
+        "redis-cli -a CmdLeak9",
+        "mysql -e query",
+        "mysqladmin ping",
+        "psql -c query",
+        "docker login registry",
+        "podman login registry",
+        "gh auth status",
+        "op read item",
+        "vault kv get item",
+        "aws configure get region",
+        "echo CmdLeak9 | client --password-stdin",
+        "/usr/bin/mysql -e query",
+        "sudo psql -c query",
+        "env MODE=dev sshpass -p CmdLeak9 ssh host",
+        "my\"sql\" -e query",
+        "docker lo\"gin\" registry",
+        "sudo -u root env MODE='two words' /usr/bin/psql -c query",
+        "sh -c 'redis-cli -a CmdLeak9'",
+    ] {
+        for tool in ["Bash", "exec_command"] {
+            assert!(
+                render(tool, json!({"command":command})).is_none(),
+                "{tool}: {command}"
+            );
+        }
+    }
+    assert!(render("Bash", json!({"command":"echo ordinary-command"})).is_some());
+    assert_eq!(
+        safe_section("**Plan**\n- [ ] fix mysql loader").as_deref(),
+        Some("**Plan**\n- [ ] fix mysql loader")
+    );
+    assert!(render("Bash", json!({"command":"echo ';' mysql loader"})).is_some());
+    assert!(safe_section("**Tasks**\n└ redis-cli -a CmdLeak9").is_none());
+}
+
+#[test]
+fn repair_userpass_arguments_hide_both_halves() {
+    for command in [
+        "curl -u UserLeak9:PairLeak9 example.test",
+        "curl --user UserLeak9:PairLeak9 example.test",
+        "curl --user=UserLeak9:PairLeak9 example.test",
+        "curl -u'UserLeak9:PairLeak9 tail' example.test",
+        "curl --us\"er\" UserLeak9:PairLeak9 example.test",
+    ] {
+        for tool in ["Bash", "Task", "WebSearch"] {
+            let output = render(
+                tool,
+                json!({"command":command,"description":command,"query":command}),
+            )
+            .unwrap_or_default();
+            let visible = output.replace(['\\', '\u{200b}'], "");
+            assert!(
+                !visible.contains("UserLeak9") && !visible.contains("PairLeak9"),
+                "{output}"
+            );
+        }
+    }
+    assert!(
+        render(
+            "Bash",
+            json!({"command":"curl --user public-user example.test"})
+        )
+        .unwrap()
+        .contains("public-user")
+    );
+    assert!(
+        render(
+            "Bash",
+            json!({"command":"curl -u UserLeak9:PairLeak9 example.test"})
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn repair_abbreviated_environment_names_mask_values() {
+    for command in [
+        "DB_PASS=EnvLeak9 client",
+        "MYSQL_PWD=EnvLeak9 client",
+        "SERVICE_AUTH=EnvLeak9 client",
+        "SERVICE_CRED=EnvLeak9 client",
+        "export DB_PASS = 'ENV_HEAD ENV_TAIL' client",
+        "echo \"SERVICE_AUTH=ENV_HEAD ENV_TAIL\"",
+        "DB_PA\"SS\"=EnvLeak9 client",
+    ] {
+        let output = render("Bash", json!({"command":command})).unwrap_or_default();
+        let visible = output.replace(['\\', '\u{200b}'], "");
+        for secret in ["EnvLeak9", "ENV_HEAD", "ENV_TAIL"] {
+            assert!(!visible.contains(secret), "{command}: {output}");
+        }
+    }
+    assert!(render("Bash", json!({"command":"SERVICE_AUTH=EnvLeak9 client"})).is_some());
+    assert_eq!(
+        safe_section("**Plan**\n- [ ] fix author\\_module and credit\\_loader").as_deref(),
+        Some("**Plan**\n- [ ] fix author\\_module and credit\\_loader")
+    );
+    assert_eq!(
+        safe_section("fix DB\\_AUTH loader").as_deref(),
+        Some("fix DB\\_AUTH loader")
+    );
+    for tool in ["Task", "WebSearch"] {
+        for phrase in [
+            "DB_AUTH=",
+            "DB_AUTH='ENV_HEAD ENV_TAIL",
+            "DB_AUTH=\"ENV_HEAD ENV_TAIL",
+        ] {
+            assert!(
+                render(tool, json!({"description":phrase,"query":phrase})).is_none(),
+                "{tool}: {phrase}"
+            );
+        }
+    }
+}
+
+#[test]
+fn repair_additional_token_prefixes_mask_short_values() {
+    for token in [
+        "glpat-SmallLeak9",
+        "glptt-SmallLeak9",
+        "npm_SmallLeak9",
+        "pypi-SmallLeak9",
+        "hf_SmallLeak9",
+        "xapp-SmallLeak9",
+        "xoxa-SmallLeak9",
+        "xoxr-SmallLeak9",
+        "shpat_SmallLeak9",
+        "SG.SmallLeak9.part",
+    ] {
+        let output = render("Task", json!({"description":format!("inspect {token}")})).unwrap();
+        assert!(
+            !output
+                .replace(['\\', '\u{200b}'], "")
+                .contains("SmallLeak9"),
+            "{output}"
+        );
+    }
+    let output = render(
+        "Task",
+        json!({"description":"inspect gl\"pat\"-SmallLeak9"}),
+    )
+    .unwrap_or_default();
+    assert!(!output.contains("SmallLeak9"));
+}
+
+#[test]
+fn repair_natural_language_credentials_mask_the_value() {
+    for tool in ["Task", "WebSearch"] {
+        for phrase in [
+            "the password is ProseLeak9",
+            "the passwd is ProseLeak9",
+            "the secret is ProseLeak9",
+            "the token is ProseLeak9",
+            "the token is 'PROSE_HEAD PROSE_TAIL'",
+            "the password: ProseLeak9",
+            "the password=ProseLeak9",
+        ] {
+            let output = render(tool, json!({"description":phrase,"query":phrase})).unwrap();
+            let visible = output.replace(['\\', '\u{200b}'], "");
+            for secret in ["ProseLeak9", "PROSE_HEAD", "PROSE_TAIL"] {
+                assert!(!visible.contains(secret), "{output}");
+            }
+        }
+    }
+}
+
+#[test]
+fn repair_all_tool_summaries_disable_url_schemes_after_redaction() {
+    let cases = [
+        ("Bash", json!({"command":"curl https://example.test/docs"})),
+        (
+            "Read",
+            json!({"file_path":"docs/https://example.test/file"}),
+        ),
+        (
+            "Edit",
+            json!({"file_path":"docs/https://example.test/file","old_string":"a","new_string":"b"}),
+        ),
+        (
+            "Write",
+            json!({"file_path":"docs/https://example.test/file"}),
+        ),
+        (
+            "Grep",
+            json!({"pattern":"https://example.test/docs","path":"src"}),
+        ),
+        ("Glob", json!({"pattern":"https://example.test/*"})),
+        (
+            "Task",
+            json!({"description":"inspect https://example.test/docs"}),
+        ),
+        (
+            "WebSearch",
+            json!({"query":"inspect https://example.test/docs"}),
+        ),
+        (
+            "WebFetch",
+            json!({"url":"https://example.test/http://mirror.test/file"}),
+        ),
+        (
+            "mcp__server__tool",
+            json!({"url":"https://ARGUMENT_LEAK.test"}),
+        ),
+        (
+            "apply_patch",
+            json!({"patch":"*** Begin Patch\n*** Update File: docs/https://example.test/file\n+a\n*** End Patch"}),
+        ),
+    ];
+    for (tool, input) in cases {
+        let output = render(tool, input).unwrap();
+        assert!(!output.contains("://"), "{tool}: {output}");
+    }
+    let output = render(
+        "Bash",
+        json!({"command":"curl https://UsrLeak9:PssLeak9@example.test/path?sig=SignLeak9"}),
+    )
+    .unwrap();
+    let visible = output.replace(['\\', '\u{200b}'], "");
+    for secret in ["UsrLeak9", "PssLeak9", "SignLeak9"] {
+        assert!(!visible.contains(secret), "{output}");
+    }
+    assert!(
+        !safe_section("**Tools**\nhttps://example.test/docs")
+            .unwrap()
+            .contains("://")
+    );
 }
 
 #[test]

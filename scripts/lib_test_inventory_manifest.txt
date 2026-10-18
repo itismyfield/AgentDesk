@@ -5630,6 +5630,12 @@ services::discord::placeholder_live_events::tool_summary::tool_summary_tests::ex
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::markdown_mentions_lengths_and_unrecognized_inputs_fail_safely
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::paths_are_relative_private_or_anonymous_before_display
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::raw_and_json_apply_patch_show_only_paths_and_line_counts
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_abbreviated_environment_names_mask_values
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_additional_token_prefixes_mask_short_values
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_all_tool_summaries_disable_url_schemes_after_redaction
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_credential_commands_show_only_class
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_natural_language_credentials_mask_the_value
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_userpass_arguments_hide_both_halves
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::secret_corpus_masks_each_value_and_quoted_fragment
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::urls_and_mcp_names_never_show_arguments_or_url_credentials
 services::discord::placeholder_live_events::turn_anchor::tests::blank_guild_omits_link
@@ -7926,6 +7932,7 @@ services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_a
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_authority::ownerless_soft_stop_without_external_boundary_cannot_post
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_authority::soft_stop_requires_pre_frame_turn_authority
 services::discord::tmux::tmux_watcher::session_bound_ack::tests::soft_terminal_authority::unauthorized_soft_terminal_drains_before_terminal_tail
+services::discord::tmux::tmux_watcher::single_message_footer::body_footer_rollover_tests::watcher_body_footer_preserves_class_rollover_for_ascii_and_korean
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_completion_skips_separate_panel_completion
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_footer_disables_separate_panel_creation_and_binding
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_footer_mode_requires_both_flags
@@ -9634,6 +9641,7 @@ services::discord::turn_bridge::stream_tick::o_adoption_tests::a_last_tick_tool_
 services::discord::turn_bridge::stream_tick::o_adoption_tests::legacy_channel_placeholder_is_never_moved
 services::discord::turn_bridge::stream_tick::o_adoption_tests::o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts
 services::discord::turn_bridge::stream_tick::o_adoption_tests::only_a_tick_that_streams_a_body_ends_a_pending_adoption
+services::discord::turn_bridge::stream_tick::o_panel::body_footer_rollover_tests::bridge_body_footer_preserves_class_rollover_for_ascii_and_korean
 services::discord::turn_bridge::stream_tick::o_panel::tool_activity_tests::o_status_only_frame_uses_the_same_summary_and_class_renderer
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::absent_anchor_becomes_real_only_after_guarded_bind
 services::discord::turn_bridge::stream_tick::provider_output_guard_tests::competing_same_owner_anchor_aborts_stale_bridge_candidate

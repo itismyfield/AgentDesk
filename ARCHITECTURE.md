@@ -1252,6 +1252,8 @@ src/
 │   │   │   ├── common.rs
 │   │   │   ├── completion_footer.rs
 │   │   │   ├── context_panel.rs
+│   │   │   ├── footer_activity.rs
+│   │   │   ├── footer_activity_tests.rs
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── panel_cache_invalidation.rs
@@ -1704,6 +1706,7 @@ src/
 │   │   │   │   ├── entry.rs
 │   │   │   │   ├── observations.rs
 │   │   │   │   └── state.rs
+│   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
@@ -1962,6 +1965,7 @@ src/
 │   │   │   │   ├── tool_arms.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
+│   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
 │   │   │   │   ├── lock_liveness_tests.rs
