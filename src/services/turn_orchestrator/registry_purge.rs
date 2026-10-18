@@ -784,7 +784,7 @@ mod tests {
                 .await
         );
 
-        assert_eq!(handle.close_if_idle().await, Err("live_cancel_token"));
+        assert_eq!(handle.close_if_idle(None).await, Err("live_cancel_token"));
         assert_eq!(
             registry.remove_idle_entry(channel).await,
             MailboxPurgeOutcome::RefusedLiveWork("live_cancel_token")
@@ -959,7 +959,7 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_104);
         let handle = registry.handle(channel);
-        assert_eq!(handle.close_if_idle().await, Ok(()));
+        assert_eq!(handle.close_if_idle(None).await, Ok(()));
 
         let enqueue = registry
             .enqueue_with_closed_retry(
