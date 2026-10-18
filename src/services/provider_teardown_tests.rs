@@ -66,7 +66,7 @@ pub(crate) mod test_support {
             let dir = tempfile::TempDir::new().expect("tmux dir");
             let reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
             std::fs::write(dir.path().join("reason_path"), reason).unwrap();
-            std::fs::write(dir.path().join("session_name"), name).unwrap();
+            std::fs::write(dir.path().join("session_name"), format!("{name}\n")).unwrap();
             let binary = dir.path().join("tmux");
             let mut file = std::fs::File::create(&binary).expect("fake tmux");
             writeln!(
@@ -83,7 +83,7 @@ pub(crate) mod test_support {
                  [ -f \"$d/lost_kill_ack\" ] && {{ : > \"$d/missing\"; exit 1; }}\n\
                  [ -f \"$d/kill_fails\" ] && exit 1\n\
                  [ -f \"$d/missing_after_kill\" ] && : > \"$d/missing\"; exit 0 ;;\n\
-                 list-sessions) [ -f \"$d/missing_after_kill\" ] && {{ [ -f \"$d/missing\" ] || cat \"$d/session_name\"; exit 0; }} ;;\n\
+                 list-sessions) [ -f \"$d/missing_after_kill\" ] && {{ [ -f \"$d/missing\" ] || cat \"$d/session_name\"; [ ! -f \"$d/external_sessions\" ] || cat \"$d/external_sessions\"; exit 0; }} ;;\n\
                  new-session) [ -f \"$d/launch_enabled\" ] && {{ rm -f \"$d/missing\"; for adk_fake_arg do adk_fake_command=\"$adk_fake_arg\"; done; /bin/bash -c \"$adk_fake_command\"; exit $?; }} ;;\n\
                  set-option|set-hook) [ -f \"$d/launch_enabled\" ] && exit 0 ;;\n\
                  esac\necho \"can't find session: $3\" >&2; exit 1"
@@ -105,6 +105,14 @@ pub(crate) mod test_support {
                 set("AGENTDESK_CODEX_PATH", &absent),
             ];
             Self { dir, _env: env }
+        }
+
+        pub(crate) fn add_unwatched_inventory(&self, name: &str) {
+            std::fs::write(
+                self.dir.path().join("external_sessions"),
+                format!("{name}\n"),
+            )
+            .unwrap();
         }
 
         pub(crate) fn mark_missing(&self) {

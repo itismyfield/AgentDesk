@@ -8,6 +8,36 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueueId
 
 const ORIGINAL_MESSAGE: u64 = 1_561_159_600_206_516_285;
 
+#[derive(Clone, Default)]
+struct DequeueHolds(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DequeueHolds {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            channel: Option<u64>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "channel_id" {
+                    self.channel = Some(value);
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields.channel == Some(CANARY_CHANNEL) && fields.message.contains("dequeue_held") {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 fn original(message: u64) -> Intervention {
     Intervention {
         author_id: UserId::new(7),
@@ -123,18 +153,53 @@ async fn legacy_compat_keeps_original_queue_and_retirement_is_idempotent_pg() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
-    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
+    let name = concat!(
         module_path!(),
         "::legacy_compat_boot_kickoff_launches_the_original_input_once_pg"
-    )) {
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name)
+        || !crate::services::discord::admin_host_guard::tests::api_child(
+            name.split_once("::").unwrap().1,
+        )
+    {
         return;
     }
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
-        "services::discord::queue_dispatch::codex_clear_compat::tests::",
-        "legacy_compat_boot_kickoff_launches_the_original_input_once_pg"
-    )) {
+    boot_launch_once(false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_compat_boot_kickoff_without_restored_core_session_launches_once_pg() {
+    let name = concat!(
+        module_path!(),
+        "::legacy_compat_boot_kickoff_without_restored_core_session_launches_once_pg"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name)
+        || !crate::services::discord::admin_host_guard::tests::api_child(
+            name.split_once("::").unwrap().1,
+        )
+    {
         return;
     }
+    boot_launch_once(true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compat_transient_boundary_error_reevaluates_on_next_kick_pg() {
+    let name = concat!(
+        module_path!(),
+        "::compat_transient_boundary_error_reevaluates_on_next_kick_pg"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name)
+        || !crate::services::discord::admin_host_guard::tests::api_child(
+            name.split_once("::").unwrap().1,
+        )
+    {
+        return;
+    }
+    boot_launch_once(true, true).await;
+}
+
+async fn boot_launch_once(no_core_session: bool, transient_boundary_error: bool) {
     let mut fixture = CanaryFixture::new_with_audit_prefix(120).await;
     assert!(
         !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
@@ -160,6 +225,18 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
     .await;
     crate::services::discord::internal_api::init(api.port, None);
     Arc::get_mut(&mut fixture.shared).unwrap().api_port = api.port;
+    let lock_pool = if transient_boundary_error {
+        let original_pool = fixture.shared.pg_pool.as_ref().unwrap().clone();
+        let timed = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*original_pool.connect_options()).clone())
+            .await
+            .unwrap();
+        Arc::get_mut(&mut fixture.shared).unwrap().pg_pool = Some(timed);
+        Some(original_pool)
+    } else {
+        None
+    };
     let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
         "http://127.0.0.1:{}",
         api.port
@@ -177,15 +254,50 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
     crate::services::discord::adk_session::clear_provider_session_id_pg(pool, &key)
         .await
         .unwrap();
-    fixture
-        .shared
-        .core
-        .lock()
-        .await
-        .sessions
-        .get_mut(&channel)
-        .unwrap()
-        .session_id = None;
+    if no_core_session {
+        fixture.shared.core.lock().await.sessions.remove(&channel);
+        fixture
+            .fake
+            .add_unwatched_inventory("external-e51-unwatched");
+        crate::services::discord::restore_tmux_watchers(&api.http, &fixture.shared).await;
+        assert!(
+            !fixture
+                .shared
+                .core
+                .lock()
+                .await
+                .sessions
+                .contains_key(&channel)
+        );
+        assert!(fixture.shared.tmux_watchers.by_tmux_session.is_empty());
+        let observed = crate::services::discord::turn_presence::activity::activity_now(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+        )
+        .await;
+        eprintln!(
+            "E51_BOOT_ACTIVITY activity={:?} reason={}",
+            observed.activity, observed.reason
+        );
+        assert_eq!(
+            (observed.activity, observed.reason),
+            (
+                crate::services::discord::turn_presence::activity::Activity::Unknown,
+                "session_identity_unresolved"
+            ),
+        );
+    } else {
+        fixture
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&channel)
+            .unwrap()
+            .session_id = None;
+    }
     let mut saved = original(ORIGINAL_MESSAGE);
     saved
         .source_message_ids
@@ -235,6 +347,20 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
             .seq,
         121
     );
+    let mut locked = if let Some(pool) = lock_pool {
+        sqlx::query("SET statement_timeout = '50ms'")
+            .execute(fixture.shared.pg_pool.as_ref().unwrap())
+            .await
+            .unwrap();
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE channel_session_clear_boundaries IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        Some(lock)
+    } else {
+        None
+    };
     let deps = crate::services::discord::router::IntakeDeps {
         http: &api.http,
         cache: None,
@@ -242,15 +368,61 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
         shared: &fixture.shared,
         token: "e51-isolated-test-bot",
     };
-    assert_eq!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex)
-        )
-        .await
-        .expect("restored queue did not finish preparation"),
-        1
+    if let Some(lock) = locked.take() {
+        assert_eq!(
+            super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex).await,
+            0
+        );
+        let retained = fixture.shared.mailbox(channel).snapshot().await;
+        assert_eq!(QueueIdentity::of(&retained.intervention_queue[0]), identity);
+        let parked = fixture.shared.queue_park_ledger.project(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+            &retained,
+        );
+        assert_eq!(
+            parked.reason.as_deref(),
+            Some("codex_clear_compat:C4:error")
+        );
+        assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+        assert!(
+            !fixture
+                .fake
+                .take_calls()
+                .iter()
+                .any(|call| call.starts_with("new-session "))
+        );
+        lock.rollback().await.unwrap();
+        sqlx::query("SET statement_timeout = 0")
+            .execute(fixture.shared.pg_pool.as_ref().unwrap())
+            .await
+            .unwrap();
+    }
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::prelude::*;
+    let held = DequeueHolds::default();
+    let count = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex)
+            .with_subscriber(tracing_subscriber::registry().with(held.clone())),
+    )
+    .await
+    .expect("restored queue did not finish preparation");
+    let parked = fixture.shared.queue_park_ledger.project(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        &snapshot,
     );
+    assert_eq!(
+        count,
+        1,
+        "boot kickoff parked: {:?}; dequeue_held={}",
+        parked.reason,
+        held.0.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert_eq!(held.0.load(std::sync::atomic::Ordering::Relaxed), 0);
     let turn_guard = fixture.turn_failure_guard().await;
     let dispatch = crate::services::discord::inflight::load_inflight_state_read_only(
         &ProviderKind::Codex,
@@ -304,26 +476,8 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
             .count(),
         1
     );
-    let sent = api.take();
-    let bodies = sent
-        .iter()
-        .filter(|call| {
-            let mut parts = call.splitn(3, ' ');
-            let method = parts.next().unwrap_or_default();
-            let path = parts.next().unwrap_or_default();
-            let body = parts.next().unwrap_or_default();
-            matches!(method, "POST" | "PATCH")
-                && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
-                && serde_json::from_str::<serde_json::Value>(body)
-                    .ok()
-                    .and_then(|value| value["content"].as_str().map(str::to_owned))
-                    .is_some_and(|content| content.contains("clear relaunch completed"))
-        })
-        .count();
-    assert_eq!(
-        bodies, 1,
-        "the restored verified turn sends one completed response: {sent:?}"
-    );
+    let sent = crate::services::discord::commands::control::codex_clear_relaunch_tests::collect_completed_response(&api).await;
+    crate::services::discord::commands::control::codex_clear_relaunch_tests::assert_one_completed_response(&sent);
     turn_guard.finish();
 }
 
@@ -362,13 +516,54 @@ async fn compat_historical_pin_with_a_live_or_unreadable_pane_parks_c2_pg() {
             channel,
             &snapshot,
         );
-        assert_eq!(parked.reason.as_deref(), Some("codex_clear_compat:C2"));
+        assert_eq!(
+            parked.reason.as_deref(),
+            Some(if failed_probe {
+                "codex_clear_compat:C2:probe"
+            } else {
+                "codex_clear_compat:C2"
+            })
+        );
         assert_eq!(
             snapshot.intervention_queue[0].message_id.get(),
             ORIGINAL_MESSAGE
         );
         assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compat_transient_probe_failure_reevaluates_without_new_input_pg() {
+    let fixture = CanaryFixture::new().await;
+    let at = legacy_ended(&fixture);
+    boundary(
+        fixture.shared.pg_pool.as_ref().unwrap(),
+        at + chrono::Duration::seconds(1),
+    )
+    .await;
+    let channel = ChannelId::new(CANARY_CHANNEL);
+    let snapshot = enqueue(&fixture.shared, original(ORIGINAL_MESSAGE)).await;
+    fixture.fake.fail_probes();
+    assert!(!admit(&fixture.shared, &ProviderKind::Codex, channel, &snapshot).await);
+    let parked = fixture.shared.queue_park_ledger.project(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+        &snapshot,
+    );
+    assert_eq!(
+        parked.reason.as_deref(),
+        Some("codex_clear_compat:C2:probe")
+    );
+    fixture.fake.restore_probes();
+    assert!(admit(&fixture.shared, &ProviderKind::Codex, channel, &snapshot).await);
+    assert!(dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+    let retained = fixture.shared.mailbox(channel).snapshot().await;
+    assert_eq!(retained.intervention_queue.len(), 1);
+    assert_eq!(
+        QueueIdentity::of(&retained.intervention_queue[0]),
+        QueueIdentity::of(&snapshot.intervention_queue[0])
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -706,7 +901,7 @@ async fn compat_boundary_requires_a_strict_later_nonnull_row_pg() {
         .unwrap()
         .with_timezone(&chrono::Utc);
     assert!(
-        !boundary_after(&pool, recorded_at).await,
+        !boundary_after(&pool, recorded_at).await.unwrap(),
         "a missing row cannot retire proof"
     );
     sqlx::query(
@@ -728,7 +923,7 @@ async fn compat_boundary_requires_a_strict_later_nonnull_row_pg() {
         .await
         .unwrap();
         assert_eq!(
-            boundary_after(&pool, recorded_at).await,
+            boundary_after(&pool, recorded_at).await.unwrap(),
             permitted,
             "offset={offset}"
         );
@@ -748,12 +943,12 @@ async fn compat_boundary_requires_a_strict_later_nonnull_row_pg() {
     .await
     .unwrap();
     assert!(
-        !boundary_after(&pool, recorded_at).await,
+        !boundary_after(&pool, recorded_at).await.unwrap(),
         "NULL is not a later clear"
     );
     pool.close().await;
     assert!(
-        !boundary_after(&pool, recorded_at).await,
+        boundary_after(&pool, recorded_at).await.is_err(),
         "a query failure cannot retire proof"
     );
     database.drop().await;

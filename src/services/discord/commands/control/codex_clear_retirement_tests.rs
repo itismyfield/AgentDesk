@@ -342,4 +342,51 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
                 || call.starts_with("load-buffer")
         }));
     }
+
+    // An unresolved canary without retirement, and another channel while the canary is
+    // retired, must both remain held. Neither half of the launch exception is optional.
+    vacate(&fixture);
+    fixture
+        .fake
+        .add_unwatched_inventory("external-e51-unwatched");
+    let canary = ChannelId::new(CANARY_CHANNEL);
+    fixture.shared.core.lock().await.sessions.remove(&canary);
+    for channel in [canary, ChannelId::new(6_845_072)] {
+        let _turn_mode = (channel != canary).then(|| TestConfirmation::new(channel.get()));
+        if channel != canary {
+            let captured = clear_relaunch::capture(CANARY_TMUX).unwrap().unwrap();
+            clear_relaunch::commit(&captured, "explicit_clear").unwrap();
+            assert!(clear_relaunch::relaunch_open(CANARY_TMUX));
+        } else {
+            assert!(!clear_relaunch::relaunch_open(CANARY_TMUX));
+        }
+        super::clear_persist_failure_tests::seed_backlog(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+        )
+        .await;
+        let before = fixture.shared.mailbox(channel).snapshot().await;
+        let identity = QueueIdentity::of(&before.intervention_queue[0]);
+        let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;
+        assert_eq!(
+            (observed.activity, observed.reason),
+            (Activity::Unknown, "session_identity_unresolved")
+        );
+        let taken = crate::services::discord::mailbox_take_next_automatic_intervention(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+        )
+        .await;
+        assert!(
+            taken.intervention.is_none(),
+            "channel={channel} retirement_open={}",
+            clear_relaunch::relaunch_open(CANARY_TMUX)
+        );
+        let after = fixture.shared.mailbox(channel).snapshot().await;
+        assert_eq!(after.intervention_queue.len(), 1);
+        assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
+        assert!(after.pending_user_dispatch.is_none());
+    }
 }

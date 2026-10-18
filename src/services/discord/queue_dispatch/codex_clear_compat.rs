@@ -2,6 +2,7 @@
 
 use super::super::*;
 use crate::services::codex_tui::canary::{self, CANARY_CHANNEL, CANARY_TMUX};
+use crate::services::platform::tmux::{self, SessionPresence};
 use crate::services::tui_prompt_dedupe::binding_context::SpawnNonceMarker;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_context, binding_events};
 use crate::services::turn_orchestrator::QueueIdentity;
@@ -76,11 +77,19 @@ pub(super) async fn admit(
         shared
             .queue_park_ledger
             .note_promote_hold(provider, channel, OWNER, reason);
-        *cached = Some(Failure {
-            runtime: Arc::downgrade(shared),
-            epoch,
-            input,
-        });
+        if matches!(
+            reason,
+            "codex_clear_compat:C1"
+                | "codex_clear_compat:C3"
+                | "codex_clear_compat:C4"
+                | "codex_clear_compat:C5"
+        ) {
+            *cached = Some(Failure {
+                runtime: Arc::downgrade(shared),
+                epoch,
+                input,
+            });
+        }
         return false;
     }
     true
@@ -99,7 +108,7 @@ async fn evaluate(
     }
     let exact = {
         let core = shared.core.lock().await;
-        core.sessions.get(&channel).is_some_and(|session| {
+        core.sessions.get(&channel).is_none_or(|session| {
             session.remote_profile_name.is_none()
                 && session
                     .channel_name
@@ -109,6 +118,9 @@ async fn evaluate(
     };
     if !exact {
         return Err("codex_clear_compat:C1");
+    }
+    if tmux::session_presence(CANARY_TMUX) == SessionPresence::ProbeFailed {
+        return Err("codex_clear_compat:C2:probe");
     }
     if !dedupe::clear_relaunch::vacant(CANARY_TMUX) {
         return Err("codex_clear_compat:C2");
@@ -122,9 +134,12 @@ async fn evaluate(
         return Err("codex_clear_compat:C3");
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
-        return Err("codex_clear_compat:C4");
+        return Err("codex_clear_compat:C4:error");
     };
-    if !boundary_after(pool, captured.committed_at).await {
+    if !boundary_after(pool, captured.committed_at)
+        .await
+        .map_err(|_| "codex_clear_compat:C4:error")?
+    {
         return Err("codex_clear_compat:C4");
     }
     // A new explicit clear supersedes the read, including any result it would publish.
@@ -135,18 +150,19 @@ async fn evaluate(
         .map_err(|_| "codex_clear_compat:C5")
 }
 
-async fn boundary_after(pool: &sqlx::PgPool, recorded_at: chrono::DateTime<chrono::Utc>) -> bool {
-    sqlx::query_scalar::<_, Option<bool>>(
+async fn boundary_after(
+    pool: &sqlx::PgPool,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, Option<bool>>(
         "SELECT cleared_at > $2 FROM channel_session_clear_boundaries WHERE channel_id = $1",
     )
     .bind(CANARY_CHANNEL.to_string())
     .bind(recorded_at)
     .fetch_optional(pool)
-    .await
-    .ok()
+    .await?
     .flatten()
-    .flatten()
-    .unwrap_or(false)
+    .unwrap_or(false))
 }
 
 #[cfg(test)]

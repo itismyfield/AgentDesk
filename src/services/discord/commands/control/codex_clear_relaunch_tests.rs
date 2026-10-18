@@ -137,8 +137,9 @@ impl CanaryFixture {
         };
         let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let hosts = crate::config::session_hosts::force_for_test(None, &[]);
+        let workspace = serde_json::to_string(root.path()).unwrap();
         let yaml = format!(
-            "server: {{}}\ndiscord:\n  bots:\n    codex: {{token: '{TEST_BOT}', provider: codex}}\nagents:\n  - id: clear-canary\n    name: clear-canary\n    provider: codex\n    channels:\n      codex: {{id: '{CANARY_CHANNEL}', name: adk-codex-tui-e2e, runtime: tui}}\n"
+            "server: {{}}\ndiscord:\n  bots:\n    codex: {{token: '{TEST_BOT}', provider: codex}}\nagents:\n  - id: clear-canary\n    name: clear-canary\n    provider: codex\n    channels:\n      codex: {{id: '{CANARY_CHANNEL}', name: adk-codex-tui-e2e, workspace: {workspace}, runtime: tui}}\n"
         );
         let mut config: crate::config::Config = serde_yaml::from_str(&yaml).unwrap();
         config.session_hosts =
@@ -149,6 +150,14 @@ impl CanaryFixture {
         fs::write(disk, &yaml).unwrap();
         let hosting = Hosting::install(&config);
         crate::config_live_reload::install(config);
+        assert_eq!(
+            crate::services::discord::settings::resolve_workspace(
+                serenity::ChannelId::new(CANARY_CHANNEL),
+                None,
+            ),
+            Some(root.path().display().to_string()),
+            "boot without a core session resolves the configured workspace",
+        );
         assert_eq!(
             crate::services::provider_hosting::resolve_provider_session_selection_with_channel(
                 &ProviderKind::Codex,
@@ -482,16 +491,49 @@ impl Drop for CanaryFixture {
 
 #[tokio::test(flavor = "current_thread")]
 async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
-    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(concat!(
-        module_path!(),
-        "::canary_clear_reopens_launch_without_releasing_old_source_pg"
-    )) {
+    clear_and_first_input(
+        concat!(
+            module_path!(),
+            "::canary_clear_reopens_launch_without_releasing_old_source_pg"
+        ),
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canary_clear_with_unwatched_external_tmux_launches_first_input_pg() {
+    clear_and_first_input(
+        concat!(
+            module_path!(),
+            "::canary_clear_with_unwatched_external_tmux_launches_first_input_pg"
+        ),
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn clear_without_core_session_still_retires_dead_canary_pg() {
+    clear_and_first_input(
+        concat!(
+            module_path!(),
+            "::clear_without_core_session_still_retires_dead_canary_pg"
+        ),
+        true,
+        true,
+    )
+    .await;
+}
+
+async fn clear_and_first_input(test: &str, external_inventory: bool, without_core: bool) {
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(test) {
         return;
     }
-    if !crate::services::discord::admin_host_guard::tests::api_child(concat!(
-        "services::discord::commands::control::codex_clear_relaunch_tests::",
-        "canary_clear_reopens_launch_without_releasing_old_source_pg"
-    )) {
+    let qualified = test.split_once("::").unwrap().1;
+    if !crate::services::discord::admin_host_guard::tests::api_child(qualified) {
         return;
     }
     let mut fixture = CanaryFixture::new().await;
@@ -502,7 +544,21 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
         )
         .expect("the fixture installs an explicit empty O boot list")
     );
-    let api = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
+    let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
+        |method, path| {
+            (method == axum::http::Method::GET
+                && path.ends_with(&format!("/channels/{CANARY_CHANNEL}")))
+            .then(|| {
+                json!({
+                    "id": CANARY_CHANNEL.to_string(), "type": 0,
+                    "name": "adk-codex-tui-e2e", "guild_id": "42000",
+                    "position": 0, "permission_overwrites": [], "nsfw": false,
+                    "parent_id": null
+                })
+            })
+        },
+    ))
+    .await;
     crate::services::discord::internal_api::init(api.port, None);
     Arc::get_mut(&mut fixture.shared).unwrap().api_port = api.port;
     let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
@@ -517,6 +573,18 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
     assert!(dedupe::codex_verified_requires_proof(CANARY_TMUX));
     assert!(!dedupe::codex_verified_input_blocked(CANARY_TMUX));
     let before = fs::read(fixture.history()).unwrap();
+    if external_inventory {
+        fixture
+            .fake
+            .add_unwatched_inventory("external-e51-unwatched");
+    }
+    if without_core {
+        fixture.shared.core.lock().await.sessions.remove(&channel);
+        fixture.fake.mark_missing();
+        fixture.alive.store(false, Ordering::SeqCst);
+        crate::services::session_backend::remove_process_session(CANARY_TMUX);
+        assert!(!dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+    }
     clear_persist_failure_tests::seed_backlog(&fixture.shared, &ProviderKind::Codex, channel).await;
     clear_channel_session_state(
         &api.http,
@@ -529,13 +597,33 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
     .await
     .unwrap();
     assert!(!fixture.alive.load(Ordering::SeqCst));
-    assert!(
-        fixture
-            .fake
-            .take_calls()
-            .iter()
-            .any(|call| call.starts_with("kill-session"))
+    let kills = fixture
+        .fake
+        .take_calls()
+        .iter()
+        .filter(|call| call.starts_with("kill-session"))
+        .count();
+    assert_eq!(
+        kills,
+        usize::from(!without_core),
+        "only the core-selected session is ended"
     );
+    assert!(
+        dedupe::clear_relaunch::relaunch_open(CANARY_TMUX),
+        "an explicit clear must retire the dead canary even without a core session"
+    );
+    let watermark: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            fixture
+                .root
+                .path()
+                .join("runtime/codex_clear_retired")
+                .join(format!("{CANARY_CHANNEL}.json")),
+        )
+        .expect("explicit clear creates a durable retirement watermark"),
+    )
+    .unwrap();
+    assert_eq!(watermark["origin"], "explicit_clear");
     assert_eq!(
         crate::services::tui_prompt_dedupe::binding_context::observe_spawn_nonce_marker(
             CANARY_TMUX
@@ -651,11 +739,19 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
         clear_preflight_open,
         "clear opens only the cold-launch preflight"
     );
-    assert_eq!(underlying.unwrap(), "Absent(LocalInventory)");
-    assert_eq!(
-        (observed.activity, observed.reason),
-        (Activity::Idle, "no_session")
-    );
+    if external_inventory {
+        assert_eq!(underlying.unwrap(), "Hold(\"owner_unresolved\")");
+        assert_eq!(
+            (observed.activity, observed.reason),
+            (Activity::Unknown, "session_identity_unresolved")
+        );
+    } else {
+        assert_eq!(underlying.unwrap(), "Absent(LocalInventory)");
+        assert_eq!(
+            (observed.activity, observed.reason),
+            (Activity::Idle, "no_session")
+        );
+    }
     let new = new.unwrap_or_else(|| {
         panic!(
             "terminal completion preceded a real fresh hook proof; API calls={:?}; launch calls={calls:?}",
@@ -703,26 +799,78 @@ async fn canary_clear_reopens_launch_without_releasing_old_source_pg() {
     assert!(after.pending_user_dispatch.is_none());
     assert!(after.intervention_queue.is_empty());
     let sent = api.take();
-    let bodies = sent
-        .iter()
-        .filter(|call| {
-            let mut parts = call.splitn(3, ' ');
-            let method = parts.next().unwrap_or_default();
-            let path = parts.next().unwrap_or_default();
-            let body = parts.next().unwrap_or_default();
-            matches!(method, "POST" | "PATCH")
-                && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
-                && serde_json::from_str::<serde_json::Value>(body)
-                    .ok()
-                    .and_then(|value| value["content"].as_str().map(str::to_owned))
-                    .is_some_and(|content| content.contains("clear relaunch completed"))
-        })
-        .count();
-    assert_eq!(
-        bodies, 1,
-        "the completed verified turn sends one response: {sent:?}"
-    );
+    assert_one_completed_response(&sent);
     failure_guard
         .expect("the actual turn had a cancellation owner")
         .finish();
+}
+
+pub(in crate::services::discord) fn assert_one_completed_response(sent: &[String]) {
+    let mut finals = 0;
+    let mut posts = 0;
+    let mut messages = std::collections::BTreeSet::new();
+    for call in sent {
+        let mut parts = call.splitn(3, ' ');
+        let method = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        let body = parts.next().unwrap_or_default();
+        if !matches!(method, "POST" | "PATCH")
+            || !path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
+        {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+            continue;
+        };
+        let Some(content) = value["content"].as_str() else {
+            continue;
+        };
+        if !content.contains("clear relaunch completed") {
+            continue;
+        }
+        finals += usize::from(content == "clear relaunch completed");
+        if method == "POST" {
+            posts += 1;
+            // The isolated Recorder returns this message ID for successful creates.
+            messages.insert(format!("{path}/900001"));
+        } else {
+            messages.insert(path.to_owned());
+        }
+    }
+    assert_eq!(finals, 1, "one final completed body: {sent:?}");
+    assert_eq!(
+        messages.len(),
+        1,
+        "one response message including progress edits: {sent:?}"
+    );
+    assert!(posts <= 1, "a repeated POST is another response: {sent:?}");
+}
+
+pub(in crate::services::discord) async fn collect_completed_response(
+    api: &crate::services::discord::admin_host_guard::tests::Recorder,
+) -> Vec<String> {
+    let mut sent = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            sent.extend(api.take());
+            if sent.iter().any(|call| {
+                let mut parts = call.splitn(3, ' ');
+                let method = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
+                let body = parts.next().unwrap_or_default();
+                matches!(method, "POST" | "PATCH")
+                    && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
+                    && serde_json::from_str::<serde_json::Value>(body)
+                        .ok()
+                        .is_some_and(|value| value["content"] == "clear relaunch completed")
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the completed terminal never delivered its final response");
+    sent.extend(api.take());
+    sent
 }
