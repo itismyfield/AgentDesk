@@ -5,7 +5,7 @@ use std::sync::TryLockError;
 
 use tokio::time::Instant;
 
-use super::{HOLD_FOR, HomeGate, HomeIntake, HomeOwnership, with_homes};
+use super::{HOLD_FOR, HomeGate, HomeOwnership, with_homes};
 use crate::services::cluster::channel_ingress::{IngressKey, LocalLeaseSample};
 use crate::services::tui_o::ownership::GatewayOwnership;
 
@@ -111,15 +111,10 @@ pub(crate) fn sample_gate(gate: &HomeGate, row_provider: &str) -> GateSample {
                         epoch: held.gate_epoch,
                     }) =>
             {
-                let intake = if local.intake_closed == Some(held.home_epoch) {
-                    HomeIntake::Closed
-                } else {
-                    HomeIntake::Open
-                };
                 let ownership = HomeOwnership::Owned {
                     home_epoch: held.home_epoch,
                     gate_epoch: held.gate_epoch,
-                    intake,
+                    intake: gate.intake_of(&local, held.home_epoch),
                 };
                 (ownership, Some(held.renew_sent + HOLD_FOR))
             }
@@ -143,7 +138,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::super::{lock_homes, register, unregister};
+    use super::super::{HomeIntake, lock_homes, register, unregister};
     use super::*;
     use crate::db::o_channel_homes::{HeldHome, HomeState};
 

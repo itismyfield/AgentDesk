@@ -55,6 +55,8 @@ pub(crate) async fn run_orphan_token_auto_heal_pass_for_tests(
 pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
 mod relay_progress;
+mod routine_process;
+pub(crate) use routine_process::cancel_routine_process_turn;
 mod runtime_resolve;
 mod session_enrichment;
 mod snapshot;
@@ -73,9 +75,7 @@ pub(in crate::services::discord) mod watcher_respawn;
 pub(in crate::services::discord) use watcher_respawn::lock_watcher_absence_for_test;
 pub(in crate::services::discord) use watcher_respawn::reclaim_watcherless_session_bound_relay;
 
-// `HeadlessAgentTurnReservation` has no external referent today (callers
-// destructure the reserve/start tuple); kept re-exported for the reserve→start
-// API surface, same convention as the recovery/snapshot blocks below.
+// Keep the reservation type re-exported for the reserve/start API surface.
 #[cfg(all(test, unix))]
 pub(crate) use super::turn_presence::activity::tests::{
     BindingRoot, ReadyPane, bind_turn_mode_transcript, settled_reason,

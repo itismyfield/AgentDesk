@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
+#[cfg(all(test, unix))]
+mod direct_spawn_tests;
 pub mod fallback;
 
 pub const DEFAULT_PROFILE_ID: &str = "default";

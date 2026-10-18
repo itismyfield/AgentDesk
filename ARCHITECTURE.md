@@ -580,6 +580,9 @@ src/
 │   │   ├── patterns.rs
 │   │   └── storage.rs
 │   ├── auto_queue/
+│   │   ├── cancel_run/
+│   │   │   ├── malformed_context_pg_tests.rs
+│   │   │   └── remaining_live_census.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
@@ -720,7 +723,9 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   └── uploads.rs
 │   │   ├── channel_home/
-│   │   │   └── ingress_snapshot.rs
+│   │   │   ├── epoch_tests.rs
+│   │   │   ├── ingress_snapshot.rs
+│   │   │   └── intake.rs
 │   │   ├── channel_home_boot/
 │   │   │   ├── home_writers.rs
 │   │   │   └── home_writers_tests.rs
@@ -1066,6 +1071,7 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_process.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -1450,7 +1456,9 @@ src/
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
-│   │   │   │   └── stale_turn_host_tests.rs
+│   │   │   │   ├── stale_turn_host_tests.rs
+│   │   │   │   ├── stale_turn_witness_tests.rs
+│   │   │   │   └── thread_guard_release.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── entrypoints.rs
@@ -2516,6 +2524,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── direct_spawn_tests.rs
 │   │   └── fallback.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
@@ -2551,6 +2560,8 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── execution.rs
+│   │   │   ├── launch.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
@@ -2868,6 +2879,9 @@ src/
 │   │   │   ├── stall_tests.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── tool_result_repost_tests.rs
+│   │   │   ├── tool_result_tests.rs
+│   │   │   ├── tool_results.rs
 │   │   │   ├── transition_actor_tests.rs
 │   │   │   ├── transition_apply_tests.rs
 │   │   │   ├── transition_cleanup.rs
@@ -2988,6 +3002,7 @@ src/
 │   │   ├── front_requeue.rs
 │   │   ├── herdr_user_stop.rs
 │   │   ├── inbound_order.rs
+│   │   ├── inbound_order_restore_tests.rs
 │   │   ├── incarnation.rs
 │   │   ├── injected_inputs.rs
 │   │   ├── injected_inputs_tests.rs
@@ -3012,7 +3027,9 @@ src/
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
-│   │   └── turn_finished_signal.rs
+│   │   ├── turn_finished_signal.rs
+│   │   ├── witnessed_release.rs
+│   │   └── witnessed_release_tests.rs
 │   ├── writer_protocol/
 │   │   ├── namespace/
 │   │   │   ├── catalog.rs

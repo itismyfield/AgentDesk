@@ -378,6 +378,7 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scr
 
 ### Serial execution
 
+- PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `test_fast`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. required `Fast targeted tests (ubuntu-latest)` mirror가 같은 `pg_db` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
 - main·PR `test_fast`는 같은 `pg_shards` 계획으로 PG matrix를 실행한다. shard 수는 `scripts/check_pg_test_lane_membership.py`의 `PG_SHARD_COUNT` 하나에서 정한다(현재 4). 이 값으로 matrix와 SHA256 modulus 및 허용 job 이름을 만든다. required `Fast targeted tests (ubuntu-latest)` mirror는 기존 `needs.test_fast.result`를 유지하여 모든 shard 결과를 확인한다.
 - `PG_INCLUDE_SHARD`가 있으면 `scripts/ci/non-pg-test-filter.sh`는 기존 단일 PG 선택을 실제 lib harness `--list`로 조회하고, 전체 ID의 `int(SHA256(id), 16) % PG_SHARD_COUNT`가 자기 번호인 시험만 `--exact`로 실행한다. 새 PG 시험은 기존 등록만으로 자동 배정된다. 목록 실패·중복·불완전 summary·빈 shard·잘못된 번호는 source 단계에서 실패한다. env unset은 기존 단일 선택을 유지한다.
 - main·PR shard step은 `just test-postgres-shard`에서 PG 명령을 직접 실행한다. 모든 shard가 자기 PG 선택을 실행한 뒤 shard 0만 추가 targeted 명령을 실행한다. recipe는 한 Bash script에서 source·시험 실패를 전파하고, 각 shard 안에서는 `--test-threads=1`을 유지한다.

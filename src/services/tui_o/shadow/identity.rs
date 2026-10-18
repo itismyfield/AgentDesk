@@ -158,7 +158,7 @@ fn claude_user(record: &Value) -> Vec<RecordFact> {
     }
 }
 
-/// Each `tool_result` is its own unit keyed by `tool_use_id`; only error results are posted.
+/// Each `tool_result` keeps its native key and historical seal; the writer excludes its body.
 fn claude_tool_result(item: &Value) -> RecordFact {
     let Some(id) = str_at(item, "tool_use_id").filter(|id| !id.is_empty()) else {
         return blocked("tool_result without tool_use_id");
