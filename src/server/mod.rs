@@ -2738,12 +2738,12 @@ async fn routine_runtime_loop(
     let discord_logger =
         RoutineDiscordLogger::new_with_health_registry(pg_pool.clone(), health_registry.clone());
     let agent_executor =
-        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs);
+        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
+            .with_headless_fresh_agents(routines_config.headless_fresh_agents);
     match store.recover_stale_running_runs().await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
-                // Reap the interrupted run's orphaned fresh session (ownership proof required),
-                // or it is later misreported as an abrupt "session ended".
+                // Reap owned orphaned fresh sessions before they look like abrupt exits.
                 agent_executor
                     .teardown_recovered_fresh_session(&store, run)
                     .await;

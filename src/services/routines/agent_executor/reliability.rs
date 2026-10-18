@@ -63,6 +63,8 @@ pub(super) fn fresh_provider_session_probe_allowed(
     now: DateTime<Utc>,
 ) -> bool {
     run.execution_strategy == "fresh"
+        && execution::AgentExecutionMode::from_result(run.result_json.as_ref())
+            != execution::AgentExecutionMode::Process
         && run.turn_id.is_some()
         && now.signed_duration_since(current_attempt_started_at(run))
             >= Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
@@ -381,6 +383,23 @@ mod tests {
         assert!(fresh_provider_session_probe_allowed(
             &run,
             run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
+        ));
+    }
+
+    #[test]
+    fn process_attempt_never_probes_legacy_tmux_after_grace() {
+        let mut run = running_run(None);
+        run.result_json = Some(json!({"execution_mode":"process"}));
+        run.execution_strategy = "fresh".into();
+        run.turn_id = Some("discord:123:456".into());
+        assert!(!fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::hours(3)
+        ));
+        run.result_json = Some(json!({"execution_mode":"tmux"}));
+        assert!(fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::hours(3)
         ));
     }
 

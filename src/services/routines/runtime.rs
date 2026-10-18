@@ -898,7 +898,7 @@ async fn teardown_fresh_session_for_close(
         return;
     };
     agent_executor
-        .teardown_fresh_agent_session(store, &claimed.routine_id, None, reason)
+        .teardown_fresh_agent_run(store, &claimed.routine_id, &claimed.run_id, reason)
         .await;
 }
 

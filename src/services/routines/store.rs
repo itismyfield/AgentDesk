@@ -992,21 +992,10 @@ impl RoutineStore {
         .map_err(|e| anyhow!("list routine runs {routine_id}: {e}"))
     }
 
-    /// Returns `true` when *this specific run* actually started an agent turn
-    /// (`turn_id` set on the run row). This is the only safe, run-specific
-    /// evidence that the run owns a fresh agent session, and it gates
-    /// fresh-session teardown on terminal script actions (#3006).
-    ///
-    /// A fresh agent session is created exclusively via `mark_agent_turn_started`,
-    /// which stamps `turn_id` onto the run that spawned it; that run is then
-    /// closed (and its session torn down) by the agent-completion path. A
-    /// terminal JS-script action (`Complete`/`Skip`/`Pause`) is a *different*
-    /// run that never started a turn, so it owns no session. Gating on any
-    /// historical routine turn is wrong: a mixed routine that returned `agent`
-    /// once would then let every later script-only close kill whatever session
-    /// is currently latest in `routine.discord_thread_id` — which may be an
-    /// unrelated operator/user session created after that prior turn. Only the
-    /// run that actually started the turn may tear it down.
+    /// Only a run with its own `turn_id` owns a fresh agent session (#3006).
+    /// Terminal script actions create separate runs with no turn, so they must
+    /// not tear down a session based on an earlier run's history: an unrelated
+    /// operator session may now be latest in the routine's Discord thread.
     pub async fn run_started_agent_turn(&self, run_id: &str) -> Result<bool> {
         let turn_id: Option<Option<String>> = sqlx::query_scalar(
             r#"
@@ -2392,6 +2381,9 @@ impl RoutineStore {
                         'agent_id', $5,
                         'kind', $6,
                         'turn_id', $2,
+                        'execution_mode', $3::jsonb ->> 'execution_mode',
+                        'provider', $3::jsonb ->> 'provider',
+                        'channel_id', $3::jsonb ->> 'channel_id',
                         'at', NOW()
                     )
                 ),
