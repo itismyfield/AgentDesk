@@ -19,6 +19,7 @@ struct Row {
     started: Instant,
     result: Option<bool>,
     elapsed: Option<u64>,
+    background: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,7 +59,7 @@ impl ToolActivityRing {
                 success,
             } => {
                 if let Some(success) = success {
-                    self.finish(tool_use_id.as_deref(), *success);
+                    self.finish(tool_use_id.as_deref(), *success, false);
                 } else if let Some(name) = name {
                     if let Some(existing) = tool_use_id
                         .as_ref()
@@ -88,7 +89,65 @@ impl ToolActivityRing {
                         started: Instant::now(),
                         result: None,
                         elapsed: None,
+                        background: matches!(class(name), "Task" | "Bash")
+                            && input
+                                .as_deref()
+                                .and_then(|input| serde_json::from_str::<Value>(input).ok())
+                                .and_then(|value| {
+                                    value.get("run_in_background").and_then(Value::as_bool)
+                                })
+                                .unwrap_or(false),
                     });
+                }
+            }
+            StatusEvent::SubagentStart {
+                tool_use_id: Some(id),
+                background: true,
+                ..
+            } => {
+                if let Some(row) = self
+                    .rows
+                    .iter_mut()
+                    .find(|r| r.class == "Task" && r.id.as_ref() == Some(id))
+                {
+                    row.background = true;
+                }
+            }
+            StatusEvent::SubagentEnd {
+                tool_use_id: Some(id),
+                success,
+                ack_only: false,
+                ..
+            } => {
+                if self
+                    .rows
+                    .iter()
+                    .any(|r| r.class == "Task" && r.id.as_ref() == Some(id))
+                {
+                    self.finish(Some(id), *success, true);
+                }
+            }
+            StatusEvent::BackgroundTaskStart {
+                tool_use_id: id, ..
+            } => {
+                if let Some(row) = self
+                    .rows
+                    .iter_mut()
+                    .find(|r| r.class == "Bash" && r.id.as_ref() == Some(id))
+                {
+                    row.background = true;
+                }
+            }
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: id,
+                success,
+            } => {
+                if self
+                    .rows
+                    .iter()
+                    .any(|r| r.class == "Bash" && r.id.as_ref() == Some(id))
+                {
+                    self.finish(Some(id), *success, true);
                 }
             }
             StatusEvent::TurnCompleted { .. } => self.completed = true,
@@ -96,7 +155,7 @@ impl ToolActivityRing {
         }
     }
 
-    fn finish(&mut self, id: Option<&str>, success: bool) {
+    fn finish(&mut self, id: Option<&str>, success: bool, terminal: bool) {
         let exact = id.and_then(|id| self.rows.iter().position(|r| r.id.as_deref() == Some(id)));
         if id.is_some() && exact.is_none() {
             return;
@@ -116,6 +175,9 @@ impl ToolActivityRing {
         if let Some(row) = index.and_then(|index| self.rows.get_mut(index))
             && row.result.is_none()
         {
+            if row.background && success && !terminal {
+                return;
+            }
             row.result = Some(success);
             row.elapsed = Some(row.started.elapsed().as_secs());
             self.failed = self.failed.saturating_add(usize::from(!success));

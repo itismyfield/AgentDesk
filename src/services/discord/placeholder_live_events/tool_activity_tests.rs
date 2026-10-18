@@ -163,7 +163,7 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
     let out = render(state.clone());
     assert!(out.len() <= 1400, "{}: {out}", out.len());
     assert!(out.encode_utf16().count() <= 2000);
-    assert!(out.contains("… 외 "));
+    assert!(out.contains("… 외 ") && out.contains("ROW6"), "{out}");
     let full = state.tool_activity.render(6);
     for row in out.lines().filter(|l| l.starts_with("-# ✓ ")) {
         assert!(
@@ -305,4 +305,43 @@ fn activity_partial_tui_start_is_enriched_without_double_counting() {
         out.contains("도구 1") && out.contains("▶ Bash  cargo test"),
         "{out}"
     );
+}
+
+#[test]
+fn activity_background_task_ack_stays_running_until_terminal_evidence() {
+    for name in ["Task", "Bash"] {
+        let mut state = StatusPanelState::default();
+        begin(
+            &mut state,
+            name,
+            json!({"description":"background audit","command":"cargo test","run_in_background":true}),
+            Some("bg"),
+        );
+        end(&mut state, name, Some("bg"), false);
+        let out = render(state.clone());
+        assert!(
+            out.contains(&format!("▶ {name}  ")) && !out.contains(&format!("✓ {name}")),
+            "{out}"
+        );
+        if name == "Task" {
+            state.apply(StatusEvent::SubagentEnd {
+                success: false,
+                agent_id: None,
+                desc: None,
+                tool_use_id: Some("bg".into()),
+                summary: None,
+                ack_only: false,
+            });
+        } else {
+            state.apply(StatusEvent::BackgroundTaskEnd {
+                tool_use_id: "bg".into(),
+                success: false,
+            });
+        }
+        let out = render(state);
+        assert!(
+            out.contains(&format!("✗ {name}  ")) && out.contains("실패 1"),
+            "{out}"
+        );
+    }
 }

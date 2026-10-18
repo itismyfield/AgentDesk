@@ -51,13 +51,13 @@ pub(super) fn render_panel_activity_line(
         let tools = snapshot.tool_activity.render(6);
         activity_line = if matches!(
             header_status,
-            DerivedStatus::Running
-                | DerivedStatus::ToolRunning { .. }
-                | DerivedStatus::SubagentRunning { .. }
+            DerivedStatus::Running | DerivedStatus::ToolRunning { .. }
         ) {
             tools
         } else {
-            format!("{activity_line}\n{tools}")
+            let label = super::tool_summary::safe_section(&activity_line)
+                .unwrap_or_else(|| "🔧 도구 활동".to_string());
+            format!("{label}\n{tools}")
         };
     }
     if mark_placeholder {
