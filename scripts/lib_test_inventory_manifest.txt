@@ -3641,6 +3641,7 @@ services::discord::commands::control::clear_persist_failure_tests::a_clear_whose
 services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_write_fails_stops_the_released_turn_once_and_runs_no_old_backlog
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_managed_process
 services::discord::commands::control::clear_persist_failure_tests::persisted_clear_still_resets_the_session_and_arms_no_kick
+services::discord::commands::control::clear_teardown::clear_end_record_tests::only_a_confirmed_claude_pane_end_is_recorded
 services::discord::commands::control::clear_wait_tests::a_clear_overtakes_a_held_pane_effect_and_discards_the_live_head
 services::discord::commands::control::codex_clear_relaunch_tests::canary_clear_reopens_launch_without_releasing_old_source_pg
 services::discord::commands::control::codex_clear_relaunch_tests::canary_clear_with_unwatched_external_tmux_launches_first_input_pg
@@ -12386,6 +12387,8 @@ services::tui_o::store::cleanup_witness::tests::readers_s1a_malformed_witness_is
 services::tui_o::store::cleanup_witness::tests::readers_s1a_stale_offset_or_hash_witness_is_ignored
 services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_init_only_and_old_directory_recover
 services::tui_o::store::cleanup_witness::tests::readers_s1a_witness_write_failure_latches_and_keeps_prior_copy
+services::tui_o::store::clear_end::tests::a_failed_directory_sync_still_publishes_and_an_unpublished_write_announces_nothing
+services::tui_o::store::clear_end::tests::appends_keep_the_newest_records_and_announce_each_one
 services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_failure_keeps_original_evidence
 services::tui_o::store::codex_provenance::p5a2_tests::p5a2_deny_readback_mismatch_and_foreign_identity_are_typed
 services::tui_o::store::codex_provenance::p5a2_tests::p5a2_native_cursor_floor_are_authority_not_marker
@@ -12925,6 +12928,14 @@ services::tui_o::writer::tests::actor::rotation::retire_tests::a_rotation_applie
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_successor_record_without_rotation_fields_holds_to_the_current_length_and_waits_for_evidence
 services::tui_o::writer::tests::actor::rotation::retire_tests::a_tail_without_its_newline_keeps_a_proven_old_source_read_until_it_ends
 services::tui_o::writer::tests::actor::rotation::retire_tests::an_old_source_is_not_retired_without_provider_evidence_however_long_it_stays_quiet
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::a_clear_end_for_a_vanished_old_source_leaves_it_to_missing_cleanup
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::a_confirmed_clear_end_proves_the_fresh_hop_and_the_old_source_retires
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::a_late_clear_end_retires_the_old_source_only_on_the_tend_consuming_its_validation
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::a_proven_old_source_that_vanishes_halts_instead_of_retiring
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::burst_confirmed_clears_return_within_three_readers_once_validated
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::clear_ends_published_while_o_was_down_prove_on_resume_and_wake_the_old_reader
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::clear_ends_that_do_not_name_the_fresh_hop_prove_nothing
+services::tui_o::writer::tests::actor::rotation::retire_tests::clear_end_proof_tests::spaced_confirmed_clears_never_exceed_three_readers
 services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_holds_checkpoint_delivers_tails_and_recovers_once_per_outage
 services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_readable_history_without_a_matching_hop_does_not_block
 services::tui_o::writer::tests::actor::rotation::retire_tests::legacy_hop_retry_tests::legacy_hop_retry_tail_after_durable_proof_invalidates_previous_eof

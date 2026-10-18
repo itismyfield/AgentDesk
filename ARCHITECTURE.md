@@ -920,6 +920,9 @@ src/
 │   │   │   └── too_old_drop_pg_tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
+│   │   │   │   ├── clear_teardown/
+│   │   │   │   │   ├── clear_end_record.rs
+│   │   │   │   │   └── clear_end_record_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
 │   │   │   │   ├── clear_persist_failure_tests.rs
@@ -2800,6 +2803,8 @@ src/
 │   │   │   ├── spool/
 │   │   │   │   └── transition.rs
 │   │   │   ├── cleanup_witness.rs
+│   │   │   ├── clear_end.rs
+│   │   │   ├── clear_end_tests.rs
 │   │   │   ├── codex_provenance.rs
 │   │   │   ├── codex_provenance_tests.rs
 │   │   │   ├── durable.rs
@@ -2849,6 +2854,7 @@ src/
 │   │   │   │   └── codex.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── claude_boundary.rs
+│   │   │   │   ├── clear_end.rs
 │   │   │   │   ├── owe.rs
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
@@ -2864,6 +2870,7 @@ src/
 │   │   │   ├── adoption_tests.rs
 │   │   │   ├── binding.rs
 │   │   │   ├── canary_policy_tests.rs
+│   │   │   ├── clear_end_proof_tests.rs
 │   │   │   ├── clear_launch_tests.rs
 │   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_herdr_drive_tests.rs

@@ -175,6 +175,15 @@ impl Names {
         taken.map_or(source.session_id.as_str(), String::as_str)
     }
 
+    /// The stored name of `source`'s file as a read sees it, taking nothing; an ambiguous store
+    /// names none.
+    pub(super) fn stored_name(&self, store: &ChannelStore, source: &SourceId) -> Option<SourceId> {
+        match self.stored(store, source) {
+            Ok(stored) => Some(stored.map_or_else(|| source.clone(), |(c, _)| c.source.clone())),
+            Err(_) => None,
+        }
+    }
+
     /// The stored name a bind uses. A compatible stored source is taken only once its bytes before
     /// the cursor still read as stored; otherwise the bind halts rather than attach the file anew.
     pub(super) fn bind_name(
