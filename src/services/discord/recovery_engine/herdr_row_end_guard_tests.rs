@@ -141,8 +141,8 @@ fn an_unrouted_channel_keeps_an_ended_row_pg() {
 
 const RETIRE_RACE: u64 = 1_479_671_399_000_108;
 
-/// A successor launched between the reads and the retire: the CAS refuses, so the successor's
-/// row, execution and hold stay and nothing is shown.
+/// Another retire and a successor row between the reads and this retire: the CAS refuses, so the
+/// successor's row and the hold stay and nothing is shown.
 #[test]
 fn a_successor_before_the_retire_keeps_everything_pg() {
     let path = concat!(
@@ -172,24 +172,31 @@ fn a_successor_before_the_retire_keeps_everything_pg() {
             on("before_retire", move || {
                 let (pool, key, next) = (pool.clone(), key.clone(), next.clone());
                 Box::pin(async move {
-                    sqlx::query("UPDATE sessions SET hosted_execution = jsonb_set(hosted_execution, '{execution_nonce}', '\"successor-execution\"') WHERE session_key = $1")
-                    .bind(&key).execute(&pool).await.unwrap();
+                    let lookup = HostedLookupKey::SessionKey(&key);
+                    let HostedLookup::Found(found) =
+                        hosted::load_hosted_execution_pg(&pool, lookup).await
+                    else {
+                        panic!("the bound execution");
+                    };
+                    let HostedRecord::Known(record) = found.record.clone() else {
+                        panic!("a known record");
+                    };
+                    let nonce = record.execution_nonce.clone();
+                    let written = hosted::retire_pg(&pool, &found, &record.owner, &nonce).await;
+                    assert!(matches!(written, Ok(HostedCasOutcome::Written)));
                     inflight::save_inflight_state(&next).unwrap();
                 })
             });
             run.pass().await;
             let durable = run.durable().expect("the successor's row");
             assert_eq!(durable.turn_nonce.as_deref(), Some("successor"));
-            let hosted: (Option<String>, Option<String>) = sqlx::query_as(
-                "SELECT hosted_execution->>'execution_nonce', hosted_execution->>'state' FROM sessions WHERE session_key = $1",
-            )
-            .bind(&run.key)
-            .fetch_one(&run.pool)
-            .await
-            .unwrap();
-            assert_eq!(hosted.0.as_deref(), Some("successor-execution"));
-            assert_ne!(hosted.1.as_deref(), Some("retired"), "{hosted:?}");
-            assert!(herdr::held());
+            let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+            assert_eq!(
+                run.hosted().await,
+                Some(retired),
+                "only the other retire wrote"
+            );
+            assert!(herdr::held(), "this pass released nothing");
             assert_eq!(run.texts(), Vec::<String>::new());
             run.close().await;
         },

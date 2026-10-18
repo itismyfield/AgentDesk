@@ -29,7 +29,6 @@ const READY: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
 const BUSY: &str = "\u{2733} Architecting\u{2026}";
 const CODEX_READY: &str = "earlier output\n\n\u{203a}\n\n  gpt-5.5 xhigh \u{b7} /fixture/workspace";
 const PHASE: &str = "ADK_HERDR_ROW_END_PHASE";
-const DATABASE: &str = "ADK_HERDR_ROW_END_DATABASE";
 
 /// What the relay in front of the fixture's socket answers instead of the fixture.
 #[derive(Clone, Default)]
@@ -204,7 +203,7 @@ where
 struct Run {
     shared: Arc<SharedData>,
     pool: sqlx::PgPool,
-    db: Option<TestPostgresDb>,
+    db: TestPostgresDb,
     mock: DiscordMockState,
     server: tokio::task::JoinHandle<()>,
     provider: ProviderKind,
@@ -279,20 +278,8 @@ impl Run {
     /// Binds the execution, logs its source, saves the prior process's row and restart mark,
     /// then moves this process to the next generation.
     async fn start(rig: &herdr::P11TerminationRig, setup: Setup) -> Self {
-        let (db, pool) = match std::env::var(DATABASE) {
-            Ok(url) => {
-                let pool =
-                    crate::db::postgres::connect_test_pool_with_max_connections(&url, "row-end", 4)
-                        .await
-                        .unwrap();
-                (None, pool)
-            }
-            Err(_) => {
-                let db = TestPostgresDb::create().await;
-                let pool = db.connect_and_migrate().await;
-                (Some(db), pool)
-            }
-        };
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
         let mock = DiscordMockState::new();
         if setup.routed {
             mock.allow_channel(setup.channel);
@@ -325,17 +312,12 @@ impl Run {
         let token = shared.token_hash.clone();
         let restarted = std::env::var(PHASE).as_deref() == Ok("after");
         if restarted {
-            // The old launch's context; the fixture writes the same one again.
+            // Each phase has its own database: the old launch's record is written again here, with
+            // its context, at this process's fixture socket.
             let context = PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap())
                 .join("runtime/binding_contexts/claude")
                 .join(format!("{}.json", herdr::EXECUTION));
             std::fs::remove_file(context).unwrap();
-            // The same execution as the old process recorded it, at this process's fixture socket.
-            sqlx::query("DELETE FROM sessions WHERE session_key = $1")
-                .bind(&key)
-                .execute(&pool)
-                .await
-                .unwrap();
         }
         let bound = herdr::HostedState::Bound;
         let switches = match provider {
@@ -558,9 +540,7 @@ impl Run {
         self.server.abort();
         drop(self.relay);
         self.pool.close().await;
-        if let Some(db) = self.db {
-            db.drop().await;
-        }
+        self.db.drop().await;
     }
 }
 
@@ -644,13 +624,10 @@ fn r1_restarted_claude_turn_ends_with_its_transcript_answer_pg() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let db = TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
         for phase in ["before", "after"] {
             let home = tempfile::tempdir().unwrap();
             let output = herdr::child_command(path, R1, home.path())
                 .env(PHASE, phase)
-                .env(DATABASE, &db.database_url)
                 .env("AGENTDESK_ROOT_DIR", root.path())
                 .output()
                 .unwrap();
@@ -678,8 +655,6 @@ fn r1_restarted_claude_turn_ends_with_its_transcript_answer_pg() {
                 );
             }
         }
-        pool.close().await;
-        db.drop().await;
     });
 }
 
