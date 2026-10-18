@@ -624,9 +624,8 @@ async fn assert_kept(run: &Run, saved: &inflight::InflightTurnState, case: &str)
 
 const R1: u64 = 1_479_671_399_000_101;
 
-/// A Claude turn dispatched before a restart and finished after it: the restarted process's boot
-/// restore leaves the row, and the next source tick shows the transcript's own answer once,
-/// clears the row, releases the hold and takes the next input once.
+/// A Claude turn finished after a restart: boot restore leaves the row, and a source tick shows the
+/// transcript's answer once, clears the row, releases the hold and takes the next input once.
 #[test]
 fn r1_restarted_claude_turn_ends_with_its_transcript_answer_pg() {
     if herdr::is_child() {

@@ -4,9 +4,8 @@ use super::*;
 
 const NEGATIVE: u64 = 1_479_671_399_000_105;
 
-/// Every read short of a clear idle or end keeps the row, its execution and its hold, and shows
-/// nothing: a long busy turn, a stale ready screen over a turn still open, an unreadable endpoint
-/// and a replaced source.
+/// A long busy turn, a stale ready screen over an open turn, an unreadable endpoint or a replaced
+/// source keeps the row, its execution and its hold, and shows nothing.
 #[test]
 fn unresolved_reads_keep_the_row_as_production_does_pg() {
     let path = concat!(

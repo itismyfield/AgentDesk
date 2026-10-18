@@ -176,9 +176,8 @@ fn boot_restore_leaves_only_a_restarted_herdr_row_to_the_end_pass() {
     );
 }
 
-/// The clear removes the row only while the locked file is still the turn the pass read, from a
-/// prior process, with no kind, receipt or hot swap; a receipt written after the pass chose the
-/// row keeps it for receipt settlement.
+/// The clear removes only the turn the pass read, from a prior process, with no kind, receipt or
+/// hot swap; a receipt written after the pass chose the row keeps it.
 #[test]
 fn the_exact_clear_removes_only_the_turn_the_pass_read() {
     let _root = root();
