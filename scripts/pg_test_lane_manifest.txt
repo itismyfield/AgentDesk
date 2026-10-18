@@ -287,6 +287,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/agent_executor/execution.rs
 src/services/routines/agent_executor/reliability.rs
 src/services/routines/reliability_pg_tests.rs
 src/services/routines/session_control.rs
@@ -632,6 +633,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::agent_executor::execution::pg_tests
 services::routines::agent_executor::reliability::tests
 services::routines::reliability_pg_tests
 services::routines::session_control::tests
@@ -1789,7 +1791,15 @@ services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keep
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_clean_requests_no_session_kill_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_drops_only_witnessed_parents_still_on_the_thread_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_an_episode_readopted_after_the_witness_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_the_successor_route_across_a_watcher_exit_row_clear_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_never_touches_a_row_naming_another_channel_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_racing_cleans_release_once_pg
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_companion_settled_open_turn_stays_held_after_six_hundred_seconds
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_resume_companion_unregistered_discovery_pass_publishes
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_backstop_rechecks_after_source_publication
@@ -2078,6 +2088,10 @@ services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_deferral_refused_by_the_queue_keeps_the_checkpoint_pg
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_admitted_after_the_witness_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_route_published_after_the_release_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_leaves_an_unanchored_thread_turn_alone_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
@@ -2295,6 +2309,7 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::agent_executor::execution::pg_tests::deferred_process_run_keeps_mode_after_executor_config_changes_pg
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg

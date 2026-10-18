@@ -1069,6 +1069,7 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_process.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -1453,7 +1454,9 @@ src/
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   ├── stale_turn.rs
-│   │   │   │   └── stale_turn_host_tests.rs
+│   │   │   │   ├── stale_turn_host_tests.rs
+│   │   │   │   ├── stale_turn_witness_tests.rs
+│   │   │   │   └── thread_guard_release.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
 │   │   │   │   │   ├── entrypoints.rs
@@ -2519,6 +2522,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── direct_spawn_tests.rs
 │   │   └── fallback.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
@@ -2554,6 +2558,8 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── execution.rs
+│   │   │   ├── launch.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
@@ -3019,7 +3025,9 @@ src/
 │   │   ├── remint_fence.rs
 │   │   ├── reply_results.rs
 │   │   ├── source_generation.rs
-│   │   └── turn_finished_signal.rs
+│   │   ├── turn_finished_signal.rs
+│   │   ├── witnessed_release.rs
+│   │   └── witnessed_release_tests.rs
 │   ├── writer_protocol/
 │   │   ├── namespace/
 │   │   │   ├── catalog.rs

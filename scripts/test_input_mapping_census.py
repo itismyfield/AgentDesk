@@ -123,6 +123,7 @@ EXPECTED = {
     "reaction_lifecycle.rs": {"declare": 1, "into_iter": 1, "iter": 1},
     "relay_recovery/apply.rs": {"len": 2, "retain": 1},
     "router/intake_gate.rs": {"get": 1, "remove": 1},
+    "router/intake_gate/thread_guard_release.rs": {"iter": 1, "remove_if": 1},
     "router/message_handler/intake_turn/adk_thread.rs": {"contains_key": 1, "insert": 1, "iter": 1, "retain": 1},
     "router/message_handler/intake_turn.rs": {"contains_key": 1},
     "runtime_bootstrap/shared_data.rs": {"initialize": 1},
@@ -145,7 +146,7 @@ RETAIN_ARGUMENTS = {
 RELEASES = {
     "collect_and_clear_thread_parents": {
         "turn_finalizer/cleanup.rs": 1,
-        "router/intake_gate/stale_turn.rs": 2,
+        "router/intake_gate/stale_turn.rs": 1,
         "relay_recovery/apply.rs": 1,
         "turn_finalizer/policy_commit.rs": 1,
     },
@@ -187,7 +188,7 @@ class Census(unittest.TestCase):
             self.assertEqual(actual, expected, helper)
         self.assertEqual(sum(RELEASES["kick_thread_parents_after_turn_release"].values())
                          + sum(RELEASES["collect_and_clear_thread_parents"].values())
-                         - 1 + 3, 13)  # Remove the wrapper; add three direct deletions.
+                         - 1 + 4, 13)  # Remove the wrapper; add four direct deletions.
 
     def test_retain_predicates_only_remove_edges(self):
         # Retain exposes a mutable value, so operation counts alone miss edge replacement.
