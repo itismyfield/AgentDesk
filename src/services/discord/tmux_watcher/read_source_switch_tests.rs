@@ -129,9 +129,8 @@ async fn until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// The replacement watcher reads the rebuilt relay below the old file's watermark:
-/// the session relay folds it into the open turn and Discord shows the turn once.
-/// The rebind leaves the row watcher-owned, so either the watcher or the sink may post.
+/// The replacement watcher's read below the old watermark joins the open turn, and Discord
+/// shows it once; the rebind leaves the row watcher-owned, so either side may post it.
 #[test]
 fn crossed_rebind_relay_reaches_discord_once_below_the_old_watermark() {
     if std::env::var_os(CHILD).is_none() {
