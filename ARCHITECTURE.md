@@ -357,6 +357,9 @@ src/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
 │   │   │   └── pg_tests.rs
+│   │   ├── auth/
+│   │   │   ├── tailnet_peer.rs
+│   │   │   └── tailnet_peer_tests.rs
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
@@ -520,6 +523,7 @@ src/
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
 │   ├── outbox_worker.rs
+│   ├── policy_tick_logging.rs
 │   ├── rate_limit_profiles.rs
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
@@ -619,6 +623,7 @@ src/
 │   │   └── worker.rs
 │   ├── claude/
 │   │   ├── herdr_turn/
+│   │   │   ├── never_attached.rs
 │   │   │   └── provider_terminal_tests.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
@@ -2020,6 +2025,7 @@ src/
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
 │   │   │   ├── before_start_stop_reconcile_tests.rs
+│   │   │   ├── before_start_stop_retry_tests.rs
 │   │   │   ├── before_start_stop_tail_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
@@ -2433,6 +2439,7 @@ src/
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs
 │   │   │   ├── capture_tests.rs
+│   │   │   ├── overflow_tests.rs
 │   │   │   └── test_capture.rs
 │   │   ├── emit.rs
 │   │   ├── events.rs
