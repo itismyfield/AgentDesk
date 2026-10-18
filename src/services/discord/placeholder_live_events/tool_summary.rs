@@ -54,10 +54,17 @@ fn credential_command(input: &str) -> bool {
         return true;
     }
     let words: Vec<_> = TOKENS.find_iter(input).map(|word| word.as_str()).collect();
-    let (mut command, mut wrapper) = (true, false);
+    let (mut command, mut wrapper, mut skip_argument) = (true, false, false);
     for (index, raw_word) in words.iter().enumerate() {
         if matches!(*raw_word, ";" | "&" | "|" | "(" | ")" | "\r" | "\n") {
-            (command, wrapper) = (true, false);
+            (command, wrapper, skip_argument) = (true, false, false);
+            continue;
+        }
+        if skip_argument {
+            if raw_word.starts_with('-') {
+                return true;
+            }
+            skip_argument = false;
             continue;
         }
         if !command {
@@ -68,13 +75,38 @@ fn credential_command(input: &str) -> bool {
             || (*raw_word == "Bash" && index > 0 && words[index - 1] == "└")
             || matches!(
                 word.as_str(),
-                "-" | "└" | "▶" | "✓" | "✗" | "?" | "[" | "]" | "[x]"
+                "-" | "└" | "▶" | "✓" | "✗" | "?" | "]" | "[x]"
             )
         {
             continue;
         }
+        if word.contains(char::is_whitespace) {
+            return credential_command(&word);
+        }
         let executable = word.rsplit('/').next().unwrap_or(&word);
-        if matches!(executable, "sudo" | "env" | "command" | "exec" | "nohup") {
+        if executable == "timeout"
+            && !words.get(index + 1).is_some_and(|duration| {
+                duration.starts_with(|c: char| c.is_ascii_digit())
+                    && duration
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || ".smhd".contains(c))
+            })
+        {
+            return true;
+        }
+        if matches!(executable, "timeout" | "ssh") {
+            skip_argument = true;
+            wrapper = true;
+            continue;
+        }
+        if executable == "command" && words.get(index + 1) == Some(&"-v") {
+            command = false;
+            continue;
+        }
+        if matches!(
+            executable,
+            "sudo" | "env" | "command" | "exec" | "nohup" | "time" | "doas"
+        ) {
             wrapper = true;
             continue;
         }
@@ -86,25 +118,19 @@ fn credential_command(input: &str) -> bool {
         }
         if matches!(
             executable,
-            "sshpass"
-                | "htpasswd"
-                | "redis-cli"
-                | "mysql"
-                | "mysqladmin"
-                | "psql"
-                | "op"
-                | "vault"
-                | "sh"
-                | "bash"
-                | "zsh"
-                | "dash"
-        ) || words.get(index + 1).is_some_and(|next| {
-            let next = next.replace(['\'', '"'], "").to_ascii_lowercase();
-            matches!(
-                (executable, next.as_str()),
-                ("docker" | "podman", "login") | ("gh", "auth") | ("aws", "configure")
-            )
-        }) {
+            "sshpass" | "htpasswd" | "redis-cli" | "mysql" | "mysqladmin" | "psql" | "op" | "vault"
+        ) || (matches!(executable, "sh" | "bash" | "zsh" | "dash")
+            && words
+                .get(index + 1)
+                .is_some_and(|next| next.starts_with('-')))
+            || words.get(index + 1).is_some_and(|next| {
+                let next = next.replace(['\'', '"'], "").to_ascii_lowercase();
+                matches!(
+                    (executable, next.as_str()),
+                    ("docker" | "podman", "login") | ("gh", "auth") | ("aws", "configure")
+                )
+            })
+        {
             return true;
         }
         command = false;
@@ -160,7 +186,7 @@ fn redact_env(input: &str) -> String {
 fn redact_prose(input: &str) -> String {
     static PROSE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)(\b(?:password|passwd|secret|token)\b[ \t]*(?:(?:is\b|[:=])[ \t]*)*)({WORD})"
+            r"(?i)((?:\b(?:password|passwd|secret|token|pw|pwd|passphrase|api[ _-]?key)\b|비밀번호(?:는)?)[ \t]*(?:(?:is\b|was\b|[:=])[ \t]*)*)({WORD})"
         ))
         .expect("credential prose")
     });
@@ -185,13 +211,25 @@ fn redact_credentials(input: &str) -> String {
     });
     static FLAGS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)((?:^|[\s;&|])(?:--(?:password|passwd|token|api[_-]?key|secret|client[_-]secret)(?:[ \t]*=[ \t]*|[ \t]+)|-p))({WORD})"
+            r"(?i)((?:^|[\s;&|])(?:--(?:password|passwd|token|api[_-]?key|secret|client[_-]secret)(?:[ \t]*=[ \t]*|[ \t]+)|-p[ \t]*))({WORD})"
         )).expect("credential flags")
     });
     static ASSIGNMENTS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
             r#"(?i)(\b(?:[a-z0-9_-]*(?:password|passwd|token|secret)[a-z0-9_-]*|[a-z0-9_-]+[_-]key|api[_-]?key|private[_-]?key)['"]?[ \t]*[:=][ \t]*)({WORD})"#
         )).expect("credential assignments")
+    });
+    static POSITIONAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"(?i)(\b(?:redis-cli[ \t]+-a|htpasswd[ \t]+-b[ \t]+{WORD}[ \t]+{WORD})[ \t]+)({WORD})"
+        ))
+        .expect("credential argument values")
+    });
+    static SPACED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"(?i)(\b[a-z0-9_]*(?:_authToken|secret_access_key)[ \t]+)({WORD})"
+        ))
+        .expect("spaced credential keys")
     });
     static BARE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
@@ -215,6 +253,8 @@ fn redact_credentials(input: &str) -> String {
     let masked = crate::utils::redact::redact_sensitive_headers(&masked, "***");
     let masked = FLAGS.replace_all(&masked, "${1}***");
     let masked = ASSIGNMENTS.replace_all(&masked, "${1}***");
+    let masked = POSITIONAL.replace_all(&masked, "${1}***");
+    let masked = SPACED.replace_all(&masked, "${1}***");
     BARE.replace_all(&masked, "${1}***").into_owned()
 }
 
@@ -271,7 +311,7 @@ fn sanitized(raw: &str) -> Option<String> {
     if raw.as_bytes().windows(3).any(|bytes| {
         bytes[0] == b'%' && bytes[1].is_ascii_hexdigit() && bytes[2].is_ascii_hexdigit()
     }) || raw.contains('\0')
-        || credential_command(raw)
+        || lower.contains("--password-stdin")
         || env_key.is_some_and(|end| probe[end..].trim().is_empty())
         || (credential_syntax && !balanced_quotes(raw))
         || (raw.contains('\\')
@@ -318,6 +358,11 @@ fn sanitized(raw: &str) -> Option<String> {
 /// Existing generated sections already escape Markdown; retain that structure
 /// while applying the same credential and mention boundary to every line.
 pub(super) fn safe_section(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        if let Some(command) = line.trim().strip_prefix("└ Bash ") {
+            shell_masked(command, 0)?;
+        }
+    }
     let masked = sanitized(raw)?;
     if masked
         .chars()
@@ -355,12 +400,66 @@ fn text(raw: &str, limit: usize) -> Option<String> {
 }
 
 fn shell_text(raw: &str) -> Option<String> {
-    // Expansions, escaping and heredocs require shell interpretation. Never
-    // guess where their credential values end; ordinary quoted words are safe.
-    if raw.contains(['$', '`', '\\']) || raw.contains("<<") {
+    text(&shell_masked(raw, 0)?, 80)
+}
+
+fn shell_masked(raw: &str, depth: usize) -> Option<String> {
+    if depth > 8 || raw.contains('\\') || raw.contains("<<") || !balanced_quotes(raw) {
         return None;
     }
-    balanced_quotes(raw).then(|| text(raw, 80)).flatten()
+    static UNWRAP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)^\s*(?:\S*/)?(?:sh|bash|zsh|dash)\s+(?:-l\s+)?(?:-c|-lc)\s+(?:'([^']*)'|"([^"]*)")\s*$"#).expect("single shell command argument")
+    });
+    if let Some(captures) = UNWRAP.captures(raw) {
+        return shell_masked(
+            captures.get(1).or_else(|| captures.get(2))?.as_str(),
+            depth + 1,
+        );
+    }
+    let mut masked = String::new();
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        let tail = &raw[cursor..];
+        let ch = tail.chars().next()?;
+        if tail.starts_with("$(") || ch == '`' {
+            let start = cursor + if ch == '`' { 1 } else { 2 };
+            let end = if ch == '`' {
+                start + raw[start..].find('`')?
+            } else {
+                let mut level = 1;
+                raw[start..].char_indices().find_map(|(index, ch)| {
+                    match ch {
+                        '(' => level += 1,
+                        ')' => level -= 1,
+                        _ => {}
+                    }
+                    (level == 0).then_some(start + index)
+                })?
+            };
+            let inner = shell_masked(&raw[start..end], depth + 1)?;
+            masked.push_str(if ch == '`' { "`" } else { "$(" });
+            masked.push_str(&inner);
+            masked.push(if ch == '`' { '`' } else { ')' });
+            cursor = end + 1;
+            continue;
+        }
+        if ch == '$' {
+            static REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
+                Regex::new(r"^\$(?:[a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
+                    .expect("variable name references")
+            });
+            let reference = REFERENCE.find(tail)?.as_str();
+            masked.push_str(reference);
+            cursor += reference.len();
+            continue;
+        }
+        masked.push(ch);
+        cursor += ch.len_utf8();
+    }
+    if credential_command(&masked) {
+        return None;
+    }
+    sanitized(&masked)
 }
 
 fn balanced_quotes(raw: &str) -> bool {
