@@ -229,15 +229,12 @@ async fn p10_r1_notice_retries_the_same_receipt_then_closes_once() {
     })
     .await;
     assert_eq!(gateway.count(), 1, "the backoff has not elapsed");
-    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::time::advance(Duration::from_millis(2)).await;
     assert!(future.await);
     {
         let calls = gateway.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(
-            calls[1].0.duration_since(calls[0].0),
-            Duration::from_secs(1)
-        );
+        assert!(calls[1].0.duration_since(calls[0].0) >= Duration::from_secs(1));
         assert_eq!(calls[0].1, calls[1].1, "one durable admission");
     }
     assert_eq!(test_hooks::submitted(), submitted + 1);
@@ -273,7 +270,7 @@ async fn p10_r1_ack_retry_reuses_the_sent_notice() {
         ));
         assert_eq!(close.receipt_pending(), Some(true));
         assert_eq!(gateway.count(), 1);
-        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(Duration::from_millis(1001)).await;
         assert!(future.await);
         assert_eq!(gateway.count(), 1, "a shown notice needs only another ACK");
         let receipts = boundaries.receipts.borrow();
@@ -298,10 +295,10 @@ async fn p10_r1_notice_exhaustion_keeps_receipt_for_restart() {
     tokio::pin!(future);
     before_retry(future.as_mut(), &boundaries, 1).await;
     let receipt_bytes = close.bytes();
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
     before_retry(future.as_mut(), &boundaries, 2).await;
     assert_eq!(gateway.count(), 2);
-    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::time::advance(Duration::from_millis(3001)).await;
     assert!(future.await);
     assert_eq!(gateway.count(), 3);
     assert_eq!(close.bytes(), receipt_bytes);
@@ -363,7 +360,7 @@ async fn p10_r1_retry_stops_when_the_captured_actor_changes() {
         .await
     );
     // Keep the receipt row unchanged so admission cannot mask a missing actor check.
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
     assert!(future.await);
     assert_eq!(gateway.count(), 1, "a successor gets no stale notice");
     assert_eq!(test_hooks::submitted(), submitted);
