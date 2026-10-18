@@ -147,6 +147,7 @@ pub(super) fn gate_closed_arm(
         M::AbandonPendingDispatch { .. } => "AbandonPendingDispatch",
         M::FinishTurn { .. } => "FinishTurn",
         M::FinishTurnIfMatches { .. } => "FinishTurnIfMatches",
+        M::ReleaseWitnessedEpisode(_) => "ReleaseWitnessedEpisode",
         M::FinishTurnIfToken { .. } => "FinishTurnIfToken",
         M::HardStop { .. } => "HardStop",
         M::FinishCancelledTurn { .. } => "FinishCancelledTurn",

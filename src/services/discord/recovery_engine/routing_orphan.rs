@@ -78,7 +78,8 @@ fn routing_orphan_pane_alive(liveness: PaneLiveness) -> bool {
 }
 
 /// The disposition's `tmux_alive`, or `None` when the row is left as stored: another host, or
-/// a tmux-confirmed dead pane whose stored rows the host guard keeps.
+/// a tmux-confirmed dead pane whose stored rows the host guard keeps. A row naming no session
+/// was never probed, so it reads as a failed probe, never as a dead pane.
 async fn routing_orphan_tmux_alive(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -86,7 +87,11 @@ async fn routing_orphan_tmux_alive(
     tmux_session_name: Option<&str>,
 ) -> Option<bool> {
     let Some(name) = tmux_session_name else {
-        return Some(false);
+        tracing::warn!(
+            channel_id = state.channel_id,
+            "recovery: routing-orphaned row names no tmux session; pane unmeasured, so no budget force-clear"
+        );
+        return Some(routing_orphan_pane_alive(PaneLiveness::ProbeError));
     };
     let liveness = host_liveness::observe_liveness(name, Some(state));
     if liveness == SessionLiveness::Unknown {
@@ -138,10 +143,8 @@ async fn cleanup_routing_orphaned_inflight(
     tmux_session_name: Option<&str>,
     reason: BotChannelRoutingGuardFailure,
 ) {
-    // Conservative liveness for the destructive disposition guard: only a
-    // DEFINITIVE dead/absent pane (or no session name at all) permits the budget
-    // force-clear path; a transient probe ERROR is treated as maybe-alive and
-    // preserves the row (re-notify next boot) — never budget-clear a live pane.
+    // Only a tmux-confirmed dead pane permits the budget force-clear; a probe error or a
+    // missing session name is unmeasured, so the row is kept and re-notified next boot.
     let tmux_alive = routing_orphan_tmux_alive(shared, provider, state, tmux_session_name).await;
     // A kept row is left whole: no restart report clear, notice or disposition.
     let Some(tmux_alive) = tmux_alive else {

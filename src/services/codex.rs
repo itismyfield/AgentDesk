@@ -1085,10 +1085,7 @@ fn execute_command_simple_inner(
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    // #2249 / #2250: put Codex in its own process group so kill_pid_tree(child_pid)
-    // can SIGTERM/SIGKILL the whole descendant tree on cancel/timeout. Without
-    // this, kill(-pid, ...) targets PGID = our own process group and the kill
-    // falls back to the immediate child PID only — wrappers / grandchildren leak.
+    // Own a process group so cancellation also terminates wrappers and grandchildren.
     crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
@@ -1447,6 +1444,11 @@ fn execute_streaming_direct(
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
+    let overlay = crate::services::discord::org_schema::spawn_auth_overlay(
+        ProviderKind::Codex,
+        report_channel_id,
+    )?;
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
@@ -1455,7 +1457,6 @@ fn execute_streaming_direct(
 
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
-    // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
         let _ = child.wait();
@@ -1540,9 +1541,8 @@ fn execute_streaming_remote_direct(
     Err("Remote SSH execution is not available in AgentDesk".to_string())
 }
 
-/// Tear down a pre-existing tmux session before relaunching a Codex Direct TUI
-/// on the same name. Records the termination audit + exit reason and kills the
-/// session. No-op when the session does not exist.
+/// Tear down an existing tmux session before relaunching Codex Direct TUI,
+/// recording its termination and exit reason. Missing sessions are a no-op.
 #[cfg(unix)]
 fn cleanup_existing_codex_tui_session(
     tmux_session_name: &str,

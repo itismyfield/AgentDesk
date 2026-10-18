@@ -15,7 +15,7 @@ fn prompt(uuid: &str, text: &str) -> Vec<u8> {
     line(serde_json::json!({"type": "user", "uuid": uuid, "message": {"content": text}}))
 }
 
-/// A user row of error tool results, each posted as its own unit.
+/// A user row of error tool results, each sealed as its own internal unit.
 fn results(uuid: &str, results: &[(&str, &str)]) -> Vec<u8> {
     let item = |(id, text): &(&str, &str)| serde_json::json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": text});
     let content: Vec<_> = results.iter().map(item).collect();
@@ -352,10 +352,19 @@ async fn a_fork_decides_the_same_whether_or_not_the_writer_restarts_while_its_pa
         );
         append(&a_path, &results("u-k1", &[("k1", "one")]));
         polls(3).await;
+        assert!(
+            harness.port.posts().is_empty(),
+            "{tag} tool results stay internal"
+        );
+        let channel = harness.channel();
+        let key = UnitKey {
+            native_key: "k1".into(),
+            kind: UnitKind::ToolResult,
+            ..unit("")
+        };
         assert_eq!(
-            harness.port.posts(),
-            ["one"],
-            "{tag} the parent posts its row"
+            channel.ledger().excluded(&key),
+            Some(pieces::TOOL_RESULT_INTERNAL)
         );
         if restart {
             halt(stop, task).await;
@@ -364,7 +373,7 @@ async fn a_fork_decides_the_same_whether_or_not_the_writer_restarts_while_its_pa
         }
         append(&b_path, rest);
         polls(3).await;
-        assert_eq!(harness.port.posts(), ["one"], "{tag} posts");
+        assert!(harness.port.posts().is_empty(), "{tag} posts");
         let pending = WriterAlarm::BoundaryPending { source: b.clone() };
         assert_eq!(harness.alarms.taken(), [pending], "{tag} alarm");
         let held = matches!(boundary(&harness, &b), Boundary::Pending { .. });

@@ -837,9 +837,11 @@ NON_PG_FILTER_REPLAY=(
   services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
   services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
   services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+  services::routines::agent_executor::reliability::tests::process_attempt_never_probes_legacy_tmux_after_grace
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
+  services::routines::agent_executor::reliability::tests::terminal_turn_error_settles_only_for_fresh_runs
   services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
   services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
   services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel

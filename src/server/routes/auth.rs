@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use super::AppState;
 use crate::api_caller_observability::{AuthStrength, RequestPrincipal};
 
+mod tailnet_peer;
+
 /// GET /api/auth/session
 /// Public authentication probe; never treats reaching this handler as proof.
 pub async fn get_session(
@@ -142,10 +144,8 @@ async fn run_with_request_principal(
     next.run(req).await
 }
 
-/// Auth middleware: checks Bearer token against config.server.auth_token.
-/// If auth_token is not set, non-internal requests pass through (local-only
-/// mode). Internal control-plane routes still require loopback peer proof or a
-/// configured Bearer token.
+/// Internal routes require socket or configured Bearer proof; only node-to-node
+/// routes accept tokenless tailnet peers. Other routes keep the configured auth mode.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: axum::extract::Request,
@@ -156,11 +156,8 @@ pub async fn auth_middleware(
     let headers = req.headers().clone();
     let peer = peer_addr_from_request(&req);
 
-    // Internal in-process paths (escalation emit, dispatch↔thread link,
-    // hook/* state mutations, root TUI/hook control-plane routes,
-    // dispatched-sessions webhook). Require strict loopback peer OR matching
-    // Bearer token — never accept Origin/Referer alone since those are
-    // forgeable from the LAN.
+    // Keep local control paths behind loopback/Bearer proof. Tokenless tailnet
+    // trust below is restricted to the two node-to-node routes.
     if is_internal_loopback_path(path) {
         if is_loopback_peer(peer) {
             return run_with_request_principal(req, next, AuthStrength::Loopback).await;
@@ -174,6 +171,18 @@ pub async fn auth_middleware(
                     }
                 }
             }
+        }
+        if state
+            .config
+            .server
+            .auth_token
+            .as_deref()
+            .is_none_or(str::is_empty)
+            && tailnet_peer::allows(&req, peer)
+        {
+            tracing::debug!(method = %req.method(), route = path, auth_strength = "TailnetPeer",
+                "node request authenticated");
+            return run_with_request_principal(req, next, AuthStrength::TailnetPeer).await;
         }
         return unauthorized_response();
     }

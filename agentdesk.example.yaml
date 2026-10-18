@@ -469,6 +469,7 @@ prompt_manifest_retention:
 #   max_agent_polls_per_tick: 10
 #   default_timezone: "Asia/Seoul"
 #   agent_timeout_secs: 1800
+#   headless_fresh_agents: false # true: fresh agent runs use headless processes; restart required
 #   max_checkpoint_bytes: 262144
 #   hot_reload: true
 #   stale_paused_alert_secs: 0

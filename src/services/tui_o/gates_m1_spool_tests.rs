@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -10,13 +10,15 @@ use serde_json::Value;
 use super::gates_m1_support::{EmptyBindings, TestWriter, writer as make_writer};
 use crate::services::tui_o::shadow::capture::{SourceCapture, file_identity};
 use crate::services::tui_o::shadow::{
-    CaptureOutcome, CaptureSource, IDENTITY_VERSION, ShadowProvider, SourceId, UnitKey,
+    CaptureOutcome, CaptureSource, IDENTITY_VERSION, ShadowProvider, SourceId, UnitKey, UnitKind,
 };
 use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::spool::source_key;
 use crate::services::tui_o::store::{ChannelStore, HaltReason, OStore, StoreError, fault};
 use crate::services::tui_o::writer::deliver::Step;
-use crate::services::tui_o::writer::pieces::{Derived, PieceWork, UnitDeriver};
+use crate::services::tui_o::writer::pieces::{
+    Derived, PieceWork, TOOL_RESULT_INTERNAL, UnitDeriver,
+};
 use crate::services::tui_o::writer::rotation::Sources;
 
 const ORACLE: &str = "5806d1e6038040218ec48b51bf3105fe36992a23";
@@ -184,11 +186,24 @@ impl Fixture {
         }
     }
 
+    fn tool_result_keys(&self) -> BTreeSet<UnitKey> {
+        self.expected
+            .pieces
+            .iter()
+            .map(|piece| &piece.unit_key)
+            .chain(self.expected.excluded.iter().map(|item| &item.unit_key))
+            .filter(|key| key.kind == UnitKind::ToolResult)
+            .cloned()
+            .collect()
+    }
+
+    /// Keep the frozen identity oracle; only apply the current internal-tool-result body policy.
     fn expected_work(&self) -> Vec<Derived> {
         let mut work: Vec<_> = self
             .expected
             .pieces
             .iter()
+            .filter(|piece| piece.unit_key.kind != UnitKind::ToolResult)
             .map(|piece| {
                 Derived::Piece(PieceWork {
                     unit_key: piece.unit_key.clone(),
@@ -197,11 +212,60 @@ impl Fixture {
                 })
             })
             .collect();
-        work.extend(self.expected.excluded.iter().map(|item| Derived::Excluded {
-            unit_key: item.unit_key.clone(),
-            reason: item.reason.clone(),
-        }));
+        work.extend(
+            self.expected
+                .excluded
+                .iter()
+                .filter(|item| item.unit_key.kind != UnitKind::ToolResult)
+                .map(|item| Derived::Excluded {
+                    unit_key: item.unit_key.clone(),
+                    reason: item.reason.clone(),
+                }),
+        );
+        work.extend(
+            self.tool_result_keys()
+                .into_iter()
+                .map(|unit_key| Derived::Excluded {
+                    unit_key,
+                    reason: TOOL_RESULT_INTERNAL.into(),
+                }),
+        );
         work
+    }
+
+    fn pending_bodies(&self) -> Vec<String> {
+        self.expected
+            .pieces
+            .iter()
+            .filter(|piece| piece.posted.is_none() && piece.unit_key.kind != UnitKind::ToolResult)
+            .map(|piece| piece.payload.clone())
+            .collect()
+    }
+
+    /// Suppression must be durable, while all v2 body payloads, indices and posted receipts survive.
+    fn delivered(&self, store: &ChannelStore, posted_count: usize) {
+        let ledger = store.ledger();
+        assert_eq!(ledger.violation(), None);
+        assert_eq!(ledger.anchor(), 10_000 + posted_count as u64);
+        for key in self.tool_result_keys() {
+            assert_eq!(ledger.excluded(&key), Some(TOOL_RESULT_INTERNAL));
+        }
+        for piece in &self.expected.pieces {
+            let actual = ledger.latest_piece(&piece.unit_key, piece.index);
+            if piece.unit_key.kind == UnitKind::ToolResult && piece.posted.is_none() {
+                assert!(
+                    actual.is_none(),
+                    "unprepared v2 tool output must never gain a send attempt"
+                );
+                continue;
+            }
+            let (_, actual) = actual.expect("v2 body has a durable receipt after replay");
+            assert_eq!(actual.payload, piece.payload);
+            match piece.posted {
+                Some(id) => assert_eq!(actual.outcome, Some(PieceOutcome::Posted(id))),
+                None => assert!(matches!(actual.outcome, Some(PieceOutcome::Posted(_)))),
+            }
+        }
     }
 }
 
@@ -247,13 +311,7 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
             sorted(fixture.expected_work()),
             "v2/current output tuples differ: {name}"
         );
-        let pending: Vec<_> = fixture
-            .expected
-            .pieces
-            .iter()
-            .filter(|piece| piece.posted.is_none())
-            .map(|piece| piece.payload.clone())
-            .collect();
+        let pending = fixture.pending_bodies();
         assert!(!pending.is_empty());
         assert!(
             fixture
@@ -270,6 +328,7 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
             pending,
             "already delivered v2 pieces must never repost"
         );
+        fixture.delivered(writer.store(), port.posts().len());
         drop(writer);
         let (mut reopened, second_port) = make_writer(fixture.open().unwrap());
         for item in resume(&fixture, &mut reopened) {
@@ -279,6 +338,7 @@ async fn g2_gate_v2_v3_rederive_same_unitkey_body_frontier() {
             second_port.posts().is_empty(),
             "a second recovery must post nothing"
         );
+        fixture.delivered(reopened.store(), port.posts().len());
         println!(
             "PROBE ChannelWriter::deliver provider={name} posts={} delivered_reposts=0",
             port.posts().len()
@@ -431,19 +491,14 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
             for item in work {
                 assert_eq!(writer.deliver(&item).await, Step::Done);
             }
-            let mut pending: Vec<_> = fixture
-                .expected
-                .pieces
-                .iter()
-                .filter(|piece| piece.posted.is_none())
-                .map(|piece| piece.payload.clone())
-                .collect();
+            let mut pending = fixture.pending_bodies();
             pending.push("rollover tail".into());
             assert_eq!(
                 port.posts(),
                 pending,
                 "crash recovery must preserve delivered frontier"
             );
+            fixture.delivered(writer.store(), port.posts().len());
             drop(writer);
             let (mut reopened, second_port) = make_writer(fixture.open().unwrap());
             for item in resume(&fixture, &mut reopened) {
@@ -453,6 +508,7 @@ async fn g2_gate_v2_to_v3_rollover_crash_matrix() {
                 second_port.posts().is_empty(),
                 "repeat recovery after rollover must post nothing"
             );
+            fixture.delivered(reopened.store(), port.posts().len());
             drop(reopened);
             for unknown in [1, u64::from(IDENTITY_VERSION) + 1] {
                 set_version(&segments[1], unknown);
