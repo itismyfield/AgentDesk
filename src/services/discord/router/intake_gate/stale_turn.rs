@@ -340,6 +340,38 @@ pub(super) async fn mailbox_has_live_active_turn_or_cleanup_stale_proof(
 #[path = "stale_turn_host_tests.rs"]
 mod host_tests;
 
+/// #6199 — the THREAD-GUARD verdict and clean as intake runs them, for tests outside intake.
+#[cfg(test)]
+pub(in crate::services::discord) mod thread_guard_test_api {
+    use super::*;
+
+    /// What the verdict hands the clean.
+    pub(in crate::services::discord) type Witness = ();
+
+    pub(in crate::services::discord) async fn witness(
+        shared: &std::sync::Arc<SharedData>,
+        provider: &ProviderKind,
+        thread: serenity::ChannelId,
+    ) -> Option<Witness> {
+        let now = chrono::Utc::now().timestamp();
+        thread_guard_should_force_clean_stale_thread(shared, provider, thread, now)
+            .await
+            .then_some(())
+    }
+
+    /// Whether the clean released the thread's turn.
+    pub(in crate::services::discord) async fn clean(
+        shared: &std::sync::Arc<SharedData>,
+        provider: &ProviderKind,
+        parent: serenity::ChannelId,
+        thread: serenity::ChannelId,
+        _witness: Witness,
+    ) -> bool {
+        thread_guard_force_clean_stale_thread(shared, provider, parent, thread).await;
+        true
+    }
+}
+
 /// #1446 Layer 2 — these cases read inflight files via the runtime root
 /// override, so we keep the always-on slice that needs no `SharedData`
 /// construction. The `thread_guard_force_clean_stale_thread` integration

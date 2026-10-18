@@ -1777,7 +1777,13 @@ services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keep
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_clean_requests_no_session_kill_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_drops_only_witnessed_parents_still_on_the_thread_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_an_episode_readopted_after_the_witness_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_never_touches_a_row_naming_another_channel_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_racing_cleans_release_once_pg
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_companion_settled_open_turn_stays_held_after_six_hundred_seconds
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_resume_companion_unregistered_discovery_pass_publishes
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_backstop_rechecks_after_source_publication
@@ -2058,6 +2064,9 @@ services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_deferral_refused_by_the_queue_keeps_the_checkpoint_pg
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_admitted_after_the_witness_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_leaves_an_unanchored_thread_turn_alone_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode

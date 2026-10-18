@@ -13,7 +13,7 @@ mod gate;
 #[cfg(all(test, unix))]
 mod live_entry_tests;
 mod queue_effects;
-mod stale_turn;
+pub(super) mod stale_turn;
 
 pub(in crate::services::discord) use gate::should_process_turn_message;
 

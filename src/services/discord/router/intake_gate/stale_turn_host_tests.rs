@@ -324,3 +324,271 @@ async fn s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg() {
     receipt_cleanup_case(true, true).await;
     receipt_cleanup_case(true, false).await;
 }
+
+// ---- #6199: the THREAD-GUARD clean releases only the witnessed episode ----
+
+use super::thread_guard_test_api::{clean, witness};
+
+/// A Gemini runtime whose confirmed-legacy thread holds a stale turn A, its row's finalizer id
+/// pinned so no load rewrites it, mapped from a parent: the runtime, its registry, A's token and
+/// the parent.
+async fn stale_thread(
+    pool: &sqlx::PgPool,
+    thread: ChannelId,
+    label: &str,
+) -> (
+    Arc<SharedData>,
+    Arc<HealthRegistry>,
+    Arc<CancelToken>,
+    ChannelId,
+) {
+    let provider = ProviderKind::Gemini;
+    let (shared, registry) = registered_runtime(pool, &provider).await;
+    map_channel(&shared, thread, label).await;
+    let token = stale_turn(&shared, &provider, thread, None).await;
+    let path = inflight_path(&provider, thread);
+    let mut row: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    row["finalizer_turn_id"] = row["user_msg_id"].clone();
+    std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+    let parent = ChannelId::new(thread.get() + 10);
+    shared.dispatch.thread_parents.insert(parent, thread);
+    (shared, registry, token, parent)
+}
+
+fn gemini_row(channel: ChannelId) -> Option<Vec<u8>> {
+    std::fs::read(inflight_path(&ProviderKind::Gemini, channel)).ok()
+}
+
+fn mapped(shared: &SharedData, parent: ChannelId) -> Option<ChannelId> {
+    (shared.dispatch.thread_parents.get(&parent)).map(|thread| *thread.value())
+}
+
+/// Whether `token` still holds `channel`, uncancelled.
+async fn holds(shared: &Arc<SharedData>, channel: ChannelId, token: &Arc<CancelToken>) -> bool {
+    let after = crate::services::discord::mailbox_snapshot(shared, channel).await;
+    let owned = (after.cancel_token.as_ref()).is_some_and(|held| Arc::ptr_eq(held, token));
+    owned && !token.cancelled.load(Ordering::Relaxed)
+}
+
+// A ends on another path after the witness and its own episode (message and nonce) is adopted
+// again: that start is after the witness's cutoff, so the clean leaves the turn, row and route.
+#[tokio::test]
+async fn thread_guard_keeps_an_episode_readopted_after_the_witness_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_030_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-readopt").await;
+    let w = witness(&shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    let finish = crate::services::discord::mailbox_finish::mailbox_finish_turn;
+    assert!(
+        finish(&shared, &provider, thread)
+            .await
+            .removed_token
+            .is_some()
+    );
+    let message = MessageId::new(thread.get() + 1);
+    let start = crate::services::discord::mailbox_try_start_turn;
+    assert!(start(&shared, thread, token.clone(), UserId::new(7), message).await);
+    let (row, counter) = (
+        gemini_row(thread),
+        shared.restart.global_active.load(Ordering::Relaxed),
+    );
+
+    let released = clean(&shared, &provider, parent, thread, w).await;
+
+    assert!(holds(&shared, thread, &token).await);
+    assert!(
+        row.is_some() && gemini_row(thread) == row,
+        "row bytes unchanged"
+    );
+    assert_eq!(
+        shared.restart.global_active.load(Ordering::Relaxed),
+        counter
+    );
+    assert_eq!(mapped(&shared, parent), Some(thread));
+    assert!(!released, "the readopted episode started after the cutoff");
+    db.drop().await;
+}
+
+// The clean drops only the parents it witnessed that still point at the thread: a parent mapped
+// later, a parent remapped to another thread and a foreign mapping all stay.
+#[tokio::test]
+async fn thread_guard_drops_only_witnessed_parents_still_on_the_thread_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_031_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-routes").await;
+    let other = ChannelId::new(thread.get() + 20);
+    let [remapped, foreign, late] = [11, 12, 13].map(|n| ChannelId::new(thread.get() + n));
+    let routes = &shared.dispatch.thread_parents;
+    routes.insert(remapped, thread);
+    routes.insert(foreign, other);
+    let w = witness(&shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    routes.insert(late, thread);
+    routes.insert(remapped, other);
+
+    assert!(clean(&shared, &provider, parent, thread, w).await);
+
+    assert!(token.cancelled.load(Ordering::Relaxed), "A released");
+    assert_eq!(mapped(&shared, parent), None);
+    assert_eq!(
+        mapped(&shared, late),
+        Some(thread),
+        "mapped after the witness"
+    );
+    assert_eq!(
+        mapped(&shared, remapped),
+        Some(other),
+        "remapped after the witness"
+    );
+    assert_eq!(mapped(&shared, foreign), Some(other), "foreign");
+    db.drop().await;
+}
+
+// A row rewritten after the witness no longer names A: the clean releases A and keeps the row.
+#[tokio::test]
+async fn thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_032_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-row").await;
+    let w = witness(&shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    let path = inflight_path(&provider, thread);
+    let mut row: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    row["turn_nonce"] = "another-episode".into();
+    row["started_at"] = "2001-01-01 00:00:00".into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+    let bytes = gemini_row(thread);
+
+    assert!(clean(&shared, &provider, parent, thread, w).await);
+
+    assert!(token.cancelled.load(Ordering::Relaxed), "A released");
+    assert!(
+        bytes.is_some() && gemini_row(thread) == bytes,
+        "row bytes unchanged"
+    );
+    db.drop().await;
+}
+
+// A row filed under the thread but naming another channel is no witness: neither file, the turn
+// nor the route changes.
+#[tokio::test]
+async fn thread_guard_never_touches_a_row_naming_another_channel_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_033_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-key").await;
+    let other = ChannelId::new(thread.get() + 20);
+    let path = inflight_path(&provider, thread);
+    let mut row: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    row["channel_id"] = other.get().into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&row).unwrap()).unwrap();
+    std::fs::write(
+        inflight_path(&provider, other),
+        serde_json::to_vec_pretty(&row).unwrap(),
+    )
+    .unwrap();
+    let (here, there) = (gemini_row(thread), gemini_row(other));
+
+    if let Some(w) = witness(&shared, &provider, thread).await {
+        clean(&shared, &provider, parent, thread, w).await;
+    }
+
+    assert!(
+        here.is_some() && gemini_row(thread) == here,
+        "thread file unchanged"
+    );
+    assert!(
+        there.is_some() && gemini_row(other) == there,
+        "other file unchanged"
+    );
+    assert!(holds(&shared, thread, &token).await);
+    assert_eq!(mapped(&shared, parent), Some(thread));
+    db.drop().await;
+}
+
+// Two cleans racing on one witness release A once: one counter decrement, one completion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_guard_racing_cleans_release_once_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_034_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-race").await;
+    shared.restart.global_active.store(2, Ordering::Relaxed);
+    let w = witness(&shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    let mut rx = crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+        shared.as_ref(),
+    );
+
+    let (a, b) = tokio::join!(
+        clean(&shared, &provider, parent, thread, w.clone()),
+        clean(&shared, &provider, parent, thread, w),
+    );
+
+    assert!(token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+    let mut completions = 0;
+    while let Ok(event) = rx.try_recv() {
+        completions += usize::from(event.channel_id == thread && event.queue_is_eligible());
+    }
+    assert_eq!(completions, 1);
+    assert_eq!([a, b].into_iter().filter(|released| *released).count(), 1);
+    db.drop().await;
+}
+
+// The clean releases A's bookkeeping without a session kill: a successor may reuse its name.
+#[tokio::test(flavor = "current_thread")]
+async fn thread_guard_clean_requests_no_session_kill_pg() {
+    use crate::services::provider::cancel_token_cleanup::executor::{
+        TmuxCleanupIntent, take_requested_intents_for_test,
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let tmux = ModeTmux::install();
+    tmux.serve(Tmux::Dead);
+    let (db, pool) = postgres().await;
+    let provider = ProviderKind::Gemini;
+    let thread = ChannelId::new(1_479_671_344_000_035_001);
+    let (shared, _registry, token, parent) = stale_thread(&pool, thread, "i6199-kill").await;
+    let w = witness(&shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    let name = "AgentDesk-gemini-i6199-shared".to_string();
+    *token.tmux_binding.lock().unwrap() = Some(TmuxBinding::NameOnly { name });
+    take_requested_intents_for_test();
+
+    assert!(clean(&shared, &provider, parent, thread, w).await);
+
+    let intents = take_requested_intents_for_test();
+    assert!(token.cancelled.load(Ordering::Relaxed), "A released");
+    let killed = intents
+        .iter()
+        .any(|i| matches!(i, TmuxCleanupIntent::CleanupSession));
+    assert!(!killed, "{intents:?}");
+    db.drop().await;
+}
