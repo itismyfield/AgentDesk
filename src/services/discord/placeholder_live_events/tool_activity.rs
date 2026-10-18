@@ -17,6 +17,7 @@ struct Row {
     class: &'static str,
     summary: Option<String>,
     started: Instant,
+    started_unix: i64,
     result: Option<bool>,
     elapsed: Option<u64>,
     background: bool,
@@ -88,6 +89,7 @@ impl ToolActivityRing {
                             .as_deref()
                             .and_then(|input| safe_tool_summary(name, input, cwd)),
                         started: Instant::now(),
+                        started_unix: chrono::Utc::now().timestamp(),
                         result: None,
                         elapsed: None,
                         unconfirmed: false,
@@ -229,18 +231,16 @@ impl ToolActivityRing {
                 None if self.completed || row.unconfirmed => "?",
                 None => "▶",
             };
-            let elapsed = row
-                .elapsed
-                .unwrap_or_else(|| row.started.elapsed().as_secs());
             let summary = row
                 .summary
                 .as_deref()
                 .map(|s| format!("  {s}"))
                 .unwrap_or_default();
-            let time = if row.class == "Bash" || elapsed > 0 {
-                format!("  {elapsed}초")
-            } else {
-                String::new()
+            // Discord refreshes running ages without changing heartbeat render text.
+            let time = match row.elapsed {
+                Some(elapsed) if row.class == "Bash" || elapsed > 0 => format!("  {elapsed}초"),
+                None => format!("  시작 <t:{}:R>", row.started_unix),
+                _ => String::new(),
             };
             lines.push(format!("{glyph} {}{summary}{time}", row.class));
         }

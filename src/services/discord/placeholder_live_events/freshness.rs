@@ -7,6 +7,8 @@
 //!
 //! The activity header shares the same renderer across separate panels and footers.
 //! Class mode preserves the static label; summary mode adds bounded, sanitized rows.
+//! Tool ages and panel times use stable event stamps, so heartbeat renders stay
+//! byte-identical while Discord refreshes relative ages on the client.
 
 use poise::serenity_prelude::ChannelId;
 
