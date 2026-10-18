@@ -343,9 +343,8 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
         }));
     }
 
-    // An unresolved canary without retirement, another channel while the canary is retired,
-    // and the retired canary once it is Herdr-hosted must all remain held. No part of the
-    // launch exception is optional.
+    // An unretired canary, another channel while the canary is retired, and a retired but
+    // Herdr-hosted canary all stay held: every part of the launch exception is required.
     vacate(&fixture);
     fixture
         .fake
