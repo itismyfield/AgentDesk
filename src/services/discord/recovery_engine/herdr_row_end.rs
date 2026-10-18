@@ -419,12 +419,10 @@ fn idle_read(
             outcome == HostInputOutcome::ReadySameExecution
         }
         ProviderKind::Codex => {
-            use crate::services::codex_tui::input::{
-                ComposerContent, active_composer_content_in_pane,
-            };
-            crate::services::codex_tui::input::pane_looks_ready_for_codex_prompt(&screen)
+            use crate::services::codex_tui::input::{self as codex, ComposerContent};
+            codex::pane_looks_ready_for_codex_prompt(&screen)
                 && (mutant("no-empty-composer")
-                    || active_composer_content_in_pane(&screen) == ComposerContent::Empty)
+                    || codex::active_composer_content_in_pane(&screen) == ComposerContent::Empty)
         }
         _ => false,
     };
@@ -435,12 +433,9 @@ fn idle_read(
     }
     let len = meta.len();
     let body = match provider {
-        ProviderKind::Claude => {
-            let turn = crate::services::claude::herdr_turn::closed_turn(&mut file, submitted, len)?;
-            turn.filter(|turn| turn.kind == NativeTerminalKind::Completed)
-                .map(turn_body)
-                .filter(|body| !body.trim().is_empty())
-        }
+        ProviderKind::Claude => turn_body(crate::services::claude::herdr_turn::closed_turn(
+            &mut file, submitted, len,
+        )?),
         _ => codex_last_turn_closed(&mut file, len)?.then_some(None)?,
     };
     (view.read_execution() == before).then_some(body)
@@ -448,12 +443,13 @@ fn idle_read(
 
 /// A completed turn's reply: its explicit result, else its streamed text composed as the live bridge
 /// composes it, with one paragraph break at each tool use.
-fn turn_body(turn: Terminal) -> String {
+fn turn_body(turn: Option<Terminal>) -> Option<String> {
     use crate::services::discord::semantic_boundaries::{
         semantic_chunk_separator_needed, text_ends_inside_open_code_fence,
     };
+    let turn = turn.filter(|turn| turn.kind == NativeTerminalKind::Completed)?;
     if !turn.result.trim().is_empty() || mutant("done-overwrites") {
-        return turn.result;
+        return Some(turn.result).filter(|result| !result.trim().is_empty());
     }
     let mut body = String::new();
     for part in turn.output.iter().filter(|_| !mutant("no-body-collect")) {
@@ -476,7 +472,7 @@ fn turn_body(turn: Terminal) -> String {
             }
         }
     }
-    body
+    (!body.trim().is_empty()).then_some(body)
 }
 
 /// The rollout's latest started turn has its own completion or abort and no input after it; a torn

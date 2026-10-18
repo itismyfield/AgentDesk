@@ -22,12 +22,15 @@ use crate::services::tui_prompt_dedupe::binding_events::{CauseSource, Proposal, 
 mod guards;
 
 const NONCE: &str = "turn-row-end";
-const ANSWER: &str = "the restarted turn's own answer";
+const PARTIAL: &str = "Reading the files.";
+const ANSWER: &str = "The restarted turn's own answer.";
 const STALE: &str = "a wrapper file's stale answer";
 const SENTINEL: u64 = 1_479_671_399_000_001;
 const READY: &str = "Claude Code v2.1.141\n\n\u{276f} \nstatus";
 const BUSY: &str = "\u{2733} Architecting\u{2026}";
 const CODEX_READY: &str = "earlier output\n\n\u{203a}\n\n  gpt-5.5 xhigh \u{b7} /fixture/workspace";
+/// A ready-looking boxed Codex composer holding a draft.
+const CODEX_DRAFT: &str = "earlier output\n╭──────────────────────────────╮\n│ hello world ▌                │\n╰──────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
 const PHASE: &str = "ADK_HERDR_ROW_END_PHASE";
 
 /// What the relay in front of the fixture's socket answers instead of the fixture.
@@ -140,6 +143,8 @@ fn serve(client: UnixStream, real: &Path, pane: &Pane) {
 enum Owner {
     Legacy,
     O,
+    /// Legacy, with the recorded provider's process read as alive.
+    Alive,
 }
 
 /// Runs `scenario` in this test's child on a runtime whose every thread has the fixture's
@@ -160,7 +165,7 @@ where
     F: FnOnce(herdr::P11TerminationRig) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let rig = herdr::P11TerminationRig::boot(channel);
+    let rig = herdr::P11TerminationRig::boot_with(channel, owner == Owner::Alive);
     let fixture = rig.thread_installer();
     let codex = provider == ProviderKind::Codex;
     // A restarted phase keeps the root its parent gave both phases.
@@ -177,7 +182,7 @@ where
         fixture();
         crate::services::tui_prompt_dedupe::binding_events::set_test_root(Some(&root));
         HERDR_SETTLEMENT_OVERRIDE.set(false);
-        if owner == Owner::Legacy {
+        if owner != Owner::O {
             std::mem::forget(crate::services::tui_o::cutover::test_override::force_channels(&[]));
         }
         if codex {
@@ -242,12 +247,12 @@ fn open_turn(provider: &ProviderKind, row: &inflight::InflightTurnState) -> Stri
         _ => format!(
             "{}\n{}\n",
             json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": "question"}}),
-            json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": "partial"}]}}),
+            json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": PARTIAL}]}}),
         ),
     }
 }
 
-/// The provider's own terminal for the open turn.
+/// The provider's own terminal for the open turn; a Claude transcript has no result record.
 fn terminal(provider: &ProviderKind, row: &inflight::InflightTurnState) -> String {
     let at = stamp(row);
     match provider {
@@ -256,8 +261,10 @@ fn terminal(provider: &ProviderKind, row: &inflight::InflightTurnState) -> Strin
             json!({"type": "event_msg", "timestamp": at, "payload": {"type": "task_complete", "turn_id": "t1"}})
         ),
         _ => format!(
-            "{}\n",
-            json!({"type": "result", "timestamp": at, "subtype": "success", "result": ANSWER})
+            "{}\n{}\n{}\n",
+            json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": ANSWER}]}}),
+            json!({"type": "system", "subtype": "stop_hook_summary", "timestamp": at}),
+            json!({"type": "system", "subtype": "turn_duration", "timestamp": at, "durationMs": 900}),
         ),
     }
 }
@@ -387,6 +394,7 @@ impl Run {
                 _ => crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
             });
             row.turn_nonce = Some(NONCE.into());
+            row.full_response = PARTIAL.into();
             inflight::save_inflight_state(&row).unwrap();
             std::fs::write(&source, open_turn(&provider, &row)).unwrap();
             let meta = std::fs::metadata(&source).unwrap();
@@ -605,7 +613,7 @@ async fn assert_kept(run: &Run, saved: &inflight::InflightTurnState, case: &str)
 const R1: u64 = 1_479_671_399_000_101;
 
 /// A Claude turn finished after a restart: boot restore leaves the row, and a source tick shows the
-/// transcript's answer once, clears the row, releases the hold and takes the next input once.
+/// turn's whole streamed reply once, clears the row, releases the hold and takes the next input once.
 #[test]
 fn r1_restarted_claude_turn_ends_with_its_transcript_answer_pg() {
     if herdr::is_child() {
@@ -685,7 +693,10 @@ async fn r1(rig: herdr::P11TerminationRig, phase: String) {
     let (taken, _reset) = run.sentinel().await;
     let started = Instant::now();
     run.boot().await;
-    assert_ended(&run, ANSWER, &taken).await;
+    let body = "Reading the files.\n\nThe restarted turn's own answer.";
+    assert_ended(&run, body, &taken).await;
+    let shown: usize = run.texts().iter().map(|t| t.matches(PARTIAL).count()).sum();
+    assert_eq!(shown, 1, "the saved partial once: {:?}", run.texts());
     assert_eq!(
         run.hosted().await,
         Some((herdr::HostedState::Bound, herdr::EXECUTION.to_string())),

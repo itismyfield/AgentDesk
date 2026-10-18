@@ -239,3 +239,78 @@ fn the_exact_clear_removes_only_the_turn_the_pass_read() {
     );
     assert!(!path().exists());
 }
+
+/// A completed turn's body is its explicit result, else its streamed text in order with one break
+/// at each tool use; an aborted or mixed turn has none, and an open one is not idle.
+#[test]
+fn the_turn_body_is_its_result_or_its_streamed_text() {
+    use serde_json::json;
+    use std::io::Write;
+    let at = "2026-10-19T00:00:01Z";
+    let input = chrono::DateTime::parse_from_rfc3339(at).unwrap().to_utc();
+    let user = |text: &str| json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": text}});
+    let text = |text: &str| json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": text}]}});
+    let tool = json!({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]}});
+    let output = json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}});
+    let stop = json!({"type": "system", "subtype": "stop_hook_summary", "timestamp": at});
+    let took =
+        json!({"type": "system", "subtype": "turn_duration", "timestamp": at, "durationMs": 900});
+    let result = json!({"type": "result", "timestamp": at, "subtype": "success", "result": "The whole answer."});
+    let interrupt = json!({"type": "user", "timestamp": at, "message": {"role": "user",
+        "content": [{"type": "text", "text": "[Request interrupted by user]"}]}});
+    let table = [
+        (
+            "one reply",
+            vec![user("q"), text("The answer."), stop.clone(), took.clone()],
+            Some(Some("The answer.")),
+        ),
+        (
+            "text between tool uses",
+            vec![
+                user("q"),
+                text("Reading the files."),
+                tool.clone(),
+                output.clone(),
+                text("Both match."),
+                tool,
+                output,
+                text("Done."),
+                stop.clone(),
+                took.clone(),
+            ],
+            Some(Some("Reading the files.\n\nBoth match.\n\nDone.")),
+        ),
+        (
+            "explicit result",
+            vec![user("q"), text("Reading."), result],
+            Some(Some("The whole answer.")),
+        ),
+        (
+            "aborted",
+            vec![user("q"), text("Reading."), interrupt],
+            Some(None),
+        ),
+        (
+            "previous tail in the same second",
+            vec![
+                text("previous turn"),
+                user("q"),
+                text("The answer."),
+                stop,
+                took,
+            ],
+            Some(None),
+        ),
+        ("still open", vec![user("q"), text("Reading.")], None),
+    ];
+    for (case, records, expected) in table {
+        let mut file = tempfile::tempfile().unwrap();
+        for record in &records {
+            writeln!(file, "{record}").unwrap();
+        }
+        let len = file.metadata().unwrap().len();
+        let read = crate::services::claude::herdr_turn::closed_turn(&mut file, Some(input), len);
+        let body = read.map(turn_body);
+        assert_eq!(body.as_ref().map(Option::as_deref), expected, "{case}");
+    }
+}

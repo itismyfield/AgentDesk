@@ -283,7 +283,8 @@ fn the_pass_never_waits_on_an_end_task_pg() {
 
 const O_OWNED: u64 = 1_479_671_399_000_111;
 
-/// An O-owned channel shows only the body-free marker, never the recovered body, and still ends.
+/// An O-owned channel shows only the body-free marker, never the recovered body or the saved
+/// partial, and still ends.
 #[test]
 fn an_o_owned_channel_shows_only_the_marker_pg() {
     let path = concat!(
@@ -309,10 +310,12 @@ fn an_o_owned_channel_shows_only_the_marker_pg() {
             run.relay.set(|pane| pane.screen = Some(READY.into()));
             let (taken, _reset) = run.sentinel().await;
             run.pass().await;
-            let notice = run.interrupted();
-            assert_ended(&run, &notice, &taken).await;
+            let marker = interrupted_recovery_message(&run.row, "");
+            assert_ended(&run, &marker, &taken).await;
             assert!(
-                !run.texts().iter().any(|t| t.contains(ANSWER)),
+                !run.texts()
+                    .iter()
+                    .any(|t| t.contains(ANSWER) || t.contains(PARTIAL)),
                 "{:?}",
                 run.texts()
             );
@@ -367,6 +370,82 @@ fn a_same_second_previous_tail_falls_back_to_the_notice_pg() {
                     .iter()
                     .any(|t| t.contains(ANSWER) || t.contains("previous turn"))
             );
+            run.close().await;
+        },
+    );
+}
+
+const DRAFT: u64 = 1_479_671_399_000_113;
+
+/// A closed Codex rollout under a ready-looking composer that holds a draft is not idle: the row,
+/// its execution and its hold stay, and nothing is shown or taken.
+#[test]
+fn a_codex_draft_keeps_a_closed_turn_pg() {
+    let path = concat!(module_path!(), "::a_codex_draft_keeps_a_closed_turn_pg");
+    in_child(
+        path,
+        DRAFT,
+        ProviderKind::Codex,
+        Owner::Legacy,
+        |rig| async move {
+            use crate::services::codex_tui::input::{self as codex, ComposerContent};
+            assert!(codex::pane_looks_ready_for_codex_prompt(CODEX_DRAFT));
+            assert_ne!(
+                codex::active_composer_content_in_pane(CODEX_DRAFT),
+                ComposerContent::Empty
+            );
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Codex,
+                    channel: DRAFT,
+                    routed: true,
+                },
+            )
+            .await;
+            append(&run.source, &terminal(&ProviderKind::Codex, &run.row));
+            run.relay.set(|pane| pane.screen = Some(CODEX_DRAFT.into()));
+            let (taken, _reset) = run.sentinel().await;
+            let saved = run.row.clone();
+            run.pass().await;
+            assert_kept(&run, &saved, "a draft in the composer").await;
+            assert!(taken.lock().unwrap().is_empty(), "no input taken");
+            run.close().await;
+        },
+    );
+}
+
+const SURVIVOR: u64 = 1_479_671_399_000_114;
+
+/// A pane back at its shell while the recorded provider process still lives is no end: the row,
+/// the bound execution and its hold stay, and nothing is shown or taken.
+#[test]
+fn a_surviving_provider_keeps_an_exited_pane_row_pg() {
+    let path = concat!(
+        module_path!(),
+        "::a_surviving_provider_keeps_an_exited_pane_row_pg"
+    );
+    in_child(
+        path,
+        SURVIVOR,
+        ProviderKind::Claude,
+        Owner::Alive,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: SURVIVOR,
+                    routed: true,
+                },
+            )
+            .await;
+            run.relay.set(|pane| pane.exited = true);
+            let (taken, _reset) = run.sentinel().await;
+            let saved = run.row.clone();
+            run.pass().await;
+            assert_kept(&run, &saved, "provider alive").await;
+            assert!(taken.lock().unwrap().is_empty(), "no input taken");
             run.close().await;
         },
     );

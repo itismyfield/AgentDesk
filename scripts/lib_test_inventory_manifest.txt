@@ -6057,10 +6057,12 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::the_resta
 services::discord::recovery_engine::herdr_reader::tests::the_restart_pass_reads_nothing_without_a_local_endpoint
 services::discord::recovery_engine::herdr_reader::tests::the_socket_reader_reports_one_servers_reading_of_the_stored_pane
 services::discord::recovery_engine::herdr_row_end::tests::boot_restore_leaves_only_a_restarted_herdr_row_to_the_end_pass
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_codex_draft_keeps_a_closed_turn_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_live_actor_keeps_an_idle_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_same_second_previous_tail_falls_back_to_the_notice_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_clear_keeps_its_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_retire_keeps_everything_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_surviving_provider_keeps_an_exited_pane_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_o_owned_channel_shows_only_the_marker_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_unrouted_channel_keeps_an_ended_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::the_pass_never_waits_on_an_end_task_pg
@@ -6070,6 +6072,7 @@ services::discord::recovery_engine::herdr_row_end::tests::rig::r2_restarted_code
 services::discord::recovery_engine::herdr_row_end::tests::rig::r3_a_turn_busy_at_boot_ends_on_a_later_pass_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::r4_an_ended_execution_retires_and_ends_its_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::the_exact_clear_removes_only_the_turn_the_pass_read
+services::discord::recovery_engine::herdr_row_end::tests::the_turn_body_is_its_result_or_its_streamed_text
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::idle_captured_response::tests::idle_partial_source_stamp_refuses_append_and_replacement

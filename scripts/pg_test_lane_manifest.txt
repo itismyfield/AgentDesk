@@ -1789,10 +1789,12 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_receipt_precedes_replay_debt_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_off_stays_held_no_effect_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_replay_conflict_is_held_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_codex_draft_keeps_a_closed_turn_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_live_actor_keeps_an_idle_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_same_second_previous_tail_falls_back_to_the_notice_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_clear_keeps_its_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_retire_keeps_everything_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_surviving_provider_keeps_an_exited_pane_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_o_owned_channel_shows_only_the_marker_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_unrouted_channel_keeps_an_ended_row_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::the_pass_never_waits_on_an_end_task_pg
