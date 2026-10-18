@@ -2517,6 +2517,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── direct_spawn_tests.rs
 │   │   └── fallback.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs

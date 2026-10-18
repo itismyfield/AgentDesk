@@ -125,17 +125,19 @@ impl RoutineAgentExecutor {
         let result = self
             .start_turn(
                 store,
-                &claimed,
-                &agent_id,
-                "primary",
-                &prompt,
-                dm_user_id.as_deref(),
-                &checkpoint,
-                next_due_at,
-                execution::AgentExecutionMode::for_new(
-                    &claimed.execution_strategy,
-                    self.headless_fresh_agents,
-                ),
+                start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: "primary",
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                    execution_mode: execution::AgentExecutionMode::for_new(
+                        &claimed.execution_strategy,
+                        self.headless_fresh_agents,
+                    ),
+                },
             )
             .await;
         match result {
@@ -294,17 +296,19 @@ impl RoutineAgentExecutor {
                 match self
                     .start_turn(
                         store,
-                        &claimed,
-                        &fallback_agent_id,
-                        "fallback",
-                        &prompt,
-                        dm_user_id.as_deref(),
-                        &checkpoint,
-                        next_due_at,
-                        execution::AgentExecutionMode::for_new(
-                            &claimed.execution_strategy,
-                            self.headless_fresh_agents,
-                        ),
+                        start_deferral::PendingAgentStart {
+                            claimed: &claimed,
+                            agent_id: &fallback_agent_id,
+                            attempt_kind: "fallback",
+                            prompt: &prompt,
+                            dm_user_id: dm_user_id.as_deref(),
+                            checkpoint: &checkpoint,
+                            next_due_at,
+                            execution_mode: execution::AgentExecutionMode::for_new(
+                                &claimed.execution_strategy,
+                                self.headless_fresh_agents,
+                            ),
+                        },
                     )
                     .await
                 {
@@ -627,14 +631,18 @@ impl RoutineAgentExecutor {
         match self
             .start_turn(
                 store,
-                &claimed,
-                &agent_id,
-                &attempt_kind,
-                &prompt,
-                dm_user_id.as_deref(),
-                &checkpoint,
-                next_due_at,
-                execution::AgentExecutionMode::from_result(run.result_json.as_ref()),
+                start_deferral::PendingAgentStart {
+                    claimed: &claimed,
+                    agent_id: &agent_id,
+                    attempt_kind: &attempt_kind,
+                    prompt: &prompt,
+                    dm_user_id: dm_user_id.as_deref(),
+                    checkpoint: &checkpoint,
+                    next_due_at,
+                    execution_mode: execution::AgentExecutionMode::from_result(
+                        run.result_json.as_ref(),
+                    ),
+                },
             )
             .await
         {
@@ -791,14 +799,18 @@ impl RoutineAgentExecutor {
                 match self
                     .start_turn(
                         store,
-                        &claimed,
-                        &fallback_agent_id,
-                        "fallback",
-                        &prompt,
-                        None,
-                        &checkpoint,
-                        next_due_at,
-                        execution::AgentExecutionMode::from_result(run.result_json.as_ref()),
+                        start_deferral::PendingAgentStart {
+                            claimed: &claimed,
+                            agent_id: &fallback_agent_id,
+                            attempt_kind: "fallback",
+                            prompt: &prompt,
+                            dm_user_id: None,
+                            checkpoint: &checkpoint,
+                            next_due_at,
+                            execution_mode: execution::AgentExecutionMode::from_result(
+                                run.result_json.as_ref(),
+                            ),
+                        },
                     )
                     .await
                 {

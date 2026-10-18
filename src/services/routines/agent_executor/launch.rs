@@ -2,19 +2,21 @@
 use super::*;
 
 impl RoutineAgentExecutor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_turn(
         &self,
         store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-        agent_id: &str,
-        attempt_kind: &str,
-        prompt: &str,
-        dm_user_id: Option<&str>,
-        checkpoint: &Option<Value>,
-        next_due_at: Option<DateTime<Utc>>,
-        execution_mode: execution::AgentExecutionMode,
+        start: start_deferral::PendingAgentStart<'_>,
     ) -> Result<StartedAgentTurn> {
+        let start_deferral::PendingAgentStart {
+            claimed,
+            agent_id,
+            attempt_kind,
+            prompt,
+            dm_user_id,
+            checkpoint,
+            next_due_at,
+            execution_mode,
+        } = start;
         let Some(registry) = self.health_registry.as_deref() else {
             return Err(anyhow!(
                 "routine agent action requires discord runtime health registry"
