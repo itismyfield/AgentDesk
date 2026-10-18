@@ -118,11 +118,12 @@ pub(super) fn build_watcher_single_message_panel_status_block(
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
     if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
+        let content = (full_response, indicator);
         return shared.ui.placeholder_live_events.render_footer(
             channel_id,
             provider,
             started_at_unix,
-            (full_response, indicator),
+            content,
         );
     }
     build_watcher_placeholder_status_block(
