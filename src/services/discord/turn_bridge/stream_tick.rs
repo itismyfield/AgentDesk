@@ -18,6 +18,8 @@ use guarded_persist::{
     persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
     sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
 };
+#[path = "stream_tick/runtime.rs"]
+mod runtime;
 use rollover_guard::{GuardedRolloverEditOutcome, guarded_bridge_rollover_edit};
 
 pub(super) type LongRunningPlaceholderActive = Option<(
@@ -207,10 +209,33 @@ pub(super) async fn run_bridge_stream_tick(
     let mut last_adk_heartbeat = *state.last_adk_heartbeat;
     let mut last_inflight_long_run_heartbeat = *state.last_inflight_long_run_heartbeat;
 
-    macro_rules! reconcile_tick_runtime_from_inflight {
-        ($current_msg_id_before_save:expr) => {{
-            let mut runtime = super::bridge_entry_persist::BridgeEntryRuntimeState {
-                inflight_state: &mut *inflight_state,
+    macro_rules! tick_context {
+        () => {
+            runtime::TickContext {
+                shared_owned: &shared_owned,
+                gateway: &gateway,
+                channel_id,
+                provider: &provider,
+                turn_id: turn_id.as_str(),
+                stream_tick_expected,
+                status_interval,
+                single_message_panel_footer_mode,
+                status_panel_started_at,
+                done,
+                dispatch_id: &dispatch_id,
+                adk_session_key: &adk_session_key,
+                spinner,
+            }
+        };
+    }
+
+    macro_rules! tick_runtime {
+        () => {
+            runtime::TickRuntime {
+                spin_idx: &mut spin_idx,
+                last_status_panel_text: &mut last_status_panel_text,
+                last_status_panel_edit: &mut last_status_panel_edit,
+                status_panel_dirty: &mut status_panel_dirty,
                 full_response: &mut full_response,
                 response_sent_offset: &mut response_sent_offset,
                 bridge_confirmed_response_sent_offset: &mut bridge_confirmed_response_sent_offset,
@@ -230,31 +255,31 @@ pub(super) async fn run_bridge_stream_tick(
                 standby_relay_owns_output: &mut standby_relay_owns_output,
                 status_panel_msg_id: &mut status_panel_msg_id,
                 status_panel_generation: &mut status_panel_generation,
-            };
-            super::bridge_entry_persist::reconcile_runtime_locals_from_inflight_state(
-                shared_owned.as_ref(),
-                &mut runtime,
-            );
-            super::bridge_entry_persist::clear_last_edit_text_if_current_message_changed(
-                $current_msg_id_before_save,
-                current_msg_id,
-                &mut last_edit_text,
-            );
-        }};
+                last_edit_text: &mut last_edit_text,
+                last_status_edit: &mut last_status_edit,
+                first_answer_relayed: &mut first_answer_relayed,
+                pending_long_running_open_after_state_save:
+                    &mut pending_long_running_open_after_state_save,
+                pending_long_running_retarget_after_state_save:
+                    &mut pending_long_running_retarget_after_state_save,
+                long_running_placeholder_active: &mut long_running_placeholder_active,
+                inflight_state: &mut *inflight_state,
+                persisted_inflight_baseline: &mut *persisted_inflight_baseline,
+                expected_current_message: &mut *expected_current_message,
+                pending_current_message_candidate: &mut *pending_current_message_candidate,
+                bridge_created_response_placeholder_msg_id:
+                    &mut *bridge_created_response_placeholder_msg_id,
+                bridge_spans: &mut *bridge_spans,
+            }
+        };
     }
 
-    macro_rules! stage_tick_state_for_guard {
-        () => {{
-            inflight_state.full_response.clone_from(&full_response);
-            inflight_state.response_sent_offset = response_sent_offset;
-            inflight_state.any_tool_used = any_tool_used;
-            inflight_state.has_post_tool_text = has_post_tool_text;
-            sync_stream_tick_tool_fields(
-                inflight_state,
-                &current_tool_line,
-                &prev_tool_status,
-                &last_tool_name,
-                &last_tool_summary,
+    macro_rules! reconcile_tick_runtime_from_inflight {
+        ($current_msg_id_before_save:expr) => {{
+            runtime::reconcile_tick_runtime_from_inflight(
+                shared_owned.as_ref(),
+                &mut tick_runtime!(),
+                $current_msg_id_before_save,
             );
         }};
     }
@@ -310,64 +335,16 @@ pub(super) async fn run_bridge_stream_tick(
 
     macro_rules! authorize_visible_mutation {
         ($caller:expr) => {{
-            stage_tick_state_for_guard!();
-            let intended_authority =
-                crate::services::discord::inflight::StreamRelayAuthority::from_state(
-                    inflight_state,
-                );
-            let current_msg_id_before_fence = current_msg_id;
-            let guarded_outcome = fence_stream_tick_visible_mutation_with_candidate_cleanup(
-                StreamTickCandidateSaveContext {
-                    gateway: gateway.as_ref(),
-                    provider: &provider,
-                    token_hash: &shared_owned.token_hash,
-                    channel_id,
-                    persisted_baseline: persisted_inflight_baseline,
-                    inflight_state: &mut *inflight_state,
-                    expected_identity: stream_tick_expected,
-                    expected_current_message,
-                    current_msg_id: &mut current_msg_id,
-                    pending_current_message_candidate,
-                    bridge_created_response_placeholder_msg_id,
-                },
+            let (dirty, permission) = runtime::authorize_visible_mutation(
+                &tick_context!(),
+                &mut tick_runtime!(),
                 $caller,
             )
             .await;
-            state_dirty = dirty_after_guarded_save(guarded_outcome);
-            if guarded_outcome == GuardedSaveOutcome::Saved
-                || (guarded_outcome.is_identity_mismatch_legacy()
-                    && stream_tick_expected.matches_state(inflight_state))
-            {
-                reconcile_tick_runtime_from_inflight!(current_msg_id_before_fence);
-            }
-            match visible_mutation_authority_after_guarded_save(
-                guarded_outcome,
-                inflight_state,
-                intended_authority,
-            )
-            .mutation_permission()
-            {
-                Some(allowed) => allowed,
-                None => {
-                    // `durable_relay_owner_kind="none"` means "the BRIDGE owns
-                    // the relay" (`StreamRelayAuthority::bridge_owns_relay`), NOT
-                    // "nobody owns it" — read `bridge_owns_relay` for the
-                    // disposition and never treat `none` as a missing owner.
-                    tracing::warn!(
-                        channel_id = channel_id.get(),
-                        caller = $caller,
-                        ?guarded_outcome,
-                        durable_relay_owner_kind =
-                            inflight_state.effective_relay_owner_kind().as_str(),
-                        bridge_owns_relay =
-                            crate::services::discord::inflight::StreamRelayAuthority::from_state(
-                                inflight_state,
-                            )
-                            .bridge_owns_relay(),
-                        "stream tick lost durable Discord mutation authority"
-                    );
-                    return_authority_lost!();
-                }
+            state_dirty = dirty;
+            match permission {
+                std::ops::ControlFlow::Continue(allowed) => allowed,
+                std::ops::ControlFlow::Break(()) => return_authority_lost!(),
             }
         }};
     }

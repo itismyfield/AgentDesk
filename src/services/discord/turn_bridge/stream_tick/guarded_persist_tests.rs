@@ -1017,7 +1017,17 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
 
 #[test]
 fn production_tick_reconciles_anchor_dirty_flush_and_exit_candidate_merges() {
-    let tick = include_str!("../stream_tick.rs");
+    let tick = [
+        include_str!("../stream_tick.rs"),
+        include_str!("runtime.rs"),
+    ]
+    .map(|source| {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production stream tick prefix")
+    })
+    .join("\n");
     let production_tick = tick
         .split("#[cfg(test)]")
         .next()
