@@ -183,7 +183,7 @@ fn a_successor_before_the_retire_keeps_everything_pg() {
                     };
                     let nonce = record.execution_nonce.clone();
                     let written = hosted::retire_pg(&pool, &found, &record.owner, &nonce).await;
-                    assert!(matches!(written, Ok(HostedCasOutcome::Written)));
+                    assert!(matches!(written, Ok(hosted::HostedCasOutcome::Written)));
                     inflight::save_inflight_state(&next).unwrap();
                 })
             });

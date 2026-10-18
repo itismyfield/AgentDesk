@@ -13,13 +13,13 @@ use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    self as hosted, HostedCasOutcome, HostedExecution, HostedLookup, HostedLookupKey,
-    HostedObservation, HostedRecord, HostedState,
+    self as hosted, HostedExecution, HostedLookup, HostedLookupKey, HostedObservation,
+    HostedRecord, HostedState,
 };
 use crate::services::agent_protocol::NativeTerminalKind;
 use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
 use crate::services::claude_tui::host_input::{HostCapture, HostInputOutcome, InputTarget};
-use crate::services::discord::herdr_terminate::{ExecutionEnd, execution_end};
+use crate::services::discord::herdr_terminate::{ExecutionEnd, execution_end, retire_confirmed};
 use crate::services::provider::session_probe::SessionLiveness;
 use crate::services::session_host::{
     HerdrPaneView, HerdrTarget, PaneProvider, PaneReading, herdr_endpoints,
@@ -69,8 +69,7 @@ fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current:
         && !state.replay_rerun_blocked()
         && !state.runtime_kind_unknown_on_disk
         && !(state.runtime_kind.is_none() && state.version > inflight::inflight_state_version())
-        && (state.host_locator.is_some()
-            || mutant("herdr-only")
+        && (mutant("herdr-only")
             || recovery_tmux_session_name(provider, state)
                 .is_some_and(|name| super::turn_bridge::herdr_marked(&name)))
         && !inflight::before_start_receipt_present(provider, state.channel_id)
@@ -330,10 +329,7 @@ async fn commit(pool: &sqlx::PgPool, seen: Seen) -> Option<Ended> {
     if let Some((observation, record)) = &seen.retire {
         #[cfg(test)]
         tests::hook("before_retire").await;
-        let retired = hosted::retire_pg(pool, observation, &record.owner, &seen.nonce).await;
-        if !matches!(retired, Ok(HostedCasOutcome::Written)) {
-            return None;
-        }
+        retire_confirmed(pool, observation, record).await.ok()?;
     }
     let keep_hold = matches!(seen.ended, Ended::Idle { .. }) && mutant("hold");
     (keep_hold || release_hold(&seen.nonce) == HoldRelease::Released).then_some(seen.ended)

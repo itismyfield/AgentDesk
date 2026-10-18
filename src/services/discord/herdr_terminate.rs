@@ -170,7 +170,7 @@ pub(super) async fn execution_end(target: HerdrTarget, record: HostedExecution) 
         Err(_) => ExecutionEnd::Unconfirmed,
     }
 }
-async fn retire_confirmed(
+pub(super) async fn retire_confirmed(
     pool: &PgPool,
     row: &HostedObservation,
     record: &HostedExecution,
