@@ -24,6 +24,9 @@ pub(super) use entry::collect_turn_stream_until_terminal;
 #[path = "turn_stream_collector/stream_seed.rs"]
 mod stream_seed;
 
+#[path = "turn_stream_collector/stream_chunk.rs"]
+mod stream_chunk;
+
 async fn collect_turn_stream_body(
     ctx: &TurnStreamCollectorContext,
     io: TurnStreamCollectorIo,
@@ -557,159 +560,59 @@ async fn collect_turn_stream_body(
 
             match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
-                    let authority = if parser.retained_source.is_some() {
-                        // This is the original opened descriptor, not a new file/marker
-                        // pair observed through a path that may have been replaced.
-                        WatcherSourceAuthority {
-                            source_file: file_identity,
-                            ..source_authority
-                        }
-                    } else {
-                        source_authority_for_read(
+                    let (auto_compacted, _chunk_forwarded_to_session_relay) =
+                        match stream_chunk::process_stream_chunk(stream_chunk::StreamChunkState {
+                            shared: &shared,
+                            watcher_provider: &watcher_provider,
+                            tmux_session_name: &tmux_session_name,
+                            channel_id,
+                            watcher_thread_channel_id,
                             source_authority,
-                            &tmux_session_name,
+                            retained_source: parser.retained_source.is_some(),
                             read_witness,
+                            chunk: &chunk,
+                            off,
                             file_identity,
-                        )
-                    };
-                    current_offset = off;
-                    maybe_refresh_watcher_activity_heartbeat(
-                        shared.pg_pool.as_ref(),
-                        &shared.token_hash,
-                        &watcher_provider,
-                        &tmux_session_name,
-                        watcher_thread_channel_id,
-                        &mut last_activity_heartbeat_at,
-                    );
-                    ready_for_input_tracker.record_output();
-                    let chunk_start = current_offset.saturating_sub(chunk.len() as u64);
-                    let decoded_chunk = utf8_decoder.decode_source_for_buffer(
-                        &chunk,
-                        chunk_start,
-                        authority,
-                        &all_data,
-                    );
-                    let authority =
-                        authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
-                    clean_decoded_provenance &= !decoded_chunk.mixed_read_provenance;
-                    // Defer forwarding until parsing attaches the terminal fence.
-                    let chunk_buffer_was_empty = all_data.is_empty();
-                    if chunk_buffer_was_empty {
-                        all_data_start_offset = decoded_chunk.start_offset.unwrap_or(chunk_start);
-                    }
-                    if decoded_chunk.text.is_empty() && all_data.is_empty() {
-                        continue;
-                    }
-                    all_data.push_str(&decoded_chunk.text);
-                    let chunk_buffer_start_offset = all_data_start_offset;
-                    let chunk_buffer_len = all_data.len();
-                    observe_qwen_user_prompts_in_buffer(
-                        &all_data,
-                        &watcher_provider,
-                        &tmux_session_name,
-                    );
-                    let turn_terminal_start_offset = turn_identity_for_panel
-                        .as_ref()
-                        .and_then(|identity| identity.turn_start_offset)
-                        .unwrap_or(chunk_buffer_start_offset);
-                    let outcome = process_watcher_lines_for_turn(
-                        &mut all_data,
-                        &mut state,
-                        &mut full_response,
-                        &mut tool_state,
-                        Some(chunk_buffer_start_offset),
-                        Some(turn_terminal_start_offset),
-                    );
-                    #[cfg(test)]
-                    o_test::response_inner(
-                        watcher_provider.clone(),
-                        channel_id,
-                        full_response.clone(),
-                    );
-                    // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
-                    // chunk. `outcome.found_result` now tells us whether this is
-                    // the RESULT-bearing chunk; if so it rides a TERMINAL frame
-                    // carrying the commit fence (consumed_end + pinned identity).
-                    // E5 (#2412): every decoded chunk is still pushed into the
-                    // relay MPSC; only the terminality of the frame changed.
-                    let chunk_forward = forwarded_chunk(
-                        &decoded_chunk.text,
-                        chunk_buffer_len,
-                        chunk_buffer_start_offset,
-                        outcome.pre_turn_bytes_skipped,
-                        authority,
-                    );
-                    let streaming_terminal_fence = watcher_terminal_commit_fence(
-                        outcome.found_result,
-                        chunk_buffer_start_offset,
-                        terminal_event_consumed_offset(current_offset, &all_data),
-                        turn_identity_for_panel.as_ref(),
-                        &tmux_session_name,
-                    );
-                    let chunk_forwarded_to_session_relay = forward_turn_chunk_to_supervisor_relay(
-                        &tmux_session_name,
-                        &chunk_forward,
-                        all_data.len(),
-                        &producer_registry,
-                        &mut cached_relay_producer,
-                        turn_identity_for_panel.as_ref(),
-                        streaming_terminal_fence,
-                    );
-                    apply_streaming_supervisor_relay_forward(
-                        &mut all_data_fully_mirrored_to_session_relay,
-                        &mut all_data_session_bound_relay_ack,
-                        &mut all_data_first_forwarded_relay_sequence,
-                        &mut session_bound_relay_turn_fully_mirrored,
-                        &mut session_bound_relay_turn_first_forwarded_sequence,
-                        &mut split_trailing_turn_follows,
-                        &chunk_forwarded_to_session_relay,
-                        chunk_buffer_was_empty,
-                        all_data.is_empty(),
-                        turn_identity_for_panel.as_ref(),
-                    );
-                    last_output_at = tokio::time::Instant::now();
-                    all_data_start_offset = advance_buffer_start_offset(
-                        chunk_buffer_start_offset,
-                        chunk_buffer_len,
-                        all_data.len(),
-                    );
-                    if watcher_live_events_dirty_should_force_status_update(
-                        flush_placeholder_live_events(&shared, channel_id, &mut tool_state),
-                        single_message_panel_footer_mode,
-                    ) {
-                        force_next_watcher_status_update(&mut last_status_update);
-                    }
-                    found_result = found_result || outcome.found_result;
-                    if outcome.found_result {
-                        terminal_kind = outcome.terminal_kind.or(terminal_kind);
-                        terminal_evidence_offset = outcome
-                            .terminal_evidence_offset
-                            .or(terminal_evidence_offset);
-                    }
-                    if outcome.soft_terminal_candidate && soft_terminal_seen_at.is_none() {
-                        soft_terminal_seen_at = Some(tokio::time::Instant::now());
-                        terminal_kind = outcome
-                            .terminal_kind
-                            .or(terminal_kind)
-                            .or(Some(WatcherTerminalKind::SoftStopHookSummary));
-                        terminal_evidence_offset = outcome
-                            .terminal_evidence_offset
-                            .or(terminal_evidence_offset);
-                    }
-                    is_prompt_too_long = is_prompt_too_long || outcome.is_prompt_too_long;
-                    stale_resume_detected = stale_resume_detected || outcome.stale_resume_detected;
-                    if let Some(kind) = outcome.task_notification_kind {
-                        task_notification_kind =
-                            merge_task_notification_kind(task_notification_kind, kind);
-                    }
-                    if let Some(context) = outcome.task_notification_context {
-                        task_notification_context =
-                            merge_context(task_notification_context.take(), context);
-                    }
-                    assistant_text_seen |= outcome.assistant_text_seen;
-                    fresh_assistant_text_seen |= outcome.assistant_text_seen;
-                    #[cfg(test)]
-                    o_test::inner(watcher_provider.clone(), channel_id, task_notification_kind);
+                            current_offset: &mut current_offset,
+                            last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
+                            ready_for_input_tracker: &mut ready_for_input_tracker,
+                            utf8_decoder,
+                            all_data: &mut all_data,
+                            clean_decoded_provenance: &mut clean_decoded_provenance,
+                            all_data_start_offset: &mut all_data_start_offset,
+                            state: &mut state,
+                            full_response: &mut full_response,
+                            tool_state: &mut tool_state,
+                            turn_identity_for_panel: &turn_identity_for_panel,
+                            producer_registry: &producer_registry,
+                            cached_relay_producer: &mut cached_relay_producer,
+                            all_data_fully_mirrored_to_session_relay:
+                                &mut all_data_fully_mirrored_to_session_relay,
+                            all_data_session_bound_relay_ack: &mut all_data_session_bound_relay_ack,
+                            all_data_first_forwarded_relay_sequence:
+                                &mut all_data_first_forwarded_relay_sequence,
+                            session_bound_relay_turn_fully_mirrored:
+                                &mut session_bound_relay_turn_fully_mirrored,
+                            session_bound_relay_turn_first_forwarded_sequence:
+                                &mut session_bound_relay_turn_first_forwarded_sequence,
+                            split_trailing_turn_follows: &mut split_trailing_turn_follows,
+                            last_output_at: &mut last_output_at,
+                            single_message_panel_footer_mode,
+                            last_status_update: &mut last_status_update,
+                            found_result: &mut found_result,
+                            terminal_kind: &mut terminal_kind,
+                            terminal_evidence_offset: &mut terminal_evidence_offset,
+                            soft_terminal_seen_at: &mut soft_terminal_seen_at,
+                            is_prompt_too_long: &mut is_prompt_too_long,
+                            stale_resume_detected: &mut stale_resume_detected,
+                            task_notification_kind: &mut task_notification_kind,
+                            task_notification_context: &mut task_notification_context,
+                            assistant_text_seen: &mut assistant_text_seen,
+                            fresh_assistant_text_seen: &mut fresh_assistant_text_seen,
+                        }) {
+                            std::ops::ControlFlow::Break(()) => continue,
+                            std::ops::ControlFlow::Continue(processed) => processed,
+                        };
                     if ctx.legacy_mode.is_legacy()
                         && matches!(
                             task_notification_kind,
@@ -751,7 +654,7 @@ async fn collect_turn_stream_body(
                             );
                         }
                     }
-                    if outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
+                    if auto_compacted && !auto_compaction_lifecycle_attempted {
                         auto_compaction_lifecycle_attempted =
                             entry::emit_compaction(ctx, &state).await;
                     }
