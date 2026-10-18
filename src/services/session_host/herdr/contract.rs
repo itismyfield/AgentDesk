@@ -207,6 +207,15 @@ pub(crate) fn working_dir_result(
 
 /// `scroll_back` < 0 asks for that many unwrapped history lines, capped.
 pub(crate) fn capture_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
+    read_request(pane_id, scroll_back, true)
+}
+
+/// The same read with the screen's ANSI styling kept.
+pub(crate) fn capture_ansi_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
+    read_request(pane_id, scroll_back, false)
+}
+
+fn read_request(pane_id: &str, scroll_back: i32, strip_ansi: bool) -> HerdrRequest {
     let (source, lines) = if scroll_back < 0 {
         let lines = scroll_back.unsigned_abs().min(CAPTURE_MAX_LINES);
         (HerdrReadSource::RecentUnwrapped, Some(lines))
@@ -217,7 +226,7 @@ pub(crate) fn capture_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
         pane_id: pane_id.to_string(),
         source,
         lines,
-        strip_ansi: true,
+        strip_ansi,
     }
 }
 

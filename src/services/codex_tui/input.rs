@@ -112,6 +112,8 @@ pub(crate) use submission::{
     submission_modal_in_pane, submission_readiness_from_ansi_pane,
 };
 mod composer_status;
+mod herdr_cancel;
+pub(crate) use herdr_cancel::herdr_turn_in_progress;
 mod inline_banner;
 use composer_content::boxed_composer_body;
 pub(crate) use composer_content::{ComposerContent, active_composer_content_in_pane};
@@ -1352,13 +1354,6 @@ fn pane_looks_ready_for_codex_prompt_with_ansi(pane: &str) -> bool {
         return true;
     }
     pane_looks_ready_for_codex_prompt(&plain)
-}
-
-/// Running text alone is insufficient when a modal or prompt draft owns the composer.
-pub(crate) fn herdr_turn_in_progress(pane: &str) -> bool {
-    recent_codex_active_turn_marker(pane).is_some()
-        && !pane_has_codex_interactive_modal_in_pane(pane)
-        && active_composer_visible_prompt_draft_in_pane(pane).is_none()
 }
 
 pub(crate) fn pane_has_codex_active_turn_in_pane(pane: &str) -> bool {
