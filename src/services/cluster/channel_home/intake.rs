@@ -15,11 +15,9 @@ impl HomeGate {
 
     /// The intake of the epoch held as `home_epoch`, read under the gate's local lock.
     pub(super) fn intake_of(&self, local: &HomeLocal, home_epoch: i64) -> HomeIntake {
-        #[cfg(test)]
-        let restoring = !super::super::channel_home_boot::restore_mutant("intake_ignores_restore")
-            && self.restoring();
-        #[cfg(not(test))]
         let restoring = self.restoring();
+        #[cfg(test)]
+        let restoring = restoring && !mutant("intake_ignores_restore");
         if local.intake_closed == Some(home_epoch) || restoring {
             HomeIntake::Closed
         } else {
@@ -31,4 +29,10 @@ impl HomeGate {
         let restored = self.opens_after.as_ref();
         restored.is_some_and(|restored| !restored.load(Ordering::Acquire))
     }
+}
+
+/// Test-only mutant of the restore flag's hold, read only for a gate that has one.
+#[cfg(test)]
+fn mutant(name: &str) -> bool {
+    std::env::var("ADK_S3A_RESTORE_MUTANT").ok().as_deref() == Some(name)
 }
