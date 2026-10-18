@@ -331,11 +331,6 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
         {
             return rendered;
         }
-        let header = format(&sections[..1]);
-        if sections.len() > 1 && header.len() <= 1400 && header.encode_utf16().count() <= 1936 {
-            sections.pop();
-            continue;
-        }
         // Reduce oversized activity lists by removing complete oldest rows.
         let mut lines = sections[0].lines().map(str::to_owned).collect::<Vec<_>>();
         if let Some(index) = lines.iter().rposition(|line| {

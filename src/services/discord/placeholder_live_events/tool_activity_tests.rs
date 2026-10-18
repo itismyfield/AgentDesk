@@ -162,14 +162,27 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
             json!({"description":format!("ROW{i}{}END", "🦀한".repeat(40))}),
             Some(&id),
         );
-        end(&mut state, "Task", Some(&id), false);
+        end(&mut state, "Task", Some(&id), i % 2 == 0);
     }
     let out = render(state.clone());
     assert!(out.len() <= 1400, "{}: {out}", out.len());
     assert!(out.encode_utf16().count() <= 2000);
     assert!(out.contains("… 외 ") && out.contains("ROW6"), "{out}");
+    let rows = out
+        .lines()
+        .filter(|line| line.starts_with("-# ✓ ") || line.starts_with("-# ✗ "))
+        .collect::<Vec<_>>();
+    assert!(!rows.is_empty(), "{out}");
+    assert!(rows.iter().any(|line| line.starts_with("-# ✗ ")), "{out}");
+    assert_eq!(
+        out.lines().find(|line| line.starts_with("-# … 외 ")),
+        Some(format!("-# … 외 {}개", 7 - rows.len()).as_str()),
+        "{out}"
+    );
+    assert!(out.contains("-# 턴 시작 : fixed"), "{out}");
+    assert!(out.contains("-# 마지막 업데이트 : fixed"), "{out}");
     let full = state.tool_activity.render(6);
-    for row in out.lines().filter(|l| l.starts_with("-# ✓ ")) {
+    for row in rows {
         assert!(
             full.lines()
                 .any(|original| original == row.trim_start_matches("-# ")),
@@ -182,6 +195,57 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
         footer.lines().skip(1).collect::<Vec<_>>().join("\n").len(),
         out.lines().skip(1).collect::<Vec<_>>().join("\n").len()
     );
+
+    let mut with_context = StatusPanelState::default();
+    for i in 0..6 {
+        let id = format!("context{i}");
+        begin(
+            &mut with_context,
+            "Bash",
+            json!({"command":format!("ROW{i} {}", "한".repeat(62))}),
+            Some(&id),
+        );
+        end(&mut with_context, "Bash", Some(&id), false);
+    }
+    let header_only = render(with_context.clone());
+    assert!(header_only.len() <= 1400, "{header_only}");
+    assert_eq!(
+        header_only
+            .lines()
+            .filter(|line| line.starts_with("-# ✗ Bash  ROW"))
+            .count(),
+        6,
+        "{header_only}"
+    );
+    assert!(!header_only.contains("… 외 "), "{header_only}");
+    with_context.context = Some(super::super::context_panel::ContextPanelSnapshot {
+        provider_session_id: None,
+        input_tokens: 9_000,
+        cache_create_tokens: 0,
+        cache_read_tokens: 0,
+        context_window_tokens: 10_000,
+        compact_percent: 80,
+    });
+    let out = render(with_context);
+    assert!(out.len() <= 1400 && out.encode_utf16().count() <= 2000);
+    assert!(
+        out.contains("-# ⚠️ 9.0k / 10.0k (90%) · auto-compact 80% — 자동 압축 직전"),
+        "{out}"
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.starts_with("-# ✗ Bash  ROW"))
+            .count(),
+        5,
+        "{out}"
+    );
+    assert!(!out.contains("ROW0"), "{out}");
+    for i in 1..6 {
+        assert!(out.contains(&format!("✗ Bash  ROW{i} ")), "{out}");
+    }
+    assert!(out.contains("-# … 외 1개"), "{out}");
+    assert!(out.contains("-# 턴 시작 : fixed"), "{out}");
+    assert!(out.contains("-# 마지막 업데이트 : fixed"), "{out}");
 }
 
 #[test]
