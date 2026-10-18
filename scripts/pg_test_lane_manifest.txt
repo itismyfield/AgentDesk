@@ -88,6 +88,7 @@ src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/campaign_handoff_tests.rs
 src/services/auto_queue/cancel_run.rs
+src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs
 src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs
 src/services/auto_queue/cleanup_tasks_pg_tests.rs
 src/services/auto_queue/command.rs
@@ -416,6 +417,7 @@ server::task_dispatch_claims::replay_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
 services::agent_recovery::durable::postgres_tests
+services::auto_queue::cancel_run::malformed_context_pg_tests
 services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
 services::auto_queue::cleanup_tasks::ownership_pg_tests
@@ -1289,6 +1291,9 @@ services::agent_recovery::durable::postgres_tests::postgres_same_provider_error_
 services::agent_recovery::durable::postgres_tests::postgres_stale_completion_cannot_claim_a_restarted_takeover
 services::agent_recovery::durable::postgres_tests::postgres_takeover_is_invisible_until_commit
 services::agent_recovery::durable::postgres_tests::postgres_wal_frontier_rejects_same_generation_stale_progress
+services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch
@@ -1401,6 +1406,7 @@ services::cluster::channel_home_boot::tests::a_holders_row_starts_one_watch_and_
 services::cluster::channel_home_boot::tests::a_reclaims_target_drops_the_reclaimed_row_and_unregisters_pg
 services::cluster::channel_home_boot::tests::a_releasing_drain_runs_the_supplied_reset_once_and_waits_when_refused_pg
 services::cluster::channel_home_boot::tests::a_releasing_holder_whose_row_is_aborted_returns_the_channel_to_the_gateway_rules_pg
+services::cluster::channel_home_boot::tests::a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg
 services::cluster::channel_home_boot::tests::a_target_holds_without_a_lease_until_its_row_is_gone_pg
 services::cluster::channel_home_boot::tests::an_unrestored_target_adopts_a_released_channel_only_once_restored_pg
 services::cluster::channel_home_boot::tests::writer_return::a_reclaimed_boot_returns_the_channel_to_one_gateway_writer_pg
@@ -1524,6 +1530,7 @@ services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gate
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_restart_under_a_worker_starts_no_writer_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_gateway_role_move_keeps_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_adopts_through_its_boot_watch_pg
+services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_released_target_standby_adopts_closed_then_opens_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_releasing_holder_restart_retries_reset_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_unregister_during_the_adopt_leaves_one_holder_pg
 services::cluster::intake_worker::home_route_tests::s3_real::holder_pg::th6_worker_holder_restart_rehydrates_pg
@@ -1931,7 +1938,9 @@ services::discord::router::message_handler::voice_announcement_route::voice_rout
 services::discord::router::message_handler::watchdog::host_tests::a_withheld_paused_attach_leaves_the_row_registry_and_retries_untouched_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_channel_delegated_after_a_rest_worker_boot_gets_a_writer_under_its_home_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_rest_worker_adopts_its_released_home_only_once_its_turns_are_restored_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg
 services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_registers_renews_and_hosts_only_its_delegated_writer_pg
+services::discord::runtime_bootstrap::channel_homes_tests::a_standby_holder_whose_restore_fails_keeps_intake_closed_until_a_restart_restores_pg
 services::discord::runtime_bootstrap::channel_homes_tests::th6_standby_reclaim_restart_restores_turns_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_entry_reads_nothing_off_and_starts_nothing_without_a_row_pg
 services::discord::runtime_bootstrap::channel_homes_tests::the_legacy_reset_runs_the_existing_reset_and_keeps_a_local_pane_pg

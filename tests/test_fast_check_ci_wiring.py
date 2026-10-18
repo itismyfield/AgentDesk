@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "a36d39d5cbf34fce4d01a30547c309c1cc4e9f64f8e9239a70ed632ad47fbc7f"
+    "789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -535,17 +535,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("name: Fast targeted tests (ubuntu-latest)", job)
         self.assertRegex(
             job,
-            r"(?m)^    needs:\n      - changes\n      - test_fast\n    if: "
+            r"(?m)^    needs:\n      - changes\n      - test_fast\n      - pg15_owner_proof\n    if: "
             + re.escape(MIRROR_IF)
             + "$",
         )
-        self.assertEqual(job.count("FILTER_NAME: pg_db"), 1)
+        self.assertEqual(job.count("FILTER_NAME: pg_db"), 2)
         self.assertEqual(
-            job.count("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}"), 1
+            job.count("FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}"), 2
         )
         self.assertEqual(job.count("UPSTREAM_JOB_NAME: test_fast"), 1)
         self.assertEqual(
             job.count("UPSTREAM_RESULT: ${{ needs.test_fast.result }}"), 1
+        )
+        self.assertEqual(job.count("UPSTREAM_JOB_NAME: pg15_owner_proof"), 1)
+        self.assertEqual(
+            job.count("UPSTREAM_RESULT: ${{ needs.pg15_owner_proof.result }}"), 1
         )
 
         test_job = job_block(workflow, "test_fast")
@@ -561,6 +565,103 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("source scripts/ci/non-pg-test-filter.sh", test_job)
         self.assertEqual(test_job.count(command), 1)
         self.assertNotIn(command, job_block(workflow, "scripts"))
+
+    def test_pg15_owner_proof_runs_whenever_the_postgres_shards_run(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        self.assertEqual(jobs["pg15_owner_proof"]["needs"], ["changes", "pg_shards", "lib_test_prepare"])
+        for pg_db in ("true", "false"):
+            for force_full in ("true", "false"):
+                context = {
+                    "needs.changes.outputs.pg_db": pg_db,
+                    "needs.pg_shards.outputs.force_full": force_full,
+                }
+                for job_id in ("pg15_owner_proof", "test_fast"):
+                    with self.subTest(job=job_id, pg_db=pg_db, force_full=force_full):
+                        condition = jobs[job_id]["if"].replace("!cancelled()", "true")
+                        self.assertEqual(eval_step_if(condition, context), "true" in (pg_db, force_full))
+
+    def test_fast_targeted_context_fails_closed_on_each_pg15_outcome_its_gate_forbids(self) -> None:
+        mirror = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "fast_targeted_tests_required_context"
+        ]
+        self.assertIn("pg15_owner_proof", mirror["needs"])
+        steps = [step for step in mirror["steps"] if step.get("run") == "./scripts/required-check-mirror.sh"]
+        red = {
+            ("true", "success"): False, ("true", "skipped"): True,
+            ("true", "failure"): True, ("true", "cancelled"): True,
+            ("false", "success"): False, ("false", "skipped"): False,
+            ("false", "failure"): True, ("false", "cancelled"): True,
+        }
+        for (pg_db, outcome), expected_red in red.items():
+            values = {
+                "needs.changes.result": "success",
+                "needs.changes.outputs.pg_db": pg_db,
+                "needs.test_fast.result": "success",
+                "needs.pg15_owner_proof.result": outcome,
+            }
+            codes = []
+            for step in steps:
+                env = {
+                    key: values[value[3:-2].strip()] if value.startswith("${{") else value
+                    for key, value in step["env"].items()
+                }
+                codes.append(subprocess.run(
+                    ["bash", "scripts/required-check-mirror.sh"], cwd=REPO_ROOT,
+                    env={**os.environ, **env}, capture_output=True, check=False,
+                ).returncode)
+            with self.subTest(pg_db=pg_db, outcome=outcome):
+                self.assertEqual(any(codes), expected_red)
+
+    def test_pg15_owner_proof_runs_the_exact_ids_on_a_postgres_15_server(self) -> None:
+        job = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["pg15_owner_proof"]
+        self.assertEqual(job["env"]["POSTGRES_SERVICE_IMAGE"], "postgres:15")
+        names = [step.get("name") for step in job["steps"]]
+        order = ["Start PostgreSQL service", "Require PostgreSQL 15 server",
+                 "PostgreSQL 15 exact owner proof", "Stop PostgreSQL service"]
+        self.assertEqual([name for name in names if name in order], order)
+
+        version_step = job["steps"][names.index("Require PostgreSQL 15 server")]
+        with tempfile.TemporaryDirectory() as temp:
+            docker = Path(temp) / "docker"
+            docker.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_SERVER_VERSION"\n', encoding="utf-8")
+            docker.chmod(0o755)
+            for version, accepted in (("150019", True), ("170004", False), ("160010", False),
+                                      ("1500", False), ("", False)):
+                with self.subTest(server_version_num=version):
+                    result = subprocess.run(
+                        ["bash", "-c", version_step["run"]], capture_output=True, check=False,
+                        env={**os.environ, "PATH": f"{temp}:{os.environ['PATH']}",
+                             "FAKE_SERVER_VERSION": version},
+                    )
+                    self.assertEqual(result.returncode == 0, accepted)
+
+        proof = job["steps"][names.index("PostgreSQL 15 exact owner proof")]
+        self.assertEqual(proof["env"], {
+            "ADK_LIB_TEST_ARTIFACT": "${{ runner.temp }}/lib-test-artifact",
+            "BASH_ENV": "/dev/null",
+        })
+        words = proof["run"].split()
+        lane, command = words[: words.index("--")], words[words.index("--") + 1 :]
+        self.assertEqual(lane[:2], ["python3", "scripts/run_test_lane.py"])
+        self.assertEqual(lane[lane.index("--expected-ids") + 1], "scripts/ci/pg15_required_ids.txt")
+        self.assertEqual(command[-1], "--test-threads=1")
+        exact = command[command.index("--exact") + 1 : -1]
+        ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
+        self.assertEqual(exact, ids)
+
+    def test_pg15_required_ids_are_inventoried_and_never_ledgered(self) -> None:
+        ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
+        self.assertTrue(ids)
+        self.assertEqual(len(ids), len(set(ids)))
+        manifest = (REPO_ROOT / "scripts/lib_test_inventory_manifest.txt").read_text(encoding="utf-8")
+        inventoried = set(manifest.split("[tests]\n", 1)[1].split("\n[", 1)[0].split())
+        self.assertEqual([test_id for test_id in ids if test_id not in inventoried], [])
+        ledger = (REPO_ROOT / "scripts/known_test_failures.txt").read_text(encoding="utf-8")
+        patterns = [line.split("|")[1].strip() for line in ledger.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#") and "|" in line]
+        self.assertTrue(patterns)
+        self.assertEqual([(test_id, pattern) for test_id in ids for pattern in patterns
+                          if test_id.startswith(pattern)], [])
 
     def test_terminal_delivery_evidence_regressions_flow_through_registered_required_context(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

@@ -24975,15 +24975,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:cca072c3b9f2b8c3775a2b4b13146c3d93e2726a9505c2c0c3d6315f3959b587"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/auto_queue/cancel_run.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:dd17312517b51b80b315fe2ef15d7f065a487722fd0fbccf80348d9e5f768eb2"
     },
     {
@@ -25003,6 +24994,87 @@
       "symbol": "query_scalar",
       "classification": "UNRESOLVED",
       "fingerprint": "sha256:e85e7b357906a0613bb0a7a8330db5112d5d9fcf01d1d4f3df513aad7e70161d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:03038e77bc389f471fed2f23aa3a4827cf0313492ca5fe9f00e3ac2a70524a95"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:486b29c9d22b0da97ec09d92a2aedbe808b3b71480706f6ac860bcff92b052cb"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5826e874087a3241e0ddbd5f8598d6ecdb585c7fe6e34a731f9e8932a10bce1a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:cb94eb3285713c86648afab2d1052819415a1fbc12dd3c6863739c3d277fb058"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:d6bb238339a99c6bb3f01dd8e6b25969817404134e7ad9a17c89441ef6ed36fe"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:175a042beef1da4dfd36a69244d8f55e51c3f3de638c600accbf488013044ce1"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6ef7b34a3381768cb16d6f86d17150d7d0eb1633621f01a4c166a46b18b4957e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a06afc2b8eb47fd88e02d1cd7a3bf7dbea8eca9df1cd4960818514286357ca45"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cancel_run/remaining_live_census.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:52e461b4723d02ce966e8598ab486ce684d6aef9c6667d5ae266a1c1244566b0"
     },
     {
       "root": "src",

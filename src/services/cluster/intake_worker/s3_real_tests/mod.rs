@@ -61,6 +61,7 @@ fn s3_node_child() {
         "th6_first_gateway" => Box::pin(holder_pg::first_gateway_node(&env)),
         "th6_first_worker" => Box::pin(holder_pg::first_worker_node(&env)),
         "th6_adopt_target" => Box::pin(holder_pg::adopt_target_node(&env)),
+        "th6_adopt_standby" => Box::pin(holder_pg::adopt_standby_node(&env)),
         "th8_holder" => Box::pin(route_pg::holder_node(&env)),
         "th8_gateway" => Box::pin(route_pg::gateway_node(&env)),
         "th8_branches" => Box::pin(route_pg::branches_node(&env)),
