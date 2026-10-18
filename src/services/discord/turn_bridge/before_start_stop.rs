@@ -13,7 +13,7 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::herdr_before_start::{BeforeStartProof, ExitDecision};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::policy_close::{PolicyCloseRequest, PolicyRetain};
-use poise::serenity_prelude::{ChannelId, MessageId};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,14 +157,10 @@ where
     };
     #[cfg(test)]
     test_hooks::boundary("after_receipt", &admitted);
-    // The stop shows on the durable row's message and only where O does not own the body.
-    if admitted.current_msg_id != anchor.get()
-        || crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
-            admitted.channel_id,
-            admitted.runtime_kind,
-        )
-        .unwrap_or(true)
-    {
+    // The stop shows on the durable row's message, as a reply where O owns that body; an
+    // unreadable ownership shows nothing.
+    let o_body = o_owns_body(&admitted);
+    if admitted.current_msg_id != anchor.get() || o_body.is_none() {
         return CloseAttempt::Held;
     }
     if !mailbox_owns(mailbox, actor).await {
@@ -177,6 +173,16 @@ where
         .is_some_and(|receipt| receipt.notice_delivered())
     {
         admitted.clone()
+    } else if o_body == Some(true) {
+        let http = shared.serenity_http_or_token_fallback();
+        let acked = match http {
+            Some(http) => reply_and_ack_stop(&http, shared, &admitted).await,
+            None => None,
+        };
+        let Some(acked) = acked else {
+            return CloseAttempt::Retry("notice");
+        };
+        acked
     } else {
         // A successful send remains evidence for this anchor's ACK, never a substitute for it.
         let sent = match previous_sent.as_ref() {
@@ -227,6 +233,48 @@ where
         "before-start policy close left its turn held"
     );
     CloseAttempt::Held
+}
+
+/// Whether O owns `row`'s destination body; `None` while that cannot be read.
+pub(in crate::services::discord) fn o_owns_body(row: &InflightTurnState) -> Option<bool> {
+    crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
+        row.channel_id,
+        row.runtime_kind,
+    )
+    .ok()
+}
+
+/// The stop notice as a reply to `row`'s message, for a body O owns. The turn nonce names the
+/// send, so a resend after a lost ack is deduplicated rather than shown twice.
+pub(in crate::services::discord) async fn send_stop_reply(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+) -> Result<Option<MessageId>, String> {
+    if row.current_msg_id == 0 {
+        return Err("no message to reply to".into());
+    }
+    let nonce = row.turn_nonce.as_deref().unwrap_or_default();
+    crate::services::discord::outbound::serenity_reference::send_referenced_lifecycle_notice(
+        http.clone(),
+        shared.clone(),
+        ChannelId::new(row.channel_id),
+        MessageId::new(row.current_msg_id),
+        ADMITTED_ABORT_NOTICE,
+        format!("herdr-stop:{nonce}"),
+        "herdr_stop_notice".into(),
+    )
+    .await
+}
+
+/// Shows the stop as a reply and acks `row`'s receipt only on the message id that send returned.
+pub(in crate::services::discord) async fn reply_and_ack_stop(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+) -> Option<InflightTurnState> {
+    let sent = send_stop_reply(http, shared, row).await;
+    row.ack_before_start_reply(&sent).await
 }
 
 async fn mailbox_owns(mailbox: &ChannelMailboxHandle, actor: &Arc<CancelToken>) -> bool {

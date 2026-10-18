@@ -244,54 +244,103 @@ async fn a_send_new_terminal_acks_and_clears_in_one_run() {
     assert!(posted, "{:?}", discord.calls());
 }
 
-/// O's marker is not this terminal: on an O-owned destination nothing is sent, acked or cleared,
-/// whether or not a delivery was already recorded.
+/// Where O owns the body no Legacy body is sent: an undelivered Aborted shows one stop reply, then
+/// the row clears. An unreadable ownership keeps the row untouched.
 #[tokio::test(flavor = "current_thread")]
-async fn an_o_owned_destination_keeps_the_row() {
-    for committed in [false, true] {
+async fn an_o_owned_destination_ends_the_row_without_a_legacy_body() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
+    use crate::services::tui_o::cutover::test_override::force_channels;
+    use NativeTerminalKind::{Aborted, Completed};
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for (kind, committed, replies) in [
+        (Completed, false, 0),
+        (Aborted, false, 1),
+        (Aborted, true, 0),
+    ] {
         let fixture = Fixture::new("o-owned");
-        let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
-            CHANNEL,
-            crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-        )]);
+        let _o = force_channels(&[(CHANNEL, ClaudeTui)]);
         let mut row = fixture.row.clone();
+        row.tui_terminal_kind = Some(kind);
         row.terminal_delivery_committed = committed;
+        let row = fixture.persist(&row);
+        let discord = super::o_cut_recorder::start(CHANNEL).await;
+        let outcome = fixture
+            .terminal(&row)
+            .settle(&discord.http, &shared, &row)
+            .await;
+        let (case, calls) = (format!("{kind:?} committed={committed}"), discord.calls());
+        assert_eq!(outcome, AdmittedRestart::Settled, "{case}: {calls:?}");
+        assert!(fixture.durable().is_none(), "{case}");
+        assert_eq!(calls.len(), replies, "{case}: {calls:?}");
+        for call in calls {
+            assert!(call.route.starts_with("POST "), "{case}: {call:?}");
+            assert_eq!(
+                call.content.as_deref(),
+                Some(ADMITTED_ABORT_NOTICE),
+                "{case}"
+            );
+            assert_eq!(
+                call.reply_to.as_deref(),
+                Some("3"),
+                "{case}: a reply to the turn"
+            );
+        }
+    }
+    let fixture = Fixture::new("o-unreadable");
+    let _o = force_channels(&[(CHANNEL, CodexTui)]);
+    let row = fixture.persist(&fixture.row);
+    let before = std::fs::read(fixture.path()).unwrap();
+    let discord = super::o_cut_recorder::start(CHANNEL).await;
+    let outcome = fixture
+        .terminal(&row)
+        .settle_checked(&discord.http, &shared, &row)
+        .await;
+    assert_eq!(
+        outcome,
+        AdmittedRestartReport::Retained("O ownership is unreadable")
+    );
+    assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
+    assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+}
+
+/// A drain restart left its admitted row to the next process, which shows its terminal once and
+/// clears it; a hot-swap handoff may still overlap the prior process and keeps the row untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn a_drain_restart_row_settles_and_a_hot_swap_row_is_kept() {
+    for mode in [
+        InflightRestartMode::DrainRestart,
+        InflightRestartMode::HotSwapHandoff,
+    ] {
+        let fixture = Fixture::new("planned");
+        let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+        let mut row = fixture.row.clone();
+        row.restart_mode = Some(mode);
         let row = fixture.persist(&row);
         let before = std::fs::read(fixture.path()).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let discord = super::o_cut_recorder::start(CHANNEL).await;
         let outcome = fixture
             .terminal(&row)
-            .settle(&discord.http, &shared, &row)
+            .settle_checked(&discord.http, &shared, &row)
             .await;
-        assert_eq!(outcome, AdmittedRestart::Retained, "committed={committed}");
-        assert_eq!(
-            std::fs::read(fixture.path()).ok(),
-            Some(before),
-            "committed={committed}"
-        );
-        assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+        let shown = discord.contents();
+        if mode == InflightRestartMode::DrainRestart {
+            assert_eq!(
+                outcome,
+                AdmittedRestartReport::Settled,
+                "{:?}",
+                discord.calls()
+            );
+            assert!(fixture.durable().is_none());
+            let notices = shown.iter().filter(|c| c.contains(ADMITTED_ABORT_NOTICE));
+            assert_eq!(notices.count(), 1, "{shown:?}");
+        } else {
+            let hot_swap = AdmittedRestartReport::Retained("a hot-swap handoff owns the row");
+            assert_eq!(outcome, hot_swap);
+            assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
+            assert!(discord.calls().is_empty(), "{:?}", discord.calls());
+        }
     }
-}
-
-/// A planned restart owns its row; restart keeps it untouched and sends nothing.
-#[tokio::test(flavor = "current_thread")]
-async fn a_planned_restart_row_is_kept_untouched() {
-    let fixture = Fixture::new("planned");
-    let _legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
-    let mut row = fixture.row.clone();
-    row.restart_mode = Some(InflightRestartMode::DrainRestart);
-    let row = fixture.persist(&row);
-    let before = std::fs::read(fixture.path()).unwrap();
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let discord = super::o_cut_recorder::start(CHANNEL).await;
-    let outcome = fixture
-        .terminal(&row)
-        .settle(&discord.http, &shared, &row)
-        .await;
-    assert_eq!(outcome, AdmittedRestart::Retained);
-    assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
-    assert!(discord.calls().is_empty(), "{:?}", discord.calls());
 }
 
 /// Cleanup re-reads the row under its lock: a changed nonce or a current-generation row is kept.
@@ -325,7 +374,8 @@ async fn cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode() {
         // Unacknowledged on both sides: neither the snapshot nor the row recorded a delivery.
         let mut snapshot = committed.clone();
         snapshot.terminal_delivery_committed = fresh.terminal_delivery_committed;
-        let outcome = inflight::clear_admitted_restart_terminal(provider, &snapshot, NONCE, 9);
+        let outcome =
+            inflight::clear_admitted_restart_terminal(provider, &snapshot, NONCE, 9, false);
         assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared, "{case}");
         assert_eq!(
             std::fs::read(fixture.path()).ok(),
@@ -351,8 +401,34 @@ async fn cleanup_keeps_a_row_that_is_no_longer_the_delivered_episode() {
         fixture.durable().is_some(),
         "a nonce-less row is not this episode"
     );
+    // O's variant keeps every episode check, the anchor's pin among them, in place of the ack.
+    let _o = crate::services::tui_o::cutover::test_override::force_channels(&[(
+        CHANNEL,
+        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+    )]);
+    let mut owned = committed.clone();
+    owned.terminal_delivery_committed = false;
+    for (case, change) in changes
+        .into_iter()
+        .filter(|(case, _)| *case != "unacknowledged")
+    {
+        let mut fresh = owned.clone();
+        change(&mut fresh);
+        fixture.overwrite(&fresh);
+        let outcome = inflight::clear_admitted_restart_terminal(provider, &owned, NONCE, 9, true);
+        assert_ne!(outcome, inflight::GuardedClearOutcome::Cleared, "O {case}");
+        let kept = std::fs::read(fixture.path()).ok();
+        assert_eq!(kept, Some(serde_json::to_vec(&fresh).unwrap()), "O {case}");
+    }
+    fixture.overwrite(&owned);
+    let outcome = inflight::clear_admitted_restart_terminal(provider, &owned, NONCE, 9, true);
+    assert_eq!(
+        outcome,
+        inflight::GuardedClearOutcome::Cleared,
+        "O's exact episode"
+    );
     fixture.overwrite(&committed);
-    let outcome = inflight::clear_admitted_restart_terminal(provider, &committed, NONCE, 9);
+    let outcome = inflight::clear_admitted_restart_terminal(provider, &committed, NONCE, 9, false);
     assert_eq!(outcome, inflight::GuardedClearOutcome::Cleared);
 }
 
@@ -367,10 +443,12 @@ fn cleanup_keeps_a_current_generation_row_that_matches_its_snapshot() {
     row.born_generation = 9;
     fixture.overwrite(&row);
     let before = std::fs::read(fixture.path()).unwrap();
-    let outcome = inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 9);
+    let outcome =
+        inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 9, false);
     assert_eq!(outcome, inflight::GuardedClearOutcome::UserMsgMismatch);
     assert_eq!(std::fs::read(fixture.path()).ok(), Some(before));
-    let outcome = inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 10);
+    let outcome =
+        inflight::clear_admitted_restart_terminal(&fixture.provider, &row, NONCE, 10, false);
     assert_eq!(outcome, inflight::GuardedClearOutcome::Cleared);
     assert!(fixture.durable().is_none());
 }

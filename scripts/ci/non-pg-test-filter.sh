@@ -534,8 +534,10 @@ NON_PG_FILTER_REPLAY=(
   services::discord::queue_io::queued_head_inject::tests::auto::mend::s3_an_unnamed_paste_is_handed_back_untyped_and_typed_once_named_pg
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_destination_restart_does_not_own_keeps_the_receipt
   services::discord::recovery_engine::herdr_before_start_restart::tests::a_prior_receipt_shows_one_stop_then_clears_its_row
+  services::discord::recovery_engine::herdr_before_start_restart::tests::an_o_owned_receipt_shows_its_stop_as_a_reply_then_clears
   services::discord::recovery_engine::herdr_before_start_restart::tests::an_unshown_notice_waits_and_a_durable_ack_is_not_shown_again
   services::discord::recovery_engine::herdr_before_start_restart::tests::decode_takes_only_a_prior_readable_receipt_that_names_its_row
+  services::discord::recovery_engine::herdr_before_start_restart::tests::only_a_turn_this_process_indexed_is_held_at_restart
   services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_keeps_every_held_receipt_silent_and_untouched
   services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
   services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_follows_the_restore_table

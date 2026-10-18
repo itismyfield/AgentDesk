@@ -195,6 +195,7 @@ src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_test
 src/services/discord/router/message_handler/intake_turn/replay_start_tests.rs
 src/services/discord/router/message_handler/intake_turn/runtime_transition/native_hold_tests.rs
 src/services/discord/router/message_handler/provider_dispatch.rs
+src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
@@ -539,6 +540,7 @@ services::discord::router::message_handler::intake_turn::replay_start_tests::wor
 services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::tests
@@ -1695,7 +1697,7 @@ services::discord::inflight::removal::custody_notice_tests::old_custody_episode_
 services::discord::inflight::removal::custody_notice_tests::pending_notify_readdresses_when_custody_copy_identifies_provider_bot_pg
 services::discord::inflight::removal::custody_notice_tests::the_boot_reaper_starts_the_notice_pass_pg
 services::discord::inflight::removal::custody_notice_tests::without_postgres_the_notice_waits_for_the_next_boot_pg
-services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_keeps_a_held_herdr_turn_and_its_admitted_kind_pg
+services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::a_restart_settles_admitted_kinds_and_leaves_other_turns_as_before_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::an_admitted_ack_outlives_a_stop_before_cleanup_pg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::herdr_terminal_admission::restart_tests::restart_preserves_execution_nonce_input_hold_pg
 services::discord::ingress_shadow::compat_tests::ingress_shadow_keeps_a_pending_dm_reply_byte_identical_pg
@@ -1875,6 +1877,8 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_no_codex_source_behind_a_later_pending_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_restart_restores_the_logged_rollout_of_a_matched_codex_pane_for_its_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_settled_herdr_reconnect_is_not_attached_again_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::a_configured_stop_settles_a_live_turn_on_its_own_abort_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::a_pane_escape_settles_a_live_turn_on_its_own_abort_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unanswered_follow_up_enter_keeps_the_hold_and_sends_nothing_again_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg

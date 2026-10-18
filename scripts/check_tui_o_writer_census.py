@@ -381,8 +381,6 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "o_owns_recovery_body:peek",
         "relay_recovered_body_to_placeholder:claim",
     ),
-    "src/services/discord/recovery_engine/herdr_admitted_restart.rs": ("o_owns:peek",),
-    "src/services/discord/recovery_engine/herdr_before_start_restart.rs": ("o_owns:peek",),
     "src/services/discord/recovery_engine/terminal_text_idempotency.rs": (
         "relay_no_anchor_terminal_text:claim",
         "relay_no_anchor_terminal_text:claim",
@@ -440,7 +438,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
         "apply_watcher_long_chunks_legacy:claim",
     ),
     "src/services/discord/tui_prompt_relay/claude_idle_bridge.rs": ("idle_tail_tool_opens:peek",),
-    "src/services/discord/turn_bridge/before_start_stop.rs": ("consume:peek",),
+    "src/services/discord/turn_bridge/before_start_stop.rs": ("o_owns_body:peek",),
     "src/services/discord/turn_bridge/headless_delivery.rs": (
         "enqueue_claimed_headless_delivery:claim",
     ),

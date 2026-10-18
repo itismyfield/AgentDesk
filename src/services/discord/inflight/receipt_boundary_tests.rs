@@ -621,6 +621,7 @@ async fn s3act_b3b_clear_entrypoint_matrix_pg() {
                     &row,
                     "receipt-boundary",
                     9,
+                    false,
                 ),
             };
             assert!(guard_reads() > 0, "raw guard really read {op}");
