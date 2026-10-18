@@ -45,7 +45,9 @@ async fn idle_cursor_restarts_a_rebind_replaced_relay_at_zero() {
     inflight::save_inflight_state(&row).unwrap();
     let staged = format!("{}.rebuilt", path.display());
     std::fs::write(&staged, rebuilt).unwrap();
-    note_relay_output_replaced(path.to_str().unwrap());
+    super::super::super::recovery_engine::relay_output_replacements::note_relay_output_replaced(
+        path.to_str().unwrap(),
+    );
     std::fs::rename(&staged, &path).unwrap();
     assert_eq!(
         dc1_tick().await[&name],

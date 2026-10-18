@@ -83,7 +83,10 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                 relay_source.path.clone(),
                 expected_file,
             );
-            let replacements = idle_jsonl::relay_output_replacements(&relay_source.path);
+            let replacements =
+                super::recovery_engine::relay_output_replacements::relay_output_replacements(
+                    &relay_source.path,
+                );
             let mut replaced_in_place = false;
             if let Some(cursor) = offsets.get(&session_name).filter(|c| c.source != source) {
                 // Only a rebind's replacement restarts at 0; another new file keeps EOF.

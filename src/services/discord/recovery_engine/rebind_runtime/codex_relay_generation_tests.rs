@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::session_relay_sink::relay_output_replacements;
+use crate::services::discord::recovery_engine::relay_output_replacements::relay_output_replacements;
 use std::os::unix::fs::MetadataExt;
 
 fn file_identity(path: &std::path::Path) -> (u64, u64) {

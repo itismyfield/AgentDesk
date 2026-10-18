@@ -242,27 +242,6 @@ pub(super) struct IdleCursor {
     pub replacements: u64,
 }
 
-static RELAY_OUTPUT_REPLACEMENTS: std::sync::LazyLock<Mutex<HashMap<String, u64>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// A rebind replaced `path` with a new file whose bytes start a new coordinate
-/// space, unlike a rotation, whose new file keeps the delivered tail.
-pub(crate) fn note_relay_output_replaced(path: &str) {
-    let mut replacements = RELAY_OUTPUT_REPLACEMENTS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    *replacements.entry(path.to_string()).or_default() += 1;
-}
-
-pub(crate) fn relay_output_replacements(path: &str) -> u64 {
-    RELAY_OUTPUT_REPLACEMENTS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(path)
-        .copied()
-        .unwrap_or(0)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum IdlePending {
     Deferred,

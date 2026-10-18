@@ -58,19 +58,16 @@ pub(super) fn prepare(
 /// keyed on the file identity never reads the new bytes as the old file's.
 #[cfg(unix)]
 fn replace_relay_output(relay_output_path: &str) -> std::io::Result<()> {
-    let staging = format!(
-        "{relay_output_path}.replace-{}",
-        uuid::Uuid::new_v4().simple()
-    );
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)?;
+    let path = std::path::Path::new(relay_output_path);
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("relay output path has no directory"))?;
+    let staging = tempfile::NamedTempFile::new_in(directory)?;
     // Noted before the rename so an idle tick can never see the new file first.
-    crate::services::discord::session_relay_sink::note_relay_output_replaced(relay_output_path);
-    std::fs::rename(&staging, relay_output_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&staging);
-    })
+    crate::services::discord::recovery_engine::relay_output_replacements::note_relay_output_replaced(
+        relay_output_path,
+    );
+    staging.persist(path).map(drop).map_err(|error| error.error)
 }
 
 #[cfg(not(unix))]
