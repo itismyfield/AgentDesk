@@ -36,8 +36,8 @@ macro_rules! claude_capture {
     };
 }
 
-/// Fronts the rig's socket as Herdr 0.9.3 answers: only a `format: "ansi"` read keeps SGR (CRLF
-/// rows), any other read is plain; a server that `styles` nothing answers every read as text.
+/// Fronts the rig's socket as Herdr 0.9.3 answers: only a `format: "ansi"` read keeps SGR, with
+/// CRLF rows; any other read is plain whatever its `strip_ansi`.
 struct HerdrStrips {
     backend: PathBuf,
     /// Each `pane.read` request line as the client wrote it, its id masked.
@@ -47,7 +47,7 @@ struct HerdrStrips {
 }
 
 impl HerdrStrips {
-    fn over(rig: &HerdrRig, styles: bool) -> Self {
+    fn over(rig: &HerdrRig) -> Self {
         let front = rig.socket().to_path_buf();
         let backend = front.with_extension("rig");
         std::fs::rename(&front, &backend).unwrap();
@@ -62,7 +62,7 @@ impl HerdrStrips {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
                 };
-                relay(client, &rig_socket, &log, styles);
+                relay(client, &rig_socket, &log);
             }
         });
         Self {
@@ -74,12 +74,7 @@ impl HerdrStrips {
     }
 }
 
-fn relay(
-    client: UnixStream,
-    rig_socket: &Path,
-    reads: &std::sync::Mutex<Vec<String>>,
-    styles: bool,
-) {
+fn relay(client: UnixStream, rig_socket: &Path, reads: &std::sync::Mutex<Vec<String>>) {
     let _ = client.set_nonblocking(false);
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let mut writer = client.try_clone().unwrap();
@@ -100,7 +95,7 @@ fn relay(
     let mut reply = String::new();
     let _ = rig.read_to_string(&mut reply);
     if request["method"] == "pane.read" && !reply.trim().is_empty() {
-        let ansi = styles && request["params"]["format"] == "ansi";
+        let ansi = request["params"]["format"] == "ansi";
         let mut answer: serde_json::Value = serde_json::from_str(&reply).unwrap();
         let text = &mut answer["result"]["read"]["text"];
         if let Some(styled) = text.as_str() {
@@ -135,11 +130,10 @@ fn stop_on(
     provider: ProviderKind,
     n: u64,
     screen: &str,
-    styles: bool,
 ) -> (&'static str, usize, Vec<String>) {
     let case = runtime.block_on(Case::new(pool, root, provider, n));
     let _registry = case.rig.registry_on_this_thread();
-    let strips = HerdrStrips::over(&case.rig, styles);
+    let strips = HerdrStrips::over(&case.rig);
     case.rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":screen,"revision":3,"truncated":false}}));
     let reply = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
     let text = reply.text();
@@ -183,10 +177,6 @@ fn sent() -> &'static str {
     HerdrStop::Requested(HerdrDelivery::Sent).reply()
 }
 
-fn unobserved() -> &'static str {
-    HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Unobserved)).reply()
-}
-
 fn idle() -> &'static str {
     HerdrStop::Requested(HerdrDelivery::NotSent(HerdrNotSent::Idle)).reply()
 }
@@ -214,24 +204,11 @@ fn herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read() {
             ];
             for (name, screen, reply, escapes) in rows {
                 n += 1;
-                let seen = stop_on(pool, root, runtime, ProviderKind::Codex, n, screen, true);
+                let seen = stop_on(pool, root, runtime, ProviderKind::Codex, n, screen);
                 observed.push((width, name, seen));
                 expected.push((width, name, (reply, escapes, ansi_read())));
             }
         }
-        // A server that answers the styled read as text leaves the turn unobserved, never idle.
-        let working = format!("{WORKING}\n{}", CUT_WIDTHS[0].1);
-        let seen = stop_on(
-            pool,
-            root,
-            runtime,
-            ProviderKind::Codex,
-            650,
-            &working,
-            false,
-        );
-        observed.push((46, "text-only server", seen));
-        expected.push((46, "text-only server", (unobserved(), 0, ansi_read())));
         let seen = stop_on(
             pool,
             root,
@@ -239,7 +216,6 @@ fn herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read() {
             ProviderKind::Codex,
             651,
             HERDR_RENDERED_46,
-            true,
         );
         observed.push((46, "herdr 0.9.3 render", seen));
         expected.push((46, "herdr 0.9.3 render", (sent(), 1, ansi_read())));
@@ -262,7 +238,7 @@ fn herdr_claude_stop_shares_the_tmux_pane_evidence() {
         let (mut observed, mut expected) = (Vec::new(), Vec::new());
         for (n, (name, screen, reply, escapes)) in rows.into_iter().enumerate() {
             let n = 700 + n as u64;
-            let seen = stop_on(pool, root, runtime, ProviderKind::Claude, n, screen, true);
+            let seen = stop_on(pool, root, runtime, ProviderKind::Claude, n, screen);
             observed.push((name, seen));
             expected.push((name, (reply, escapes, plain_read())));
         }

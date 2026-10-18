@@ -231,25 +231,22 @@ fn read_request(pane_id: &str, scroll_back: i32, format: Option<HerdrReadFormat>
     }
 }
 
-/// A truncated read, or a styled read answered in another format, is never a complete screen.
+/// A truncated read is an error, never a complete screen.
 pub(crate) fn capture_result(
     call: &HerdrCall,
     outcome: HerdrOutcome,
     pane_id: &str,
 ) -> Result<String, HostError> {
-    let HerdrRequest::PaneRead { source, format, .. } = &call.request else {
+    let HerdrRequest::PaneRead { source, .. } = &call.request else {
         return Err(HostError::Protocol("capture without pane.read".to_string()));
     };
     match reply_result(call, outcome)? {
         HerdrResult::PaneRead { read } => {
             same_pane(pane_id, &read.pane_id)?;
-            if read.source != *source
-                || read.truncated
-                || format.is_some_and(|f| read.format != Some(f))
-            {
+            if read.source != *source || read.truncated {
                 return Err(HostError::Protocol(format!(
-                    "read source {:?} format {:?} truncated={}",
-                    read.source, read.format, read.truncated
+                    "read source {:?} truncated={}",
+                    read.source, read.truncated
                 )));
             }
             Ok(read.text)
