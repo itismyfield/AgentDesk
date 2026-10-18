@@ -471,6 +471,7 @@ jobs:
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs'
+              - 'src/services/discord/turn_bridge/tmux_runtime/herdr_http_cancel_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'

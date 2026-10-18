@@ -1541,6 +1541,7 @@ src/
 │   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_activation_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests.rs
+│   │   │   │   ├── provider_dispatch_codex_herdr_http_cancel_tests.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_reconnect_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests.rs
@@ -2059,6 +2060,7 @@ src/
 │   │   │   │   ├── codex_stop_delivery_cut_tests.rs
 │   │   │   │   ├── codex_stop_delivery_home_stop_tests.rs
 │   │   │   │   ├── codex_stop_delivery_tests.rs
+│   │   │   │   ├── herdr_http_cancel_tests.rs
 │   │   │   │   ├── herdr_stop_pane_tests.rs
 │   │   │   │   ├── interrupt_policy.rs
 │   │   │   │   ├── judged_stop.rs
@@ -2588,6 +2590,8 @@ src/
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
+│   ├── queue/
+│   │   └── herdr_stop.rs
 │   ├── qwen/
 │   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs

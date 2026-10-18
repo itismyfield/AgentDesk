@@ -184,6 +184,37 @@ pub(in crate::services::discord) async fn run_holder_stop_on(
     wire
 }
 
+/// A non-forced cancel's `/stop` on a live Herdr turn of this runtime, as the holder answers it;
+/// `None` when no runtime serves the channel or its turn is not one, and nothing was done.
+pub(crate) async fn run_herdr_cancel(
+    registry: &crate::services::discord::health::HealthRegistry,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Option<serde_json::Value> {
+    let channel = ChannelId::new(channel);
+    let shared = registry
+        .shared_for_provider_on_channel(provider, channel)
+        .await?;
+    let stop = turn_bridge::ChannelStop::herdr_user_stop(&shared, provider, channel).await?;
+    let reply = StopReply {
+        stop,
+        refusal: None,
+        permit: None,
+    };
+    let wire = reply.wire();
+    reply.finish(&shared, provider, channel).await;
+    Some(wire)
+}
+
+/// What `/stop` answers once its owner took the cancel: a Herdr holder's answer as it is, and
+/// "stopping" for a cancel that carries none.
+pub(in crate::services::discord) fn remote_cancel_reply(answer: &serde_json::Value) -> String {
+    match answer.get("outcome") {
+        Some(_) => holder_reply(answer),
+        None => super::STOPPING_RESPONSE.to_owned(),
+    }
+}
+
 /// What a gateway's `/stop` answers for a channel delegated away; `None` keeps the existing path.
 pub(in crate::services::discord) async fn gateway_stop_reply(
     context: &crate::services::session_forwarding::ForwardCallerContext,

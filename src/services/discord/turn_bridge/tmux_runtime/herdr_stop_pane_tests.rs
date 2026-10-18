@@ -195,12 +195,20 @@ fn herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read() {
                 "\x1b[2m› Explain this codebase\x1b[0m\n\n{}",
                 working.replace(PLACEHOLDER, "\x1b[2mAsk Codex\x1b[0m to do anything")
             );
+            // Herdr answering the styled read in plain text: the placeholder reads as a draft.
+            let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(&working);
+            let edge = "─".repeat(30);
+            let boxed = format!(
+                "{WORKING}\n\n╭{edge}╮\n│ fix the flaky test ▌ │\n╰{edge}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send"
+            );
             let rows = [
                 ("working", working.as_str(), sent(), 1),
                 ("idle", idle_screen, idle(), 0),
                 ("modal", modal.as_str(), idle(), 0),
                 ("draft", draft.as_str(), idle(), 0),
                 ("mixed", mixed.as_str(), idle(), 0),
+                ("plain answer", plain.as_str(), idle(), 0),
+                ("boxed draft", boxed.as_str(), idle(), 0),
             ];
             for (name, screen, reply, escapes) in rows {
                 n += 1;

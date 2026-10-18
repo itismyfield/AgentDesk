@@ -521,8 +521,8 @@ pub(in crate::services::discord) async fn cmd_stop(ctx: Context<'_>) -> Result<(
     )
     .await
     {
-        Ok(Some(_)) => {
-            ctx.say(super::STOPPING_RESPONSE).await?;
+        Ok(Some(answer)) => {
+            ctx.say(super::stop::remote_cancel_reply(&answer)).await?;
             log_info_event!(
                 "discord_cancel_acknowledged",
                 channel_id = channel_id.get(),

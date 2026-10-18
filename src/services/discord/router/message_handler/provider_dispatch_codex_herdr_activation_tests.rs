@@ -177,3 +177,6 @@ fn a_pane_escape_settles_a_live_turn_on_its_own_abort_pg() {
     assert_eq!(own_aborts(&frames), 1, "{frames:?}");
     assert_eq!(fx.rig.sends(), prompt_sends());
 }
+
+#[path = "provider_dispatch_codex_herdr_http_cancel_tests.rs"]
+mod http_cancel;

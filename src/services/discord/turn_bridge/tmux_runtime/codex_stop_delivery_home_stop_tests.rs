@@ -307,3 +307,6 @@ fn t9_row_read_race_rechecks_the_admitted_gate_epoch_before_escape() {
         assert_eq!(result.1["reason"], "epoch_mismatch");
     });
 }
+
+#[path = "herdr_http_cancel_tests.rs"]
+mod http_cancel;
