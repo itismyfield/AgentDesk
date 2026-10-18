@@ -12541,6 +12541,7 @@ services::tui_o::writer::input_facts::resume_tests::a_repeated_blocked_record_ke
 services::tui_o::writer::input_facts::resume_tests::an_unnamed_close_ends_the_wait_and_a_prompt_after_it_opens
 services::tui_o::writer::input_facts::resume_tests::resumed_reader_keeps_the_carried_turn_until_its_own_boundary
 services::tui_o::writer::input_facts::resume_tests::turn_evidence_counts_every_fact_but_a_row_that_opens_no_turn
+services::tui_o::writer::input_facts::tests::a_prompt_inside_an_open_turn_keeps_that_turn
 services::tui_o::writer::input_facts::tests::anonymous_openers_and_sidechain_contamination_fail_closed
 services::tui_o::writer::input_facts::tests::anonymous_turn_close_preserves_idle_and_ordered_close
 services::tui_o::writer::input_facts::tests::channels_are_isolated_and_partial_or_corrupt_supply_is_not_idle
