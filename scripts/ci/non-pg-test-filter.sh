@@ -205,7 +205,9 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::turn_presence::activity::tests
   --skip services::discord::turn_presence::activity::unbound::dormancy_tests
   --skip services::discord::turn_presence::activity::unbound::herdr_bound::tests
+  --skip services::discord::turn_presence::activity::unbound::live::owner_tests
   --skip services::discord::turn_presence::activity::unbound::live::review_tests
+  --skip services::discord::turn_presence::activity::unbound::routine_owner::tests
   --skip services::discord::turn_presence::activity::unbound::tests
   --skip services::discord::turn_teardown_clearance::tests
   --skip services::dispatches::outbox_queue::replay_hold_tests
@@ -818,6 +820,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_presence::activity::unbound::tests::u_candidate_conflicts
   services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
   services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
+  services::discord::turn_presence::activity::unbound::tests::u_outside_or_elsewhere_sessions_never_hide_own_evidence
   services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
   services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
   services::discord::turn_teardown_clearance::tests::both_ancestors_judge_as_the_last_step_before_spawn
