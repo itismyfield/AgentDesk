@@ -405,6 +405,7 @@ fn herdr_capture_maps_scroll_back_and_rejects_truncation() {
             source,
             lines,
             strip_ansi: true,
+            format: None,
         };
         let herdr = host(vec![(request, read(wire_source, false))]);
         assert_eq!(
@@ -418,6 +419,7 @@ fn herdr_capture_maps_scroll_back_and_rejects_truncation() {
         source: Visible,
         lines: None,
         strip_ansi: true,
+        format: None,
     };
     let truncated = host(vec![(visible(), read("visible", true))]);
     assert!(
