@@ -713,3 +713,236 @@ async fn concurrent_phase_gate_saves_serialize_on_dispatch_row_pg() {
     assert!(error.contains("outside the locked set"), "{error}");
     fx.close().await;
 }
+
+const REVIEW_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+impl Fixture {
+    async fn review_dispatch(&self, id: &str, status: &str, context_run: Option<&str>) {
+        self.dispatch(id, status, context_run).await;
+        sqlx::query("UPDATE task_dispatches SET dispatch_type = 'review' WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .expect("mark review dispatch");
+    }
+}
+
+fn spawn_revival(
+    pool: &PgPool,
+    dispatch_id: &'static str,
+    to_status: &'static str,
+    allowed_from: Option<&'static [&'static str]>,
+) -> JoinHandle<Result<usize, String>> {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        crate::dispatch::set_dispatch_status_on_pg_async(
+            &pool,
+            dispatch_id,
+            to_status,
+            None,
+            "owner_guard_revival",
+            allowed_from,
+            false,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    })
+}
+
+type RecoveryResult = Result<serde_json::Value, (axum::http::StatusCode, String)>;
+
+fn spawn_recovery(pool: &PgPool, dispatch_id: &'static str) -> JoinHandle<RecoveryResult> {
+    let pool = pool.clone();
+    tokio::spawn(async move {
+        crate::server::routes::reviews::recover_review_target_pg_for_test(
+            &pool,
+            crate::server::routes::reviews::ReviewTargetRecoveryBody {
+                dispatch_id: Some(dispatch_id.to_string()),
+                card_id: None,
+                target_commit: Some(REVIEW_COMMIT.to_string()),
+                worktree_path: None,
+                reason: None,
+            },
+        )
+        .await
+    })
+}
+
+/// The canonical writer reviving a terminal dispatch of a run being cancelled waits on the
+/// run token and refuses once the cancel commits.
+async fn assert_revival_refused_after_cancel(
+    dispatch_id: &'static str,
+    from_status: &'static str,
+    to_status: &'static str,
+    allowed_from: Option<&'static [&'static str]>,
+) {
+    let mut fx = Fixture::new().await;
+    fx.dispatch(dispatch_id, from_status, Some(TARGET)).await;
+    let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
+
+    let writer = spawn_revival(&fx.pool, dispatch_id, to_status, allowed_from);
+    let waited = wait_for_exact_advisory_waiter(
+        &mut fx.observer,
+        AdvisoryKey::Run(TARGET),
+        holder_pid,
+        &writer,
+    )
+    .await;
+    holder.commit().await.expect("commit cancel holder");
+    let revived = writer.await.expect("join revival");
+
+    assert!(
+        revived.is_err(),
+        "cancelled run's dispatch was revived: {revived:?}"
+    );
+    assert_eq!(
+        fx.dispatch_status(dispatch_id).await.as_deref(),
+        Some(from_status)
+    );
+    waited.expect("revival must wait on the owner run token");
+    let error = revived.expect_err("refusal");
+    assert!(
+        error.contains("refusing to publish a live dispatch owner"),
+        "{error}"
+    );
+    fx.close().await;
+}
+
+/// The REST status route cannot move a failed dispatch of a cancelling run back to pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_revival_refused_for_cancelled_owner_pg() {
+    assert_revival_refused_after_cancel("d-rest-revive", "failed", "pending", None).await;
+}
+
+/// The verdict marker rollback cannot move a completed dispatch of a cancelling run back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verdict_rollback_revival_refused_for_cancelled_owner_pg() {
+    assert_revival_refused_after_cancel(
+        "d-verdict-revive",
+        "completed",
+        "dispatched",
+        Some(&["completed"]),
+    )
+    .await;
+}
+
+/// Review recovery does not requeue a failed review dispatch whose owner run is cancelled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_recovery_refuses_failed_dispatch_of_cancelled_run_pg() {
+    let fx = Fixture::new().await;
+    fx.review_dispatch("d-review-failed", "failed", Some(TARGET))
+        .await;
+    sqlx::query("UPDATE auto_queue_runs SET status = 'cancelled' WHERE id = $1")
+        .bind(TARGET)
+        .execute(&fx.pool)
+        .await
+        .expect("cancel target run");
+
+    let recovered = spawn_recovery(&fx.pool, "d-review-failed")
+        .await
+        .expect("join recovery");
+
+    assert!(
+        recovered.is_err(),
+        "cancelled run's review was requeued: {recovered:?}"
+    );
+    assert_eq!(
+        fx.dispatch_status("d-review-failed").await.as_deref(),
+        Some("failed")
+    );
+    let (status, error) = recovered.expect_err("refusal");
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{error}");
+    assert!(
+        error.contains("refusing to publish a live dispatch owner"),
+        "{error}"
+    );
+    fx.close().await;
+}
+
+/// Review recovery of a dispatch the run cancel is terminalizing waits on the run token and
+/// then refuses, instead of overwriting the cancellation once the row lock is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_recovery_waits_for_run_cancel_and_refuses_pg() {
+    let mut fx = Fixture::new().await;
+    fx.review_dispatch("d-review-live", "pending", Some(TARGET))
+        .await;
+    let (holder, holder_pid) = fx.hold_cancel(TARGET).await;
+
+    let writer = spawn_recovery(&fx.pool, "d-review-live");
+    let waited = wait_for_exact_advisory_waiter(
+        &mut fx.observer,
+        AdvisoryKey::Run(TARGET),
+        holder_pid,
+        &writer,
+    )
+    .await;
+    holder.commit().await.expect("commit cancel holder");
+    let recovered = writer.await.expect("join recovery");
+
+    assert!(
+        recovered.is_err(),
+        "recovery revived a cancelled review: {recovered:?}"
+    );
+    assert_eq!(
+        fx.dispatch_status("d-review-live").await.as_deref(),
+        Some("cancelled")
+    );
+    waited.expect("recovery must wait on the owner run token");
+    let (status, error) = recovered.expect_err("refusal");
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{error}");
+    assert!(
+        error.contains("refusing to publish a live dispatch owner"),
+        "{error}"
+    );
+    fx.close().await;
+}
+
+/// Review recovery of an unowned dispatch cancelled meanwhile waits on the guard's row lock
+/// and its status compare-and-set refuses to overwrite the cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_recovery_cas_rejects_direct_cancel_pg() {
+    let mut fx = Fixture::new().await;
+    fx.review_dispatch("d-review-direct", "pending", None).await;
+    let mut holder = fx.pool.begin().await.expect("begin direct cancel");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("direct cancel pid");
+    let cancelled = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg_tx(
+        &mut holder,
+        "d-review-direct",
+        None,
+    )
+    .await
+    .expect("direct dispatch cancel");
+    assert_eq!(cancelled, 1);
+
+    let writer = spawn_recovery(&fx.pool, "d-review-direct");
+    let waited = wait_for_exact_row_waiter(
+        &mut fx.observer,
+        "d-review-direct",
+        GUARD_ROW_LOCK,
+        holder_pid,
+        &writer,
+    )
+    .await;
+    holder.commit().await.expect("commit direct cancel");
+    let recovered = writer.await.expect("join recovery");
+
+    assert!(
+        recovered.is_err(),
+        "recovery overwrote a direct cancel: {recovered:?}"
+    );
+    assert_eq!(
+        fx.dispatch_status("d-review-direct").await.as_deref(),
+        Some("cancelled")
+    );
+    waited.expect("recovery must wait on the guard's dispatch row lock");
+    let (status, error) = recovered.expect_err("refusal");
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{error}");
+    assert!(
+        error.contains("review dispatch changed during recovery"),
+        "{error}"
+    );
+    fx.close().await;
+}
