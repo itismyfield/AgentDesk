@@ -1186,7 +1186,7 @@ pub(in crate::services::discord) async fn unbound_verdict_for_tests(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Result<String, String> {
-    super::unbound::live::verdict_for_tests(shared, provider, channel).await
+    super::unbound::live::tests::verdict_for_tests(shared, provider, channel).await
 }
 
 async fn companion_next_incarnation_keeps_terminal_meaning(channel: u64, unfinished: bool) {
