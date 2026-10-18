@@ -352,6 +352,10 @@ fn repair_credential_commands_show_only_class() {
     );
     assert!(render("Bash", json!({"command":"echo ';' mysql loader"})).is_some());
     assert!(safe_section("**Tasks**\n└ redis-cli -a CmdLeak9").is_none());
+    assert!(safe_section("Tasks\n└ Bash Launch codex").is_some());
+    for title in ["redis-cli -a CmdLeak9", "-c 'redis-cli -a CmdLeak9'"] {
+        assert!(safe_section(&format!("Tasks\n└ Bash {title}")).is_none());
+    }
 }
 
 #[test]

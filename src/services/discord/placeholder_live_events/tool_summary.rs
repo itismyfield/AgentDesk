@@ -65,6 +65,7 @@ fn credential_command(input: &str) -> bool {
         }
         let word = raw_word.replace(['\'', '"'], "").to_ascii_lowercase();
         if ASSIGNMENT.is_match(&word)
+            || (*raw_word == "Bash" && index > 0 && words[index - 1] == "└")
             || matches!(
                 word.as_str(),
                 "-" | "└" | "▶" | "✓" | "✗" | "?" | "[" | "]" | "[x]"
@@ -77,8 +78,8 @@ fn credential_command(input: &str) -> bool {
             wrapper = true;
             continue;
         }
-        if wrapper && word.starts_with('-') {
-            if word == "--" {
+        if word.starts_with('-') {
+            if wrapper && word == "--" {
                 continue;
             }
             return true;
