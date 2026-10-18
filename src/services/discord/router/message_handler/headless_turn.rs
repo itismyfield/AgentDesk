@@ -1,7 +1,8 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
 use super::*;
-use crate::services::discord::live_bridge::register_without_requeue;
+use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
 
+mod process_mailbox;
 mod routine_metadata;
 use routine_metadata::{
     fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding,
@@ -162,6 +163,8 @@ async fn start_reserved_headless_turn_admitted(
     let claim = super::super::turn_start::claim_reserved_headless_turn;
     let (session_transition_guard, cancel_token) =
         claim(shared, channel_id, request_owner, &reservation, identity).await?;
+    let process_mailbox =
+        process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path
@@ -1001,85 +1004,87 @@ async fn start_reserved_headless_turn_admitted(
     let provider_for_blocking = provider.clone();
     let execution_pool = shared.pg_pool.clone();
     let producer_registration = original_registration.clone();
-    let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
-        shared.pg_pool.as_ref(),
-        &provider,
-        channel_id.get(),
-        adk_session_key.as_deref(),
-        tmux_session_name.as_deref(),
-    )
-    .await;
-    tokio::task::spawn_blocking(move || {
-        let _original_registration = producer_registration;
-        let _upload_lifetime = materialized_uploads;
-        let result = crate::services::platform::with_provider_execution_context(
-            provider_execution_context,
-            || {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    super::provider_dispatch::execute(
-                        super::provider_dispatch::StreamingTurn {
-                            pool: execution_pool.as_ref(),
-                            provider: &provider_for_blocking,
-                            prompt: &context_prompt,
-                            session_id: session_id_clone.as_deref(),
-                            working_dir: &current_path_clone,
-                            system_prompt: Some(&system_prompt_owned),
-                            allowed_tools: &allowed_tools,
-                            cancel: cancel_token_clone,
-                            remote_profile: remote_profile.as_ref(),
-                            tmux_session_name: tmux_session_name.as_deref(),
-                            teardown: teardown_clearance.as_ref(),
-                            host: &turn_host,
-                            channel_id: channel_id.get(),
-                            model: model_for_turn.as_deref(),
-                            native_fast_mode: native_fast_mode_override,
-                            codex_goals: codex_goals_override,
-                            compact_percent: compact_percent_for_claude,
-                            compact_lower_bound_tokens,
-                            compact_token_limit: compact_token_limit_for_codex,
-                            cache_ttl_minutes,
-                            dispatch_type: None,
-                            force_fresh: force_fresh_provider_session,
-                            submission: submission.as_ref(),
-                        },
-                        replay_start,
-                        tx.clone(),
-                    )
-                }))
-            },
-        );
+    let producer = {
+        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
+            shared.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let _original_registration = producer_registration;
+            let _upload_lifetime = materialized_uploads;
+            let result = crate::services::platform::with_provider_execution_context(
+                provider_execution_context,
+                || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        super::provider_dispatch::execute(
+                            super::provider_dispatch::StreamingTurn {
+                                pool: execution_pool.as_ref(),
+                                provider: &provider_for_blocking,
+                                prompt: &context_prompt,
+                                session_id: session_id_clone.as_deref(),
+                                working_dir: &current_path_clone,
+                                system_prompt: Some(&system_prompt_owned),
+                                allowed_tools: &allowed_tools,
+                                cancel: cancel_token_clone,
+                                remote_profile: remote_profile.as_ref(),
+                                tmux_session_name: tmux_session_name.as_deref(),
+                                teardown: teardown_clearance.as_ref(),
+                                host: &turn_host,
+                                channel_id: channel_id.get(),
+                                model: model_for_turn.as_deref(),
+                                native_fast_mode: native_fast_mode_override,
+                                codex_goals: codex_goals_override,
+                                compact_percent: compact_percent_for_claude,
+                                compact_lower_bound_tokens,
+                                compact_token_limit: compact_token_limit_for_codex,
+                                cache_ttl_minutes,
+                                dispatch_type: None,
+                                force_fresh: force_fresh_provider_session,
+                                submission: submission.as_ref(),
+                            },
+                            replay_start,
+                            tx.clone(),
+                        )
+                    }))
+                },
+            );
 
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!("  [headless streaming] Error: {}", error);
-                let message = super::provider_dispatch::producer_error(
-                    submission.as_ref(),
-                    channel_id.get(),
-                    error,
-                );
-                if let Some(message) = message {
-                    let _ = tx.send(message);
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!("  [headless streaming] Error: {}", error);
+                    let message = super::provider_dispatch::producer_error(
+                        submission.as_ref(),
+                        channel_id.get(),
+                        error,
+                    );
+                    if let Some(message) = message {
+                        let _ = tx.send(message);
+                    }
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
+                        value.clone()
+                    } else if let Some(value) = panic_info.downcast_ref::<&str>() {
+                        value.to_string()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!("  [headless streaming] PANIC: {}", msg);
+                    let _ = tx.send(StreamMessage::Error {
+                        message: format!("Internal error (panic): {}", msg),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: None,
+                    });
                 }
             }
-            Err(panic_info) => {
-                let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
-                    value.clone()
-                } else if let Some(value) = panic_info.downcast_ref::<&str>() {
-                    value.to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                tracing::error!("  [headless streaming] PANIC: {}", msg);
-                let _ = tx.send(StreamMessage::Error {
-                    message: format!("Internal error (panic): {}", msg),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                });
-            }
-        }
-    });
+        })
+    };
 
     if !inflight_state.silent_turn {
         super::typing_indicator::spawn_native_typing_indicator(
@@ -1089,6 +1094,7 @@ async fn start_reserved_headless_turn_admitted(
             inflight_state.effective_finalizer_turn_id(),
         );
     }
+    let completion_tx = process_mailbox.map(|mailbox| mailbox.watch(producer));
     spawn_turn_bridge(
         shared.clone(),
         cancel_token,
@@ -1117,7 +1123,7 @@ async fn start_reserved_headless_turn_admitted(
             new_session_id: session_id,
             defer_watcher_resume: false,
             reuse_status_panel_message: false,
-            completion_tx: None,
+            completion_tx,
             is_external_input_tui_direct: false, // #3089 A6b: Discord-origin (not external-input)
             inflight_state,
         },
@@ -1127,15 +1133,6 @@ async fn start_reserved_headless_turn_admitted(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
-}
-
-async fn register_headless_original(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &InflightTurnState,
-    cancel: &Arc<CancelToken>,
-) -> Result<Option<Arc<crate::services::discord::live_bridge::OriginalRegistration>>, bool> {
-    register_without_requeue(shared, provider, state, cancel).await
 }
 
 #[cfg(test)]

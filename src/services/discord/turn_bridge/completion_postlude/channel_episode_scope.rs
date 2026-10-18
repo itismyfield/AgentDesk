@@ -459,6 +459,7 @@ mod tests {
                 "services/discord/live_bridge/guard_tests.rs",
                 "services/discord/recovery_engine/restore_inflight.rs",
                 "services/discord/router/message_handler/headless_turn.rs",
+                "services/discord/router/message_handler/headless_turn/process_mailbox/bridge_tests.rs",
                 "services/discord/router/message_handler/intake_turn.rs",
                 "services/discord/tui_prompt_relay/claude_idle_bridge.rs",
                 "services/discord/turn_bridge/entry_abort_cold_error_tests.rs",
@@ -511,6 +512,34 @@ mod tests {
             )
         );
         assert!(headless_claim.contains("Ok((transition, cancel_token))"));
+        let process_fixture: String =
+            include_str!("../../router/message_handler/headless_turn/process_mailbox/tests.rs")
+                .split_whitespace()
+                .collect();
+        assert!(process_fixture.contains("lettoken=Arc::new(CancelToken::new());"));
+        assert!(process_fixture.contains("letmailbox=shared.mailbox(channel);"));
+        assert!(process_fixture.contains(concat!(
+            "mailbox.try_start_turn(token.clone(),",
+            "UserId::new(7),MessageId::new(user_message_id))"
+        )));
+        assert!(
+            process_fixture
+                .contains("letlease=capture((&shared,channel),&token,Some(&process_metadata()))")
+        );
+        assert!(process_fixture.contains("Self{shared,channel,token,mailbox,}"));
+        let process_bridge = include_str!(
+            "../../router/message_handler/headless_turn/process_mailbox/bridge_tests.rs"
+        );
+        assert_eq!(process_bridge.matches(&spawn).count(), 1);
+        let process_bridge: String = process_bridge.split_whitespace().collect();
+        assert!(
+            process_bridge
+                .contains("Fixture::with_user_message(ProviderKind::Codex,USER_MESSAGE).await;")
+        );
+        assert!(process_bridge.contains(concat!(
+            "spawn_turn_bridge(fixture.shared.clone(),",
+            "fixture.token.clone(),rx,context);"
+        )));
         let recovery_tokens: String = recovery.split_whitespace().collect();
         assert_eq!(
             recovery_tokens.matches("mailbox_recovery_kickoff(").count(),

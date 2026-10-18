@@ -1479,7 +1479,11 @@ src/
 │   │   │   │   └── thread_guard_release.rs
 │   │   │   ├── message_handler/
 │   │   │   │   ├── headless_turn/
+│   │   │   │   │   ├── process_mailbox/
+│   │   │   │   │   │   ├── bridge_tests.rs
+│   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── entrypoints.rs
+│   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── dispatch_stamp/
@@ -3018,7 +3022,8 @@ src/
 │   │   │   ├── mend_tests.rs
 │   │   │   └── prefix.rs
 │   │   ├── registry_purge/
-│   │   │   └── closed_gate_tests.rs
+│   │   │   ├── closed_gate_tests.rs
+│   │   │   └── current_entry_tests.rs
 │   │   ├── active_source_dedup.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs

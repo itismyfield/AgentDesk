@@ -1458,10 +1458,10 @@ enum ChannelMailboxMsg {
         age: Duration,
         reply: oneshot::Sender<()>,
     },
-    /// #3297 r2 (codex) — registry purge: verify idleness and set the `closed`
-    /// tombstone in ONE serialized actor step, closing the snapshot→unlink
-    /// TOCTOU race. Full rationale + verdict logic live in `registry_purge.rs`.
+    /// Idle purge checks and tombstones in one actor step, closing the snapshot→unlink race.
+    /// See `registry_purge.rs` for the optional claim guard and unlink protocol.
     CloseIfIdle {
+        expected_claim: Option<ClaimObservation>,
         reply: oneshot::Sender<Result<(), &'static str>>,
     },
     /// Busy-turn injection order; see `injected_inputs.rs`.
@@ -2710,8 +2710,8 @@ fn input_mailbox_step(
             }
             let _ = reply.send(());
         }
-        ChannelMailboxMsg::CloseIfIdle { reply } => {
-            let _ = reply.send(registry_purge::close_if_idle_verdict(&mut state));
+        msg @ ChannelMailboxMsg::CloseIfIdle { .. } => {
+            registry_purge::answer_close_if_idle(&mut state, msg)
         }
         ChannelMailboxMsg::Injection(msg) => injected_inputs::step(&mut state, channel_id, msg),
     }
