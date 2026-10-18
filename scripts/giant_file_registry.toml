@@ -730,46 +730,6 @@ owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
-# output-offset relay-dedup authority: the idle-JSONL relay loop now consults
-# `committed_relay_offset` (read-only) with generation-aware watermark resets to
-# de-duplicate inflight-less wake/background relays against the tmux watcher.
-# #5071 T0-S4 moved the terminal outcome fold and RelaySink::deliver to
-# session_relay_sink/terminal_handoff.rs; the root remains giant at 1498 prod
-# LoC as measured by scripts/generate_inventory_docs.py.
-# Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
-#
-# DEADLINE RESET 2026-08-31 -> 2026-10-31 on 2026-09-07 (#5742). The prior date
-# lapsed and broke the inventory gate for a week, so the new one is recorded
-# with its reasoning instead of a bare number:
-#   1. Blocked on cost, not on will. Decomposing this root is not a
-#      self-contained move -- three guards pin it by path and by call-site
-#      count, and every one has to be repinned in the same change:
-#      scripts/check_delivery_journal_raw_writer.py (root + `deliver_response`),
-#      scripts/check_durable_frontier_writer_call_sites.py (four path->count
-#      maps naming the root), and scripts/run_relay_authority_mutations.sh
-#      (SESSION_RELAY_SINK plus four delivery_orchestration_tests targets).
-#      That closure is wider than a reviewable PR, which is what the
-#      2026-08-31 date had assumed it would not be.
-#   2. The surface is still moving. The idle-relay loop reads
-#      `committed_relay_offset`, and the #5071 T5 relay-authority rollout
-#      (Legacy -> observe -> enforce) is rewriting exactly that authority.
-#      Splitting the loop before T5 settles means cutting the same code twice.
-#   3. 2026-10-31 is not a fresh guess: it is the date the other thirteen
-#      discord-relay #4712 entries already carry. Folding this path into that
-#      wave buys one decomposition round for the whole cohort and removes the
-#      lone private deadline that drifted unnoticed. If T5 has not settled by
-#      then, move this entry with the cohort rather than alone.
-# The 2026-09-04 retirement decision is recorded on #5447; health/snapshot.rs
-# is now keep and its pointer/deadline cleanup is resolved. #4229 remains pending.
-#
-# The fourteen 2026-10-31 entries still need a cohort-wide disposition.
-# `pr_ordinary_no_regression` permits reclassification without new/growing giants or pin increases.
-file = "src/services/discord/session_relay_sink.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
 
 # TRANSITION-LIST CLEANUP 2026-09-07 (#5742): four paths were still listed in
 # scripts/giant_file_closed_issue_transition_list.txt after their decompositions
