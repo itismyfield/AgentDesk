@@ -244,6 +244,7 @@ src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tes
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs
+src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs
 src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs
 src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs
@@ -592,6 +593,7 @@ services::discord::tmux_reaper::host_guard_tests
 services::discord::tui_prompt_relay::herdr_source::tests
 services::discord::tui_prompt_relay::rehydration::tests::host_defer
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::idle_echo
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
@@ -2139,6 +2141,8 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::a_vetoed_paste_
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_aborted_intake_leaves_the_owner_to_record_the_injection_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_refused_before_its_reservation_leaves_the_message_to_intake_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::an_owner_that_dies_outside_the_effect_reports_the_input_unknown_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::idle_echo::r1_idle_inject_has_no_direct_terminal_notice_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::idle_echo::r1_unsent_full_frame_keeps_external_direct_notice_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::postgres_runtime_helpers_keep_bootstrap_futures_off_the_test_stack
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::startup_recovery_and_a_restart_drain_keep_text_from_the_pane_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_parent_arrival_after_the_thread_took_the_message_does_not_paste_pg

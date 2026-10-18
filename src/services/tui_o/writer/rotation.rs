@@ -44,6 +44,8 @@ const PENDING_BIND_ALARM_SECS: i64 = 60;
 
 #[path = "rotation/claude_boundary.rs"]
 mod claude_boundary;
+#[path = "rotation/clear_end.rs"]
+mod clear_end;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
@@ -147,6 +149,9 @@ pub struct Sources<B> {
     /// The history needed to identify legacy hops has not been read successfully yet.
     legacy_hops_unread: bool,
     names: Names,
+    /// Clear ends published for this channel, and whether they must be matched again.
+    clear_notice: watch::Receiver<u64>,
+    clear_due: bool,
     reader_config: Option<ReaderConfig>,
     last_wall: Option<SystemTime>,
     validation: Option<Validation>,
@@ -306,6 +311,8 @@ impl<B: BindingEvents> Sources<B> {
             legacy_hops: HashMap::new(),
             legacy_hops_unread: false,
             names: Names::new(provider),
+            clear_notice: crate::services::tui_o::store::clear_end::subscribe(channel),
+            clear_due: false,
             reader_config: None,
             last_wall: None,
             validation: None,
@@ -394,7 +401,7 @@ impl<B: BindingEvents> Sources<B> {
             },
         };
         if *self.notice.borrow() <= checkpoint {
-            return Ok(());
+            return self.settle_cleared(writer);
         }
         if self.legacy_hops_unread {
             self.restore_legacy_hops(writer)?;
@@ -465,13 +472,14 @@ impl<B: BindingEvents> Sources<B> {
                     self.bind(writer, event, old, new, *cause, parent)?;
                 }
                 self.prove(writer, event)?;
+                self.clear_due = true;
             }
             let moved = writer.store().set_binding_checkpoint(event.seq);
             moved.map_err(halted("binding checkpoint"))?;
             self.checkpoint = Some(event.seq);
             expected += 1;
         }
-        Ok(())
+        self.settle_cleared(writer)
     }
 
     /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.
@@ -536,8 +544,7 @@ impl<B: BindingEvents> Sources<B> {
         let Some(session) = proving_session(event) else {
             return Ok(());
         };
-        let mut proved = false;
-        let mut wake = Vec::new();
+        let mut proved = Vec::new();
         for (key, next) in &mut self.rotation.successors {
             let made = match (next.seq, next.tmux_session.as_deref()) {
                 (Some(seq), Some(tmux)) => Some((seq, tmux)),
@@ -549,25 +556,13 @@ impl<B: BindingEvents> Sources<B> {
                 made.is_some_and(|(seq, tmux)| seq <= event.seq && tmux == event.tmux_session);
             if next.proof.is_none() && ours && left {
                 next.proof = Some(event.seq);
-                proved = true;
-                if self.reader_config.is_some() {
-                    wake.push(key.clone());
-                }
+                proved.push(key.clone());
             }
         }
-        if proved {
+        if !proved.is_empty() {
             let written = writer.store().write_rotation(&self.rotation);
             written.map_err(halted("rotation"))?;
-            for key in wake {
-                if let Some(index) = self
-                    .readers
-                    .iter()
-                    .position(|r| source_key(&r.source) == key)
-                {
-                    self.readers[index].quiet = None;
-                    self.wake(writer, index)?;
-                }
-            }
+            self.wake_proven(writer, proved)?;
         }
         Ok(())
     }

@@ -327,7 +327,7 @@ async fn retained_or_unreadable_inflight_is_preserved_with_its_actor() {
                 None,
                 0,
             );
-            row.turn_nonce = fixture.token.turn_nonce().map(str::to_owned);
+            row.turn_nonce = Some("foreign-retained-episode".into());
             inflight::save_inflight_state(&row).unwrap();
             let path = inflight::inflight_state_path(
                 &inflight::inflight_runtime_root().unwrap(),
@@ -362,30 +362,9 @@ async fn retained_or_unreadable_inflight_is_preserved_with_its_actor() {
 #[tokio::test]
 async fn admission_watcher_and_token_guards_preserve_the_actor() {
     with_isolated_runtime_root(|| async {
-        for guard in [
-            "admission",
-            "restored_owner",
-            "uncancelled",
-            "restart",
-            "token_tmux",
-        ] {
+        for guard in ["restored_owner", "restart", "token_tmux"] {
             let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
-            if guard == "uncancelled" {
-                fixture.finish(&fixture.token).await;
-            } else {
-                fixture.settle(false).await;
-            }
-            let transition = if guard == "admission" {
-                Some(
-                    fixture
-                        .shared
-                        .session_transition_lock(fixture.channel)
-                        .lock_owned()
-                        .await,
-                )
-            } else {
-                None
-            };
+            fixture.settle(false).await;
             let owner_name = format!("fixture-restored-owner-{}", fixture.channel);
             match guard {
                 "restored_owner" => {
@@ -414,7 +393,6 @@ async fn admission_watcher_and_token_guards_preserve_the_actor() {
             }
             finalize(lease).await;
             fixture.assert_same_actor_retained();
-            drop(transition);
         }
     })
     .await;
@@ -435,16 +413,9 @@ async fn live_process_group_preserves_actor_until_the_captured_group_is_gone() {
     }
     with_isolated_runtime_root(|| async {
         let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
-        let after_exit = capture(
-            (&fixture.shared, fixture.channel),
-            &fixture.token,
-            Some(&process_metadata()),
-        )
-        .await
-        .unwrap();
         let mut child = ChildGuard(
             Command::new("/bin/sleep")
-                .arg("30")
+                .arg("1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -456,23 +427,269 @@ async fn live_process_group_preserves_actor_until_the_captured_group_is_gone() {
         fixture.token.store_child_pid(pid);
         assert_eq!(process_group_probe(pid), ProcessGroupProbe::Live);
         fixture.settle(false).await;
-        finalize(lease).await;
+        let retirement = finalize(lease);
+        tokio::pin!(retirement);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut retirement)
+                .await
+                .is_err(),
+            "the original callback must wait for its live process group"
+        );
         fixture.assert_same_actor_retained();
         assert!(
             child.0.try_wait().unwrap().is_none(),
             "retirement must not terminate the producer"
         );
-        child.0.kill().unwrap();
-        child.0.wait().unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while process_group_probe(pid) != ProcessGroupProbe::Gone {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            tokio::join!(retirement, async {
+                while child.0.try_wait().unwrap().is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert_eq!(process_group_probe(pid), ProcessGroupProbe::Gone);
+            });
         })
         .await
-        .expect("the fixture's own process group must disappear");
-        finalize(after_exit).await;
+        .expect("the single original callback must retire after its own child naturally exits");
         assert!(fixture.shared.mailbox_peek(fixture.channel).is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn delayed_transition_unlock_retries_the_original_completion_callback() {
+    with_isolated_runtime_root(|| async {
+        let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
+        fixture.settle(false).await;
+        let transition = fixture
+            .shared
+            .session_transition_lock(fixture.channel)
+            .lock_owned()
+            .await;
+        let retirement = finalize(lease);
+        tokio::pin!(retirement);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut retirement)
+                .await
+                .is_err(),
+            "the original completion callback must retry a busy admission transition"
+        );
+        fixture.assert_same_actor_retained();
+        drop(transition);
+        tokio::time::timeout(Duration::from_secs(3), retirement)
+            .await
+            .expect("unlocking admission must let the original callback remove its actor");
+        assert!(fixture.shared.mailbox_peek(fixture.channel).is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn retry_never_removes_a_new_idle_actor_or_a_later_idle_claim() {
+    use crate::services::turn_orchestrator::registry_purge::MailboxPurgeOutcome;
+    with_isolated_runtime_root(|| async {
+        for replace_actor in [true, false] {
+            let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
+            fixture.settle(false).await;
+            let transition = fixture
+                .shared
+                .session_transition_lock(fixture.channel)
+                .lock_owned()
+                .await;
+            let retirement = finalize(lease);
+            tokio::pin!(retirement);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut retirement)
+                    .await
+                    .is_err()
+            );
+            let successor_actor = if replace_actor {
+                assert_eq!(
+                    fixture
+                        .shared
+                        .mailboxes
+                        .remove_idle_entry(fixture.channel)
+                        .await,
+                    MailboxPurgeOutcome::Removed
+                );
+                let successor = fixture.shared.mailbox(fixture.channel);
+                assert!(!successor.same_actor(&fixture.mailbox));
+                successor
+            } else {
+                let successor = Arc::new(CancelToken::new());
+                assert!(
+                    fixture
+                        .mailbox
+                        .try_start_turn(successor.clone(), UserId::new(7), MessageId::new(124),)
+                        .await
+                );
+                successor.mark_completion_cleanup();
+                successor.cancelled.store(true, Ordering::Release);
+                fixture.finish(&successor).await;
+                fixture.mailbox.clone()
+            };
+            let observed = successor_actor.snapshot().await.claim_observation;
+            drop(transition);
+            tokio::time::timeout(Duration::from_secs(3), retirement)
+                .await
+                .expect("a superseded callback must stop rather than recapture the current actor");
+            let retained = fixture
+                .shared
+                .mailbox_peek(fixture.channel)
+                .expect("idle successor remains registered");
+            assert!(retained.same_actor(&successor_actor));
+            let snapshot = retained.snapshot().await;
+            assert!(snapshot.cancel_token.is_none());
+            assert_eq!(snapshot.claim_observation, observed);
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn watcher_admitted_during_retry_preserves_the_original_actor() {
+    use crate::services::discord::tmux_watcher_registry::{TmuxWatcherHandle, tmux_watcher_now_ms};
+    use std::sync::atomic::{AtomicBool, AtomicI64};
+    with_isolated_runtime_root(|| async {
+        let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
+        fixture.settle(false).await;
+        let transition = fixture
+            .shared
+            .session_transition_lock(fixture.channel)
+            .lock_owned()
+            .await;
+        let retirement = finalize(lease);
+        tokio::pin!(retirement);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut retirement)
+                .await
+                .is_err()
+        );
+        let name = format!("fixture-watcher-admitted-during-retry-{}", fixture.channel);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(true));
+        let resume = Arc::new(std::sync::Mutex::new(Some(77)));
+        fixture.shared.tmux_watchers.insert(
+            fixture.channel,
+            TmuxWatcherHandle {
+                tmux_session_name: name.clone(),
+                output_path: format!("/fixture/{name}.jsonl"),
+                paused: paused.clone(),
+                resume_offset: resume.clone(),
+                cancel: cancel.clone(),
+                pause_epoch: Arc::new(AtomicU64::new(3)),
+                turn_delivered: Arc::new(AtomicBool::new(true)),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(tmux_watcher_now_ms())),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(3), retirement)
+            .await
+            .expect("watcher admission must stop the original retry while admission remains busy");
+        fixture.assert_same_actor_retained();
+        let retained = fixture
+            .shared
+            .tmux_watchers
+            .get(&fixture.channel)
+            .expect("new watcher remains registered");
+        assert_eq!(retained.tmux_session_name, name);
+        assert!(Arc::ptr_eq(&retained.cancel, &cancel));
+        assert!(Arc::ptr_eq(&retained.paused, &paused));
+        assert!(Arc::ptr_eq(&retained.resume_offset, &resume));
+        assert!(!cancel.load(Ordering::Acquire));
+        assert!(paused.load(Ordering::Acquire));
+        assert_eq!(*resume.lock().unwrap(), Some(77));
+        drop(retained);
+        let (_, removed) = fixture
+            .shared
+            .tmux_watchers
+            .remove(&fixture.channel)
+            .expect("remove only the fixture's watcher after verifying it was untouched");
+        assert!(Arc::ptr_eq(&removed.cancel, &cancel));
+        drop(transition);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        fixture.assert_same_actor_retained();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn delayed_episode_state_settlement_retries_the_original_completion_callback() {
+    with_isolated_runtime_root(|| async {
+        for pending_row in [false, true] {
+            let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
+            let row = if pending_row {
+                fixture.settle(false).await;
+                let mut row = inflight::InflightTurnState::new(
+                    fixture.shared.provider.clone(),
+                    fixture.channel.get(),
+                    None,
+                    7,
+                    123,
+                    456,
+                    "late episode settlement".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                );
+                row.turn_nonce = fixture.token.turn_nonce().map(str::to_owned);
+                row.runtime_kind =
+                    Some(crate::services::agent_protocol::RuntimeHandoffKind::ProcessBackend);
+                inflight::save_inflight_state(&row).unwrap();
+                Some(row)
+            } else {
+                None
+            };
+            let retirement = finalize(lease);
+            tokio::pin!(retirement);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), &mut retirement)
+                    .await
+                    .is_err(),
+                "the original completion callback must wait for its exact episode to settle"
+            );
+            fixture.assert_same_actor_retained();
+            if let Some(row) = row {
+                assert_eq!(
+                    inflight::clear_inflight_state_for_captured_episode(
+                        &fixture.shared.provider,
+                        fixture.channel.get(),
+                        &inflight::InflightTurnIdentity::from_state(&row),
+                        fixture.token.turn_nonce(),
+                    ),
+                    inflight::GuardedClearOutcome::Cleared
+                );
+            } else {
+                fixture.settle(false).await;
+            }
+            tokio::time::timeout(Duration::from_secs(3), retirement)
+                .await
+                .expect("late episode settlement must let the original callback retire its actor");
+            assert!(fixture.shared.mailbox_peek(fixture.channel).is_none());
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn settlement_retry_budget_expires_with_the_original_actor_retained() {
+    with_isolated_runtime_root(|| async {
+        let (fixture, lease) = Fixture::new(ProviderKind::Codex).await;
+        // The actor is idle, but its captured token has not received finalizer cleanup yet.
+        fixture.finish(&fixture.token).await;
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(7), finalize(lease))
+            .await
+            .expect(
+                "an unsettled episode must not keep its retirement callback alive indefinitely",
+            );
+        assert!(
+            started.elapsed() >= Duration::from_secs(4),
+            "the callback must actually retry"
+        );
+        fixture.assert_same_actor_retained();
+        assert!(!fixture.token.cancelled.load(Ordering::Acquire));
+        assert!(fixture.mailbox.snapshot().await.cancel_token.is_none());
     })
     .await;
 }
