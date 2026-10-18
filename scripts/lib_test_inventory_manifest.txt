@@ -5626,6 +5626,7 @@ services::discord::placeholder_live_events::tool_activity::tests::activity_turn_
 services::discord::placeholder_live_events::tool_activity::tests::activity_unmatched_result_and_ring_eviction_fail_closed
 services::discord::placeholder_live_events::tool_activity::tests::activity_whole_panel_does_not_repeat_secret_descriptions_in_other_sections
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::claude_and_codex_aliases_share_classes_and_summaries
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::credential_wrappers_spaced_keys_and_prose_mask_their_values
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::existing_sections_share_the_secret_boundary_without_losing_lines_or_markdown
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::markdown_mentions_lengths_and_unrecognized_inputs_fail_safely
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::paths_are_relative_private_or_anonymous_before_display
@@ -5637,6 +5638,8 @@ services::discord::placeholder_live_events::tool_summary::tool_summary_tests::re
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_natural_language_credentials_mask_the_value
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::repair_userpass_arguments_hide_both_halves
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::secret_corpus_masks_each_value_and_quoted_fragment
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::shell_references_and_substitutions_remain_visible_with_masked_values
+services::discord::placeholder_live_events::tool_summary::tool_summary_tests::shell_wrappers_unwrap_one_argument_without_rejecting_non_shell_tools
 services::discord::placeholder_live_events::tool_summary::tool_summary_tests::urls_and_mcp_names_never_show_arguments_or_url_credentials
 services::discord::placeholder_live_events::turn_anchor::tests::blank_guild_omits_link
 services::discord::placeholder_live_events::turn_anchor::tests::id_zero_omits_link

@@ -80,8 +80,8 @@ fn credential_command(input: &str) -> bool {
         {
             continue;
         }
-        if word.contains(char::is_whitespace) {
-            return credential_command(&word);
+        if word.contains(char::is_whitespace) || word.starts_with(['$', '\u{e002}']) {
+            return true;
         }
         let executable = word.rsplit('/').next().unwrap_or(&word);
         if executable == "timeout"
@@ -186,7 +186,7 @@ fn redact_env(input: &str) -> String {
 fn redact_prose(input: &str) -> String {
     static PROSE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)((?:\b(?:password|passwd|secret|token|pw|pwd|passphrase|api[ _-]?key)\b|비밀번호(?:는)?)[ \t]*(?:(?:is\b|was\b|[:=])[ \t]*)*)({WORD})"
+            r"(?i)((?:\b(?:password|passwd|secret|token|pw|passphrase|api[ _-]?key)\b|비밀번호(?:는)?)(?:[ \t]+|[ \t]*[:=][ \t]*)(?:(?:is\b|was\b|[:=])[ \t]*)*)({WORD})"
         ))
         .expect("credential prose")
     });
@@ -211,7 +211,7 @@ fn redact_credentials(input: &str) -> String {
     });
     static FLAGS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)((?:^|[\s;&|])(?:--(?:password|passwd|token|api[_-]?key|secret|client[_-]secret)(?:[ \t]*=[ \t]*|[ \t]+)|-p[ \t]*))({WORD})"
+            r"(?i)((?:^|[\s;&|])(?:--(?:password|passwd|token|api[_-]?key|secret|client[_-]secret)(?:[ \t]*=[ \t]*|[ \t]+)|-p))({WORD})"
         )).expect("credential flags")
     });
     static ASSIGNMENTS: LazyLock<Regex> = LazyLock::new(|| {
@@ -221,7 +221,7 @@ fn redact_credentials(input: &str) -> String {
     });
     static POSITIONAL: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)(\b(?:redis-cli[ \t]+-a|htpasswd[ \t]+-b[ \t]+{WORD}[ \t]+{WORD})[ \t]+)({WORD})"
+            r"(?i)(\b(?:sshpass[ \t]+-p|redis-cli[ \t]+-a|htpasswd[ \t]+-b[ \t]+{WORD}[ \t]+{WORD})[ \t]+)({WORD})"
         ))
         .expect("credential argument values")
     });
@@ -313,7 +313,7 @@ fn sanitized(raw: &str) -> Option<String> {
     }) || raw.contains('\0')
         || lower.contains("--password-stdin")
         || env_key.is_some_and(|end| probe[end..].trim().is_empty())
-        || (credential_syntax && !balanced_quotes(raw))
+        || (credential_syntax && (!balanced_quotes(raw) || raw.contains(['$', '`'])))
         || (raw.contains('\\')
             && (credential_syntax
                 || redact_tokens(&probe) != probe
@@ -374,7 +374,10 @@ pub(super) fn safe_section(raw: &str) -> Option<String> {
 }
 
 fn text(raw: &str, limit: usize) -> Option<String> {
-    let masked = sanitized(raw)?;
+    text_masked(&sanitized(raw)?, limit)
+}
+
+fn text_masked(masked: &str, limit: usize) -> Option<String> {
     let first = masked.lines().next()?.trim();
     if first.is_empty() {
         return None;
@@ -400,7 +403,7 @@ fn text(raw: &str, limit: usize) -> Option<String> {
 }
 
 fn shell_text(raw: &str) -> Option<String> {
-    text(&shell_masked(raw, 0)?, 80)
+    text_masked(&shell_masked(raw, 0)?, 80)
 }
 
 fn shell_masked(raw: &str, depth: usize) -> Option<String> {
@@ -417,6 +420,7 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
         );
     }
     let mut masked = String::new();
+    let mut substitutions = Vec::new();
     let mut cursor = 0;
     while cursor < raw.len() {
         let tail = &raw[cursor..];
@@ -437,9 +441,13 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
                 })?
             };
             let inner = shell_masked(&raw[start..end], depth + 1)?;
-            masked.push_str(if ch == '`' { "`" } else { "$(" });
-            masked.push_str(&inner);
-            masked.push(if ch == '`' { '`' } else { ')' });
+            let substitution = if ch == '`' {
+                format!("`{inner}`")
+            } else {
+                format!("$({inner})")
+            };
+            substitutions.push(substitution);
+            masked.push_str(&format!("\u{e002}{}\u{e003}", substitutions.len() - 1));
             cursor = end + 1;
             continue;
         }
@@ -459,7 +467,23 @@ fn shell_masked(raw: &str, depth: usize) -> Option<String> {
     if credential_command(&masked) {
         return None;
     }
-    sanitized(&masked)
+    static REFERENCES: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|\{[a-zA-Z_][a-zA-Z0-9_]*\})")
+            .expect("visible variable references")
+    });
+    let mut references = Vec::new();
+    let protected = REFERENCES.replace_all(&masked, |capture: &regex::Captures<'_>| {
+        references.push(capture[0].to_string());
+        format!("\u{e000}{}\u{e001}", references.len() - 1)
+    });
+    let mut masked = sanitized(&protected)?;
+    for (index, reference) in references.iter().enumerate() {
+        masked = masked.replace(&format!("\u{e000}{index}\u{e001}"), reference);
+    }
+    for (index, substitution) in substitutions.iter().enumerate() {
+        masked = masked.replace(&format!("\u{e002}{index}\u{e003}"), substitution);
+    }
+    Some(masked)
 }
 
 fn balanced_quotes(raw: &str) -> bool {

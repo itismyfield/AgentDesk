@@ -218,12 +218,10 @@ pub(super) fn build_bridge_single_message_panel_status_block(
 ) -> String {
     if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
         let content = (full_response, indicator);
-        return shared.ui.placeholder_live_events.render_footer(
-            channel_id,
-            provider,
-            started_at_unix,
-            content,
-        );
+        return shared
+            .ui
+            .placeholder_live_events
+            .render_footer_status_panel(channel_id, provider, started_at_unix, content);
     }
     if shared.ui.status_panel_v2_enabled {
         super::formatting::build_processing_status_block(indicator)

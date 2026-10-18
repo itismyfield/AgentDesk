@@ -2,7 +2,7 @@ use super::*;
 use crate::config::ToolActivityDisplay;
 
 impl PlaceholderLiveEvents {
-    pub(in crate::services::discord) fn render_footer(
+    pub(in crate::services::discord) fn render_footer_status_panel(
         &self,
         channel_id: ChannelId,
         provider: &ProviderKind,

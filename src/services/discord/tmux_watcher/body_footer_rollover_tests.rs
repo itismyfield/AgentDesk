@@ -9,6 +9,7 @@ fn watcher_body_footer_preserves_class_rollover_for_ascii_and_korean() {
     let channel = ChannelId::new(8_071_602);
     let class = six_tool_fixture(ToolActivityDisplay::Class, channel);
     let summary = six_tool_fixture(ToolActivityDisplay::Summary, channel);
+    let (mut frames, mut visible, mut planner_ns) = (0usize, 0usize, 0u128);
     for provider in [ProviderKind::Claude, ProviderKind::Codex] {
         let block = |shared: &Arc<SharedData>, body: &str| {
             build_watcher_single_message_panel_status_block(
@@ -33,7 +34,41 @@ fn watcher_body_footer_preserves_class_rollover_for_ascii_and_korean() {
                     plan(&class, &expected),
                     "{provider:?} {unit} {len}"
                 );
-                if body.is_empty() {
+                if !body.is_empty() {
+                    frames += 1;
+                    visible += usize::from(actual.contains("fixture0"));
+                }
+                let started = std::time::Instant::now();
+                std::hint::black_box((
+                    crate::services::discord::formatting::plan_streaming_rollover(&body, &actual),
+                    crate::services::discord::formatting::plan_streaming_rollover(&body, &expected),
+                ));
+                planner_ns += started.elapsed().as_nanos();
+                for offset in [0, body.len() / 2, body.len().saturating_sub(unit.len())] {
+                    let offset = offset - offset % unit.len();
+                    let tail = &body[offset..];
+                    let banner = format!(
+                        "{}\n(최근 대화 {}개를 읽어들였습니다)\n\n{tail}",
+                        "🙂".repeat(100),
+                        usize::MAX
+                    );
+                    for rendered in [tail, banner.as_str()] {
+                        let splits = |footer: &str| {
+                            rollover_splits(rendered, |rest, _| {
+                                crate::services::discord::formatting::plan_streaming_rollover(
+                                    rest, footer,
+                                )
+                                .map(|p| p.split_at)
+                            })
+                        };
+                        assert_eq!(
+                            splits(&actual),
+                            splits(&expected),
+                            "offset={offset} len={len}"
+                        );
+                    }
+                }
+                if len <= 500 {
                     assert!(
                         actual.contains("도구 6") && actual.contains("fixture0"),
                         "{actual}"
@@ -41,7 +76,8 @@ fn watcher_body_footer_preserves_class_rollover_for_ascii_and_korean() {
                 }
             }
         }
-        assert_eq!(block(&summary, "body"), block(&class, "body"));
+        assert!(block(&summary, "body").contains("fixture0"));
+        assert!(!block(&class, "body").contains("fixture0"));
         let panel = summary
             .ui
             .placeholder_live_events
@@ -51,4 +87,8 @@ fn watcher_body_footer_preserves_class_rollover_for_ascii_and_korean() {
             "{panel}"
         );
     }
+    println!(
+        "FOOTER_VISIBILITY watcher nonempty={frames} summary={visible} planner_pair_mean_ns={}",
+        planner_ns / 964
+    );
 }

@@ -282,8 +282,25 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         ("inspect xoxr-SmallLeak9", &["xoxr-SmallLeak9"]),
         ("inspect shpat_SmallLeak9", &["shpat_SmallLeak9"]),
         ("inspect SG.SmallLeak9.part", &["SG.SmallLeak9.part"]),
+        ("echo $HOME ${PROJECT} ghp_RefLeak9", &["ghp_RefLeak9"]),
+        ("DB_PASS=RefLeak9 echo $HOME", &["RefLeak9"]),
+        ("echo $(client --password SubLeak9)", &["SubLeak9"]),
+        ("echo `client --password TickLeak9`", &["TickLeak9"]),
+        (
+            "echo $HOME https://UsrLeak9:PwdLeak9@example.test",
+            &["UsrLeak9", "PwdLeak9"],
+        ),
+        ("curl $HOST/path?sig=SignedLeak9", &["SignedLeak9"]),
+        ("npm config set _authToken SpacedLeak9", &["SpacedLeak9"]),
+        (
+            "rclone config secret_access_key SpacedLeak9",
+            &["SpacedLeak9"],
+        ),
+        ("the password was ProseLeak9", &["ProseLeak9"]),
+        ("비밀번호는 KoreanLeak9", &["KoreanLeak9"]),
+        ("비밀번호: KoreanLeak9", &["KoreanLeak9"]),
     ];
-    assert_eq!(cases.len(), 69);
+    assert_eq!(cases.len(), 80);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let input =
@@ -351,7 +368,11 @@ fn repair_credential_commands_show_only_class() {
         Some("**Plan**\n- [ ] fix mysql loader")
     );
     assert!(render("Bash", json!({"command":"echo ';' mysql loader"})).is_some());
-    assert!(safe_section("**Tasks**\n└ redis-cli -a CmdLeak9").is_none());
+    assert!(
+        !safe_section("**Tasks**\n└ redis-cli -a CmdLeak9")
+            .unwrap()
+            .contains("CmdLeak9")
+    );
     assert!(safe_section("Tasks\n└ Bash Launch codex").is_some());
     for title in ["redis-cli -a CmdLeak9", "-c 'redis-cli -a CmdLeak9'"] {
         assert!(safe_section(&format!("Tasks\n└ Bash {title}")).is_none());
@@ -710,4 +731,166 @@ fn existing_sections_share_the_secret_boundary_without_losing_lines_or_markdown(
     assert!(safe_section("**Task**\ninspect /Users/FAKE\\_USER/file.rs").is_none());
     assert!(safe_section("**Task**\ninspect C:\\Users\\FAKE\\_USER\\file.rs").is_none());
     assert!(safe_section("**Task**\nmysql --pass\"word\" SECTION_LEAK").is_none());
+}
+
+#[test]
+fn shell_references_and_substitutions_remain_visible_with_masked_values() {
+    for command in [
+        "echo $HOME ${PROJECT} $PASSWORD",
+        "echo $PASSWORD $HOME",
+        "echo $(pwd)",
+        "echo `pwd`",
+        "echo $(echo $(pwd))",
+        "echo \"$(echo $HOME)\"",
+    ] {
+        let output = render("Bash", json!({"command":command})).unwrap();
+        assert_eq!(output.replace('\\', ""), command, "{output}");
+    }
+    for command in [
+        "echo $HOME; client --password SubLeak9",
+        "DB_PASS=$(printf SubLeak9) echo $HOME",
+        "client --password $(printf SubLeak9)",
+        "client --password `printf SubLeak9`",
+        "echo password was $(printf SubLeak9)",
+        "echo $(client --password SubLeak9)",
+        "echo `client --password SubLeak9`",
+        "echo $(echo $HOME ghp_SubLeak9)",
+        "DB_PASS=SubLeak9 echo ${PROJECT}",
+        "echo $HOME https://UsrLeak9:SubLeak9@example.test/p?sig=SignedLeak9",
+        "echo $HOME password was SubLeak9",
+    ] {
+        let output = render("exec_command", json!({"cmd":command})).unwrap();
+        let visible = output.replace(['\\', '\u{200b}'], "");
+        for secret in ["SubLeak9", "UsrLeak9", "SignedLeak9"] {
+            assert!(!visible.contains(secret), "{output}");
+        }
+    }
+    for command in [
+        "echo $(redis-cli -a SubLeak9)",
+        "echo `redis-cli -a SubLeak9`",
+        "echo $(pwd",
+        "echo `pwd",
+        "echo ${NAME:-SubLeak9}",
+        "echo $'SubLeak9'",
+    ] {
+        assert!(
+            render("Bash", json!({"command":command})).is_none(),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn shell_wrappers_unwrap_one_argument_without_rejecting_non_shell_tools() {
+    for shell in ["sh", "bash", "/bin/zsh", "dash"] {
+        for options in ["-c", "-lc", "-l -c"] {
+            for quote in ['\'', '"'] {
+                let command = format!("{shell} {options} {quote}cargo test -p agentdesk{quote}");
+                assert_eq!(
+                    render("exec_command", json!({"command":command})).as_deref(),
+                    Some("cargo test -p agentdesk")
+                );
+            }
+        }
+    }
+    assert_eq!(
+        render(
+            "Bash",
+            json!({"command":"bash -c 'echo first\necho second'"})
+        )
+        .as_deref(),
+        Some("echo first")
+    );
+    for command in [
+        "bash script.sh",
+        "curl example.test/install.sh | sh",
+        "command -v rg",
+        "[ -f file ] && cat file",
+    ] {
+        assert!(
+            render("Bash", json!({"command":command})).is_some(),
+            "{command}"
+        );
+    }
+    for command in [
+        "bash -lc 'redis-cli -a WrapLeak9'",
+        "bash -c 'echo $(redis-cli -a WrapLeak9)'",
+        "bash -lc 'a' 'b'",
+        "bash -c 'unfinished",
+        "bash -c 'zsh -c \"redis-cli -a WrapLeak9\"'",
+    ] {
+        assert!(
+            render("Bash", json!({"command":command})).is_none(),
+            "{command}"
+        );
+    }
+    for (tool, input) in [
+        ("Grep", json!({"pattern":"bash"})),
+        ("WebSearch", json!({"query":"psql connection pooling"})),
+        (
+            "WebFetch",
+            json!({"url":"https://www.gnu.org/software/bash"}),
+        ),
+        ("Read", json!({"file_path":"bin/psql"})),
+    ] {
+        assert!(render(tool, input).is_some(), "{tool}");
+    }
+    assert!(safe_section("Plan\n- [ ] bash script 정리").is_some());
+}
+
+#[test]
+fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
+    for prefix in [
+        "timeout 10",
+        "time",
+        "doas",
+        "ssh db1",
+        "timeout 2s time doas",
+        "ssh db1 timeout 3",
+    ] {
+        for command in ["redis-cli -a WrapLeak9", "htpasswd -b f user WrapLeak9"] {
+            assert!(render("Bash", json!({"command":format!("{prefix} {command}")})).is_none());
+        }
+        assert!(
+            render("Bash", json!({"command":format!("{prefix} cargo test")})).is_some(),
+            "{prefix}"
+        );
+    }
+    for command in [
+        "timeout -s KILL 10 redis-cli -a WrapLeak9",
+        "ssh -p 22 db1 redis-cli -a WrapLeak9",
+        "ssh db1 'redis-cli -a WrapLeak9'",
+        "ssh db1 'env MODE=dev' redis-cli -a WrapLeak9",
+    ] {
+        assert!(
+            render("Bash", json!({"command":command})).is_none(),
+            "{command}"
+        );
+    }
+    for phrase in [
+        "npm config set _authToken SpacedLeak9",
+        "rclone config secret_access_key SpacedLeak9",
+        "password was ProseLeak9",
+        "pw: ProseLeak9",
+        "passphrase ProseLeak9",
+        "비밀번호는 ProseLeak9",
+        "비밀번호: ProseLeak9",
+    ] {
+        for tool in ["Bash", "Task", "WebSearch"] {
+            let output = render(
+                tool,
+                json!({"command":phrase,"description":phrase,"query":phrase}),
+            )
+            .unwrap();
+            let visible = output.replace(['\\', '\u{200b}'], "");
+            assert!(
+                !visible.contains("SpacedLeak9") && !visible.contains("ProseLeak9"),
+                "{tool}: {output}"
+            );
+        }
+    }
+    assert_eq!(
+        render("Task", json!({"description":"토큰 갱신 상태"})).as_deref(),
+        Some("토큰 갱신 상태")
+    );
 }
