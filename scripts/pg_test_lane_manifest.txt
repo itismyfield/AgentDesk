@@ -259,6 +259,7 @@ src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tes
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_cut_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_home_stop_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/codex_stop_delivery_tests.rs
+src/services/discord/turn_bridge/tmux_runtime/herdr_stop_pane_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs
 src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
@@ -608,6 +609,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::background_child_ordering_tests
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::cut
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::home_stop
 services::discord::turn_bridge::tmux_runtime::process_backend_cancel::tests
 services::discord::turn_bridge::tmux_runtime::stop_host::tests
@@ -2198,6 +2200,8 @@ services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_http_preserve_keeps_conflict_and_cannot_cancel_token_pg
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_prepare_preserves_consumed_claim_and_intent
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_production_stop_unwired_switch_on_matches_off
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_claude_stop_shares_the_tmux_pane_evidence
+services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_stop_pane::herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_typed_refusals_have_no_escape_effects
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_uncertain_escape_spends_claim_and_gate_mismatch_writes_nothing
 services::discord::turn_bridge::tmux_runtime::codex_stop_delivery::tests::herdr_user_stop_reads_a_long_turn_and_never_calls_an_unread_turn_idle
