@@ -1,5 +1,6 @@
 //! A non-forced cancel through the production router on a live Codex Herdr turn this process
 //! started takes its `/stop`: it completes nothing, and the turn settles on its own abort.
+use super::super::super::*;
 use super::*;
 
 const AUTH: &str = "activation-http-cancel";
@@ -15,8 +16,9 @@ struct Cancelled {
 fn http_cancel(fx: &Fixture, shared: &Arc<crate::services::discord::SharedData>) -> Cancelled {
     let channel = CHANNEL.to_string();
     fx.rt.block_on(async {
-        let active = "UPDATE sessions SET status = 'turn_active' WHERE channel_id = $1";
-        let update = sqlx::query(active).bind(&channel);
+        let update =
+            sqlx::query("UPDATE sessions SET status = 'turn_active' WHERE channel_id = $1")
+                .bind(&channel);
         update.execute(&fx.pool).await.unwrap();
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         registry.register("codex".into(), shared.clone()).await;

@@ -197,6 +197,7 @@ src/services/discord/router/message_handler/intake_turn/runtime_transition/nativ
 src/services/discord/router/message_handler/provider_dispatch.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_activation_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_followup_tests.rs
+src/services/discord/router/message_handler/provider_dispatch_codex_herdr_http_cancel_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_codex_herdr_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs
 src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs
@@ -543,6 +544,7 @@ services::discord::router::message_handler::intake_turn::runtime_transition::nat
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::http_cancel
 services::discord::router::message_handler::provider_dispatch::herdr_tests
 services::discord::router::message_handler::provider_dispatch::herdr_tests::reconnect
 services::discord::router::message_handler::provider_dispatch::tests
@@ -1883,6 +1885,7 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::a_settled_herdr_reconnect_is_not_attached_again_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::a_configured_stop_settles_a_live_turn_on_its_own_abort_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::a_pane_escape_settles_a_live_turn_on_its_own_abort_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::activation::http_cancel::a_non_forced_http_cancel_settles_a_live_turn_on_its_own_abort_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unanswered_follow_up_enter_keeps_the_hold_and_sends_nothing_again_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::an_unclear_follow_up_keeps_its_hold_and_the_next_prompt_writes_nothing_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg

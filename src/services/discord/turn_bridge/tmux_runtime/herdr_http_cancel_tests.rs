@@ -79,9 +79,10 @@ fn expected(intent: &str, delivery: &str, reason: Option<&str>) -> Value {
 
 /// The session row's status and dispatch, which only the existing cancel's tail rewrites.
 async fn row(case: &Case) -> (String, Option<String>) {
-    let query = "SELECT status, active_dispatch_id FROM sessions WHERE channel_id = $1";
     let pool = case.shared.pg_pool.as_ref().unwrap();
-    let row = sqlx::query_as(query).bind(case.channel.to_string());
+    let row =
+        sqlx::query_as("SELECT status, active_dispatch_id FROM sessions WHERE channel_id = $1")
+            .bind(case.channel.to_string());
     row.fetch_one(pool).await.unwrap()
 }
 
@@ -103,8 +104,7 @@ fn live(
     n: u64,
 ) -> Case {
     let case = rt.block_on(Case::new(pool, root, p, n));
-    let active = "UPDATE sessions SET status = 'turn_active', instance_id = $2, active_dispatch_id = 'dispatch-http' WHERE channel_id = $1";
-    let update = sqlx::query(active)
+    let update = sqlx::query("UPDATE sessions SET status = 'turn_active', instance_id = $2, active_dispatch_id = 'dispatch-http' WHERE channel_id = $1")
         .bind(case.channel.to_string())
         .bind(NODE_ID);
     rt.block_on(update.execute(pool)).unwrap();
@@ -341,9 +341,8 @@ fn herdr_http_cancel_keeps_the_existing_cancel_for_other_turns_pg() {
         assert_eq!(runtime.block_on(row(&case)), active_row());
 
         let other = case.channel.get() + 5_000;
-        let seed = "INSERT INTO sessions (session_key, provider, status, channel_id, instance_id) VALUES ($1, $2, 'turn_active', $3, $4)";
         let key = format!("{}:legacy-{other}", case.provider.as_str());
-        let insert = sqlx::query(seed).bind(key).bind(case.provider.as_str());
+        let insert = sqlx::query("INSERT INTO sessions (session_key, provider, status, channel_id, instance_id) VALUES ($1, $2, 'turn_active', $3, $4)").bind(key).bind(case.provider.as_str());
         let insert = insert.bind(other.to_string()).bind(NODE_ID);
         runtime.block_on(insert.execute(pool)).unwrap();
         let (status, answer) = runtime.block_on(cancel_on(&case, other, false, true));
