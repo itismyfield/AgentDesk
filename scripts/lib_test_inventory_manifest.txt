@@ -1678,6 +1678,9 @@ services::analytics::session_metrics::tests::parse_machine_config_uses_host_and_
 services::api_friction::issue_body::tests::issue_body_evidence_formatting_stays_stable
 services::api_friction::issue_body::tests::issue_body_evidence_query_cap_stays_stable
 services::api_friction::issue_body::tests::issue_body_fallback_copy_stays_stable_without_evidence
+services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch
