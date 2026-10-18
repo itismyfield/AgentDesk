@@ -20,9 +20,11 @@ pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
 mod peer_filter;
+mod tool_activity_display;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
+pub use tool_activity_display::ToolActivityDisplay;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
@@ -1305,13 +1307,8 @@ pub struct PlaceholderConfig {
     pub live_events_enabled: bool,
     #[serde(default = "default_true")]
     pub status_panel_v2_enabled: bool,
-    /// #3805 P2: rollout gate for the two-message panel model (answer chunks
-    /// first, the live status panel re-anchored beneath the latest chunk).
-    /// Default OFF and restart-required — the whole `placeholder` section is
-    /// boot-bound, copied into shared UI state once at startup (see
-    /// `config_live_reload::restart_required_changes`). PR-A is pure
-    /// scaffolding: no branch reads this flag yet (later PR-B~ gates the
-    /// two-message create/re-anchor path behind it).
+    pub tool_activity_display: ToolActivityDisplay,
+    /// Restart-required rollout gate for the two-message panel model (default OFF).
     #[serde(default)]
     pub two_message_panel_enabled: bool,
 }
@@ -1321,6 +1318,7 @@ impl Default for PlaceholderConfig {
         Self {
             live_events_enabled: true,
             status_panel_v2_enabled: true,
+            tool_activity_display: ToolActivityDisplay::default(),
             two_message_panel_enabled: false,
         }
     }

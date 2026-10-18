@@ -108,6 +108,7 @@ src/
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
 │   ├── test_env.rs
+│   ├── tool_activity_display.rs
 │   └── writer_channels_tests.rs
 ├── db/
 │   ├── auto_queue/
@@ -1266,6 +1267,10 @@ src/
 │   │   │   ├── subagent_summary.rs
 │   │   │   ├── task_panel.rs
 │   │   │   ├── tests.rs
+│   │   │   ├── tool_activity.rs
+│   │   │   ├── tool_activity_tests.rs
+│   │   │   ├── tool_summary.rs
+│   │   │   ├── tool_summary_tests.rs
 │   │   │   ├── turn_anchor.rs
 │   │   │   └── workflow_panel.rs
 │   │   ├── placeholder_sweeper/
@@ -1962,6 +1967,7 @@ src/
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
 │   │   │   │   ├── o_panel.rs
+│   │   │   │   ├── o_tool_activity_tests.rs
 │   │   │   │   └── rollover_guard.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs

@@ -1254,10 +1254,8 @@ pub fn handle_dcserver(token: Option<String>) {
         let api_port = ad_config.server.port;
         let placeholder_live_events_enabled = ad_config.placeholder.live_events_enabled;
         let status_panel_v2_enabled = ad_config.placeholder.status_panel_v2_enabled;
-        // #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
-        // copied into shared UI state at boot; no path reads it yet.
+        let tool_activity_display = ad_config.placeholder.tool_activity_display;
         let two_message_panel_enabled = ad_config.placeholder.two_message_panel_enabled;
-
         // Self-watchdog: probes the axum server's /api/health endpoint.
         // #5147: this call also arms `services::hang_forensics`' runtime-
         // liveness beacon — the machine-readable proof that the runtime is
@@ -1309,6 +1307,7 @@ pub fn handle_dcserver(token: Option<String>) {
                         engine: discord_engine,
                         placeholder_live_events_enabled,
                         status_panel_v2_enabled,
+                        tool_activity_display,
                         two_message_panel_enabled,
                     },
                 )
@@ -1404,6 +1403,7 @@ pub fn handle_dcserver(token: Option<String>) {
                                 engine: engine_clone,
                                 placeholder_live_events_enabled: live_events_enabled,
                                 status_panel_v2_enabled: status_panel_v2,
+                                tool_activity_display,
                                 two_message_panel_enabled: two_message_panel,
                             },
                         )

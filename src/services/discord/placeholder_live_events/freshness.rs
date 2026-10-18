@@ -5,25 +5,8 @@
 //! derived-status activity label and the store-facing time-line builder live here
 //! with their tests.
 //!
-//! While a turn is actively processing, the footer header shows only the latest
-//! observed tool class (`🔧 마지막 도구 ([Read])`) or a non-progress fallback when
-//! no tool has run yet. Raw tool arguments are intentionally excluded from this
-//! channel-visible surface. Distinct wait states retain their specific labels
-//! because those details are not represented by the spinner. Completed turns
-//! retain their existing completion label. The spinner merge
-//! (`single_message_panel::merged_footer_header_line`) swaps the leading status
-//! emoji for the animated spinner, so the marker set there must stay in sync with
-//! the emojis this label can start with. The request anchor follows the activity
-//! line, then the stable TIME lines render one field per line in turn-start / last-
-//! update order. The fixed KST absolute times keep mobile clients readable when
-//! they do not refresh Discord's relative token. This replaces the pre-#3983
-//! confidence line + `진행 중 — provider` header; the freshness class is absorbed
-//! into the activity emoji, and the provider moved off the footer entirely.
-//!
-//! Both times derive from STABLE store stamps (never "now"), so the footer text
-//! stays byte-identical across heartbeat ticks — the message is not needlessly
-//! re-edited (the #3477 stability invariant) while Discord renders the live
-//! localized age client-side.
+//! The activity header shares the same renderer across separate panels and footers.
+//! Class mode preserves the static label; summary mode adds bounded, sanitized rows.
 
 use poise::serenity_prelude::ChannelId;
 
@@ -61,6 +44,22 @@ pub(super) fn render_panel_activity_line(
         .then_some(snapshot.last_tool.as_ref())
         .flatten();
     let mut activity_line = render_activity_line_with_last_tool(&header_status, visible_last_tool);
+    if snapshot.tool_activity_display == crate::config::ToolActivityDisplay::Summary
+        && !snapshot.status.is_terminal()
+        && !snapshot.tool_activity.is_empty()
+    {
+        let tools = snapshot.tool_activity.render(6);
+        activity_line = if matches!(
+            header_status,
+            DerivedStatus::Running
+                | DerivedStatus::ToolRunning { .. }
+                | DerivedStatus::SubagentRunning { .. }
+        ) {
+            tools
+        } else {
+            format!("{activity_line}\n{tools}")
+        };
+    }
     if mark_placeholder {
         // Insert before LF/CRLF so footer composition can remove this header suffix.
         let first_line_end = activity_line.lines().next().unwrap_or("").len();

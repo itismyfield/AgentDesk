@@ -25,6 +25,8 @@ mod subagent_panel;
 mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;
+mod tool_activity;
+mod tool_summary;
 mod turn_anchor;
 mod workflow_panel;
 
@@ -91,6 +93,7 @@ pub(in crate::services::discord) enum TaskCompletionDisplayPolicy {
 
 #[derive(Debug, Default)]
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
+    tool_activity_display: crate::config::ToolActivityDisplay,
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
     status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
     // #3477 item 3: monotonic timestamp of the most recent live (Recent/terminal)
@@ -617,7 +620,7 @@ impl PlaceholderLiveEvents {
         // stable stored last-activity stamp, not this render-time heartbeat).
         _heartbeat_at_unix: i64,
     ) -> String {
-        let snapshot = self
+        let mut snapshot = self
             .status_by_channel
             .get(&channel_id)
             .map(|entry| {
@@ -639,6 +642,7 @@ impl PlaceholderLiveEvents {
         // its count-change INFO log) is retired — terminal Tasks/Subagents are now
         // hidden from the live panel outright, so nothing is ever compacted out.
         let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
+        snapshot.tool_activity_display = self.tool_activity_display;
         let time_line = self.panel_time_line(channel_id, started_at_unix);
         render_status_panel(snapshot, provider, time_line, turn_trigger_line)
     }

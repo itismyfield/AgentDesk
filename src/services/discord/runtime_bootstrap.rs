@@ -84,8 +84,7 @@ pub(crate) struct RunBotContext {
     pub(crate) engine: Option<crate::engine::PolicyEngine>,
     pub(crate) placeholder_live_events_enabled: bool,
     pub(crate) status_panel_v2_enabled: bool,
-    /// #3805 P2: two-message panel rollout gate (default OFF). Scaffolding —
-    /// threaded from config into shared UI state, not read by any path in PR-A.
+    pub(crate) tool_activity_display: crate::config::ToolActivityDisplay,
     pub(crate) two_message_panel_enabled: bool,
 }
 
@@ -162,6 +161,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         engine,
         placeholder_live_events_enabled,
         status_panel_v2_enabled,
+        tool_activity_display,
         two_message_panel_enabled,
     } = context;
 
@@ -284,6 +284,7 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
         UiFeatureFlags {
             placeholder_live_events_enabled,
             status_panel_v2_enabled,
+            tool_activity_display,
             two_message_panel_enabled,
         },
         RestoredSessionState {
@@ -298,10 +299,8 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     );
     // Sole boot owner of loader-verdict row retirement: every runtime shape
     // passes here after the generation is allocated and before any mint surface.
-    // Only the utility branch leaves earlier: it builds no runtime or mint surface. Its
-    // doctor handles only health-registered runtimes, which register after their reaper.
+    // Utility bots leave earlier; their doctor handles only registered runtimes.
     super::inflight::reap_inflight_rows_at_boot_blocking(&provider, shared.pg_pool.clone()).await;
-    // Turn mode is fixed before the relay restores pending starts for the channels it confirms.
     let confirmed = super::tui_direct_pending_start::turn_retirement::confirm_at_boot(
         &provider,
         boot_config.tui_o.as_ref(),
@@ -1275,6 +1274,7 @@ mod restart_lifecycle_characterization_tests {
             UiFeatureFlags {
                 placeholder_live_events_enabled: false,
                 status_panel_v2_enabled: false,
+                tool_activity_display: crate::config::ToolActivityDisplay::Summary,
                 two_message_panel_enabled: false,
             },
             RestoredSessionState {

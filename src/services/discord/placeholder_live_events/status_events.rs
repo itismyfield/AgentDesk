@@ -121,6 +121,12 @@ pub(in crate::services::discord) fn status_events_from_tool_use_with_id_for_foot
             eta_secs: parse_eta_secs(input.into()),
         });
     }
+    events.push(super::tool_activity::observation(
+        Some(name),
+        Some(input),
+        tool_use_id,
+        None,
+    ));
     events
 }
 
@@ -161,6 +167,12 @@ pub(in crate::services::discord) fn status_events_from_tool_result_with_id(
             ack_only: !is_error,
         });
     }
+    events.push(super::tool_activity::observation(
+        tool_name,
+        None,
+        tool_use_id,
+        Some(!is_error),
+    ));
     events
 }
 
@@ -348,14 +360,23 @@ pub(in crate::services::discord) fn status_events_from_json_for_footer_mode(
         return subagent_activity_status_events(value, parent_id);
     }
 
-    match value.get("type").and_then(Value::as_str).unwrap_or("") {
+    let mut events = match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "assistant" => assistant_status_events(value, footer_mode_enabled),
         "content_block_start" => content_block_start_status_events(value, footer_mode_enabled),
-        "user" => user_status_events(value),
+        "user" => super::tool_activity::json_result_observations(user_status_events(value), value),
         "system" => system_status_events(value),
         "background_event" => background_status_events(value),
         _ => Vec::new(),
+    };
+    if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+        events.insert(
+            0,
+            StatusEvent::ToolActivityCwd {
+                cwd: cwd.to_owned(),
+            },
+        );
     }
+    events
 }
 
 pub(super) fn is_task_tool(name: &str) -> bool {
