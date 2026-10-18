@@ -70,6 +70,7 @@ fn target(provider: &ProviderKind, state: &inflight::InflightTurnState, current:
         && !state.runtime_kind_unknown_on_disk
         && !(state.runtime_kind.is_none() && state.version > inflight::inflight_state_version())
         && (state.host_locator.is_some()
+            || mutant("herdr-only")
             || recovery_tmux_session_name(provider, state)
                 .is_some_and(|name| super::turn_bridge::herdr_marked(&name)))
         && !inflight::before_start_receipt_present(provider, state.channel_id)
