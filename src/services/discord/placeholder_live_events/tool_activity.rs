@@ -60,10 +60,15 @@ impl ToolActivityRing {
                 if let Some(success) = success {
                     self.finish(tool_use_id.as_deref(), *success);
                 } else if let Some(name) = name {
-                    if tool_use_id
+                    if let Some(existing) = tool_use_id
                         .as_ref()
-                        .is_some_and(|id| self.rows.iter().any(|r| r.id.as_ref() == Some(id)))
+                        .and_then(|id| self.rows.iter_mut().find(|r| r.id.as_ref() == Some(id)))
                     {
+                        if existing.summary.is_none() {
+                            existing.summary = input
+                                .as_deref()
+                                .and_then(|input| safe_tool_summary(name, input, cwd));
+                        }
                         return;
                     }
                     if self.rows.len() == CAPACITY {
@@ -251,7 +256,12 @@ pub(super) fn fit_panel(mut sections: Vec<String>) -> String {
         {
             return rendered;
         }
-        // Drop old tool rows before unrelated context and never split a row.
+        let header = format(&sections[..1]);
+        if sections.len() > 1 && header.len() <= 1400 && header.encode_utf16().count() <= 1936 {
+            sections.pop();
+            continue;
+        }
+        // Reduce oversized activity lists by removing complete oldest rows.
         let mut lines = sections[0].lines().map(str::to_owned).collect::<Vec<_>>();
         if let Some(index) = lines.iter().rposition(|line| {
             ["▶ ", "✓ ", "✗ ", "? "]

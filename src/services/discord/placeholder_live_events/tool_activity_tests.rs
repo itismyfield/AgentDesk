@@ -259,7 +259,10 @@ fn activity_fake_render_example() {
         json!({"secret":"NEVER_DISPLAYED"}),
         Some("m"),
     );
-    println!("{}", render(state));
+    let output = render(state);
+    assert!(output.contains("✓ Read  src/lib.rs") && output.contains("✗ Bash  npm run build"));
+    assert!(output.contains("memento · recall") && !output.contains("NEVER_DISPLAYED"));
+    println!("{output}");
 }
 
 #[test]
@@ -284,4 +287,22 @@ fn activity_whole_panel_does_not_repeat_secret_descriptions_in_other_sections() 
             assert!(!out.contains(forbidden), "{name}: {forbidden}: {out}");
         }
     }
+}
+
+#[test]
+fn activity_partial_tui_start_is_enriched_without_double_counting() {
+    let mut state = StatusPanelState::default();
+    for value in [
+        json!({"type":"content_block_start","content_block":{"type":"tool_use","id":"partial","name":"Bash","input":{}}}),
+        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"partial","name":"Bash","input":{"command":"cargo test"}}]}}),
+    ] {
+        for event in status_events_from_json(&value) {
+            state.apply(event);
+        }
+    }
+    let out = render(state);
+    assert!(
+        out.contains("도구 1") && out.contains("▶ Bash  cargo test"),
+        "{out}"
+    );
 }
