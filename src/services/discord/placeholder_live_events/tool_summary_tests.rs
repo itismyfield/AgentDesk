@@ -683,7 +683,7 @@ fn existing_sections_share_the_secret_boundary_without_losing_lines_or_markdown(
         safe_section("Context 90% · auto-compact 80%").as_deref(),
         Some("Context 90% · auto-compact 80%")
     );
-    let raw = "**Subagents**\n└ inspect ghp_ShortFakeLeak9\n  ▶ @everyone\n**Tasks**\n└ mysql --password 'SECTION_HEAD SECTION_TAIL'";
+    let raw = "**Subagents**\n└ inspect ghp_ShortFakeLeak9\n  ▶ @everyone\n**Tasks**\n└ client --password 'SECTION_HEAD SECTION_TAIL'";
     let output = safe_section(raw).unwrap();
     assert!(output.starts_with("**Subagents**\n"), "{output}");
     assert!(output.contains("\n**Tasks**\n"), "{output}");
