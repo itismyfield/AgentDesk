@@ -47,6 +47,10 @@ pub(super) async fn run_stream_loop(
     let (request_owner_name, adk_session_key) = (ctx.request_owner_name, ctx.adk_session_key);
     let (adk_session_name, adk_session_info) = (ctx.adk_session_name, ctx.adk_session_info);
     let (adk_cwd, dispatch_id) = (ctx.adk_cwd, ctx.dispatch_id);
+    shared_owned
+        .ui
+        .placeholder_live_events
+        .set_tool_activity_cwd(channel_id, adk_cwd.as_deref());
     let (role_binding, turn_id) = (ctx.role_binding, ctx.turn_id);
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;

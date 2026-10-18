@@ -264,6 +264,7 @@ NON_PG_FILTER_REPLAY=(
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::parse_phase_gate_context_returns_none_without_run_id
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::pass_alias_matches_phase_gate_pass_verdict_when_checks_pass
   db::auto_queue::phase_gates::reconcile_phase_gate_pg_tests::whitespace_padded_check_status_is_not_inferred_as_pass
+  db::auto_queue::run_owner_guard_pg_tests::wait_helpers_reject_a_waiter_observed_after_the_deadline
   db::automation_candidates::verdict_tests::card_update_guards_require_exactly_one_row
   db::automation_candidates::verdict_tests::crashed_always_discards
   db::automation_candidates::verdict_tests::final_iteration_boundary

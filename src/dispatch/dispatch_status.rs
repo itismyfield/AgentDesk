@@ -635,80 +635,19 @@ async fn set_dispatch_status_on_pg_tx_with_sync(
     let result: Option<&serde_json::Value> = effective_result_owned.as_ref().or(result);
 
     let result_json = result.map(|value| value.to_string());
-    let changed = match (result_json.as_deref(), touch_completed_at) {
-        (Some(result_json), true) => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = $1,
-                 result = CAST($2 AS jsonb),
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL,
-                 completed_at = CASE
-                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
-                     ELSE completed_at
-                 END
-             WHERE id = $3
-               AND status = $4",
-        )
-        .bind(to_status)
-        .bind(result_json)
-        .bind(dispatch_id)
-        .bind(&current_status)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-        (Some(result_json), false) => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = $1,
-                 result = CAST($2 AS jsonb),
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL
-             WHERE id = $3
-               AND status = $4",
-        )
-        .bind(to_status)
-        .bind(result_json)
-        .bind(dispatch_id)
-        .bind(&current_status)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-        (None, true) => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = $1,
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL,
-                 completed_at = CASE
-                     WHEN $1 IN ('completed', 'failed', 'cancelled') THEN COALESCE(completed_at, NOW())
-                     ELSE completed_at
-                 END
-             WHERE id = $2
-               AND status = $3",
-        )
-        .bind(to_status)
-        .bind(dispatch_id)
-        .bind(&current_status)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-        (None, false) => sqlx::query(
-            "UPDATE task_dispatches
-             SET status = $1,
-                 updated_at = NOW(),
-                 last_stuck_alert_at = NULL
-             WHERE id = $2
-               AND status = $3",
-        )
-        .bind(to_status)
-        .bind(dispatch_id)
-        .bind(&current_status)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
-        .rows_affected() as usize,
-    };
+    let changed = crate::db::auto_queue::run_owner_guard::update_dispatch_status_row_on_pg_tx(
+        tx,
+        &crate::db::auto_queue::run_owner_guard::StatusRowUpdate {
+            dispatch_id,
+            current_status: &current_status,
+            to_status,
+            result_json: result_json.as_deref(),
+            touch_completed_at,
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("update postgres dispatch {dispatch_id}: {error}"))?
+        as usize;
 
     // Resolve every side-effect gate once. The block below then executes the
     // side effects in a fixed order with these precomputed conditions; the

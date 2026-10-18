@@ -105,7 +105,10 @@ async fn a_same_message_episode_with_another_nonce_is_kept() {
 async fn a_closed_actor_runs_no_withdrawal() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let handle = ChannelMailboxRegistry::default().handle(ChannelId::new(6_199_921));
-    let closed = handle.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply });
+    let closed = handle.request(|reply| ChannelMailboxMsg::CloseIfIdle {
+        expected_claim: None,
+        reply,
+    });
     assert_eq!(closed.await.ok(), Some(Ok(())));
     let runs = Arc::new(AtomicUsize::new(0));
 

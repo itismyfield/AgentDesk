@@ -33,6 +33,12 @@ older runs without the field retain tmux behavior. Process runs keep their own s
 never claim tmux ownership, and cancel only the process belonging to their recorded turn.
 Existing channel host and guarded-input admission still apply.
 
+After confirmed terminal delivery and process exit, a fresh process attempt retires its
+idle mailbox actor. Cleanup checks the captured actor and claim, durable inflight absence,
+and the absence of queued work, recovery, dispatch, or terminal watcher ownership. Newer
+turns and unresolved delivery obligations retain their mailbox for normal handling.
+Cancellation or timeout without confirmed delivery also retains this observability.
+
 Before enabling it, check that routine prompts do not require an interactive provider TUI
 or a persistent tmux pane. Shell/JS routines do not use the agent executor.
 

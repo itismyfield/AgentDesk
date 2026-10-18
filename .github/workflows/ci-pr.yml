@@ -218,6 +218,7 @@ jobs:
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'
               - 'src/db/auto_queue/run_completion_pg_tests.rs'
+              - 'src/db/auto_queue/run_owner_guard_pg_tests.rs'
               - 'src/db/auto_queue/tests.rs'
               - 'src/db/automation_candidates/verdict_tests.rs'
               - 'src/db/calendar_sync/postgres_tests.rs'
@@ -359,6 +360,7 @@ jobs:
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
               - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
+              - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
@@ -444,12 +446,14 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
@@ -1507,9 +1511,24 @@ jobs:
           --expected-ids scripts/ci/pg15_required_ids.txt --
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --
           cargo test --lib -- --exact
+          db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg
+          db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg
           db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
           dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
           services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
           --test-threads=1
@@ -2210,7 +2229,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
+          expected=d6185791546e805d03d7c36685ef940b1cc8ca1c22bdc2544a41d35e2133e243
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2462,7 +2481,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
+          expected=d6185791546e805d03d7c36685ef940b1cc8ca1c22bdc2544a41d35e2133e243
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
