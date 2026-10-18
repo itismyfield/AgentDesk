@@ -1259,6 +1259,14 @@ server::routes::audit_explicit_auth_routes_tests::live_mutation_routes_enforce_e
 server::routes::audit_explicit_auth_routes_tests::route_debug_format_matches_legacy_audit_string
 server::routes::audit_explicit_auth_routes_tests::route_inventory_has_only_live_explicit_auth_mutations
 server::routes::audit_explicit_auth_routes_tests::route_inventory_is_non_empty_and_named_uniquely
+server::routes::auth::tailnet_peer::tests::absent_transport_or_original_uri_never_grants_tailnet_trust
+server::routes::auth::tailnet_peer::tests::actual_runtime_profiles_accept_only_tailnet_node_probe
+server::routes::auth::tailnet_peer::tests::exact_methods_original_uri_and_absent_original_uri
+server::routes::auth::tailnet_peer::tests::forwarded_headers_never_replace_socket_proof
+server::routes::auth::tailnet_peer::tests::receiver_token_and_bearer_precedence_remains_explicit
+server::routes::auth::tailnet_peer::tests::socket_peer_and_route_matrix_preserves_control_boundaries
+server::routes::auth::tailnet_peer::tests::tailnet_cidr_boundaries_mapped_and_scoped_addresses
+server::routes::auth::tailnet_peer::tests::unknown_path_variants_never_enter_handlers_or_gain_principal
 server::routes::auth::tests::extract_bearer_strips_prefix_or_returns_none
 server::routes::auth::tests::is_internal_loopback_path_matches_known_prefixes
 server::routes::auth::tests::is_internal_loopback_path_rejects_unrelated_paths
@@ -1474,6 +1482,9 @@ server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_force_pur
 server::routes::queue_api::cancel_queue_preserve_pg_tests::queue_truth_recorded_preserve_removal_is_still_unknown_pg
 server::routes::queue_api::home_stop_tests::f1_direct_cancel_refuses_the_envelope_before_the_service_and_keeps_legacy_bodies
 server::routes::queue_api::home_stop_tests::f1_holder_route_needs_internal_auth_and_the_trusted_forward
+server::routes::queue_api::home_stop_tests::tailnet_home_stop_with_forward_headers_keeps_body_validation
+server::routes::queue_api::home_stop_tests::tailnet_home_stop_without_api_nest_stays_unauthorized
+server::routes::queue_api::home_stop_tests::tailnet_home_stop_without_forward_marker_reaches_untrusted_refusal
 server::routes::receipt::tests::concurrent_token_analytics_misses_are_single_flighted
 server::routes::receipt::tests::concurrent_token_analytics_refreshes_are_coalesced
 server::routes::receipt::tests::token_analytics_cache_state_header_values_are_stable
@@ -11541,6 +11552,9 @@ services::session_forwarding::home_stop::tests::t18_holder_comes_from_the_home_r
 services::session_forwarding::home_stop::tests::t18_row_states_decide_before_anything_is_sent
 services::session_forwarding::probe::tests::reachability_checks_authenticated_response_identity_and_protocol
 services::session_forwarding::probe::tests::reachability_requires_trusted_origin_before_any_credentials_are_sent
+services::session_forwarding::probe::tests::tokenless_probe_reaches_tailnet_authenticated_receiver
+services::session_forwarding::probe::tests::tokenless_probe_receiver_loopback_fixture_is_detectable
+services::session_forwarding::probe::tests::tokenless_probe_receiver_without_peer_fails_closed
 services::session_forwarding::tests::cancel_owner_does_not_fall_back_to_agent_binding_pg
 services::session_forwarding::tests::cancel_owner_ignores_disconnected_sessions_pg
 services::session_forwarding::tests::cancel_owner_matches_exact_channel_not_session_key_text_pg

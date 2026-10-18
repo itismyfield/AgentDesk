@@ -357,6 +357,9 @@ src/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
 │   │   │   └── pg_tests.rs
+│   │   ├── auth/
+│   │   │   ├── tailnet_peer.rs
+│   │   │   └── tailnet_peer_tests.rs
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
