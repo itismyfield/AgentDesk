@@ -216,15 +216,9 @@ async fn tailnet_home_stop_with_forward_headers_keeps_body_validation() {
 async fn tailnet_home_stop_without_api_nest_stays_unauthorized() {
     let app = app_with(crate::config::Config::default(), None, None, "holder-a");
     assert_eq!(
-        post_from_peer(
-            &app,
-            "/internal/home-stop/v1",
-            &[],
-            "{}",
-            "100.64.0.1:1234",
-        )
-        .await
-        .0,
+        post_from_peer(&app, "/internal/home-stop/v1", &[], "{}", "100.64.0.1:1234",)
+            .await
+            .0,
         StatusCode::UNAUTHORIZED
     );
 }
