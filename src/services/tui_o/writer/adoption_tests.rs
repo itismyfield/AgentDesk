@@ -349,7 +349,7 @@ fn a_bind_of_an_unpinned_past_source_while_waiting_refuses_the_pin() {
     channel.log.0.push(back);
     assert_eq!(
         super::rotated(&channel.log.0, seq, &channel.source),
-        Some(&past[0])
+        Some((&past[0], seq + 1))
     );
     let result = channel.activate(&store, &snapshot);
     channel.assert_released(&store, result, "binding log moved");

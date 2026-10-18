@@ -2354,17 +2354,14 @@ impl Default for PoliciesConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RoutinesConfig {
-    /// Master on/off switch. Defaults to false; requires PostgreSQL and is
-    /// unavailable without the PG control plane.
+    /// Master on/off switch. Defaults to false; requires the PostgreSQL control plane.
     #[serde(default)]
     pub enabled: bool,
-    /// Release-managed directory containing bundled *.js routine scripts.
-    /// Defaults to `./routines`.
+    /// Release-managed bundled *.js routine directory. Defaults to `./routines`.
     #[serde(default = "default_routines_dir")]
     pub dir: PathBuf,
-    /// Additional operator-managed routine script directories. These are loaded
-    /// after `dir`, so a script with the same relative path overrides the
-    /// bundled script without being copied into the release directory.
+    /// Operator-managed directories loaded after `dir`; matching relative paths
+    /// override bundled scripts without copying them into the release directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_dirs: Vec<PathBuf>,
     /// How often the due-scan tick runs, in seconds. Defaults to 30.
@@ -2382,6 +2379,9 @@ pub struct RoutinesConfig {
     /// Default maximum wait for agent-backed routine completion, in seconds.
     #[serde(default = "default_routines_agent_timeout_secs")]
     pub agent_timeout_secs: u64,
+    /// Opt in to headless fresh agent runs. Defaults to false; requires restart.
+    #[serde(default)]
+    pub headless_fresh_agents: bool,
     /// Maximum serialized checkpoint payload accepted from a routine run.
     #[serde(default = "default_routines_max_checkpoint_bytes")]
     pub max_checkpoint_bytes: usize,
@@ -2407,7 +2407,6 @@ pub struct RoutinesConfig {
     /// `'migration_invalid'`, or `NULL` (pre-existing rows) are NEVER touched.
     /// The `ResumeRequiresNextDueAt` guard also applies: schedule-less routines
     /// with no `next_due_at` are skipped.
-    ///
     /// Defaults to 0 (disabled). Set to e.g. 3600 (1 hour) to enable.
     #[serde(default)]
     pub failure_pause_auto_resume_secs: u64,
@@ -2432,6 +2431,7 @@ impl Default for RoutinesConfig {
             max_agent_polls_per_tick: default_routines_max_agent_polls_per_tick(),
             default_timezone: default_routines_timezone(),
             agent_timeout_secs: default_routines_agent_timeout_secs(),
+            headless_fresh_agents: false,
             max_checkpoint_bytes: default_routines_max_checkpoint_bytes(),
             hot_reload: true,
             stale_paused_alert_secs: 0,
@@ -2502,6 +2502,20 @@ fn default_routines_max_consecutive_failures() -> u32 {
 #[cfg(test)]
 mod routine_config_unit_tests {
     use super::*;
+
+    #[test]
+    fn headless_fresh_agents_defaults_to_disabled() {
+        let config: RoutinesConfig = serde_json::from_str("{}").expect("empty routines config");
+        assert!(!config.headless_fresh_agents);
+        assert_eq!(config, RoutinesConfig::default());
+    }
+
+    #[test]
+    fn headless_fresh_agents_deserializes_opt_in() {
+        let config: RoutinesConfig =
+            serde_json::from_str(r#"{"headless_fresh_agents":true}"#).expect("headless opt-in");
+        assert!(config.headless_fresh_agents);
+    }
 
     #[test]
     fn routine_script_dirs_preserve_default_then_operator_order() {

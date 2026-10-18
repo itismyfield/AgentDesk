@@ -150,6 +150,8 @@ jobs:
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
               - 'src/server/worker_registry.rs'
+              - 'src/server/mod.rs'
+              - 'src/server/policy_tick_logging.rs'
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/scheduled_messages.rs'
@@ -297,6 +299,7 @@ jobs:
               - 'src/services/auto_queue/activate_command.rs'
               - 'src/services/auto_queue/campaign_handoff_tests.rs'
               - 'src/services/auto_queue/cancel_run.rs'
+              - 'src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs'
               - 'src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
@@ -354,6 +357,7 @@ jobs:
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
               - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
+              - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
@@ -438,6 +442,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
@@ -495,6 +500,7 @@ jobs:
               - 'src/services/observability/turn_lifecycle.rs'
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
+              - 'src/services/routines/agent_executor/execution.rs'
               - 'src/services/routines/agent_executor/reliability.rs'
               - 'src/services/routines/reliability_pg_tests.rs'
               - 'src/services/routines/session_control.rs'
@@ -527,6 +533,7 @@ jobs:
               - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
+              - 'src/services/tui_o/writer/tool_result_repost_tests.rs'
               - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
@@ -1158,6 +1165,7 @@ jobs:
     needs:
       - changes
       - test_fast
+      - pg15_owner_proof
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -1170,6 +1178,15 @@ jobs:
           FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
           UPSTREAM_JOB_NAME: test_fast
           UPSTREAM_RESULT: ${{ needs.test_fast.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror PostgreSQL 15 owner proof result for branch protection
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: pg_db
+          FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
+          UPSTREAM_JOB_NAME: pg15_owner_proof
+          UPSTREAM_RESULT: ${{ needs.pg15_owner_proof.result }}
         run: ./scripts/required-check-mirror.sh
 
   dashboard_required_context:
@@ -1405,6 +1422,99 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  # PostgreSQL 15 is the supported floor; the canonical shards above run the image default.
+  pg15_owner_proof:
+    name: PostgreSQL 15 owner proof
+    needs: [changes, pg_shards, lib_test_prepare]
+    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUST_BACKTRACE: 1
+      POSTGRES_SERVICE_IMAGE: postgres:15
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
+
+      - name: Require PostgreSQL 15 server
+        shell: bash
+        run: |
+          version="$(docker exec "${POSTGRES_SERVICE_CONTAINER:-agentdesk-postgres}" psql -U postgres -tAc 'SHOW server_version_num' | tr -d '[:space:]')"
+          echo "server_version_num=${version}"
+          case "$version" in
+            15[0-9][0-9][0-9][0-9]) ;;
+            *) echo "::error::expected PostgreSQL 15, got '${version}'"; exit 1 ;;
+          esac
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
+      # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      - name: PostgreSQL 15 exact owner proof
+        timeout-minutes: 40
+        shell: bash
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          BASH_ENV: /dev/null
+        run: >-
+          python3 scripts/run_test_lane.py --lane pg --max-summaries 4
+          --expected-ids scripts/ci/pg15_required_ids.txt --
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --
+          cargo test --lib -- --exact
+          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
+          dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
+          services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
+          --test-threads=1
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
   # The required `High-risk recovery` context is published by high_risk_recovery_required_context.
   high-risk-recovery:
     name: High-risk recovery runner
@@ -1475,12 +1585,9 @@ jobs:
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
-          # #5147: the self-watchdog's kill-time forensics. Belongs in the
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
-          # The other half of the same guard: that every Postgres await on the
           python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1
-      # #5034: watchdog/operational alerts are notifications, not queued turns;
       - name: Operational alert intake admission regressions
         env:
           ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
@@ -1490,6 +1597,7 @@ jobs:
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
       - name: Accepted turn lifetime regressions
@@ -2099,7 +2207,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=18fff0c79d4618546fa115f0a3d9557ae25949181ebea80430fa89f84b6eeace
+          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2351,7 +2459,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=18fff0c79d4618546fa115f0a3d9557ae25949181ebea80430fa89f84b6eeace
+          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

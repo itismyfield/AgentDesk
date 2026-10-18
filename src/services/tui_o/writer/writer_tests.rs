@@ -920,6 +920,9 @@ async fn a_stop_keeps_its_store_error_and_names_a_prepared_only_while_nothing_po
 #[path = "local_retry_tests.rs"]
 mod local_retry_tests;
 
+#[path = "tool_result_tests.rs"]
+mod tool_result_tests;
+
 #[path = "actor_tests.rs"]
 mod actor;
 #[path = "codex_herdr_drive_tests.rs"]

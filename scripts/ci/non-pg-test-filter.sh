@@ -385,8 +385,10 @@ NON_PG_FILTER_REPLAY=(
   services::cluster::attachment_transfer::storage_tests::attachment_upload_reference_preserves_legacy_json_and_enforces_size_limits
   services::cluster::channel_home::tests::a_draining_home_admits_owed_pieces_but_never_reopens_intake_in_its_epoch
   services::cluster::channel_home::tests::a_final_close_after_a_lapse_still_retires_the_last_epoch
+  services::cluster::channel_home::tests::a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set
   services::cluster::channel_home::tests::a_renewal_that_stops_landing_closes_the_home_h_after_its_last_send
   services::cluster::channel_home::tests::a_replaced_or_unregistered_gate_closes_for_good_and_its_lease_ends
+  services::cluster::channel_home::tests::a_restore_finishing_after_its_home_was_lost_opens_no_intake
   services::cluster::channel_home::tests::command_admission_expires_at_the_renewal_deadline
   services::cluster::channel_home::tests::command_dormant_admission_does_not_lookup_or_start_a_task
   services::cluster::channel_home::tests::command_permit_drop_panic_and_blocking_abort_are_not_unknown
@@ -835,9 +837,11 @@ NON_PG_FILTER_REPLAY=(
   services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
   services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
   services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+  services::routines::agent_executor::reliability::tests::process_attempt_never_probes_legacy_tmux_after_grace
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
   services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
+  services::routines::agent_executor::reliability::tests::terminal_turn_error_settles_only_for_fresh_runs
   services::routines::session_control::tests::fallback_tmux_channel_name_preserves_thread_suffix
   services::routines::session_control::tests::fresh_teardown_fallback_tmux_name_matches_spawn_time_routine_label
   services::routines::session_control::tests::fresh_teardown_prefers_routine_thread_and_never_primary_channel

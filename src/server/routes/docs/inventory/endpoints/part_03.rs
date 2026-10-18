@@ -6,7 +6,7 @@ use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_par
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
         ep("GET", "/api/internal/node-probe", "cluster",
-            "Authenticated identity and session-forwarding protocol probe. Verifies the configured peer endpoint belongs to the advertised node; does not expose runner administration."),
+            "Identity and session-forwarding protocol probe. Accepts loopback or configured Bearer proof, and direct Tailscale-range peers when no server token is configured. The sender checks the advertised node identity; this route does not expose runner administration."),
         ep("GET", "/api/agents/{id}/execution-requirements", "agents",
             "Read central hard execution requirements. Constraints also apply to existing session owners.")
             .with_params([("id", path_param("Agent ID."))]),

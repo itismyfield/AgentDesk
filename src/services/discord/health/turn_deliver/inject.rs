@@ -298,6 +298,12 @@ fn live_tui_session(
     tui_session(&request.provider, runtime, row, watcher, named)
 }
 
+// Only confirmed transcript-output Claude channels on tmux can submit without a busy veto.
+fn turn_mode_tmux(channel: u64) -> bool {
+    crate::services::tui_o::turn_mode::transcript_turns(channel)
+        && crate::config::session_hosts::herdr_endpoint(channel).is_none()
+}
+
 /// Whether the transcript shows a turn the input can join: a live Claude turn, or the open Codex
 /// model turn, which the paste is then aimed at.
 fn busy_turn(
@@ -342,8 +348,12 @@ async fn resolve(
     };
     let pane = live(row.as_ref(), named).ok_or(SESSION_UNRESOLVED)?;
     let binding = binding_key(&pane.0);
-    // An idle transcript keeps the caller's own start; a reservation is only for a live turn.
-    let native_turn = busy_turn(runtime, &pane.1)?;
+    // Transcript-output Claude follows the resulting native turn, whether idle or busy now.
+    let native_turn = if runtime == RuntimeHandoffKind::ClaudeTui && turn_mode_tmux(channel) {
+        None
+    } else {
+        busy_turn(runtime, &pane.1)?
+    };
     // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
     // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
     let transition = shared
@@ -667,8 +677,12 @@ fn run(
         text: &input.text,
     };
     let inject = || {
-        busy_inject::inject_report(pane, &request, Some(input.channel), &busy_inject::TIMING)
-            .outcome
+        let report = if turn_mode_tmux(input.channel) {
+            busy_inject::inject_report_any_turn
+        } else {
+            busy_inject::inject_report
+        };
+        report(pane, &request, Some(input.channel), &busy_inject::TIMING).outcome
     };
     // A panic may come after the paste, so it is reported like any later failure.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(inject));

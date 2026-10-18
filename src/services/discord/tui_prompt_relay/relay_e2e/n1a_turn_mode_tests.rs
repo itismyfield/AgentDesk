@@ -435,4 +435,4 @@ fn n1c_hook_observed_direct_prompt_in_a_confirmed_channel_posts_its_notice_witho
 #[cfg(test)]
 #[cfg(unix)]
 #[path = "claude_idle_o_transition_tests.rs"]
-pub(super) mod claude_idle_o_transition;
+pub(in crate::services::discord) mod claude_idle_o_transition;

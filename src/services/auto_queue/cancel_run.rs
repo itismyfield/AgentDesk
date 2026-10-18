@@ -6,6 +6,10 @@ use std::sync::Arc;
 
 use crate::db::auto_queue::run_status::is_live_run_status;
 
+#[cfg(test)]
+mod malformed_context_pg_tests;
+mod remaining_live_census;
+
 impl AutoQueueService {
     pub async fn cancel_run_with_pg(
         &self,
@@ -110,58 +114,6 @@ pub(crate) async fn load_run_ids_with_status_pg(
         .map_err(|error| format!("load postgres auto_queue_runs by status: {error}"))
 }
 
-pub(crate) async fn load_live_dispatch_ids_for_runs_pg(
-    pool: &PgPool,
-    run_ids: &[String],
-) -> Result<Vec<String>, String> {
-    if run_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // #2048 F13: guard the jsonb cast against malformed `context` rows.
-    // A single corrupt context (legacy migration / direct DB edit) would
-    // otherwise crash the WHOLE cancel/force-pause query with a JSON parse
-    // error, leaving the operator unable to stop the auto-queue. We probe
-    // the leading non-whitespace char before casting; anything that does
-    // not start with `{` or `[` is treated as non-JSON and yields NULL.
-    sqlx::query_scalar(
-        "SELECT DISTINCT td.id
-         FROM task_dispatches td
-         WHERE td.status IN ('pending', 'dispatched')
-           AND (
-               EXISTS (
-                   SELECT 1
-                   FROM auto_queue_entries e
-                   WHERE e.dispatch_id = td.id
-                     AND e.run_id = ANY($1)
-               )
-               OR EXISTS (
-                   SELECT 1
-                   FROM auto_queue_phase_gates pg
-                   WHERE pg.dispatch_id = td.id
-                     AND pg.run_id = ANY($1)
-               )
-               OR (
-                   CASE
-                       WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
-                       WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
-                       ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
-                   END
-               ) = ANY($1)
-           )
-         ORDER BY td.id",
-    )
-    .bind(run_ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| {
-        format!(
-            "load postgres live dispatch ids for runs {:?}: {error}",
-            run_ids
-        )
-    })
-}
-
 pub(crate) async fn delete_phase_gate_rows_for_runs_pg(
     pool: &PgPool,
     run_ids: &[String],
@@ -184,15 +136,6 @@ pub(crate) async fn delete_phase_gate_rows_for_runs_pg(
         .await
         .map(|result| result.rows_affected() as usize)
         .map_err(|error| format!("delete postgres auto_queue_phase_gates: {error}"))
-}
-
-async fn count_live_dispatches_for_runs_pg(
-    pool: &PgPool,
-    run_ids: &[String],
-) -> Result<i64, String> {
-    load_live_dispatch_ids_for_runs_pg(pool, run_ids)
-        .await
-        .map(|rows| rows.len() as i64)
 }
 
 pub(crate) async fn cancel_live_dispatches_for_runs_pg(
@@ -745,6 +688,12 @@ async fn terminalize_selected_runs_with_pg(
         Some(reason),
     )
     .await?;
+    let remaining_live_dispatches =
+        remaining_live_census::count_live_dispatches_associated_with_runs_on_pg_tx(
+            &mut tx,
+            target_run_ids,
+        )
+        .await?;
 
     tx.commit()
         .await
@@ -756,7 +705,6 @@ async fn terminalize_selected_runs_with_pg(
         cleanup_task_id,
     )
     .await;
-    let remaining_live_dispatches = count_live_dispatches_for_runs_pg(pool, target_run_ids).await?;
     let cleanup = LiveRunCleanupResult {
         cancelled_dispatches: cancel_metas.len(),
         slot_cleanup: SlotCleanupResult {

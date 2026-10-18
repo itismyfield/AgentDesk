@@ -284,6 +284,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             repost_stops: Vec::new(),
             receipts,
         };
+        writer.exclude_stored_tool_results();
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
         let refused = writer.receipts.blocked(ledger);
@@ -423,7 +424,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Appends one ledger entry; a store error or a violation the entry exposed stops the channel.
-    fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
+    pub(super) fn record(&mut self, entry: LedgerEntry) -> Result<(), Step> {
         let posted = match entry {
             LedgerEntry::Posted { msg_id, .. } => Some(msg_id),
             _ => None,
@@ -458,6 +459,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             return Step::Stopped;
         }
         if let Err(step) = self.settle_open().await {
+            return step;
+        }
+        if let Derived::Piece(piece) = item
+            && let Some(step) = self.exclude_tool_result(&piece.unit_key)
+        {
             return step;
         }
         if self.has_local_retry() {
@@ -564,6 +570,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         local_retry: Option<LocalRetryMark>,
         approved: Option<u64>,
     ) -> Step {
+        if let Some(step) = self.exclude_tool_result(&piece.unit_key) {
+            return step;
+        }
         let (serial, anchor_id) = (
             self.store.ledger().next_serial(),
             self.store.ledger().anchor(),
@@ -856,6 +865,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
     }
 
     fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {
+        if self.exclude_tool_result(permit.key().unit()).is_some() {
+            return Err(super::pieces::TOOL_RESULT_INTERNAL.into());
+        }
         let ledger = self.store.ledger();
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
         let prepared = || LedgerEntry::Prepared {

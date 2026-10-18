@@ -927,6 +927,11 @@ class RawWriterAllowlistTests(unittest.TestCase):
 
     COLLECTOR = "src/services/discord/tmux_watcher/turn_stream_collector.rs"
     COLLECTOR_ENTRY = "src/services/discord/tmux_watcher/turn_stream_collector/entry.rs"
+    COLLECTOR_PHASES = (
+        "turn_stream_collector/stream_seed.rs",
+        "turn_stream_collector/stream_chunk.rs",
+        "turn_stream_collector/idle_read.rs",
+    )
 
     def test_source_contract_stream_collector_is_no_longer_a_family_anchor(self):
         """Pin 1. Why "pipe stream epoch" was deleted rather than re-anchored.
@@ -986,6 +991,10 @@ class RawWriterAllowlistTests(unittest.TestCase):
             "the collector entry must remain a production module wired to its facade",
         )
         source = parent_source + "\n" + (ROOT / self.COLLECTOR_ENTRY).read_text(encoding="utf-8")
+        source += "\n" + "\n".join(
+            ((ROOT / self.COLLECTOR).parent / phase).read_text(encoding="utf-8")
+            for phase in self.COLLECTOR_PHASES
+        )
         self.assertIn("async fn collect_turn_stream_until_terminal(", source)
         for absent in (
             "delivery_record",

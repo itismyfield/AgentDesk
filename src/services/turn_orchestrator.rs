@@ -44,6 +44,7 @@ mod remint_fence;
 mod reply_results;
 mod source_generation;
 mod turn_finished_signal;
+pub(crate) mod witnessed_release;
 use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
     purge_active_source_from_queue, strip_source_message_id_from_intervention, take_unsettled,
@@ -1368,6 +1369,8 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<FinishTurnResult>,
     },
+    /// The THREAD-GUARD's exact release with its route withdrawal (`witnessed_release.rs`).
+    ReleaseWitnessedEpisode(Box<witnessed_release::Request>),
     /// A before-start policy close and its later tail claim on the same actor (`policy_close.rs`).
     PolicyClose {
         request: Box<policy_close::PolicyCloseRequest>,
@@ -1548,9 +1551,11 @@ struct ChannelMailboxState {
     pending_user_dispatch_yield_count: u32,
     pending_user_dispatch_since: Option<Instant>,
     /// #5937 — since when the drain has had a free slot it did not use. Only
-    /// idle time accrues, and no claim ever resets it, so a channel on a turn
-    /// cycle cannot hide a wedge and a fail-open cannot become a duty cycle.
+    /// idle time accrues, and no claim with work still ahead of it resets it, so
+    /// a turn cycle cannot hide a wedge and a fail-open cannot become a duty cycle.
     inbound_stall_since: Option<Instant>,
+    /// Which head `RequeueFront` keeps returning unclaimed; see `inbound_order.rs`.
+    inbound_restore_streak: inbound_order::HeadRestoreStreak,
     recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
@@ -2310,11 +2315,8 @@ fn input_mailbox_step(
                     );
                     clear_pending_user_dispatch(&mut state);
                 }
-                // #5937 — the head is back at the queue front, so the
-                // drain is between rounds, not wedged: the clock starts
-                // over. Here rather than in the hosted-TUI defer (#4270)
-                // that motivated it — this arm covers every caller.
-                state.inbound_stall_since = None;
+                // A restore ends a drain round, up to a cap of unclaimed returns per head.
+                inbound_order::discount_restored_head(&mut state, &identity_ids);
                 RequeueInterventionResult {
                     enqueued: true,
                     refusal_reason: None,
@@ -2420,60 +2422,19 @@ fn input_mailbox_step(
             persistence,
             reply,
         } => {
-            // #3016 — identity guard. Finalize ONLY when the active
-            // turn's user_message_id still matches the terminal's
-            // identity. A mismatch (or no active turn) means the turn
-            // this terminal belonged to already finalized and a newer
-            // turn may now own the mailbox — so we must NOT take its
-            // token. Return a no-op result (removed_token = None) that
-            // mirrors `mailbox_finish_turn`'s idempotent second-call
-            // shape, so the finalizer's `removed_token.is_some()` gate
-            // skips the counter decrement and trailing release.
-            let matches = episode_identity::finish_turn_identity_matches(
-                &state,
+            let request = episode_identity::FinishIfMatches {
+                expected_actor,
+                preserve_queue,
                 expected_user_message_id,
-                &expected_actor,
                 active_started_before,
-                &turn_nonce_guard,
-            );
-            if matches {
-                state.last_persistence = Some(persistence.clone());
-                let finished_user_message_id = state.active_user_message_id;
-                let finished =
-                    finalize_turn_state(&mut state, channel_id, Some(&persistence), preserve_queue);
-                if finished.removed_token.is_some()
-                    && let Some(nonce) = turn_nonce_guard.named_nonce()
-                {
-                    state
-                        .remint_fence
-                        .note_exact_release(expected_user_message_id, nonce);
-                }
-                let _ = reply.send(finished);
-                if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
-                    consume_pending_dispatch_marker_if_matches(
-                        &mut state,
-                        channel_id,
-                        user_message_id,
-                        "finish_turn_if_matches",
-                    );
-                }
-                mark_turn_finished_signal_done(channel_id);
-            } else {
-                // No-op: do not touch the active token. Surface the
-                // current pending state so a caller that schedules a
-                // queue kickoff still sees an accurate backlog flag,
-                // but never release the (possibly newer) live turn.
-                let _ = reply.send(FinishTurnResult {
-                    removed_token: None,
-                    has_pending: state
-                        .intervention_queue
-                        .iter()
-                        .any(|item| item.mode == InterventionMode::Soft),
-                    mailbox_online: true,
-                    queue_exit_events: Vec::new(),
-                    persistence_error: None,
-                });
-            }
+                turn_nonce_guard,
+                persistence,
+            };
+            let answer = |finished, _| _ = reply.send(finished);
+            episode_identity::finish_turn_if_matches(&mut state, channel_id, request, None, answer);
+        }
+        ChannelMailboxMsg::ReleaseWitnessedEpisode(request) => {
+            witnessed_release::answer(&mut state, channel_id, *request);
         }
         msg @ (ChannelMailboxMsg::PolicyClose { .. } | ChannelMailboxMsg::ClaimPolicyTail(_)) => {
             policy_close::answer(&mut state, channel_id, msg, own_recovery_done);

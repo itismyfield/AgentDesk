@@ -42,7 +42,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
 | `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
-| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of the standby boot restore. |
+| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs`, `src/services/cluster/channel_home_boot.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
 | `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
@@ -76,8 +76,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs` |  |
-| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
-| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
+| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record/rollout.rs` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
+| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record/rollout.rs` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs` |  |
 | `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs` | - `high_risk_enabled_via_env` — explicit opt-in via `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`. |
 | `AGENTDESK_E2E_CHANNEL_IDS` | `src/services/discord/e2e_control.rs` | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
@@ -149,7 +149,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `APPDATA` | `src/services/platform/binary_resolver.rs` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs`, `src/services/claude_tui/transcript_tail.rs`, `src/services/discord/mcp_credential_watcher.rs`, `src/services/discord/recovery_engine/manual_rebind_override.rs` | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
-| `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
+| `CODEX_HOME` | `src/services/codex_tui/rollout_tail/discovery.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
 | `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
