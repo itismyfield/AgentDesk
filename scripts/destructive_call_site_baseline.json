@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "2924826955b0594b138c5e7b8c255ef28c8d50e8",
+  "measured_at_sha": "243156271512c3c9d8db538c12acd043f65b3560",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -172,7 +172,9 @@
         "src/services/codex_tui/session.rs": 6,
         "src/services/discord/abandon_request_store.rs": 1,
         "src/services/discord/busy_followup_retry_store.rs": 3,
-        "src/services/discord/catch_up.rs": 4,
+        "src/services/discord/catch_up.rs": 1,
+        "src/services/discord/catch_up/phase1_sweep.rs": 2,
+        "src/services/discord/catch_up/phase2_sweep.rs": 1,
         "src/services/discord/commands/receipt.rs": 1,
         "src/services/discord/e2e_control.rs": 3,
         "src/services/discord/formatting/rollback_journal.rs": 4,
