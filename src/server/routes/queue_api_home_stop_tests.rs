@@ -37,6 +37,22 @@ fn app() -> Router {
     app_with(config, None, None, "holder-a")
 }
 
+fn app_nested_with(config: crate::config::Config) -> Router {
+    let broadcast_tx = crate::eventbus::new_broadcast();
+    let state = AppState {
+        pg_pool: None,
+        engine: crate::engine::PolicyEngine::new(&config).expect("policy engine"),
+        config: Arc::new(config),
+        batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
+        broadcast_tx,
+        health_registry: None,
+        cluster_instance_id: Some("holder-a".into()),
+    };
+    Router::new()
+        .nest("/api", domains::runtime::router(state.clone()))
+        .with_state(state)
+}
+
 pub(crate) async fn post(
     app: &Router,
     uri: &str,
@@ -160,4 +176,55 @@ async fn f1_holder_route_needs_internal_auth_and_the_trusted_forward() {
     let (status, answer) = post(&app, uri, &trusted, &body).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(answer["reason"], "delegation_off", "{answer}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tailnet_home_stop_without_forward_marker_reaches_untrusted_refusal() {
+    let app = app_nested_with(crate::config::Config::default());
+    let (status, answer) = post_from_peer(
+        &app,
+        "/api/internal/home-stop/v1",
+        &[],
+        "{}",
+        "100.64.0.1:1234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+    assert_eq!(answer["code"], "home_stop_untrusted", "{answer}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tailnet_home_stop_with_forward_headers_keeps_body_validation() {
+    let app = app_nested_with(crate::config::Config::default());
+    let headers = [
+        ("x-agentdesk-forwarded-by", "gw"),
+        ("x-agentdesk-session-owner", "holder-a"),
+    ];
+    let (status, answer) = post_from_peer(
+        &app,
+        "/api/internal/home-stop/v1",
+        &headers,
+        "{}",
+        "100.64.0.1:1234",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+    assert_eq!(answer["code"], "home_stop_invalid", "{answer}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tailnet_home_stop_without_api_nest_stays_unauthorized() {
+    let app = app_with(crate::config::Config::default(), None, None, "holder-a");
+    assert_eq!(
+        post_from_peer(
+            &app,
+            "/internal/home-stop/v1",
+            &[],
+            "{}",
+            "100.64.0.1:1234",
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
 }

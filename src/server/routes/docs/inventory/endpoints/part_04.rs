@@ -535,7 +535,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/internal/home-stop/v1",
             "internal",
-            "A gateway's user stop forwarded to the holder of a delegated channel. Accepted only through the trusted cluster forward (loopback or Bearer, plus the x-agentdesk-forwarded-by and x-agentdesk-session-owner headers naming this node); the holder checks its fresh o_channel_homes row (provider, holder, epoch, worker state), admits the command on its home gate and runs its own /stop. Answers echo the request identity with a typed outcome and terminal_confirmed=false; it never re-forwards.",
+            "A gateway's user stop forwarded to the holder of a delegated channel. Requires loopback or configured Bearer proof, or a direct Tailscale-range peer when no server token is configured, plus the x-agentdesk-forwarded-by and x-agentdesk-session-owner headers. The holder checks its fresh o_channel_homes row (provider, holder, epoch, worker state), receiver fence and command admission before running its own /stop. Answers echo the request identity with a typed outcome and terminal_confirmed=false; it never re-forwards.",
         )
         .with_example(
             json!({"body": {"v": 1, "request_id": "r-1", "channel_id": "1500000000000000000", "provider": "claude", "expected_holder": "mac-mini", "home_epoch": 7, "surface": "slash_stop", "intent": "user_stop", "force": false}}),
