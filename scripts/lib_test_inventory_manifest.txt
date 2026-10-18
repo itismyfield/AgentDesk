@@ -6122,6 +6122,7 @@ services::discord::recovery_engine::restore_inflight::tests::restore_clear_and_r
 services::discord::recovery_engine::restore_inflight::tests::restore_reconcile_wrappers_preserve_current_rows_and_use_rebind_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::restore_inflight::tests::restore_snapshot_warns_only_for_current_generation_rows
+services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_budget_clear_needs_a_confirmed_dead_pane_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::recovery_engine::routing_orphan::tests::orphan_with_probe_error_is_preserved_while_dead_pane_is_cleaned
 services::discord::recovery_engine::routing_orphan::tests::probe_error_is_treated_as_alive_not_dead
