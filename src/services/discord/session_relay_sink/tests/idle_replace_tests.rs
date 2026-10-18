@@ -4,9 +4,8 @@ use super::*;
 
 const CHILD: &str = "ADK_IDLE_REPLACE_CHILD";
 
-/// After a rebind replaces the relay, the idle scanner follows it to byte 0, so
-/// the rebuilt head an open row deferred is recovered once the row ends, and the
-/// body delivered before the rebind is not sent again.
+/// After a rebind replaces the relay the idle scanner restarts it at byte 0: the rebuilt
+/// head an open row deferred is recovered, and the body delivered earlier is not resent.
 #[tokio::test(start_paused = true)]
 async fn idle_cursor_restarts_a_rebind_replaced_relay_at_zero() {
     if std::env::var_os(CHILD).is_none() {

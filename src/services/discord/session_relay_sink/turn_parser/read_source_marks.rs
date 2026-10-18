@@ -1,6 +1,5 @@
-//! Which read file the sink parser is folding, and what each other file left
-//! behind in the open turn: its resend watermark and its incomplete trailing
-//! JSONL record. Records from different files are never joined into one line.
+//! Which read file the sink parser folds, and each other file's resend watermark and
+//! incomplete trailing JSONL record, so records from different files never join.
 
 use std::collections::VecDeque;
 
@@ -67,9 +66,8 @@ impl ReadSourceMarks {
         }
     }
 
-    /// Park the active file's incomplete trailing record and watermark, then make
-    /// `to` active with whatever it parked earlier in this turn. Complete records
-    /// already in the buffer stay in the shared stream.
+    /// Park the active file's incomplete trailing record and watermark, then activate `to`
+    /// with what it parked earlier; complete records stay in the shared stream.
     pub(super) fn switch(
         &mut self,
         to: ReadSource,

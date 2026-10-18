@@ -37,10 +37,9 @@ pub(in crate::services::discord) struct SessionRelayParser {
     /// would turn a failed POST into a silent loss, so this deliberately does
     /// not. Cross-delivery duplicates stay the send point's job (the delivered
     /// content fingerprint and the committed-range re-gate).
-    ///
-    /// Like `buffer`, it describes the active read file only; `read_source_marks`
-    /// keeps the other files' watermarks and partial records.
     turn_source_end: Option<u64>,
+    /// Other read files' watermarks and partial records; `buffer` and
+    /// `turn_source_end` describe the active read file only.
     read_source_marks: ReadSourceMarks,
 }
 
