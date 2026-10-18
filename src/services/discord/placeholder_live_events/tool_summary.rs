@@ -356,7 +356,7 @@ pub(super) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
     if key == "apply_patch" {
         return patch_summary(input, cwd);
     }
-    let value: Value = serde_json::from_str(input).ok()?;
+    let value = super::status_events::tool_input_value(input);
     if !value.is_object() {
         return None;
     }

@@ -19,6 +19,14 @@ fn claude_and_codex_aliases_share_classes_and_summaries() {
             render(name, json!({"cmd":"cargo test -p agentdesk"})).as_deref(),
             Some("cargo test -p agentdesk")
         );
+        assert_eq!(
+            render(
+                name,
+                json!(json!({"cmd":"cargo test -p agentdesk"}).to_string())
+            )
+            .as_deref(),
+            Some("cargo test -p agentdesk")
+        );
     }
     for (name, expected) in [
         ("Read", "Read"),
@@ -247,17 +255,17 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
     assert_eq!(cases.len(), 47);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
-            let output = render(
-                tool,
-                json!({"command":command,"cmd":command,"description":command,"query":command}),
-            )
-            .unwrap_or_default();
-            let visible = output.replace('\\', "").replace('\u{200b}', "");
-            for secret in *secrets {
-                assert!(
-                    !output.contains(secret) && !visible.contains(secret),
-                    "{tool}: {secret:?} survived in {output:?}"
-                );
+            let input =
+                json!({"command":command,"cmd":command,"description":command,"query":command});
+            for value in [input.clone(), json!(input.to_string())] {
+                let output = render(tool, value).unwrap_or_default();
+                let visible = output.replace(['\\', '\u{200b}'], "");
+                for secret in *secrets {
+                    assert!(
+                        !output.contains(secret) && !visible.contains(secret),
+                        "{tool}: {secret:?} survived in {output:?}"
+                    );
+                }
             }
         }
     }

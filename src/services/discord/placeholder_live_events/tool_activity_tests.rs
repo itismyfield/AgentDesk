@@ -186,22 +186,27 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
 
 #[test]
 fn activity_claude_and_codex_json_paths_share_safe_rows_and_result_identity() {
-    let store = PlaceholderLiveEvents::default();
-    let channel = ChannelId::new(12);
-    store.push_status_events(channel, status_events_from_json(&json!({"type":"assistant","cwd":"/work/project","message":{"content":[
-        {"type":"tool_use","id":"a","name":"exec_command","input":{"cmd":"cargo test"}},
+    for input in [
+        json!({"cmd":"cargo test"}),
+        json!(json!({"cmd":"cargo test"}).to_string()),
+    ] {
+        let store = PlaceholderLiveEvents::default();
+        let channel = ChannelId::new(12);
+        store.push_status_events(channel, status_events_from_json(&json!({"type":"assistant","cwd":"/work/project","message":{"content":[
+        {"type":"tool_use","id":"a","name":"exec_command","input":input},
         {"type":"tool_use","id":"b","name":"Read","input":{"file_path":"/work/project/src/lib.rs"}}
     ]}})));
-    store.push_status_events(channel, status_events_from_json(&json!({"type":"user","message":{"content":[
+        store.push_status_events(channel, status_events_from_json(&json!({"type":"user","message":{"content":[
         {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"RESULT_MUST_NEVER_APPEAR"}
     ]}})));
-    for provider in [ProviderKind::Claude, ProviderKind::Codex] {
-        let out = store.render_status_panel(channel, &provider, 1_700_000_000);
-        assert!(
-            out.contains("▶ Bash  cargo test") && out.contains("✗ Read  src/lib.rs"),
-            "{out}"
-        );
-        assert!(!out.contains("RESULT_MUST_NEVER_APPEAR"));
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            let out = store.render_status_panel(channel, &provider, 1_700_000_000);
+            assert!(
+                out.contains("▶ Bash  cargo test") && out.contains("✗ Read  src/lib.rs"),
+                "{out}"
+            );
+            assert!(!out.contains("RESULT_MUST_NEVER_APPEAR"));
+        }
     }
 }
 
