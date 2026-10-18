@@ -409,7 +409,9 @@ db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_own
 db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg
 db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg
 db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg
+db::auto_queue::run_owner_guard_pg_tests::revival_refuses_owner_gained_while_waiting_pg
 db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg
+db::auto_queue::run_owner_guard_pg_tests::wait_helpers_reject_a_waiter_observed_after_the_deadline
 db::auto_queue::run_status::tests::activate_eligible_status_contract_admits_promotable_runs
 db::auto_queue::run_status::tests::live_run_status_contract_includes_restore_window
 db::auto_queue::slot_predicate::tests::exists_form_matches_legacy_claim_exists

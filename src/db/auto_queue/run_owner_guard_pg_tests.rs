@@ -17,6 +17,7 @@ const FOREIGN: &str = "run-owner-foreign";
 const PHASE: i64 = 3;
 const GUARD_ROW_LOCK: &str = r"(?is)FROM\s+task_dispatches\b.*\bFOR\s+UPDATE";
 const CANCEL_ROW_LOCK: &str = r"(?is)FROM\s+task_dispatches\b.*WHERE\s+id\s*=\s*\$1.*FOR\s+UPDATE";
+const WAIT_DEADLINE: Duration = Duration::from_secs(5);
 
 enum AdvisoryKey<'a> {
     Run(&'a str),
@@ -196,6 +197,19 @@ async fn observer_pid(observer: &mut PgConnection) -> i32 {
         .expect("observer pid")
 }
 
+/// A waiter only proves the wait when it was observed within the deadline; a late
+/// observation (slow query or delayed poll) fails like no waiter at all.
+fn accept_waiter_within(
+    waiter: i32,
+    observed_at: Instant,
+    deadline: Instant,
+) -> Result<i32, String> {
+    if observed_at > deadline {
+        return Err(format!("waiter {waiter} observed after the 5s deadline"));
+    }
+    Ok(waiter)
+}
+
 /// The single backend waiting on `key` behind exactly `holder_pid`. Zero waiters by the
 /// deadline, extra waiters or holders, a foreign blocker or a finished writer all fail.
 async fn wait_for_exact_advisory_waiter<T>(
@@ -204,8 +218,8 @@ async fn wait_for_exact_advisory_waiter<T>(
     holder_pid: i32,
     writer: &JoinHandle<T>,
 ) -> Result<i32, String> {
+    let deadline = Instant::now() + WAIT_DEADLINE;
     let observer_pid = observer_pid(observer).await;
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         sqlx::query("SELECT pg_stat_clear_snapshot()")
             .execute(&mut *observer)
@@ -258,7 +272,7 @@ async fn wait_for_exact_advisory_waiter<T>(
             if writer.is_finished() {
                 return Err("writer finished while a key waiter was listed".to_string());
             }
-            return Ok(waiter);
+            return accept_waiter_within(waiter, Instant::now(), deadline);
         }
         if writer.is_finished() {
             return Err("writer finished without waiting on the advisory key".to_string());
@@ -279,6 +293,7 @@ async fn wait_for_exact_row_waiter<T>(
     holder_pid: i32,
     writer: &JoinHandle<T>,
 ) -> Result<i32, String> {
+    let deadline = Instant::now() + WAIT_DEADLINE;
     let statement = Regex::new(statement).expect("statement pattern");
     let observer_pid = observer_pid(observer).await;
     let (page, tuple): (i64, i64) = sqlx::query_as(
@@ -289,7 +304,6 @@ async fn wait_for_exact_row_waiter<T>(
     .fetch_one(&mut *observer)
     .await
     .expect("locate dispatch tuple");
-    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         sqlx::query("SELECT pg_stat_clear_snapshot()")
             .execute(&mut *observer)
@@ -340,7 +354,7 @@ async fn wait_for_exact_row_waiter<T>(
             if writer.is_finished() {
                 return Err("writer finished while a row waiter was listed".to_string());
             }
-            return Ok(*waiter);
+            return accept_waiter_within(*waiter, Instant::now(), deadline);
         }
         if writer.is_finished() {
             return Err("writer finished without a matching row wait".to_string());
@@ -944,5 +958,56 @@ async fn review_recovery_cas_rejects_direct_cancel_pg() {
         error.contains("review dispatch changed during recovery"),
         "{error}"
     );
+    fx.close().await;
+}
+
+/// A correct waiter seen after the deadline does not count as proof of the wait.
+#[test]
+fn wait_helpers_reject_a_waiter_observed_after_the_deadline() {
+    let observed_at = Instant::now();
+    let late = accept_waiter_within(42, observed_at, observed_at - Duration::from_millis(1));
+    assert!(late.is_err(), "late waiter accepted: {late:?}");
+    assert_eq!(
+        accept_waiter_within(42, observed_at, observed_at + WAIT_DEADLINE),
+        Ok(42)
+    );
+}
+
+/// A revival that waited on its owner's token re-reads the owners under the row lock and
+/// refuses one that a gate save attached meanwhile, since that run's token is not held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revival_refuses_owner_gained_while_waiting_pg() {
+    let mut fx = Fixture::new().await;
+    fx.dispatch("d-gained", "failed", Some(TARGET)).await;
+    let token = format!("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || '{TARGET}'))");
+    let (holder, holder_pid) = raw_holder(&fx.pg_db.database_url, &[&token]).await;
+
+    let writer = spawn_revival(&fx.pool, "d-gained", "pending", None);
+    let waited = wait_for_exact_advisory_waiter(
+        &mut fx.observer,
+        AdvisoryKey::Run(TARGET),
+        holder_pid,
+        &writer,
+    )
+    .await;
+    let saved = spawn_save(&fx.pool, FOREIGN, "d-gained")
+        .await
+        .expect("join foreign save");
+    commit_raw(holder).await;
+    let revived = writer.await.expect("join revival");
+
+    assert!(
+        revived.is_err(),
+        "revival ignored the owner gained meanwhile: {revived:?}"
+    );
+    assert_eq!(
+        fx.dispatch_status("d-gained").await.as_deref(),
+        Some("failed")
+    );
+    assert!(saved.is_ok(), "{saved:?}");
+    assert_eq!(fx.gate_rows(FOREIGN, "d-gained").await, 1);
+    waited.expect("revival must wait on the context owner token");
+    let error = revived.expect_err("refusal");
+    assert!(error.contains("outside the locked set"), "{error}");
     fx.close().await;
 }
