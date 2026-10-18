@@ -1,9 +1,9 @@
 //! #1446 stall-deadlock recovery — shared post-clear bookkeeping.
 //!
-//! The THREAD-GUARD's stale-thread cleanup (`router::intake_gate`) and the
-//! stall watchdog's force-clean path (`health::run_stall_watchdog_pass`)
-//! both call `mailbox_clear_channel` on a thread/channel whose original
-//! turn task has already died. `mailbox_clear_channel` returns the
+//! Recovery paths that release a channel whose original turn task has already
+//! died (the stall watchdog's force-clean, `health::run_stall_watchdog_pass`,
+//! calls `mailbox_clear_channel`; the THREAD-GUARD releases only its witnessed
+//! episode and finalizes it with the session-preserving variant). `mailbox_clear_channel` returns the
 //! orphaned `cancel_token` in `ClearChannelResult.removed_token`, but the
 //! normal turn-finish lifecycle (`finalize_turn_state` →
 //! `cancel_active_token` → saturating `global_active` decrement) was never run,

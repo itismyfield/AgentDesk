@@ -402,7 +402,17 @@ async fn thread_guard_leaves_an_unanchored_thread_turn_alone_pg() {
         vec![q.get()],
         "Q kept"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), bytes, "row bytes unchanged");
+    // The verdict's writing load may backfill the finalizer id; the episode the row names stays.
+    let episode = |bytes: &[u8]| {
+        let row: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        ["user_msg_id", "turn_nonce", "started_at", "channel_id"].map(|key| row[key].clone())
+    };
+    let kept = std::fs::read(&path).expect("the row stays");
+    assert_eq!(
+        episode(&kept),
+        episode(&bytes),
+        "row names the same episode"
+    );
     let mapped = shared
         .dispatch
         .thread_parents
@@ -535,6 +545,103 @@ async fn thread_guard_keeps_a_successor_admitted_after_the_witness_pg() {
     assert_eq!(harness.provider_starts(), starts);
     assert!(queued, "queued through the THREAD-GUARD");
     assert!(!released, "A's episode no longer holds the thread");
+    drop(tmux);
+    db.drop().await;
+    drop(harness);
+}
+
+// The clean is held right after its actor release; B then claims the thread, publishes its route
+// and stops short of its row. Once the clean finishes, B writes its row and runs, its route
+// stays, and the idle parent's next bot message queues behind B through the THREAD-GUARD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_guard_keeps_a_successor_route_published_after_the_release_pg() {
+    use crate::services::discord::router::thread_guard_test_api::pause;
+    let (harness, db, tmux, name) = legacy_thread_harness().await;
+    let (shared, thread) = (&harness.shared, ChannelId::new(THREAD_ID));
+    let parent = ChannelId::new(PARENT_ID);
+    let provider = ProviderKind::Claude;
+    let (a, _) = stale_thread_turn(&harness, &name).await;
+    let idle = mailbox_snapshot(shared, parent).await;
+    assert!(
+        idle.cancel_token.is_none() && idle.intervention_queue.is_empty(),
+        "idle parent"
+    );
+    let w = witness(shared, &provider, thread)
+        .await
+        .expect("an admitted stale thread");
+    let mut rx = crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+        shared.as_ref(),
+    );
+    let gate = pause::arm(thread);
+    let cleaner = {
+        let (shared, provider) = (shared.clone(), provider.clone());
+        tokio::spawn(async move { clean(&shared, &provider, parent, thread, w).await })
+    };
+    gate.reached.notified().await;
+    assert!(
+        !a.cancelled.load(Ordering::Relaxed),
+        "A finalized only after the pause"
+    );
+    assert_eq!(
+        completions(&mut rx, thread),
+        0,
+        "no completion before the cleanup"
+    );
+    // B claims the released thread and publishes its route, then waits short of its row.
+    let b = Arc::new(CancelToken::new());
+    let b_message = MessageId::new(THREAD_ID + 2);
+    let start = crate::services::discord::mailbox_try_start_turn;
+    assert!(start(shared, thread, b.clone(), UserId::new(7), b_message).await);
+    shared.dispatch.thread_parents.insert(parent, thread);
+
+    gate.resume.notify_one();
+    assert!(cleaner.await.unwrap(), "A was released");
+    assert_eq!(
+        completions(&mut rx, thread),
+        1,
+        "one completion after the cleanup"
+    );
+    assert!(a.cancelled.load(Ordering::Relaxed), "A finalized");
+
+    let mut row = inflight::InflightTurnState::new(
+        provider.clone(),
+        THREAD_ID,
+        None,
+        7,
+        b_message.get(),
+        b_message.get() + 1,
+        "successor".to_string(),
+        None,
+        Some(name.clone()),
+        None,
+        None,
+        0,
+    );
+    row.turn_nonce = b.turn_nonce().map(str::to_string);
+    inflight::save_inflight_state_create_new(&row).expect("B starts: its row is written");
+    let held = mailbox_snapshot(shared, thread).await;
+    assert!(
+        held.cancel_token
+            .as_ref()
+            .is_some_and(|t| Arc::ptr_eq(t, &b)),
+        "B holds"
+    );
+    let mapped = shared.dispatch.thread_parents.get(&parent);
+    assert_eq!(
+        mapped.map(|entry| *entry.value()),
+        Some(thread),
+        "B's route"
+    );
+    let starts = harness.provider_starts();
+    let logs = Logs::capture();
+    intake(&harness, PARENT_ID + 8).await;
+    let queued = logs.thread_guard_queued(PARENT_ID + 8);
+    drop(logs);
+    let after = mailbox_snapshot(shared, parent).await;
+    assert_eq!(queued_ids(&after.intervention_queue), vec![PARENT_ID + 8]);
+    assert!(after.cancel_token.is_none(), "nothing runs on the parent");
+    assert_eq!(harness.provider_starts(), starts);
+    assert!(queued, "queued through the THREAD-GUARD");
     drop(tmux);
     db.drop().await;
     drop(harness);
