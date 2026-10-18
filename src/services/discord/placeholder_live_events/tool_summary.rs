@@ -149,9 +149,8 @@ fn sanitized(raw: &str) -> Option<String> {
     let masked = crate::services::discord::formatting::redact_sensitive_for_placeholder(&masked);
     let masked = crate::utils::redact::redact_known_secrets(&masked);
     let masked = anonymize_home(&masked);
-    // Shell words may quote-concatenate the sensitive key/prefix itself. After
-    // ordinary values have been masked, any newly detectable material in the
-    // dequoted view is ambiguous and must fall back to the static tool class.
+    // Recheck without quotes: quoted key/prefix fragments can hide sensitive
+    // material. New matches after masking are ambiguous, so omit the detail.
     let dequoted = masked.replace('\'', "").replace('"', "");
     if dequoted != masked
         && (redact_credentials(&dequoted) != dequoted
