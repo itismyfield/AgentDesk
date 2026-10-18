@@ -1,3 +1,4 @@
+use super::consume_once as consume;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::discord;
@@ -838,11 +839,10 @@ impl Close {
     }
 }
 
-#[path = "before_start_stop_disk_gate_tests.rs"]
-mod disk_gate;
-
 #[path = "before_start_stop_clear_order_tests.rs"]
 mod clear_order;
+#[path = "before_start_stop_disk_gate_tests.rs"]
+mod disk_gate;
 
 #[path = "before_start_stop_policy_tests.rs"]
 mod policy;

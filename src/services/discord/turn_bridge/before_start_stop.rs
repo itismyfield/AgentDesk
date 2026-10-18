@@ -64,7 +64,7 @@ async fn run_policy_close(
     let settled = if let Some(mailbox) = shared.mailbox_peek(channel) {
         loop {
             attempts += 1;
-            let outcome = consume_attempt(
+            let outcome = consume(
                 shared,
                 (&shared.turn_finalizer, &mailbox),
                 actor,
@@ -115,7 +115,7 @@ enum CloseAttempt {
     Retry(&'static str),
 }
 
-async fn consume_attempt<F>(
+async fn consume<F>(
     shared: &Arc<SharedData>,
     (fin, mailbox): (&TurnFinalizer, &ChannelMailboxHandle),
     actor: &Arc<CancelToken>,
@@ -239,7 +239,7 @@ async fn mailbox_owns(mailbox: &ChannelMailboxHandle, actor: &Arc<CancelToken>) 
 }
 
 #[cfg(all(test, unix))]
-async fn consume(
+async fn consume_once(
     shared: &Arc<SharedData>,
     fin: &TurnFinalizer,
     actor: &Arc<CancelToken>,
@@ -251,7 +251,7 @@ async fn consume(
         return false;
     };
     matches!(
-        consume_attempt(
+        consume(
             shared,
             (fin, &mailbox),
             actor,
