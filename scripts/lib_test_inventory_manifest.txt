@@ -11298,7 +11298,10 @@ services::routines::fresh_session_reaper::tests::reapable_predicate_excludes_in_
 services::routines::fresh_session_reaper::tests::reaper_backstop_matches_only_completed_fresh_orphan
 services::routines::fresh_session_reaper::tests::revalidate_proceeds_only_for_dead_pane_genuine_orphan
 services::routines::fresh_session_reaper::tests::revalidate_skips_kill_when_routine_retriggered_after_snapshot
-services::routines::loader::tests::additional_alias_of_primary_root_keeps_bundled_helper_excluded
+services::routines::loader::discovery::tests::node_helpers_are_never_evaluated_in_primary_or_override_roots
+services::routines::loader::discovery::tests::override_conflicts_select_the_declared_file_cold_and_warm
+services::routines::loader::discovery::tests::undeclared_rewrite_keeps_last_known_good_until_the_file_is_removed
+services::routines::loader::discovery::tests::unreadable_script_stays_a_candidate_on_the_read_failure_path
 services::routines::loader::tests::automation_recommender_accepts_memento_digest_occurrence_counts
 services::routines::loader::tests::automation_recommender_checkpoint_guard_prunes_lru_candidate_first
 services::routines::loader::tests::automation_recommender_expands_api_friction_category
@@ -11315,7 +11318,6 @@ services::routines::loader::tests::automation_recommender_uses_weight_for_error_
 services::routines::loader::tests::bundled_sample_routines_load_and_validate
 services::routines::loader::tests::captures_registered_routine_metadata
 services::routines::loader::tests::concurrent_shared_loaders_singleflight_one_failure
-services::routines::loader::tests::discover_routine_script_refs_excludes_bundled_node_helper_in_primary_root
 services::routines::loader::tests::discover_routine_script_refs_walks_roots_and_skips_non_js
 services::routines::loader::tests::executes_tick_and_validates_action
 services::routines::loader::tests::exposes_tick_agent_idle_state_to_js
@@ -11325,7 +11327,6 @@ services::routines::loader::tests::failure_backoff_doubles_and_caps_at_one_hour
 services::routines::loader::tests::family_profile_probe_agent_action_defers_daily_marker_until_delivery
 services::routines::loader::tests::isolates_global_bindings_between_scripts
 services::routines::loader::tests::legacy_automation_executor_v2_ref_resolves_to_canonical_script
-services::routines::loader::tests::load_dir_excludes_node_only_worktree_inventory_helper
 services::routines::loader::tests::load_dir_hashes_and_evaluates_the_same_source_snapshot
 services::routines::loader::tests::load_dir_prunes_removed_scripts_and_keeps_failed_seen_script
 services::routines::loader::tests::load_dir_recurses_into_nested_script_dirs
@@ -11336,7 +11337,6 @@ services::routines::loader::tests::load_dirs_supports_operator_override_dirs
 services::routines::loader::tests::loader_recovers_after_lock_poisoning
 services::routines::loader::tests::loads_registered_routine_script
 services::routines::loader::tests::missing_relative_root_keeps_shared_authority_after_creation
-services::routines::loader::tests::operator_root_can_define_the_bundled_helper_relative_path_as_a_routine
 services::routines::loader::tests::quickjs_eval_error_includes_exception_message_and_stack
 services::routines::loader::tests::quickjs_eval_error_includes_primitive_throw_value
 services::routines::loader::tests::quickjs_eval_error_with_empty_message_starts_with_stack
