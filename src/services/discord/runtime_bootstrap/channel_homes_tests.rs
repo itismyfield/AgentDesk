@@ -883,15 +883,13 @@ async fn routed_at(pool: &sqlx::PgPool, channel: u64, epoch: i64) -> i64 {
     inserted.await.unwrap()
 }
 
-/// Status, claim owner and whether it was accepted, of outbox row `id`.
-async fn outbox_row(pool: &sqlx::PgPool, id: i64) -> (String, Option<String>, bool) {
-    sqlx::query_as(
-        "SELECT status::TEXT, claim_owner, accepted_at IS NOT NULL FROM intake_outbox WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+/// Status and claim owner of `channel`'s outbox row `id`, as the operator status query reads it.
+async fn outbox_row(pool: &sqlx::PgPool, channel: u64, id: i64) -> (String, Option<String>) {
+    let channel = channel.to_string();
+    let rows = crate::db::intake_outbox::list_recent_rows(pool, Some(&channel), 10);
+    let rows = rows.await.unwrap();
+    let row = rows.into_iter().find(|row| row.id == id).expect("the row");
+    (row.status.as_str().to_string(), row.claim_owner)
 }
 
 /// One intake worker tick on this node, as its poll loop runs it.
@@ -1017,9 +1015,10 @@ async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_rest
     let (_owners, owner) = owner_runtime_for_tests::registered("claude").await;
     let recorder = test_executor::record();
     let routed = routed_at(&pool, CH, epoch).await;
+    let row = || outbox_row(&pool, CH, routed);
     assert_eq!(tick(&pool, &owner).await, TickOutcome::QueueEmpty);
-    let pending = ("pending".to_string(), None, false);
-    assert_eq!(outbox_row(&pool, routed).await, pending, "the row waits");
+    let pending = ("pending".to_string(), None);
+    assert_eq!(row().await, pending, "the row waits unclaimed");
     assert_eq!(recorder.channels(), Vec::<u64>::new(), "no turn ran");
 
     paused.release();
@@ -1034,7 +1033,7 @@ async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_rest
     assert_eq!(opened, Some(vec![ITEM]), "opened with the queue restored");
     assert_eq!(channel_home::intake_hold(&channel, Some(epoch)), None);
     assert_eq!(channel_home_boot::running(&channel), (true, Some(epoch)));
-    assert_eq!(outbox_row(&pool, routed).await, pending, "the row stays");
+    assert_eq!(row().await, pending, "the row outlives the restore");
     assert_eq!(recorder.channels(), Vec::<u64>::new());
     use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
     let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
