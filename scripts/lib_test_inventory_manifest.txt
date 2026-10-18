@@ -4755,6 +4755,7 @@ services::discord::inflight::save_store::identity_gate::host_locator::tests::leg
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_failed_receipt_write_publishes_nothing
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::a_transition_runs_on_a_blocking_worker_and_its_panic_is_none
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_adds_only_the_receipt_to_the_advanced_row
+services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_refuses_a_fresh_zero_anchor_without_minting
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_refuses_every_fresh_row_that_is_not_this_bridge_turn
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::admission_stays_off_without_settlement_and_without_identity
 services::discord::inflight::save_store::identity_gate::runtime_stamp::before_start_stop_admission::tests::off_scheduler_answers_a_transition_panic_with_none
@@ -9201,6 +9202,11 @@ services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_normal
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_purged_actor_reconciles_only_with_ledger_and_fence
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_reconcile_window_ends_with_the_finalized_entry
 services::discord::turn_bridge::before_start_stop::tests::reconcile::s2cd_tmux_turn_never_reaches_the_reconcile
+services::discord::turn_bridge::before_start_stop::tests::retry::p10_r1_ack_retry_reuses_the_sent_notice
+services::discord::turn_bridge::before_start_stop::tests::retry::p10_r1_delivered_reentry_never_retransmits
+services::discord::turn_bridge::before_start_stop::tests::retry::p10_r1_notice_exhaustion_keeps_receipt_for_restart
+services::discord::turn_bridge::before_start_stop::tests::retry::p10_r1_notice_retries_the_same_receipt_then_closes_once
+services::discord::turn_bridge::before_start_stop::tests::retry::p10_r1_retry_stops_when_the_captured_actor_changes
 services::discord::turn_bridge::before_start_stop::tests::tail::s2f_ack_loss_after_the_tail_is_a_duplicate_without_a_tail
 services::discord::turn_bridge::before_start_stop::tests::tail::s2f_displaced_witness_resumes_from_the_ledger_ticket
 services::discord::turn_bridge::before_start_stop::tests::tail::s2f_finalized_without_an_exact_release_never_reconciles

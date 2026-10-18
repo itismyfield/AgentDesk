@@ -850,9 +850,10 @@ mod policy;
 #[path = "before_start_stop_reconcile_tests.rs"]
 mod reconcile;
 
+#[path = "before_start_stop_retry_tests.rs"]
+mod retry;
 #[path = "before_start_stop_tail_tests.rs"]
 mod tail;
-
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,
@@ -863,7 +864,6 @@ async fn recorded(
 
 /// A change applied to a row.
 type Shape = fn(&mut InflightTurnState);
-
 /// Nothing is shown or released before the receipt is durable: a failed write keeps the turn held
 /// and its row as it was; the notice runs with the receipt on disk and no inflight lock held.
 #[tokio::test(flavor = "current_thread")]
