@@ -1562,6 +1562,7 @@ services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transit
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_probe_fails_kills_and_warns_only_if_the_kill_fails_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg
+services::discord::commands::control::clear_end_tests::a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg
 services::discord::commands::control::clear_end_tests::a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg
 services::discord::commands::control::clear_entry_tests::a_clear_without_a_pool_commits_and_warns_through_both_entries_pg
@@ -1620,7 +1621,10 @@ services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after
 services::discord::herdr_terminate::route_tests::act_route_endpoint_lost_after_close_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_foreign_runtime_refused_pg
 services::discord::herdr_terminate::route_tests::act_route_logs_result_once_pg
+services::discord::herdr_terminate::route_tests::act_route_never_attached_pending_with_reprobed_evidence_retires_pg
 services::discord::herdr_terminate::route_tests::act_route_panic_reopens_the_fence_only_before_the_close_pg
+services::discord::herdr_terminate::route_tests::act_route_pending_without_a_recorded_pane_is_refused_pg
+services::discord::herdr_terminate::route_tests::act_route_pending_without_launch_evidence_is_refused_for_it_pg
 services::discord::herdr_terminate::route_tests::act_route_retired_is_the_only_success_pg
 services::discord::herdr_terminate::route_tests::act_route_stale_cas_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_view_vanishes_after_target_is_refused_pg
@@ -1816,6 +1820,7 @@ services::discord::router::message_handler::intake_turn::runtime_transition::nat
 services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::native_hold_requeues_the_real_router_input_and_uploads_durably_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_codex_launch_that_never_sent_its_create_is_followed_by_one_fresh_launch_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg
@@ -1847,10 +1852,17 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_launch_that_never_sent_its_create_leaves_the_next_turn_free_to_launch_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_names_the_terminate_switch_and_its_exact_exit_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_proven_by_its_own_provider_records_that_evidence_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_takes_no_evidence_from_another_executions_provider_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_with_only_its_shell_is_judged_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_terminated_never_attached_execution_is_followed_by_one_fresh_launch_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_a_paste_then_cancel_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_an_unclear_paste_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg
@@ -2211,6 +2223,7 @@ services::dispatches::outbox_queue::replay_hold_tests::replay_hold_unreadable_ba
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
+services::herdr_launch::tests::herdr_launch_keeps_a_pending_that_names_a_pane_after_an_unsent_create_pg
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
 services::herdr_launch::tests::herdr_launch_probes_a_pending_pane_without_evidence_again_and_never_recreates_it_pg
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
