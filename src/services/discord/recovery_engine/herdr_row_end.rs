@@ -17,7 +17,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedRecord, HostedState,
 };
 use crate::services::agent_protocol::NativeTerminalKind;
-use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
+use crate::services::claude::herdr_turn::{HoldRelease, Terminal, TurnOutput, release_hold};
 use crate::services::claude_tui::host_input::{HostCapture, HostInputOutcome, InputTarget};
 use crate::services::discord::herdr_terminate::{ExecutionEnd, execution_end, retire_confirmed};
 use crate::services::provider::session_probe::SessionLiveness;
@@ -419,7 +419,12 @@ fn idle_read(
             outcome == HostInputOutcome::ReadySameExecution
         }
         ProviderKind::Codex => {
+            use crate::services::codex_tui::input::{
+                ComposerContent, active_composer_content_in_pane,
+            };
             crate::services::codex_tui::input::pane_looks_ready_for_codex_prompt(&screen)
+                && (mutant("no-empty-composer")
+                    || active_composer_content_in_pane(&screen) == ComposerContent::Empty)
         }
         _ => false,
     };
@@ -431,18 +436,47 @@ fn idle_read(
     let len = meta.len();
     let body = match provider {
         ProviderKind::Claude => {
-            use crate::services::claude::herdr_turn::{last_turn_closed, read_turn};
-            if last_turn_closed(&mut file, len) != Ok(true) {
-                return None;
-            }
-            let turn = submitted.and_then(|at| read_turn(&mut file, at, len).ok().flatten());
+            let turn = crate::services::claude::herdr_turn::closed_turn(&mut file, submitted, len)?;
             turn.filter(|turn| turn.kind == NativeTerminalKind::Completed)
-                .map(|turn| turn.result)
-                .filter(|result| !result.trim().is_empty())
+                .map(turn_body)
+                .filter(|body| !body.trim().is_empty())
         }
         _ => codex_last_turn_closed(&mut file, len)?.then_some(None)?,
     };
     (view.read_execution() == before).then_some(body)
+}
+
+/// A completed turn's reply: its explicit result, else its streamed text composed as the live bridge
+/// composes it, with one paragraph break at each tool use.
+fn turn_body(turn: Terminal) -> String {
+    use crate::services::discord::semantic_boundaries::{
+        semantic_chunk_separator_needed, text_ends_inside_open_code_fence,
+    };
+    if !turn.result.trim().is_empty() || mutant("done-overwrites") {
+        return turn.result;
+    }
+    let mut body = String::new();
+    for part in turn.output.iter().filter(|_| !mutant("no-body-collect")) {
+        match part {
+            TurnOutput::Tool if !body.is_empty() => {
+                body.truncate(body.trim_end().len());
+                body.push_str("\n\n");
+            }
+            TurnOutput::Tool => {}
+            TurnOutput::Text(text)
+                if body.ends_with("\n\n") && !text_ends_inside_open_code_fence(&body) =>
+            {
+                body.push_str(text.trim_start_matches('\n'));
+            }
+            TurnOutput::Text(text) => {
+                if semantic_chunk_separator_needed(&body, text) {
+                    body.push_str("\n\n");
+                }
+                body.push_str(text);
+            }
+        }
+    }
+    body
 }
 
 /// The rollout's latest started turn has its own completion or abort and no input after it; a torn

@@ -932,7 +932,7 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
 
 mod never_attached;
 mod terminal_replay;
-pub(crate) use terminal_replay::{last_turn_closed, read_turn, replay_herdr_turn};
+pub(crate) use terminal_replay::{Terminal, TurnOutput, closed_turn, replay_herdr_turn};
 
 #[cfg(test)]
 mod provider_terminal_tests;
