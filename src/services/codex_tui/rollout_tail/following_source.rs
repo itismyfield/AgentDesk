@@ -2,12 +2,103 @@
 
 use super::*;
 
+enum RolloutSource {
+    Follow,
+    FixedOpened(std::fs::File),
+}
+
+pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<&str>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    tmux_session_name: &str,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    tail_rollout_file_from_offset_with_pane_busy_probe(
+        rollout_path,
+        start_offset,
+        session_id,
+        sender,
+        cancel_token,
+        is_alive,
+        Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        Some(tmux_session_name),
+    )
+}
+
+pub(crate) fn tail_fixed_recovery_rollout(
+    file: std::fs::File,
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<String>,
+    own_turn: String,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    if own_turn.is_empty()
+        || session_id.as_deref().is_none_or(str::is_empty)
+        || !file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .is_file()
+    {
+        return Err("fixed recovery needs a regular source, session and turn".into());
+    }
+    tail_source(
+        RolloutSource::FixedOpened(file),
+        (rollout_path, start_offset, session_id),
+        &sender,
+        cancel_token,
+        || true,
+        RolloutTailOptions {
+            own_turn: Some(own_turn),
+            ..Default::default()
+        },
+    )
+}
+
 pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
     L: Into<PaneLiveness>,
 >(
     rollout_path: &Path,
-    mut start_offset: u64,
-    mut initial_session_id: Option<String>,
+    start_offset: u64,
+    initial_session_id: Option<String>,
+    sender: &Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> L,
+    options: RolloutTailOptions,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    tail_source(
+        RolloutSource::Follow,
+        (rollout_path, start_offset, initial_session_id),
+        sender,
+        cancel_token,
+        is_alive,
+        options,
+    )
+}
+
+fn validate_fixed_record(line: &[u8], turn: &str) -> Result<(), String> {
+    let record: serde_json::Value = serde_json::from_slice(line)
+        .map_err(|error| format!("invalid fixed recovery record: {error}"))?;
+    let payload = &record["payload"];
+    let scoped = record["type"] == "turn_context"
+        || (record["type"] == "event_msg"
+            && matches!(
+                payload["type"].as_str(),
+                Some("task_started" | "task_complete" | "turn_aborted")
+            ));
+    if scoped && crate::services::agent_protocol::codex_payload_turn_id(payload) != Some(turn) {
+        return Err("fixed recovery reached a foreign or unnamed turn".into());
+    }
+    Ok(())
+}
+
+fn tail_source<L: Into<PaneLiveness>>(
+    source: RolloutSource,
+    (rollout_path, mut start_offset, mut initial_session_id): (&Path, u64, Option<String>),
     sender: &Sender<StreamMessage>,
     cancel_token: Option<Arc<CancelToken>>,
     mut is_alive: impl FnMut() -> L,
@@ -28,13 +119,20 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
         own_turn,
         ..
     } = options;
+    let fixed = matches!(source, RolloutSource::FixedOpened(_));
     let mut current_path = rollout_path.to_path_buf();
-    let mut source_pin = super::super::verified_tail::SourcePin::new(
-        tmux_session_name.as_deref(),
-        rollout_path,
-        initial_session_id.as_deref(),
-    );
-    let mut file = if let Some(pin) = source_pin.clone() {
+    let mut source_pin = (!fixed)
+        .then(|| {
+            super::super::verified_tail::SourcePin::new(
+                tmux_session_name.as_deref(),
+                rollout_path,
+                initial_session_id.as_deref(),
+            )
+        })
+        .flatten();
+    let mut file = if let RolloutSource::FixedOpened(file) = source {
+        file
+    } else if let Some(pin) = source_pin.clone() {
         let Some(opened) = pin.open(cancel_token.as_deref(), start_offset) else {
             return Ok((
                 ReadOutputResult::Cancelled {
@@ -63,11 +161,14 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
         .metadata()
         .map_err(|error| format!("stat Codex rollout {}: {error}", rollout_path.display()))?
         .len();
-    if source_pin.is_some() && start_offset > file_len {
+    if (fixed || source_pin.is_some()) && start_offset > file_len {
         return Err("verified start is beyond the pinned native source".into());
     }
     let mut seek_offset = super::super::session::checkpoint::boundary(&mut file, start_offset)
         .map_err(|error| error.to_string())?;
+    if fixed && seek_offset != start_offset {
+        return Err("fixed recovery origin is not a complete record boundary".into());
+    }
     file.seek(SeekFrom::Start(seek_offset))
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
@@ -104,6 +205,15 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
     let accept = parser::RecordAcceptance::new(cancel_token.as_ref());
     let accept = accept.with_own_turn(own_turn.as_deref(), &mut state);
 
+    if fixed && seek_offset > 0 {
+        sender.send(StreamMessage::Init {
+            session_id: state
+                .session_id
+                .clone()
+                .ok_or("fixed recovery needs a session")?,
+            raw_session_id: None,
+        });
+    }
     let mut death = ConfirmedDeadPane::default();
     loop {
         if sender.cancel_observed() {
@@ -175,8 +285,42 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
                 continue;
             }
         }
+        if fixed
+            && !file
+                .metadata()
+                .is_ok_and(|metadata| metadata.len() >= current_offset)
+        {
+            return Err("fixed recovery source shrank or became unreadable".into());
+        }
         match file.read(&mut buf) {
             Ok(0) => {
+                if fixed {
+                    if state.turn_aborted_seen {
+                        return Err("fixed recovery turn was aborted".into());
+                    }
+                    if state.own_turn_complete_seen && state.dropped_assistant_content {
+                        return Err("fixed recovery lost assistant content".into());
+                    }
+                    if state.own_turn_complete_seen
+                        && let Some(path) = explicit_finalize_path(&mut state, true)
+                    {
+                        let offset = seek_offset.saturating_add(state.bytes_read);
+                        emit_done(
+                            &sender,
+                            &mut state,
+                            path,
+                            &current_path,
+                            offset,
+                            terminal_range,
+                        );
+                        return Ok((
+                            ReadOutputResult::Completed { offset },
+                            outcome(&state, seek_offset, &current_path),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
                 let mut pane_is_alive =
                     || !death.observe(is_alive().into(), Some((&file, current_offset)));
                 let turn = (seek_offset, terminal_range.1);
@@ -404,6 +548,12 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
                         break;
                     }
                     let line: Vec<u8> = partial_line.drain(..=pos).collect();
+                    if fixed {
+                        validate_fixed_record(
+                            &line,
+                            own_turn.as_deref().ok_or("fixed recovery needs a turn")?,
+                        )?;
+                    }
                     state.record(line.len());
                     if process_rollout_line_bytes(&line, &sender, &mut state) {
                         last_output_at = Some(Instant::now());
@@ -422,3 +572,7 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
         }
     }
 }
+
+#[cfg(test)]
+#[path = "following_source_tests.rs"]
+mod tests;

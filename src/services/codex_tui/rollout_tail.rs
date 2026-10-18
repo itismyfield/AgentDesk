@@ -216,26 +216,7 @@ pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     .map(|result| result.0)
 }
 
-pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
-    rollout_path: &Path,
-    start_offset: u64,
-    session_id: Option<&str>,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<Arc<CancelToken>>,
-    is_alive: impl FnMut() -> L,
-    tmux_session_name: &str,
-) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
-    tail_rollout_file_from_offset_with_pane_busy_probe(
-        rollout_path,
-        start_offset,
-        session_id,
-        sender,
-        cancel_token,
-        is_alive,
-        Some(pane_busy_probe_for_tmux(tmux_session_name)),
-        Some(tmux_session_name),
-    )
-}
+pub(crate) use following_source::{tail_fixed_recovery_rollout, tail_recovery_rollout_for_tmux};
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
 pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
