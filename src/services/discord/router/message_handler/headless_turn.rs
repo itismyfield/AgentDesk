@@ -1,7 +1,8 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
 use super::*;
-use crate::services::discord::live_bridge::register_without_requeue;
+use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
 
+mod process_mailbox;
 mod routine_metadata;
 use routine_metadata::{
     fresh_routine_turn, routine_metadata_agent_id, routine_metadata_role_binding,
@@ -162,6 +163,8 @@ async fn start_reserved_headless_turn_admitted(
     let claim = super::super::turn_start::claim_reserved_headless_turn;
     let (session_transition_guard, cancel_token) =
         claim(shared, channel_id, request_owner, &reservation, identity).await?;
+    let process_mailbox =
+        process_mailbox::capture((shared, channel_id), &cancel_token, metadata.as_ref()).await;
     crate::services::discord::increment_global_active(shared, "headless_turn_start");
     // Compute the routine continuity policy once at the turn-start boundary.
     // The shared `/goal fresh` machinery below clears every provider restore path
@@ -1009,7 +1012,7 @@ async fn start_reserved_headless_turn_admitted(
         tmux_session_name.as_deref(),
     )
     .await;
-    tokio::task::spawn_blocking(move || {
+    let producer = tokio::task::spawn_blocking(move || {
         let _original_registration = producer_registration;
         let _upload_lifetime = materialized_uploads;
         let result = crate::services::platform::with_provider_execution_context(
@@ -1089,6 +1092,7 @@ async fn start_reserved_headless_turn_admitted(
             inflight_state.effective_finalizer_turn_id(),
         );
     }
+    let completion_tx = process_mailbox.map(|mailbox| mailbox.watch(producer));
     spawn_turn_bridge(
         shared.clone(),
         cancel_token,
@@ -1117,7 +1121,7 @@ async fn start_reserved_headless_turn_admitted(
             new_session_id: session_id,
             defer_watcher_resume: false,
             reuse_status_panel_message: false,
-            completion_tx: None,
+            completion_tx,
             is_external_input_tui_direct: false, // #3089 A6b: Discord-origin (not external-input)
             inflight_state,
         },
@@ -1127,15 +1131,6 @@ async fn start_reserved_headless_turn_admitted(
         turn_id: reservation.turn_id(channel_id),
         status: HeadlessTurnStartStatus::Started,
     })
-}
-
-async fn register_headless_original(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &InflightTurnState,
-    cancel: &Arc<CancelToken>,
-) -> Result<Option<Arc<crate::services::discord::live_bridge::OriginalRegistration>>, bool> {
-    register_without_requeue(shared, provider, state, cancel).await
 }
 
 #[cfg(test)]

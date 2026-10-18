@@ -77,6 +77,27 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     Ok(())
 }
 
+fn close_if_idle_observed_verdict(
+    state: &mut ChannelMailboxState,
+    expected_claim: Option<ClaimObservation>,
+) -> Result<(), &'static str> {
+    if expected_claim.is_some_and(|observed| state.claim_log.observation() != observed) {
+        return Err("claim_changed");
+    }
+    close_if_idle_verdict(state)
+}
+
+pub(super) fn answer_close_if_idle(state: &mut ChannelMailboxState, msg: ChannelMailboxMsg) {
+    let ChannelMailboxMsg::CloseIfIdle {
+        expected_claim,
+        reply,
+    } = msg
+    else {
+        unreachable!("only CloseIfIdle reaches its reply handler");
+    };
+    let _ = reply.send(close_if_idle_observed_verdict(state, expected_claim));
+}
+
 /// Tombstone gate run before the actor's arm match: a closed actor passes reads and a receipt-only
 /// policy reconcile, refuses the rest (`None` skips the match) and never retries a policy close.
 pub(super) fn gate_closed_arm(
@@ -342,12 +363,18 @@ impl ChannelMailboxHandle {
 
     /// Ask the actor to verify it is idle and, if so, tombstone itself
     /// (`Ok(())` ⇒ purgeable; `Err(reason)` ⇒ live work, purge refused).
-    /// A dead actor (mailbox closed / reply dropped) can never start work
-    /// again, so the request fallback treats it as trivially purgeable.
-    async fn close_if_idle(&self) -> Result<(), &'static str> {
-        self.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply })
-            .await
-            .unwrap_or(Ok(()))
+    /// The operator path may purge a dead actor; guarded retirement requires
+    /// an answer proving the expected claim history.
+    async fn close_if_idle(
+        &self,
+        expected_claim: Option<ClaimObservation>,
+    ) -> Result<(), &'static str> {
+        self.request(|reply| ChannelMailboxMsg::CloseIfIdle {
+            expected_claim,
+            reply,
+        })
+        .await
+        .unwrap_or_else(|_| expected_claim.map_or(Ok(()), |_| Err("actor_unreachable")))
     }
 }
 
@@ -393,8 +420,46 @@ impl ChannelMailboxRegistry {
         let Some(handle) = self.peek(channel_id) else {
             return MailboxPurgeOutcome::NoEntry;
         };
-        if let Err(refusal) = handle.close_if_idle().await {
+        self.remove_idle_handle(channel_id, &handle, None).await
+    }
+
+    /// Retire only the registered actor and claim history the caller observed.
+    /// A successor claim on the same actor refuses even when it has already finished.
+    pub(crate) async fn remove_idle_entry_if_current(
+        &self,
+        channel_id: ChannelId,
+        expected: &ChannelMailboxHandle,
+        observed: ClaimObservation,
+    ) -> MailboxPurgeOutcome {
+        let Some(current) = self.peek(channel_id) else {
+            return MailboxPurgeOutcome::NoEntry;
+        };
+        if !current.same_actor(expected) {
+            return MailboxPurgeOutcome::RefusedLiveWork("actor_changed");
+        }
+        self.remove_idle_handle(channel_id, expected, Some(observed))
+            .await
+    }
+
+    async fn remove_idle_handle(
+        &self,
+        channel_id: ChannelId,
+        handle: &ChannelMailboxHandle,
+        expected_claim: Option<ClaimObservation>,
+    ) -> MailboxPurgeOutcome {
+        let turn_finished = self
+            .turn_finished
+            .get(&channel_id)
+            .map(|signal| signal.clone());
+        if let Err(refusal) = handle.close_if_idle(expected_claim).await {
             return MailboxPurgeOutcome::RefusedLiveWork(refusal);
+        }
+        if self
+            .handles
+            .remove_if(&channel_id, |_, current| current.same_actor(handle))
+            .is_none()
+        {
+            return MailboxPurgeOutcome::RefusedLiveWork("actor_changed");
         }
         super::claim_observation::note_purge(channel_id);
         // Unlink the instance maps only when they still hold the exact
@@ -403,13 +468,13 @@ impl ChannelMailboxRegistry {
         // the verified incarnation (#5951), so only that one is unlinked. The
         // channel's re-mint fence cell (`remint_fences`) is kept: the next
         // incarnation inherits it.
-        self.handles.remove_if(&channel_id, |_, current| {
-            current.sender.same_channel(&handle.sender)
-        });
         self.recovery_done.remove_if(&channel_id, |_, signal| {
             Arc::ptr_eq(signal, handle.recovery_done())
         });
-        let removed_turn_finished = self.turn_finished.remove(&channel_id);
+        if let Some(signal) = &turn_finished {
+            self.turn_finished
+                .remove_if(&channel_id, |_, current| Arc::ptr_eq(current, signal));
+        }
         // #3297 finding 5: the GLOBAL_* maps are process-wide single slots —
         // another registry instance may have published a DIFFERENT (possibly
         // busy) actor/signal for this channel after ours. The idle check above
@@ -417,9 +482,7 @@ impl ChannelMailboxRegistry {
         // when it still points at the exact object we verified; otherwise
         // skip it and WARN.
         let global_handle_removed = GLOBAL_CHANNEL_MAILBOXES
-            .remove_if(&channel_id, |_, mirrored| {
-                mirrored.sender.same_channel(&handle.sender)
-            })
+            .remove_if(&channel_id, |_, mirrored| mirrored.same_actor(handle))
             .is_some();
         if !global_handle_removed && GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel_id) {
             tracing::warn!(
@@ -430,14 +493,14 @@ impl ChannelMailboxRegistry {
         GLOBAL_RECOVERY_DONE_SIGNALS.remove_if(&channel_id, |_, mirrored| {
             Arc::ptr_eq(mirrored, handle.recovery_done())
         });
-        if let Some((_, signal)) = removed_turn_finished {
+        if let Some(signal) = turn_finished {
             GLOBAL_TURN_FINISHED_SIGNALS
                 .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));
         }
         tracing::warn!(
             channel = channel_id.get(),
             global_handle_removed,
-            "mailbox registry entry purged (operator repair; in-memory unlink only)"
+            "idle mailbox registry entry purged (in-memory unlink only)"
         );
         MailboxPurgeOutcome::Removed
     }
@@ -445,6 +508,9 @@ impl ChannelMailboxRegistry {
 
 #[cfg(test)]
 mod closed_gate_tests;
+
+#[cfg(test)]
+mod current_entry_tests;
 
 #[cfg(test)]
 mod tests {
