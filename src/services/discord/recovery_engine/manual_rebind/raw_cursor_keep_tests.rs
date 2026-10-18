@@ -13,6 +13,14 @@ enum Cursor {
     Absent,
 }
 
+/// Which public rebind entry the case drives.
+#[derive(Clone, Copy, PartialEq)]
+enum Entry {
+    Override,
+    Floor,
+    Default,
+}
+
 fn native_text(id: &str, text: &str) -> String {
     format!(
         "{}\n",
@@ -80,7 +88,7 @@ impl Drop for CancelWatcher {
     }
 }
 
-fn rebind_case(cursor: Cursor, cancelled: bool, floor: bool, alias: bool) {
+fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -149,11 +157,13 @@ fn rebind_case(cursor: Cursor, cancelled: bool, floor: bool, alias: bool) {
         let _cancel = CancelWatcher(shared.clone(), channel);
         let (http, _bodies) = discord_mock(channel_id).await;
         let _rest = crate::services::discord::shared_state::test_rest::install(http.clone());
-        let outcome = if floor {
-            rebind_inflight_for_channel_with_minimum_start_offset(&http, &shared, &ProviderKind::Codex, channel_id, Some(tmux.clone()), Some(std::fs::metadata(&raw).unwrap().len()), episode.as_ref()).await
-        } else {
-            let overrides = ManualRebindOverrides::validated(&ProviderKind::Codex, Some(raw.to_str().unwrap()), None).unwrap();
-            rebind_inflight_for_channel(&http, &shared, &ProviderKind::Codex, channel_id, Some(tmux.clone()), overrides, episode.as_ref()).await
+        let outcome = match entry {
+            Entry::Floor => rebind_inflight_for_channel_with_minimum_start_offset(&http, &shared, &ProviderKind::Codex, channel_id, Some(tmux.clone()), Some(std::fs::metadata(&raw).unwrap().len()), episode.as_ref()).await,
+            Entry::Override => {
+                let overrides = ManualRebindOverrides::validated(&ProviderKind::Codex, Some(raw.to_str().unwrap()), None).unwrap();
+                rebind_inflight_for_channel(&http, &shared, &ProviderKind::Codex, channel_id, Some(tmux.clone()), overrides, episode.as_ref()).await
+            }
+            Entry::Default => rebind_inflight_for_channel(&http, &shared, &ProviderKind::Codex, channel_id, Some(tmux.clone()), ManualRebindOverrides::default(), episode.as_ref()).await,
         }.expect("live rebind must reach and complete its source decision");
         let actual_path = shared.tmux_watchers.get(&channel).unwrap().output_path.clone();
         let expected = if cursor == Cursor::Raw { &raw_saved } else { &relay };
@@ -202,30 +212,37 @@ fn rebind_case(cursor: Cursor, cancelled: bool, floor: bool, alias: bool) {
 
 #[test]
 fn rebind_keeps_matching_raw_incumbent_and_delivers_new_tail() {
-    rebind_case(Cursor::Raw, false, false, false);
+    rebind_case(Cursor::Raw, false, Entry::Override, false);
 }
 
 #[test]
 fn cancelled_raw_successor_does_not_skip_gap_to_a_later_floor() {
-    rebind_case(Cursor::Raw, true, true, false);
+    rebind_case(Cursor::Raw, true, Entry::Floor, false);
 }
 
 #[test]
 fn matching_raw_canonical_alias_keeps_saved_coordinates() {
-    rebind_case(Cursor::Raw, false, false, true);
+    rebind_case(Cursor::Raw, false, Entry::Override, true);
 }
 
 #[test]
 fn normalized_cursor_still_uses_normalized_plan() {
-    rebind_case(Cursor::Normalized, false, false, false);
+    rebind_case(Cursor::Normalized, false, Entry::Override, false);
 }
 
 #[test]
 fn another_raw_rollout_still_uses_normalized_plan() {
-    rebind_case(Cursor::OtherRaw, false, false, false);
+    rebind_case(Cursor::OtherRaw, false, Entry::Override, false);
 }
 
 #[test]
 fn absent_inflight_still_uses_normalized_plan() {
-    rebind_case(Cursor::Absent, false, false, false);
+    rebind_case(Cursor::Absent, false, Entry::Override, false);
+}
+
+/// The stall watchdog's reattach rebinds with default overrides and a pin; that
+/// input must reuse the healthy raw incumbent the runtime binding names.
+#[test]
+fn default_override_rebind_reuses_healthy_matching_raw_incumbent() {
+    rebind_case(Cursor::Raw, false, Entry::Default, false);
 }

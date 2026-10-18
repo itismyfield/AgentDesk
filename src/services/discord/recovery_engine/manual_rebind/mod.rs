@@ -412,7 +412,7 @@ async fn rebind_inflight_for_channel_inner(
         output_path = raw_path;
         force_initial_offset = None;
         existing_offset_rebase_to_output = None;
-        // A later retry floor cannot skip unread bytes in the retained raw source.
+        // The floor is channel-scoped, not an A offset; the sink drops the replayed overlap.
         minimum_initial_offset = None;
     } else if let Some(rollout_path) = runtime_state.codex_rollout_path.as_deref() {
         let prompt_replay_evidence = existing_inflight

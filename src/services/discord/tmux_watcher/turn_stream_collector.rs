@@ -347,6 +347,7 @@ async fn collect_turn_stream_body(
         initial_buffer_start_offset,
         initial_outcome.pre_turn_bytes_skipped,
         initial_source_authority,
+        ctx.watcher_instance_id,
     );
     let (
         mut session_bound_relay_turn_fully_mirrored,
@@ -569,6 +570,7 @@ async fn collect_turn_stream_body(
                             watcher_provider: &watcher_provider,
                             tmux_session_name: &tmux_session_name,
                             channel_id,
+                            watcher_instance_id: ctx.watcher_instance_id,
                             watcher_thread_channel_id,
                             source_authority,
                             retained_source: parser.retained_source.is_some(),
