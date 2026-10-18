@@ -25,8 +25,8 @@ use crate::services::claude_tui::host_input::{InputRun, run_herdr};
 use crate::services::claude_tui::input::{PromptReadinessSnapshot, TuiInputAction};
 use crate::services::claude_tui::transcript_tail::claude_transcript_path;
 use crate::services::herdr_launch::{
-    EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchCommand,
-    HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
+    EvidenceProbe, HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunch, HerdrLaunchEndpoint,
+    HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
 };
 use crate::services::provider::cancel_token_claude_interrupt::{
     HerdrTurnStart, herdr_stop_settlement_available,
@@ -286,19 +286,11 @@ fn pending_source(
             && logged_session(&event.new) == Some(session_id.as_str())
     });
     if !started {
-        return Err(format!("herdr turn: no logged start of {session_id}"));
+        let refused = never_attached::refusal(turn, runtime, ports, record, &session_id);
+        return Err(refused);
     }
     if record.expected.is_none() {
-        let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
-        let never = |_: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
-            Err("a pending pane is never created again".into())
-        };
-        launched(runtime.block_on(launch_herdr_session(
-            turn.pool,
-            launch(turn, None),
-            never,
-            host,
-        )))?;
+        never_attached::probe_again(turn, runtime, ports)?;
     }
     attach(turn, runtime, ports, nonce, &session_id)
 }
@@ -990,6 +982,8 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) {
         }
     }
 }
+
+mod never_attached;
 
 #[cfg(test)]
 mod provider_terminal_tests;

@@ -289,6 +289,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/agent_executor/execution.rs
 src/services/routines/agent_executor/reliability.rs
 src/services/routines/reliability_pg_tests.rs
 src/services/routines/session_control.rs
@@ -321,6 +322,7 @@ src/services/tui_o/writer/deferred_pg_tests.rs
 src/services/tui_o/writer/late_adopt_delegated_tests.rs
 src/services/tui_o/writer/local_retry_repost_tests.rs
 src/services/tui_o/writer/repost_turn_tests.rs
+src/services/tui_o/writer/tool_result_repost_tests.rs
 src/services/tui_o/writer/transition_route_tests.rs
 src/services/turn_host_tests.rs
 src/services/turn_lifecycle.rs
@@ -635,6 +637,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::agent_executor::execution::pg_tests
 services::routines::agent_executor::reliability::tests
 services::routines::reliability_pg_tests
 services::routines::session_control::tests
@@ -666,6 +669,7 @@ services::tui_o::writer::tests::actor::repost_turn
 services::tui_o::writer::tests::actor::repost_turn::activation
 services::tui_o::writer::tests::actor::repost_turn::allowlist
 services::tui_o::writer::tests::actor::repost_turn::local_retry
+services::tui_o::writer::tests::actor::repost_turn::tool_result
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg
 services::turn_host::tests
 services::turn_lifecycle::host_guard_tests
@@ -1568,6 +1572,7 @@ services::discord::commands::control::clear_end_tests::a_clear_keeps_its_transit
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_kill_fails_commits_and_warns_pg
 services::discord::commands::control::clear_end_tests::a_clear_whose_tmux_probe_fails_kills_and_warns_only_if_the_kill_fails_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_closes_the_provider_cli_through_the_terminate_service_pg
+services::discord::commands::control::clear_end_tests::a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg
 services::discord::commands::control::clear_end_tests::a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg
 services::discord::commands::control::clear_end_tests::a_herdr_configured_channel_without_a_live_execution_ends_its_tmux_pg
 services::discord::commands::control::clear_entry_tests::a_clear_without_a_pool_commits_and_warns_through_both_entries_pg
@@ -1636,7 +1641,10 @@ services::discord::herdr_terminate::exit_tests::act_terminate_process_exit_after
 services::discord::herdr_terminate::route_tests::act_route_endpoint_lost_after_close_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_foreign_runtime_refused_pg
 services::discord::herdr_terminate::route_tests::act_route_logs_result_once_pg
+services::discord::herdr_terminate::route_tests::act_route_never_attached_pending_with_reprobed_evidence_retires_pg
 services::discord::herdr_terminate::route_tests::act_route_panic_reopens_the_fence_only_before_the_close_pg
+services::discord::herdr_terminate::route_tests::act_route_pending_without_a_recorded_pane_is_refused_pg
+services::discord::herdr_terminate::route_tests::act_route_pending_without_launch_evidence_is_refused_for_it_pg
 services::discord::herdr_terminate::route_tests::act_route_retired_is_the_only_success_pg
 services::discord::herdr_terminate::route_tests::act_route_stale_cas_is_indeterminate_pg
 services::discord::herdr_terminate::route_tests::act_route_view_vanishes_after_target_is_refused_pg
@@ -1755,6 +1763,7 @@ services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_projected_read_errors_keep_bytes_until_authority_recovers_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_read_error_is_not_a_durable_hold_pg
 services::discord::recovery_engine::restore_inflight::replay_hold_tests::replay_hold_restore_retains_ambiguous_or_invalid_frozen_debt_pg
+services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_budget_clear_needs_a_confirmed_dead_pane_pg
 services::discord::recovery_engine::routing_orphan::host_guard_tests::routing_orphan_finalizes_only_a_dead_pane_the_host_guard_admits_pg
 services::discord::relay_recovery::apply::host_deferred_tests::automatic_orphan_apply_keeps_a_turn_on_an_unconfirmed_host_pg
 services::discord::relay_recovery::apply::host_deferred_tests::manual_orphan_recovery_keeps_a_turn_on_an_unconfirmed_host_pg
@@ -1805,7 +1814,15 @@ services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_keep
 services::discord::router::intake_gate::stale_turn::host_tests::queue_guard_still_releases_a_process_turn_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_a_stops_cleanup_after_protected_delete_pg
 services::discord::router::intake_gate::stale_turn::host_tests::s3act_b3b_stale_turn_b_stops_cleanup_after_protected_delete_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_clean_requests_no_session_kill_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_clears_the_witnessed_row_from_the_thread_file_only_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_drops_only_witnessed_parents_still_on_the_thread_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_row_that_no_longer_names_the_witnessed_episode_pg
 services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_an_episode_readopted_after_the_witness_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_keeps_the_successor_route_across_a_watcher_exit_row_clear_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_never_touches_a_row_naming_another_channel_pg
+services::discord::router::intake_gate::stale_turn::host_tests::thread_guard_racing_cleans_release_once_pg
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_companion_settled_open_turn_stays_held_after_six_hundred_seconds
 services::discord::router::message_handler::codex_resume_companion_queue_tests::codex_resume_companion_unregistered_discovery_pass_publishes
 services::discord::router::message_handler::codex_resume_companion_queue_tests::resume_companion_backstop_rechecks_after_source_publication
@@ -1843,6 +1860,7 @@ services::discord::router::message_handler::intake_turn::runtime_transition::nat
 services::discord::router::message_handler::intake_turn::runtime_transition::native_hold_tests::native_hold_requeues_the_real_router_input_and_uploads_durably_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_after_the_first_write_still_binds_its_own_start_and_ends_the_hold_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_cancel_before_the_first_write_leaves_the_pending_pane_for_the_next_prompt_pg
+services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_codex_launch_that_never_sent_its_create_is_followed_by_one_fresh_launch_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_first_write_refused_before_any_key_releases_the_hold_for_the_next_prompt_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::a_late_stop_refused_before_any_send_runs_at_the_next_complete_record_pg
@@ -1874,10 +1892,17 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_herdr_turn_takes_its_stop_state_with_the_escape_switch_off_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_launch_that_never_sent_its_create_leaves_the_next_turn_free_to_launch_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_matched_bound_execution_takes_one_prompt_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_names_the_terminate_switch_and_its_exact_exit_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_proven_by_its_own_provider_records_that_evidence_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_takes_no_evidence_from_another_executions_provider_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_never_attached_pending_with_only_its_shell_is_judged_nothing_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_a_logged_start_takes_its_first_prompt_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg
+services::discord::router::message_handler::provider_dispatch::herdr_tests::a_terminated_never_attached_execution_is_followed_by_one_fresh_launch_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_a_paste_then_cancel_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::after_an_unclear_paste_the_next_prompt_is_held_pg
 services::discord::router::message_handler::provider_dispatch::herdr_tests::coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg
@@ -2086,6 +2111,10 @@ services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::active_deferral_refused_by_the_queue_keeps_the_checkpoint_pg
 services::discord::tui_prompt_relay::relay_e2e::replay_defer_intake_e2e::dormant_replay_lookup_failure_keeps_the_legacy_hold_at_the_gateway_pg
 services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::intake_queues_behind_a_stale_thread_on_an_unconfirmed_host_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_admitted_after_the_witness_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_keeps_a_successor_route_published_after_the_release_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_leaves_an_unanchored_thread_turn_alone_pg
+services::discord::tui_prompt_relay::relay_e2e::thread_guard_host_e2e::thread_guard_releases_a_stale_thread_and_keeps_its_queue_pg
 services::discord::tui_prompt_relay::tests::background_child_close_pg_tests::transcript_completions_close_their_own_background_children_pg
 services::discord::tui_prompt_relay::tests::codex_direct_owner_tests::boundary_tests::loss_tests::codex_discord_attempt_new_turn_delivers_through_production_ledger_pg
 services::discord::tui_prompt_relay::tests::synthetic_bridge_handoff_pg_tests::synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episode
@@ -2238,6 +2267,7 @@ services::dispatches::outbox_queue::replay_hold_tests::replay_hold_unreadable_ba
 services::dispatches::wait_queue::tests::wake_waiting_dispatch_outbox_pg_reassigns_wait_rows_fifo
 services::herdr_launch::tests::herdr_launch_commits_pending_then_marker_then_one_create_and_fills_that_nonce_pg
 services::herdr_launch::tests::herdr_launch_creates_nothing_unless_its_own_pending_commits_pg
+services::herdr_launch::tests::herdr_launch_keeps_a_pending_that_names_a_pane_after_an_unsent_create_pg
 services::herdr_launch::tests::herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_reply_pg
 services::herdr_launch::tests::herdr_launch_probes_a_pending_pane_without_evidence_again_and_never_recreates_it_pg
 services::herdr_launch::tests::herdr_launch_reads_restore_resume_again_right_before_create_pg
@@ -2302,10 +2332,12 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::agent_executor::execution::pg_tests::deferred_process_run_keeps_mode_after_executor_config_changes_pg
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg
 services::routines::reliability_pg_tests::consecutive_failure_alert_fires_once_per_streak_pg
+services::routines::reliability_pg_tests::fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg
 services::routines::reliability_pg_tests::slot_missed_during_startup_grace_runs_exactly_once_after_it_pg
 services::routines::session_control::tests::queue_truth_routine_remote_teardown_reports_unknown_pg
 services::routines::session_control::tests::queue_truth_routine_reset_reports_unknown_pg
@@ -2487,6 +2519,7 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t10_recovered_admitted_pi
 services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlog_never_posts_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
+services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_cli_apply_retires_only_the_scope_its_inspect_approved_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_inspect_reports_the_folded_execution_it_judged_pg
 services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::route_tests::pg::transition_route_reaches_the_actor_only_for_the_rows_own_execution_pg

@@ -42,8 +42,8 @@
 | `GET` | `/api/analytics/observability` | `analytics::observability` | `src/server/routes/analytics.rs:351` | `src/server/routes/domains/analytics.rs:12` |
 | `GET` | `/api/analytics/policy-hooks` | `analytics::policy_hooks` | `src/server/routes/analytics.rs:359` | `src/server/routes/domains/analytics.rs:13` |
 | `GET` | `/api/audit-logs` | `analytics::audit_logs` | `src/server/routes/analytics.rs:474` | `src/server/routes/domains/analytics.rs:20` |
-| `GET` | `/api/auth/session` | `auth::get_session` | `src/server/routes/auth.rs:10` | `src/server/routes/domains/access.rs:16` |
-| `POST` | `/api/auth/ws-ticket` | `auth::issue_ws_ticket` | `src/server/routes/auth.rs:36` | `src/server/routes/domains/access.rs:19` |
+| `GET` | `/api/auth/session` | `auth::get_session` | `src/server/routes/auth.rs:12` | `src/server/routes/domains/access.rs:16` |
+| `POST` | `/api/auth/ws-ticket` | `auth::issue_ws_ticket` | `src/server/routes/auth.rs:38` | `src/server/routes/domains/access.rs:19` |
 | `POST` | `/api/automation-candidates` | `automation_candidates::materialize_candidate` | `src/server/routes/automation_candidates.rs:98` | `src/server/routes/domains/kanban.rs:61` |
 | `POST` | `/api/automation-candidates/{card_id}/approve` | `automation_candidates::approve_candidate` | `src/server/routes/automation_candidates.rs:210` | `src/server/routes/domains/kanban.rs:73` |
 | `GET` | `/api/automation-candidates/{card_id}/automation-inventory` | `automation_candidates::get_automation_inventory` | `src/server/routes/automation_candidates.rs:258` | `src/server/routes/domains/kanban.rs:77` |

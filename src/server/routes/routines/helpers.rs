@@ -95,7 +95,8 @@ pub(super) fn routine_agent_executor(state: &AppState) -> AppResult<RoutineAgent
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
         state.config.routines.agent_timeout_secs,
-    ))
+    )
+    .with_headless_fresh_agents(state.config.routines.headless_fresh_agents))
 }
 
 pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDiscordLogger> {

@@ -256,6 +256,40 @@ CLI는 loopback API에 POST 한 번을 보낸다. redirect·자동 재시도·pr
 
 근거: `src/cli/turn_lease.rs:4`, `:12`; `src/services/discord/turn_lease.rs:89`, `:149`, `:201`.
 
+### 3.4.1 never-attached 실행의 정리
+
+attach가 한 번도 되지 않은 Pending 실행(logged start 없음)은 다음 턴마다 거절된다. 거절 사유는 `herdr turn: pending execution <nonce> never attached (no logged start of <session>)`로 시작하고, 뒤의 꼬리가 아래 경우를 가른다. 같은 내용이 dcserver 로그 `event="herdr_turn_never_attached"`에 channel·session key·nonce·pane·terminate 스위치와 함께 남는다. 이 경우에 한해 session key를 거절 사유와 로그에서 얻을 수 있다(§3.4의 [O-U-6] 공백).
+
+pane 위치는 있고 launch 증거가 없으면, 거절하기 전에 기존 launch 재탐침이 그 pane을 한 번 더 읽는다. 자기 nonce의 provider가 root shell의 자식으로 증명될 때만 증거를 한 번 기록한다. pane을 만들거나 입력하거나 닫지 않는다. create가 서버에 닿지 않은 launch(marker 실패, 두 번째 E7 거절, create `NotSent`)는 그 자리에서 자기 Pending을 Retired로 만든다. 다음 입력은 새 launch로 간다.
+
+근거: `src/services/claude/herdr_turn/never_attached.rs:12`, `:30`; `src/services/herdr_launch.rs:442`.
+
+**A. 증거 있음 — 꼬리 `end it with ...` 또는 `ending it needs runtime.herdr_terminate_enabled ...`**
+
+0. 대상 확정(읽기 전용). 거절 사유나 로그에서 session key·nonce·실행 노드를 얻는다. 그 노드의 `<ADK> herdr status`에서 같은 channel·nonce가 `state pending`·`launch_evidence recorded`인지 대조한다. 다르면 멈춘다.
+1. 사용자 결정: 그 노드의 `runtime.herdr_terminate_enabled`를 켤지 정한다. 이미 켜져 있으면 3으로 간다.
+2. 적용: 그 노드의 live 설정에 `herdr_terminate_enabled: true`를 넣는다(§1.2 live reload).
+3. 실행: `<ADK> herdr terminate --session-key <key> --execution-nonce <nonce> --reason never-attached`. `disabled`는 아무것도 읽거나 쓰지 않은 결과라 재시도해도 안전하다. 적용을 기다린 뒤 다시 실행한다.
+4. 성공은 HTTP 200 `result="retired"`뿐이다. 다른 결과는 §3.4 분류를 따른다. `herdr status`에서 그 channel 항목이 사라졌는지 확인한다.
+5. 1에서 켰으면 원래 값으로 되돌린다. 다음 사용자 입력은 새 launch로 간다.
+
+operator terminate는 대기열을 건드리지 않으므로 Retired 뒤 남은 큐가 새 launch로 진행한다. `/clear`도 같은 실행을 terminate 서비스로 끝내지만 실행 시점의 대기열을 버린다. 스위치가 꺼져 있으면 `/clear`는 pane 종료·row retire를 하지 않고 종료 미확인을 알리지만, 큐 폐기와 세션 초기화는 그대로 한다. 막힌 동안 도착한 입력은 각자 턴으로 거절돼 소비되므로, 보존되는 것은 terminate 시점에 남은 대기열뿐이다.
+
+근거: `src/services/discord/herdr_terminate.rs:28`, `:70`; `src/services/discord/commands/control.rs:376`; `src/services/discord/commands/control/clear_teardown.rs:121`.
+
+**B. 위치 있음, provider 미증명 — 꼬리 `its provider in pane <pane> is not proven (...)`** (손 조치, 자동 복구가 아님)
+
+1. `herdr status`에서 nonce와 `pane root_shell_unrecorded`(또는 `provider_unverified`)를 확인한다. 거절 사유의 pane ID를 확인한다.
+2. 사용자 승인 뒤 그 노드의 release herdr 서버에서 `herdr pane process-info <pane>`으로 root shell과 자식을 확인한다. 기대와 다르면 멈춘다.
+3. `herdr pane close <pane>`.
+4. `<ADK> herdr retire <channel>` → `retired`. status 항목이 사라졌는지 확인한다.
+
+**C. 위치 없음 — 꼬리 `no pane was recorded and its create outcome is unknown, so it is kept`**
+
+create 응답을 잃었거나 위치 기록 전에 실패해 pane이 있을 수도 있는 상태다. 현재 정리 절차가 없다. status 목록에 나오지 않고 retire는 `NoRow("no single live herdr row of the channel")`, terminate는 `refused`(`execution identity differs`)다. 원본 row를 유지하고 수동으로 덮어쓰지 않는다.
+
+근거: `src/db/dispatched_sessions/hosted_execution.rs:309`; `src/cli/herdr.rs:250`.
+
 ### 3.5 후속 필요 — 같은 채널의 명시적 전환
 
 **후속 노드 `i5340_legacy_return`(#5340 범위, 맥 소유)**

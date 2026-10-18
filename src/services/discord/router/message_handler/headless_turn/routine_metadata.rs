@@ -61,6 +61,30 @@ pub(super) fn fresh_routine_turn(metadata: Option<&serde_json::Value>) -> bool {
         .and_then(|value| value.as_str())
         != Some("persistent")
 }
+/// Process mode is explicit and only honored on fresh routine metadata.
+pub(super) fn routine_process_turn(metadata: Option<&serde_json::Value>) -> bool {
+    fresh_routine_turn(metadata)
+        && valid_routine_metadata(metadata)
+            .and_then(|value| value.get("execution_mode"))
+            .and_then(serde_json::Value::as_str)
+            == Some("process")
+}
+
+pub(super) fn routine_tmux_session_name(
+    provider: &ProviderKind,
+    metadata: Option<&serde_json::Value>,
+    label: Option<&str>,
+    channel_name: Option<&str>,
+) -> Option<String> {
+    (provider.uses_managed_tmux_backend() && !routine_process_turn(metadata))
+        .then(|| {
+            label
+                .or(channel_name)
+                .map(|name| provider.build_tmux_session_name(name))
+        })
+        .flatten()
+}
+
 pub(super) fn routine_metadata_role_binding(
     metadata: Option<&serde_json::Value>,
     provider: &ProviderKind,
@@ -107,4 +131,63 @@ where
         clear().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key() {
+        let metadata =
+            json!({"routine_id":"r-1", "execution_strategy":"fresh", "execution_mode":"process"});
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            assert_eq!(
+                routine_tmux_session_name(
+                    &provider,
+                    Some(&metadata),
+                    Some("routine unique attempt"),
+                    Some("real channel")
+                ),
+                None
+            );
+            assert_eq!(
+                session_key_basis_override(None, Some(&metadata), Some("routine unique attempt")),
+                Some("routine unique attempt")
+            );
+            let kind =
+                super::super::super::provider_isolation::prelaunch_runtime_kind_for_managed_session(
+                    &provider, true, false, None,
+                );
+            assert_eq!(
+                kind, None,
+                "process mode must not register a managed tmux runtime"
+            );
+            assert_eq!(
+                super::super::super::provider_isolation::prelaunch_inflight_runtime_seed_without_codex_raw(&provider, true, None, kind),
+                (None, None, None, 0),
+                "a process attempt must not seed wrapper files or a tmux watcher target",
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_and_non_routine_metadata_keep_tmux_route() {
+        for metadata in [
+            json!({"routine_id":"r-1", "execution_strategy":"persistent", "execution_mode":"process"}),
+            json!({"execution_strategy":"fresh", "execution_mode":"process"}),
+            json!({"routine_id":"r-1", "execution_strategy":"fresh"}),
+        ] {
+            assert_eq!(
+                routine_tmux_session_name(
+                    &ProviderKind::Claude,
+                    Some(&metadata),
+                    Some("routine label"),
+                    Some("channel")
+                ),
+                Some(ProviderKind::Claude.build_tmux_session_name("routine label"))
+            );
+        }
+    }
 }

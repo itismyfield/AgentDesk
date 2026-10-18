@@ -37,7 +37,8 @@ pub(super) struct Waiting<'a, I: HostIo> {
     pub(super) store: &'a OStore,
     pub(super) log: &'a I::Bindings,
     pub(super) legacy: Arc<dyn LegacyView>,
-    /// The source the log bound when the adoption was deferred, as of that log entry.
+    /// The source the log bound when the adoption was deferred, or at a late reservation's
+    /// boundary, as of that log entry.
     pub(super) bound: (SourceId, u64),
     pub(super) late: bool,
 }
@@ -549,12 +550,20 @@ fn relay_blocks(kind: Option<StallKind>, relaying: bool) -> bool {
     relaying && kind != Some(StallKind::Soft)
 }
 
+/// Names the bind, the baseline it left, the late boundary and the log's end the read saw.
 fn rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
     let (source, since) = &waiting.bound;
-    let rotated = adoption::rotated(events, *since, source)?;
+    let (rotated, seq) = adoption::rotated(events, *since, source)?;
+    let boundary = (waiting.late)
+        .then(|| waiting.candidate.late_boundary())
+        .flatten()
+        .map_or_else(|| "-".to_owned(), |boundary| boundary.to_string());
+    let end = events.last().map_or(0, |event| event.seq);
     Some(format!(
-        "source {} was bound while the adoption waited",
-        rotated.path.display()
+        "source {} was bound while the adoption waited (seq {seq}; baseline {}@{since}; \
+         boundary {boundary}; log end {end})",
+        rotated.path.display(),
+        source.path.display()
     ))
 }
 

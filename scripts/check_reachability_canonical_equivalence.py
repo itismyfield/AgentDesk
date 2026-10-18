@@ -79,7 +79,7 @@ SANCTIONED_TREE_CONSUMERS: set[str] = set()
 #     applies the `RelayVerdictSource` polarity switch.
 #   * `health/snapshot/relay_probe.rs` — the operand-assembly half of the file
 #     above, and nothing else. #5942 r4 split it out because `health/snapshot.rs`
-#     is a registered `shrink` giant (#5447) that r3 had grown past its pin; the
+#     is a registered giant (keep; zero-growth pin); the
 #     four items that moved (`RelayVerdictProbeOperands`,
 #     `relay_verdict_probe_operands`, `reachability_ledger_operand_exists`,
 #     `detail_executor_witness`) are the same code with the same callers, so
