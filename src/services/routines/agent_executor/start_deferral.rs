@@ -116,6 +116,7 @@ pub(super) struct PendingAgentStart<'a> {
     pub(super) dm_user_id: Option<&'a str>,
     pub(super) checkpoint: &'a Option<Value>,
     pub(super) next_due_at: Option<DateTime<Utc>>,
+    pub(super) execution_mode: execution::AgentExecutionMode,
 }
 
 impl RoutineAgentExecutor {
@@ -140,6 +141,7 @@ impl RoutineAgentExecutor {
         let message = error.to_string();
         let result_json = json!({
             "status": "deferred",
+            "execution_mode": start.execution_mode.as_str(),
             "deferred_reason": kind.reason(),
             "deferred_since": since.to_rfc3339(),
             "next_retry_at": next_retry_at.to_rfc3339(),

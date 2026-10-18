@@ -1740,6 +1740,9 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         "python3 scripts/run_test_lane.py --skip pg_ --max-summaries 1 --lane s"
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane pg --expected-ids scripts/ci/ids.txt"
+                        " -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --"
+                        " cargo test --lib -- --exact db::a db::b --test-threads=1",
                         f'source {membership.NON_PG_FILTER_REL} && cargo test --lib -- '
                         '"${PG_INCLUDE_ARGS[@]}" --nocapture'):
             with self.subTest(command=command):
@@ -1772,6 +1775,13 @@ class CommentMarkerMutations(BypassFixtureCase):
                         f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
                         f"python3 scripts/run_test_lane.py -- {self.SWEEP}",
                         f"python3 scripts/run_test_lane.py --lane s --max-summaries 0 -- {self.SWEEP}",
+                        # An expected-ids list outside scripts/ci, or chosen at run time.
+                        "python3 scripts/run_test_lane.py --lane s --expected-ids /tmp/ids.txt"
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        'python3 scripts/run_test_lane.py --lane s --expected-ids "$IDS"'
+                        f" -- env -u AGENTDESK_ROOT_DIR {self.SWEEP}",
+                        "python3 scripts/run_test_lane.py --lane s --expected-ids scripts/ci/ids.txt"
+                        ' -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- --exact "${ids[@]}"',
                         "cargo.exe test --lib x"):
             with self.subTest(command=command), \
                     self.assertRaisesRegex(ValueError, "cargo-command-unparsed"):

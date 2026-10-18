@@ -225,6 +225,8 @@ config::peer_filter::tests::saved_config_omits_the_default_mode_and_keeps_an_exp
 config::remote_settings_tests::settings_load_exposes_no_remote_profiles
 config::routine_config_unit_tests::database_foreground_reserve_default_is_consistent_across_paths
 config::routine_config_unit_tests::database_foreground_reserve_deserializes_when_provided
+config::routine_config_unit_tests::headless_fresh_agents_defaults_to_disabled
+config::routine_config_unit_tests::headless_fresh_agents_deserializes_opt_in
 config::routine_config_unit_tests::routine_script_dirs_preserve_default_then_operator_order
 config::routine_config_unit_tests::stale_paused_knobs_default_to_disabled_alert_preserving_prior_behavior
 config::routine_config_unit_tests::stale_paused_knobs_deserialize_when_provided
@@ -1676,6 +1678,9 @@ services::analytics::session_metrics::tests::parse_machine_config_uses_host_and_
 services::api_friction::issue_body::tests::issue_body_evidence_formatting_stays_stable
 services::api_friction::issue_body::tests::issue_body_evidence_query_cap_stays_stable
 services::api_friction::issue_body::tests::issue_body_fallback_copy_stays_stable_without_evidence
+services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch
@@ -4135,6 +4140,11 @@ services::discord::health::relay_dead_reattach::tests::relay_dead_watcher_reatta
 services::discord::health::relay_dead_reattach::tests::reuse_no_op_keeps_the_relay_dead_tick_short_circuit
 services::discord::health::relay_progress::tests::backlog_grace_is_observation_not_producer_or_delivery_progress
 services::discord::health::relay_progress::tests::composite_progress_distinguishes_backpressure_and_delivery_only
+services::discord::health::routine_process::tests::exact_initial_process_turn_is_cancelled_without_clearing_its_lease
+services::discord::health::routine_process::tests::exact_process_handoff_accepts_its_logical_session_name
+services::discord::health::routine_process::tests::exact_routine_cancellation_terminates_its_captured_child_process
+services::discord::health::routine_process::tests::stale_turn_id_or_nonce_never_cancels_the_current_process
+services::discord::health::routine_process::tests::tmux_rows_and_actual_token_bindings_are_never_cancelled
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::duplicate_explicit_owners_fail_without_live_probes
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::explicit_owner_does_not_wait_for_unrelated_live_probes
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::multiple_explicit_matches_are_ambiguous
@@ -6635,6 +6645,8 @@ services::discord::router::message_handler::headless_turn::recovery_context_take
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::headless_real_turn_consumes_recovery_context_once_before_prompt_use
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::recovery_context_survives_headless_goal_lifecycle_consumed_return
 services::discord::router::message_handler::headless_turn::recovery_context_take_order_tests::reserved_headless_start_has_no_post_spawn_error_path
+services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::fresh_process_turn_suppresses_tmux_but_keeps_isolated_session_key
+services::discord::router::message_handler::headless_turn::routine_metadata::process_tests::persistent_and_non_routine_metadata_keep_tmux_route
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_claim_replaces_stale_role_and_parent_edge
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_inherited_route_is_republished_by_its_claim
 services::discord::router::message_handler::intake_turn::adk_thread::route_claim_tests::queue::s2f_lost_claim_replays_its_resolved_route
@@ -11143,6 +11155,8 @@ services::provider_auth::tests::parse_env_assignment_key_rejects_comments_empty_
 services::provider_auth::tests::qwen_settings_credential_source_reads_env_block_and_model_providers
 services::provider_auth::tests::test_006_named_codex_overlay_detects_home_auth_without_global
 services::provider_auth::tests::test_007_claude_accounts_handlers_have_no_agent_or_profile_param
+services::provider_auth_profile::direct_spawn_tests::direct_process_preserves_default_and_named_auth_profiles_in_actual_child
+services::provider_auth_profile::direct_spawn_tests::direct_process_refuses_unknown_auth_profile_before_starting_child
 services::provider_auth_profile::fallback::tests::every_isolated_provider_works_without_configuration
 services::provider_auth_profile::fallback::tests::exhausted_or_invalid_backups_stop_and_policy_removal_resets_selection
 services::provider_auth_profile::fallback::tests::exhaustion_switches_before_launch_and_unknown_usage_is_eligible
@@ -11272,10 +11286,17 @@ services::routines::action::tests::validates_agent_action_with_last_result
 services::routines::action::tests::validates_agent_dm_user_id_aliases
 services::routines::action::tests::validates_agent_prompt_contract
 services::routines::action::tests::validates_complete_action_with_checkpoint
+services::routines::agent_executor::execution::pg_tests::deferred_process_run_keeps_mode_after_executor_config_changes_pg
+services::routines::agent_executor::execution::tests::close_uses_durable_started_attempt_after_terminal_script_replaces_result
+services::routines::agent_executor::execution::tests::durable_mode_keeps_process_and_legacy_attempts_across_config_changes
+services::routines::agent_executor::execution::tests::process_is_opt_in_and_only_for_fresh_runs
+services::routines::agent_executor::execution::tests::process_labels_do_not_replace_legacy_or_other_attempt_session_rows
+services::routines::agent_executor::execution::tests::process_mode_refuses_unsupported_providers_instead_of_launching_tmux
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
 services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+services::routines::agent_executor::reliability::tests::process_attempt_never_probes_legacy_tmux_after_grace
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
 services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence

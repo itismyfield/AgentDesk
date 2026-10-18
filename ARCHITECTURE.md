@@ -580,6 +580,9 @@ src/
 │   │   ├── patterns.rs
 │   │   └── storage.rs
 │   ├── auto_queue/
+│   │   ├── cancel_run/
+│   │   │   ├── malformed_context_pg_tests.rs
+│   │   │   └── remaining_live_census.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
@@ -1076,6 +1079,7 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_process.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -2543,6 +2547,7 @@ src/
 │   ├── provider_auth_profile/
 │   │   ├── fallback/
 │   │   │   └── tests.rs
+│   │   ├── direct_spawn_tests.rs
 │   │   └── fallback.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
@@ -2578,6 +2583,8 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── execution.rs
+│   │   │   ├── launch.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/

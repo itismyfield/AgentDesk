@@ -27,6 +27,7 @@ SWAP_ACTION = "./.github/actions/ensure-swap"
 EXPECTED_SWAP_JOBS = {
     ".github/workflows/ci-pr.yml": {
         "test_fast",
+        "pg15_owner_proof",
         "high-risk-recovery",
         "library_sweep",
         "lint",
