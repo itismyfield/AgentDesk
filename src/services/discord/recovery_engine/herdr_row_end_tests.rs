@@ -94,6 +94,7 @@ fn row(provider: &ProviderKind, name: &str) -> inflight::InflightTurnState {
 }
 
 type Edit = fn(&mut inflight::InflightTurnState);
+type Change = dyn Fn(&mut serde_json::Value);
 
 /// With settlement off, as in production, boot restore keeps its wrapper path for every row but a
 /// prior process's path-less Herdr turn with no kind, receipt or planned hand-off.
@@ -201,7 +202,7 @@ fn the_exact_clear_removes_only_the_turn_the_pass_read() {
         change(&mut json);
         std::fs::write(path(), serde_json::to_vec(&json).unwrap()).unwrap();
     };
-    let kept: [(&str, &dyn Fn(&mut serde_json::Value)); 6] = [
+    let kept: [(&str, &Change); 6] = [
         ("successor turn", &|row| {
             row["turn_nonce"] = "successor".into()
         }),
