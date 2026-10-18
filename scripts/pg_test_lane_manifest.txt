@@ -286,6 +286,7 @@ src/services/observability/recovery_audit.rs
 src/services/observability/turn_lifecycle.rs
 src/services/pipeline_override.rs
 src/services/pipeline_routes.rs
+src/services/routines/agent_executor/execution.rs
 src/services/routines/agent_executor/reliability.rs
 src/services/routines/reliability_pg_tests.rs
 src/services/routines/session_control.rs
@@ -630,6 +631,7 @@ services::observability::recovery_audit::tests::recovery_audit_pg_tests
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests
 services::pipeline_override::pipeline_override_pg_tests
 services::pipeline_routes::tests
+services::routines::agent_executor::execution::pg_tests
 services::routines::agent_executor::reliability::tests
 services::routines::reliability_pg_tests
 services::routines::session_control::tests
@@ -2290,6 +2292,7 @@ services::pipeline_routes::tests::card_stage_moves_take_turns_with_stage_saves_p
 services::pipeline_routes::tests::replace_stages_persists_backoff_round_trip_pg
 services::pipeline_routes::tests::stage_saves_refuse_to_strand_open_cards_pg
 services::pipeline_routes::tests::stage_saves_take_turns_pg
+services::routines::agent_executor::execution::pg_tests::deferred_process_run_keeps_mode_after_executor_config_changes_pg
 services::routines::agent_executor::reliability::tests::fresh_probe_failure_stands_only_for_a_found_legacy_row_pg
 services::routines::reliability_pg_tests::agent_start_before_provider_registers_defers_then_fails_after_window_pg
 services::routines::reliability_pg_tests::checkpoint_rejected_completion_counts_toward_the_failure_alert_pg

@@ -942,10 +942,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
         if let Some(provider) = report_provider {
             command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
         }
-        // Compact-window overlay (#4591): pin the freshly resolved immutable
-        // threshold on top of the chokepoint's by-construction gateway env (or
-        // clear any stale inherited value when there is none).
+        // Pin the resolved compact window over the gateway environment.
         apply_auto_compact_window_to_command(command, auto_compact_window);
+        crate::services::process::configure_child_process_group(command);
     }
     let mut command = builder.into_command();
 

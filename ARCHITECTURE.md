@@ -1066,6 +1066,7 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_process.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -2551,6 +2552,8 @@ src/
 │   │   └── worktree_stale.rs
 │   ├── routines/
 │   │   ├── agent_executor/
+│   │   │   ├── execution.rs
+│   │   │   ├── launch.rs
 │   │   │   ├── reliability.rs
 │   │   │   └── start_deferral.rs
 │   │   ├── discord_log/
