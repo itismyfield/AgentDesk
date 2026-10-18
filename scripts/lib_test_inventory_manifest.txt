@@ -6133,6 +6133,9 @@ services::discord::recovery_engine::manual_rebind::post_work_evidence_tests::tmu
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::absent_inflight_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::another_raw_rollout_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::cancelled_raw_successor_does_not_skip_gap_to_a_later_floor
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_rebuilds_the_new_turn_into_a_new_relay_file
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_writer_rebuilds_the_new_turn_at_the_chosen_offset
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::default_override_rebind_reuses_healthy_matching_raw_incumbent
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::matching_raw_canonical_alias_keeps_saved_coordinates
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::normalized_cursor_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::rebind_keeps_matching_raw_incumbent_and_delivers_new_tail
@@ -6172,6 +6175,7 @@ services::discord::recovery_engine::phase_policy::tests::ownerless_live_restores
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_absent_root
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_present_root
+services::discord::recovery_engine::rebind_runtime::codex_relay_generation::tests::truncating_prepare_restarts_the_relay_in_a_new_file
 services::discord::recovery_engine::rebind_runtime::tests::active_usage_snapshot_is_non_renderable_in_rebind_output
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_adopted_transcript_session_id_follows_transcript_stem
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_legacy_runtime_marker_does_not_adopt_transcript_as_claude_tui
@@ -7400,6 +7404,7 @@ services::discord::session_relay_sink::tests::idle_jsonl_user_event_consumption_
 services::discord::session_relay_sink::tests::idle_range_commit_requires_current_generation_and_persists_frontier
 services::discord::session_relay_sink::tests::idle_relay_allows_later_large_backlog_chunk_after_session_init_seen
 services::discord::session_relay_sink::tests::idle_relay_delivers_suffix_when_init_is_in_committed_prefix
+services::discord::session_relay_sink::tests::idle_replace_tests::idle_cursor_restarts_a_rebind_replaced_relay_at_zero
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_fails_when_another_holder_owns_range
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_self_heals_an_expired_prior_holder
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_sets_leased_sink_marker
@@ -7450,6 +7455,15 @@ services::discord::session_relay_sink::tests::terminal_delivery_route_skips_brid
 services::discord::session_relay_sink::tests::terminal_lease_coordinate_prefers_fence_then_idle_range_then_degenerate
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_inflightless_sink_post_4277
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_file_that_repeats_the_turn_appends_instead_of_replacing
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_newer_files_native_terminal_replaces_instead_of_appending
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_partial_record_on_one_file_never_joins_the_next_files_first_record
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_partial_record_resumes_when_its_file_returns
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_superseded_native_terminal_is_not_delivered_and_never_reread
+services::discord::session_relay_sink::turn_parser::read_source_tests::newer_watcher_on_another_file_delivers_its_bytes_in_the_open_turn
+services::discord::session_relay_sink::turn_parser::read_source_tests::returning_to_an_earlier_file_restores_its_watermark
+services::discord::session_relay_sink::turn_parser::read_source_tests::successor_on_the_same_file_keeps_the_resend_watermark
+services::discord::session_relay_sink::turn_parser::read_source_tests::superseded_watcher_frames_never_reach_the_open_turn
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_gap_or_a_disagreeing_span_folds_the_payload_whole
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_generation_change_clears_the_resend_watermark
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_partially_suppressed_resend_increments_the_counter_too
@@ -8279,6 +8293,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stre
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::read_source_switch_tests::crossed_rebind_relay_reaches_discord_once_below_the_old_watermark
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
@@ -8389,6 +8404,7 @@ services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::watcher_skips_status_panel_creation_when_v2_disabled
 services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::forwarded_span_names_the_suffix_the_buffer_ends_with
 services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::rewind_replay_keeps_file_coordinates_and_the_sink_suppresses_the_resend
+services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::watcher_forward_carries_opened_fd_identity_without_stamp
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_ignores_synthetic_headless_panel_handle
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_off_and_equal_epoch_are_inert
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_supersedes_only_newer_epoch_for_owned_panel

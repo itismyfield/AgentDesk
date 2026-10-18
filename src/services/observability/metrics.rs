@@ -106,6 +106,11 @@ pub struct AtomicCounters {
     /// resume) are re-sending often enough to inspect; a count that goes to zero
     /// after a rewind change is how the suppression proves it is still needed.
     pub relay_resend_suppressed: AtomicU64,
+    /// Frames the sink parser refused because an older watcher read them from a
+    /// file the open turn had already left.
+    pub relay_stale_source_frame_dropped: AtomicU64,
+    /// Times the sink parser moved an open turn onto another read file.
+    pub relay_read_source_switched: AtomicU64,
     /// #4794: observed prompt-notification emissions that hit an authoritative
     /// tmux-owner registry miss and were still pending when bounded three-state
     /// probing definitively reported `DeadOrAbsent`. Poll misses are excluded;
@@ -151,6 +156,10 @@ impl AtomicCounters {
                 .relay_terminal_authority_denied
                 .load(Ordering::Relaxed),
             relay_resend_suppressed: self.relay_resend_suppressed.load(Ordering::Relaxed),
+            relay_stale_source_frame_dropped: self
+                .relay_stale_source_frame_dropped
+                .load(Ordering::Relaxed),
+            relay_read_source_switched: self.relay_read_source_switched.load(Ordering::Relaxed),
             relay_permanent_loss: self.relay_permanent_loss.load(Ordering::Relaxed),
             relay_permanent_loss_drift_state_ttl_expired: self
                 .relay_permanent_loss_drift_state_ttl_expired
@@ -202,6 +211,10 @@ pub struct AtomicCountersSnapshot {
     pub relay_terminal_authority_denied: u64,
     /// #5948: see [`AtomicCounters::relay_resend_suppressed`].
     pub relay_resend_suppressed: u64,
+    /// See [`AtomicCounters::relay_stale_source_frame_dropped`].
+    pub relay_stale_source_frame_dropped: u64,
+    /// See [`AtomicCounters::relay_read_source_switched`].
+    pub relay_read_source_switched: u64,
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
@@ -252,6 +265,10 @@ pub struct CounterSnapshotRow {
     /// #5948: resent source byte ranges the sink parser refused to fold twice.
     /// See [`AtomicCounters::relay_resend_suppressed`].
     pub relay_resend_suppressed: u64,
+    /// See [`AtomicCounters::relay_stale_source_frame_dropped`].
+    pub relay_stale_source_frame_dropped: u64,
+    /// See [`AtomicCounters::relay_read_source_switched`].
+    pub relay_read_source_switched: u64,
     /// #4794: confirmed lost observed-prompt emissions; see
     /// [`AtomicCounters::relay_permanent_loss`] for exact inclusion rules.
     pub relay_permanent_loss: u64,
@@ -363,6 +380,18 @@ impl ObservabilityCounters {
     pub fn record_relay_resend_suppressed(&self, channel_id: u64, provider: &str) {
         self.slot(channel_id, provider)
             .relay_resend_suppressed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_relay_stale_source_frame_dropped(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_stale_source_frame_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_relay_read_source_switched(&self, channel_id: u64, provider: &str) {
+        self.slot(channel_id, provider)
+            .relay_read_source_switched
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -479,6 +508,8 @@ impl ObservabilityCounters {
                     relay_owner_unknown: snap.relay_owner_unknown,
                     relay_terminal_authority_denied: snap.relay_terminal_authority_denied,
                     relay_resend_suppressed: snap.relay_resend_suppressed,
+                    relay_stale_source_frame_dropped: snap.relay_stale_source_frame_dropped,
+                    relay_read_source_switched: snap.relay_read_source_switched,
                     relay_permanent_loss: snap.relay_permanent_loss,
                     relay_permanent_loss_drift_state_ttl_expired: snap
                         .relay_permanent_loss_drift_state_ttl_expired,
@@ -614,6 +645,16 @@ pub fn record_relay_owner_unknown(channel_id: u64, provider: &str) {
 pub fn record_relay_resend_suppressed(channel_id: u64, provider: &str) {
     global().record_relay_resend_suppressed(channel_id, provider);
     super::emit::emit_relay_root_cause_counter(provider, channel_id, "relay_resend_suppressed");
+}
+
+/// See `ObservabilityCounters::record_relay_stale_source_frame_dropped`.
+pub fn record_relay_stale_source_frame_dropped(channel_id: u64, provider: &str) {
+    global().record_relay_stale_source_frame_dropped(channel_id, provider);
+}
+
+/// See `ObservabilityCounters::record_relay_read_source_switched`.
+pub fn record_relay_read_source_switched(channel_id: u64, provider: &str) {
+    global().record_relay_read_source_switched(channel_id, provider);
 }
 
 /// #4794: record confirmed permanent relay loss as an additive emission count.

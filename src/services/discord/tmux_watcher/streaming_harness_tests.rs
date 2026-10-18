@@ -41,6 +41,9 @@ mod o_seed_install_tests;
 #[path = "o_capsule_origin_tests.rs"]
 mod o_capsule_origin_tests;
 
+#[path = "read_source_switch_tests.rs"]
+mod read_source_switch_tests;
+
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";
 const CLAUDE: ProviderKind = ProviderKind::Claude;

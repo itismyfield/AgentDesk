@@ -65,6 +65,14 @@ impl SourceFileIdentity {
     }
 }
 
+/// Where a watcher frame's bytes were read: the opened file's identity and the
+/// process-monotonic generation of the watcher that read them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadSource {
+    pub file: SourceFileIdentity,
+    pub producer: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceStamp {
     pub epoch: SourceEpoch,
@@ -138,6 +146,7 @@ impl super::RelayProducer {
         relay_generation_mtime_ns: i64,
         relay_source_stamp: Option<SourceStamp>,
         source_span: Option<(u64, u64)>,
+        read_source: Option<ReadSource>,
     ) -> super::RelaySendOutcome {
         self.try_send_request(super::RelayFrameRequest {
             payload,
@@ -147,6 +156,7 @@ impl super::RelayProducer {
             generation: (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
             stamp: relay_source_stamp,
             span: source_span,
+            read_source,
         })
     }
 
@@ -158,6 +168,7 @@ impl super::RelayProducer {
         relay_generation_mtime_ns: i64,
         relay_source_stamp: Option<SourceStamp>,
         source_span: Option<(u64, u64)>,
+        read_source: Option<ReadSource>,
     ) -> super::RelaySendOutcome {
         self.try_send_request(super::RelayFrameRequest {
             payload,
@@ -167,6 +178,7 @@ impl super::RelayProducer {
             generation: (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
             stamp: relay_source_stamp,
             span: source_span,
+            read_source,
         })
     }
 }
