@@ -80,12 +80,12 @@ recent landed PR outputs were also compared with the external skill producer.
 The copied producer uses line-oriented Git numstat and `--no-renames`: a rename
 can count both old and new production paths. Git-quoted paths, including non-ASCII and
 tab/newline filenames, are not reliably counted. Lockfiles and the generated
-`scripts/pg_test_lane_manifest.txt` and
 `migrations/postgres/immutable-checksums.json` still consume the budget.
 Comment/test classification is lexical, not a Rust parser, and the producer
 treats `git show` failures as empty content. These
 canonical limitations were preserved rather than silently changing campaign
-measurement. The repository and skill copies must be reconciled by the
-coordinator in a follow-up; changes need parity evidence and a reviewed policy.
+measurement. The repository copy is byte-identical to the skill's canonical producer
+(its digest is pinned in `scripts/test_pr_cap_check.py`); changes need parity
+evidence and a reviewed policy.
 The historical operator patch in `docs/operator-patches/5758-pr-cap-helper.patch`
 is not the current production-cap policy.
