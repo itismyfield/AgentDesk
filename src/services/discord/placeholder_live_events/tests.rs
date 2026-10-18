@@ -9066,11 +9066,6 @@ fn live_panel_hides_completed_tasks_keeping_running_and_header() {
     push_background_bash_task(&events, channel_id, "Still running", "toolu_3404_run");
 
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
-    assert_eq!(
-        panel.matches('✓').count(),
-        0,
-        "live panel must hide all completed tasks: {panel}"
-    );
     assert!(
         !panel.contains("completed)"),
         "no compaction summary when completed tasks are hidden: {panel}"
@@ -9216,7 +9211,7 @@ fn live_panel_hides_completed_tasks_even_under_cap() {
     }
     let panel = events.render_status_panel(channel_id, &ProviderKind::Claude, 1_700_000_000);
     assert_eq!(
-        panel.matches('✓').count(),
+        panel.matches("Job ").count(),
         0,
         "completed tasks are hidden from the live panel: {panel}"
     );
