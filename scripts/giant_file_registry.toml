@@ -700,14 +700,6 @@ decision = "keep"
 owner = "discord-relay"
 keep_reason = "Retain per-channel health snapshot composition and relay-verdict reporting as one maintained diagnostic surface after the decomposition campaign was retired; future additions remain subject to the giant-file zero-growth gate."
 
-[[entry]]
-# #3721 first-batch promotion: health recovery surface combines stop/cancel,
-# rebind, stall-watchdog, queue drain, and leak-recovery behavior.
-file = "src/services/discord/health/recovery.rs"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#4712"
-
 # RETIRED 2026-07-24 (#4712): watchers/lifecycle.rs dropped below the production
 # giant threshold after the restore scan, liveness, dispatch failure,
 # claim/reuse ownership, output policy, recovery marker, and test clusters moved
