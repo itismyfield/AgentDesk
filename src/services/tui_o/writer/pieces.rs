@@ -10,6 +10,9 @@ use crate::services::tui_o::shadow::{CapturedRecord, ShadowProvider, UnitKey, Un
 /// Ledger reason for a tool call left to Legacy's live panel.
 pub const TOOL_CALL_PANEL: &str = "tool_call_panel";
 
+/// Raw tool output is internal, including a command's nonfatal failure.
+pub const TOOL_RESULT_INTERNAL: &str = "tool_result_internal";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PieceWork {
     pub unit_key: UnitKey,
@@ -141,6 +144,11 @@ impl UnitDeriver {
         // A tool call shows only as the live panel's last-tool line, never as its own message.
         if unit_key.kind == UnitKind::Tool {
             let reason = TOOL_CALL_PANEL.into();
+            return vec![Derived::Excluded { unit_key, reason }];
+        }
+        // Keep the native identity and original seal above for replay and fork comparisons.
+        if unit_key.kind == UnitKind::ToolResult {
+            let reason = TOOL_RESULT_INTERNAL.into();
             return vec![Derived::Excluded { unit_key, reason }];
         }
         match (planned, content) {
