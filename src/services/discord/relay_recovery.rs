@@ -787,6 +787,11 @@ mod axis_b_tests {
 
         for (source, allowed_warrant_binds, fixture_observations, fixture_verdicts) in [
             (include_str!("health/recovery.rs"), 0, 1, 3),
+            (include_str!("health/recovery/watchdog_pass.rs"), 0, 0, 0),
+            (include_str!("health/recovery/runtime_stop.rs"), 0, 0, 0),
+            (include_str!("health/recovery/inflight_repair.rs"), 0, 0, 0),
+            (include_str!("health/recovery/runtime_lookup.rs"), 0, 0, 0),
+            (include_str!("health/recovery/channel_runtime.rs"), 0, 0, 0),
             (
                 include_str!("health/recovery/watchdog_decisions.rs"),
                 1,
