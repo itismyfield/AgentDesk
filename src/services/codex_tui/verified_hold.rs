@@ -7,7 +7,7 @@ use crate::services::{
 use std::{sync::Arc, time::Duration};
 
 pub(crate) fn existing_incarnation(tmux: &str) -> bool {
-    dedupe::codex_verified_requires_proof(tmux)
+    dedupe::codex_verified_requires_proof(tmux) && !dedupe::clear_relaunch::relaunch_open(tmux)
 }
 
 pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Result<(), String> {

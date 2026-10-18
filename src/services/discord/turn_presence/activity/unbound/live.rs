@@ -695,7 +695,7 @@ async fn collect(
 
 #[cfg(test)]
 #[path = "live_tests.rs"]
-mod tests;
+pub(in crate::services::discord::turn_presence::activity) mod tests;
 
 #[cfg(test)]
 #[path = "live_review_tests.rs"]

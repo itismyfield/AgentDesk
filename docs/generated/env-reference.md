@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 121
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 122
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -132,6 +132,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_TEST_CODEX_BINDING_ROOT` | `src/services/tui_prompt_dedupe/binding_events/codex.rs` | Provider workers inherit only a fixture's explicit test root, never the live runtime root. |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs` | Test seam: a child process stops at this create stage until stdin yields a line. |

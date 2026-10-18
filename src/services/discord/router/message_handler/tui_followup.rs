@@ -466,7 +466,7 @@ pub(super) fn tui_busy_followup_diagnostic(
     }
     let tmux_session_name = tmux_session_name?;
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(tmux_session_name)
     {
         return Some(ClaudeTuiBusyFollowupDiagnostic {
             tmux_session_name: tmux_session_name.to_owned(),
@@ -703,7 +703,7 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     // Verified incarnations wait for source and permission before queue teardown.
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(&tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(&tmux_session_name)
     {
         park.note_codex_verified_hold(channel_id, &tmux_session_name);
         return true;
