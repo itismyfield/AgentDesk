@@ -5856,6 +5856,7 @@ services::discord::queue_dispatch::codex_clear_compat::tests::compat_pinned_disa
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_rejects_wrong_target_unreadable_history_and_corrupt_watermark_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_transient_boundary_error_reevaluates_on_next_kick_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_transient_probe_failure_reevaluates_without_new_input_pg
+services::discord::queue_dispatch::codex_clear_compat::tests::compat_without_core_session_and_unresolved_workspace_parks_original_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_boot_kickoff_launches_the_original_input_once_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_boot_kickoff_without_restored_core_session_launches_once_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_keeps_original_queue_and_retirement_is_idempotent_pg

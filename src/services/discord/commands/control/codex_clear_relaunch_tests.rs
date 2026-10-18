@@ -370,7 +370,10 @@ rows = [
 path = pathlib.Path(context['provider_root']) / ('rollout-' + identity + '.jsonl')
 path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
 (root / 'fresh-argv.json').write_text(json.dumps(sys.argv[1:]))
-(root / 'fresh-context').write_text(str(context_path))
+# The test polls fresh-context, so it must never be visible half-written.
+fresh = root / 'fresh-context.tmp'
+fresh.write_text(str(context_path))
+os.replace(fresh, root / 'fresh-context')
 PY
 "#)).unwrap();
         fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();

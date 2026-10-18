@@ -343,29 +343,52 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
         }));
     }
 
-    // An unresolved canary without retirement, and another channel while the canary is
-    // retired, must both remain held. Neither half of the launch exception is optional.
+    // An unretired canary, another channel while the canary is retired, and a retired but
+    // Herdr-hosted canary all stay held: every part of the launch exception is required.
     vacate(&fixture);
     fixture
         .fake
         .add_unwatched_inventory("external-e51-unwatched");
     let canary = ChannelId::new(CANARY_CHANNEL);
     fixture.shared.core.lock().await.sessions.remove(&canary);
-    for channel in [canary, ChannelId::new(6_845_072)] {
+    for (channel, herdr) in [
+        (canary, false),
+        (ChannelId::new(6_845_072), false),
+        (canary, true),
+    ] {
         let _turn_mode = (channel != canary).then(|| TestConfirmation::new(channel.get()));
+        // Live and on-disk config carry the same Herdr section, so activity reads the hosted scope.
+        let _hosts = herdr.then(|| {
+            let forced = crate::config::session_hosts::force_for_test(
+                Some("test-local"),
+                &[(CANARY_CHANNEL, "test-local")],
+            );
+            let mut config = (*crate::config_live_reload::current().unwrap()).clone();
+            config.session_hosts =
+                crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+            config.cluster.instance_id = Some("test-local".into());
+            let disk = crate::runtime_layout::config_file_path(fixture.root.path());
+            fs::write(disk, serde_yaml::to_string(&config).unwrap()).unwrap();
+            crate::config_live_reload::install(config);
+            forced
+        });
         if channel != canary {
             let captured = clear_relaunch::capture(CANARY_TMUX).unwrap().unwrap();
             clear_relaunch::commit(&captured, "explicit_clear").unwrap();
             assert!(clear_relaunch::relaunch_open(CANARY_TMUX));
         } else {
-            assert!(!clear_relaunch::relaunch_open(CANARY_TMUX));
+            assert_eq!(clear_relaunch::relaunch_open(CANARY_TMUX), herdr);
         }
-        super::clear_persist_failure_tests::seed_backlog(
-            &fixture.shared,
-            &ProviderKind::Codex,
-            channel,
-        )
-        .await;
+        if herdr {
+            assert!(crate::config::session_hosts::herdr_endpoint(CANARY_CHANNEL).is_some());
+        } else {
+            super::clear_persist_failure_tests::seed_backlog(
+                &fixture.shared,
+                &ProviderKind::Codex,
+                channel,
+            )
+            .await;
+        }
         let before = fixture.shared.mailbox(channel).snapshot().await;
         let identity = QueueIdentity::of(&before.intervention_queue[0]);
         let observed = activity::activity_now(&fixture.shared, &ProviderKind::Codex, channel).await;

@@ -11,30 +11,52 @@ const ORIGINAL_MESSAGE: u64 = 1_561_159_600_206_516_285;
 #[derive(Clone, Default)]
 struct DequeueHolds(Arc<std::sync::atomic::AtomicUsize>);
 
+#[derive(Default)]
+struct Fields {
+    message: String,
+    channel: Option<u64>,
+}
+
+impl tracing::field::Visit for Fields {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "channel_id" {
+            self.channel = Some(value);
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.message = format!("{value:?}");
+        }
+    }
+}
+
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DequeueHolds {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        #[derive(Default)]
-        struct Fields {
-            message: String,
-            channel: Option<u64>,
-        }
-        impl tracing::field::Visit for Fields {
-            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-                if field.name() == "channel_id" {
-                    self.channel = Some(value);
-                }
-            }
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.message = format!("{value:?}");
-                }
-            }
-        }
         let mut fields = Fields::default();
         event.record(&mut fields);
         if fields.channel == Some(CANARY_CHANNEL) && fields.message.contains("dequeue_held") {
             self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+/// Timestamps each info-or-louder agentdesk event so a slow boot kickoff shows its slow stage.
+struct StageClock(std::time::Instant);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StageClock {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let metadata = event.metadata();
+        if *metadata.level() > tracing::Level::INFO || !metadata.target().starts_with("agentdesk") {
+            return;
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        eprintln!(
+            "E51_BOOT_STAGE +{}ms {} {}",
+            self.0.elapsed().as_millis(),
+            metadata.target(),
+            fields.message
+        );
     }
 }
 
@@ -164,7 +186,7 @@ async fn legacy_compat_boot_kickoff_launches_the_original_input_once_pg() {
     {
         return;
     }
-    boot_launch_once(false, false).await;
+    boot_launch_once(Boot::Restored).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -180,7 +202,7 @@ async fn legacy_compat_boot_kickoff_without_restored_core_session_launches_once_
     {
         return;
     }
-    boot_launch_once(true, false).await;
+    boot_launch_once(Boot::NoCore).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -196,10 +218,36 @@ async fn compat_transient_boundary_error_reevaluates_on_next_kick_pg() {
     {
         return;
     }
-    boot_launch_once(true, true).await;
+    boot_launch_once(Boot::TransientBoundary).await;
 }
 
-async fn boot_launch_once(no_core_session: bool, transient_boundary_error: bool) {
+#[tokio::test(flavor = "current_thread")]
+async fn compat_without_core_session_and_unresolved_workspace_parks_original_pg() {
+    let name = concat!(
+        module_path!(),
+        "::compat_without_core_session_and_unresolved_workspace_parks_original_pg"
+    );
+    if !crate::services::tui_o::cutover::test_override::in_empty_list_process(name)
+        || !crate::services::discord::admin_host_guard::tests::api_child(
+            name.split_once("::").unwrap().1,
+        )
+    {
+        return;
+    }
+    boot_launch_once(Boot::NoWorkspace).await;
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Boot {
+    Restored,
+    NoCore,
+    TransientBoundary,
+    NoWorkspace,
+}
+
+async fn boot_launch_once(boot: Boot) {
+    let no_core_session = boot != Boot::Restored;
+    let transient_boundary_error = boot == Boot::TransientBoundary;
     let mut fixture = CanaryFixture::new_with_audit_prefix(120).await;
     assert!(
         !crate::services::tui_o::cutover::peek_o_owns_tui_output_for_channel(
@@ -368,6 +416,47 @@ async fn boot_launch_once(no_core_session: bool, transient_boundary_error: bool)
         shared: &fixture.shared,
         token: "e51-isolated-test-bot",
     };
+    if boot == Boot::NoWorkspace {
+        // The workspace directory disappears from config; intake could only answer with an error.
+        let config = crate::runtime_layout::config_file_path(fixture.root.path());
+        let yaml = std::fs::read_to_string(&config).unwrap();
+        let workspace = serde_json::to_string(fixture.root.path()).unwrap();
+        let missing =
+            serde_json::to_string(&fixture.root.path().join("missing-workspace")).unwrap();
+        assert!(yaml.contains(&workspace));
+        std::fs::write(&config, yaml.replace(&workspace, &missing)).unwrap();
+        api.take();
+        assert_eq!(
+            super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex).await,
+            0
+        );
+        let retained = fixture.shared.mailbox(channel).snapshot().await;
+        assert_eq!(retained.intervention_queue.len(), 1);
+        assert_eq!(QueueIdentity::of(&retained.intervention_queue[0]), identity);
+        let parked = fixture.shared.queue_park_ledger.project(
+            &fixture.shared,
+            &ProviderKind::Codex,
+            channel,
+            &retained,
+        );
+        assert_eq!(
+            parked.reason.as_deref(),
+            Some("codex_clear_compat:C1:workspace")
+        );
+        let sent = api.take();
+        assert!(
+            !sent.iter().any(|call| call.contains("No active session")),
+            "{sent:?}"
+        );
+        assert!(
+            !fixture
+                .fake
+                .take_calls()
+                .iter()
+                .any(|call| call.starts_with("new-session "))
+        );
+        return;
+    }
     if let Some(lock) = locked.take() {
         assert_eq!(
             super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex).await,
@@ -405,7 +494,11 @@ async fn boot_launch_once(no_core_session: bool, transient_boundary_error: bool)
     let count = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex)
-            .with_subscriber(tracing_subscriber::registry().with(held.clone())),
+            .with_subscriber(
+                tracing_subscriber::registry()
+                    .with(held.clone())
+                    .with(StageClock(std::time::Instant::now())),
+            ),
     )
     .await
     .expect("restored queue did not finish preparation");

@@ -59,6 +59,21 @@ pub(super) async fn admit(
     }
     *cached = None;
     shared.queue_park_ledger.clear_promote_hold(channel, OWNER);
+    // Without a core session intake can only auto-start; an unusable workspace would consume the
+    // input with an error reply. Not cached, so a config reload is picked up on the next kick.
+    let no_core_session = !shared.core.lock().await.sessions.contains_key(&channel);
+    if no_core_session
+        && crate::services::discord::settings::resolve_workspace(channel, None)
+            .is_none_or(|workspace| !std::path::Path::new(&workspace).is_dir())
+    {
+        shared.queue_park_ledger.note_promote_hold(
+            provider,
+            channel,
+            OWNER,
+            "codex_clear_compat:C1:workspace",
+        );
+        return false;
+    }
     // Legacy and healthy live incarnations keep their old path; historical pins require C1.
     if !dedupe::codex_verified_requires_proof(CANARY_TMUX)
         || dedupe::clear_relaunch::relaunch_open(CANARY_TMUX)

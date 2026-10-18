@@ -229,6 +229,7 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
             && observed.reason == "session_identity_unresolved"
             && matches!(provider, ProviderKind::Codex)
             && channel_id.get() == CANARY_CHANNEL
+            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
             && crate::services::tui_prompt_dedupe::clear_relaunch::relaunch_open(CANARY_TMUX);
         if observed.activity != Activity::Idle && !cleared_canary_launch {
             tracing::info!(
