@@ -453,6 +453,7 @@ jobs:
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
