@@ -212,7 +212,7 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
     assert_eq!(
         header_only
             .lines()
-            .filter(|line| line.starts_with("-# ✗ Bash  ROW"))
+            .filter(|line| line.starts_with("-# ✓ Bash  ROW"))
             .count(),
         6,
         "{header_only}"
@@ -234,14 +234,14 @@ fn activity_budget_drops_whole_old_rows_including_subtext_bytes() {
     );
     assert_eq!(
         out.lines()
-            .filter(|line| line.starts_with("-# ✗ Bash  ROW"))
+            .filter(|line| line.starts_with("-# ✓ Bash  ROW"))
             .count(),
         5,
         "{out}"
     );
     assert!(!out.contains("ROW0"), "{out}");
     for i in 1..6 {
-        assert!(out.contains(&format!("✗ Bash  ROW{i} ")), "{out}");
+        assert!(out.contains(&format!("✓ Bash  ROW{i} ")), "{out}");
     }
     assert!(out.contains("-# … 외 1개"), "{out}");
     assert!(out.contains("-# 턴 시작 : fixed"), "{out}");
