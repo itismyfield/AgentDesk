@@ -693,6 +693,8 @@ decompose_issue = "#4712"
 [[entry]]
 # Crossed the threshold when #5071 T4-B6 wired the composed relay verdict
 # (RelayVerdictSource polarity switch) into the per-channel snapshot composer.
+
+# 2026-09-04 giant retirement track ended (decision recorded on #5447): shrink -> keep, with size held by the zero-growth pin.
 file = "src/services/discord/health/snapshot.rs"
 decision = "keep"
 owner = "discord-relay"
@@ -759,14 +761,11 @@ decompose_issue = "#4712"
 #      wave buys one decomposition round for the whole cohort and removes the
 #      lone private deadline that drifted unnoticed. If T5 has not settled by
 #      then, move this entry with the cohort rather than alone.
-#   Follow-up, recorded so the next pass does not rediscover it: the campaign
-#   decision of 2026-09-04 to end the giant retirement track lives outside this
-#   repo, and issues #5447 and #4229 are held on exactly this registry
-#   pointer/deadline cleanup. If that decision stands, the cohort's next pass is
-#   a shrink -> keep reclassification of all fourteen 2026-10-31 entries, not a
-#   decomposition round. Either disposition is a cohort-wide call; what this
-#   change fixes is that the path is no longer stranded on a private date.
-# No current selector admits shrink -> keep; it requires a separately authorized evaluator change.
+# The 2026-09-04 retirement decision is recorded on #5447; health/snapshot.rs
+# is now keep and its pointer/deadline cleanup is resolved. #4229 remains pending.
+#
+# The fourteen 2026-10-31 entries still need a cohort-wide disposition.
+# `pr_ordinary_no_regression` permits reclassification without new/growing giants or pin increases.
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
