@@ -218,6 +218,7 @@ jobs:
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'
               - 'src/db/auto_queue/run_completion_pg_tests.rs'
+              - 'src/db/auto_queue/run_owner_guard_pg_tests.rs'
               - 'src/db/auto_queue/tests.rs'
               - 'src/db/automation_candidates/verdict_tests.rs'
               - 'src/db/calendar_sync/postgres_tests.rs'
@@ -1500,6 +1501,14 @@ jobs:
           --expected-ids scripts/ci/pg15_required_ids.txt --
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --
           cargo test --lib -- --exact
+          db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg
           db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
           dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
           services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
@@ -2203,7 +2212,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
+          expected=64e2cd39ebe1887ce7c2557144ae2b84d268ca02f0fc042a066ffcee67ec79f8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2455,7 +2464,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=789da1d66ecc3030c795371a2154619f16e5d9afab148f43fc356c92a64a194a
+          expected=64e2cd39ebe1887ce7c2557144ae2b84d268ca02f0fc042a066ffcee67ec79f8
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

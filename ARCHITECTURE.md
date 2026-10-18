@@ -113,6 +113,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── entries/
 │   │   │   └── dispatch_failure.rs
+│   │   ├── run_owner_guard/
+│   │   │   └── writes.rs
 │   │   ├── claim.rs
 │   │   ├── consultation.rs
 │   │   ├── entries.rs
@@ -122,6 +124,8 @@ src/
 │   │   ├── queries.rs
 │   │   ├── run_completion_contract_tests.rs
 │   │   ├── run_completion_pg_tests.rs
+│   │   ├── run_owner_guard.rs
+│   │   ├── run_owner_guard_pg_tests.rs
 │   │   ├── run_status.rs
 │   │   ├── runs.rs
 │   │   ├── slot_predicate.rs
@@ -582,7 +586,8 @@ src/
 │   ├── auto_queue/
 │   │   ├── cancel_run/
 │   │   │   ├── malformed_context_pg_tests.rs
-│   │   │   └── remaining_live_census.rs
+│   │   │   ├── remaining_live_census.rs
+│   │   │   └── terminalize_tx.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
