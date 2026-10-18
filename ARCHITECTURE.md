@@ -904,6 +904,8 @@ src/
 │   │   │   │   ├── clear_report.rs
 │   │   │   │   ├── clear_teardown.rs
 │   │   │   │   ├── clear_wait_tests.rs
+│   │   │   │   ├── codex_clear_relaunch_tests.rs
+│   │   │   │   ├── codex_clear_retirement_tests.rs
 │   │   │   │   ├── codex_verified_clear_tests.rs
 │   │   │   │   ├── home_fence.rs
 │   │   │   │   ├── home_fence_tests.rs
@@ -1285,6 +1287,8 @@ src/
 │   │   │   └── session_anchors.rs
 │   │   ├── queue_dispatch/
 │   │   │   ├── cancel_backstop_race_support_tests.rs
+│   │   │   ├── codex_clear_compat.rs
+│   │   │   ├── codex_clear_compat_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
@@ -2905,6 +2909,7 @@ src/
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_policy/
+│   │   │   │   ├── clear_relaunch.rs
 │   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/
