@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "f40302ff201d8d3d80768f628a0e75de96065cb4",
+  "measured_at_sha": "c4b3530ecba27b2adba9e2593de6b650737ec442",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -168,7 +168,9 @@
         "src/services/codex_tui/session.rs": 6,
         "src/services/discord/abandon_request_store.rs": 1,
         "src/services/discord/busy_followup_retry_store.rs": 3,
-        "src/services/discord/catch_up.rs": 4,
+        "src/services/discord/catch_up.rs": 1,
+        "src/services/discord/catch_up/phase1_sweep.rs": 2,
+        "src/services/discord/catch_up/phase2_sweep.rs": 1,
         "src/services/discord/commands/receipt.rs": 1,
         "src/services/discord/e2e_control.rs": 3,
         "src/services/discord/formatting/rollback_journal.rs": 4,
@@ -217,8 +219,6 @@
         "src/services/tmux_common/host_marker.rs": 1,
         "src/services/tmux_diagnostics.rs": 2,
         "src/services/tmux_wrapper.rs": 3,
-        "src/services/tui_input/blob.rs": 1,
-        "src/services/tui_input/ledger.rs": 1,
         "src/services/tui_o/store/durable.rs": 2,
         "src/services/tui_o/store/spool.rs": 3,
         "src/services/tui_prompt_dedupe/binding_context.rs": 3,
