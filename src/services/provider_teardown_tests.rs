@@ -76,10 +76,12 @@ pub(crate) mod test_support {
                  echo \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
                  has-session) [ -f \"$d/probe_fails\" ] && {{ echo \"error connecting to $d/socket (Permission denied)\" >&2; exit 1; }}\n\
                  [ -f \"$d/missing\" ] && {{ echo \"can't find session: $3\" >&2; exit 1; }}; exit 0 ;;\nlist-panes) echo 0; exit 0 ;;\n\
+                 display-message) [ -f \"$d/pane_pid\" ] && {{ cat \"$d/pane_pid\"; exit 0; }} ;;\n\
                  -V) [ -f \"$d/launch_enabled\" ] && {{ echo tmux 3.5a; exit 0; }} ;;\n\
                  capture-pane) if [ -f \"$d/launch_enabled\" ]; then cat \"$d/ready\"; else echo pane; fi; exit 0 ;;\n\
                  kill-session) [ -f \"$(cat \"$d/reason_path\")\" ] && echo reason-before-kill >> \"$d/calls\"\n\
                  [ -f \"$d/hold\" ] && {{ : > \"$d/killing\"; n=0; while [ ! -f \"$d/release\" ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done; }}\n\
+                 [ -f \"$d/pane_pid\" ] && [ ! -f \"$d/pane_survives\" ] && kill -9 \"$(cat \"$d/pane_pid\")\" 2>/dev/null\n\
                  [ -f \"$d/lost_kill_ack\" ] && {{ : > \"$d/missing\"; exit 1; }}\n\
                  [ -f \"$d/kill_fails\" ] && exit 1\n\
                  [ -f \"$d/missing_after_kill\" ] && : > \"$d/missing\"; exit 0 ;;\n\
@@ -169,6 +171,15 @@ pub(crate) mod test_support {
 
         pub(crate) fn release_kills(&self) {
             std::fs::write(self.dir.path().join("release"), "").unwrap();
+        }
+
+        /// The session's pane runs `pid`, which a later kill ends unless the pane survives it.
+        pub(crate) fn run_pane(&self, pid: u32) {
+            std::fs::write(self.dir.path().join("pane_pid"), pid.to_string()).unwrap();
+        }
+
+        pub(crate) fn keep_pane_alive(&self) {
+            std::fs::write(self.dir.path().join("pane_survives"), "").unwrap();
         }
 
         /// The logged calls, oldest first, and clears the log.

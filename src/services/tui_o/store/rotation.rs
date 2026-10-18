@@ -78,7 +78,8 @@ pub struct Successor {
     /// The old source's length when the hop was applied; the successor waits until it is spooled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_to: Option<u64>,
-    /// Seq of the provider record showing the old source's session was left.
+    /// Seq of the provider record showing the old source's session was left, or of the hop's own
+    /// bind when a confirmed clear end shows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<u64>,
 }
