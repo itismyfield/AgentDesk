@@ -14,7 +14,7 @@ impl InflightTurnState {
             return GuardedClearOutcome::Missing;
         };
         let path = inflight_state_path(&root, provider, self.channel_id);
-        let Ok(_lock) = lock_inflight_state_path(&path) else {
+        let Ok(lock) = lock_inflight_state_path(&path) else {
             return GuardedClearOutcome::IoError;
         };
         let Ok(data) = fs::read_to_string(&path) else {
@@ -45,6 +45,10 @@ impl InflightTurnState {
         {
             return GuardedClearOutcome::UserMsgMismatch;
         }
+        // Pending circuit evidence outlives the row, as the plain clear keeps it.
+        if handoff_before_discard_locked(&lock).is_err() {
+            return GuardedClearOutcome::IoError;
+        }
         log_inflight_remove(
             provider,
             self.channel_id,
@@ -52,13 +56,7 @@ impl InflightTurnState {
             "clear_restarted_herdr_row",
             &path,
         );
-        match fs::remove_file(&path) {
-            Ok(()) => GuardedClearOutcome::Cleared,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                GuardedClearOutcome::Missing
-            }
-            Err(_) => GuardedClearOutcome::IoError,
-        }
+        super::remove_row(&path).unwrap_or(GuardedClearOutcome::IoError)
     }
 }
 
