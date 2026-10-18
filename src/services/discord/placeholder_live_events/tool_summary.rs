@@ -54,17 +54,13 @@ fn credential_command(input: &str) -> bool {
         return true;
     }
     let words: Vec<_> = TOKENS.find_iter(input).map(|word| word.as_str()).collect();
-    let (mut command, mut wrapper, mut skip_value) = (true, false, false);
+    let (mut command, mut wrapper) = (true, false);
     for (index, raw_word) in words.iter().enumerate() {
         if matches!(*raw_word, ";" | "&" | "|" | "(" | ")" | "\r" | "\n") {
-            (command, wrapper, skip_value) = (true, false, false);
+            (command, wrapper) = (true, false);
             continue;
         }
         if !command {
-            continue;
-        }
-        if skip_value {
-            skip_value = false;
             continue;
         }
         let word = raw_word.replace(['\'', '"'], "").to_ascii_lowercase();
@@ -82,23 +78,10 @@ fn credential_command(input: &str) -> bool {
             continue;
         }
         if wrapper && word.starts_with('-') {
-            skip_value = matches!(
-                word.as_str(),
-                "-u" | "-g"
-                    | "-h"
-                    | "-p"
-                    | "-c"
-                    | "--user"
-                    | "--group"
-                    | "--host"
-                    | "--prompt"
-                    | "--chdir"
-                    | "--unset"
-            );
-            if !skip_value && !matches!(word.as_str(), "--" | "-n" | "-E" | "-H") {
-                return true;
+            if word == "--" {
+                continue;
             }
-            continue;
+            return true;
         }
         if matches!(
             executable,
