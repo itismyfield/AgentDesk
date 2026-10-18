@@ -19,13 +19,15 @@ const THREAD: u64 = 69_183_950;
 /// Real tmux sessions on the rig's private socket, which is never the host's own server.
 struct HostSessions {
     socket: PathBuf,
-    _selector: crate::config::TestEnvVarGuard,
+    _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
 }
 impl HostSessions {
     async fn new(rig: &Rig) -> Self {
-        let selector = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
-        // The rig holds the shared environment lock; an inherited selector wins over TMUX_TMPDIR.
-        unsafe { std::env::remove_var("TMUX") };
+        let namespace =
+            crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+                rig.channel.get(),
+                rig.root.path().join("host.sock"),
+            );
         let watch = Arc::new(Mutex::new(Watch::default()));
         let (_, stamp) = read(&rig.shared, &ProviderKind::Claude, rig.channel, watch).await;
         let socket = match &stamp.namespace.as_ref().unwrap().inventory {
@@ -39,7 +41,7 @@ impl HostSessions {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             socket,
-            _selector: selector,
+            _namespace: namespace,
         }
     }
     fn tmux(&self, args: &[&str]) {
