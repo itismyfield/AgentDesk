@@ -15,6 +15,39 @@ were copied from the original `~/.local/bin/*.sh` launchd targets and are
 deployed by `adk-release`, so leadership can move between eligible nodes
 without a manual script rsync.
 
+### Entry scripts vs Node helpers
+
+A routine root (`routines.dir` and every `routines.additional_dirs` override
+root) holds two kinds of `.js` files, and the loader tells them apart by
+reading the code without evaluating it:
+
+- A **QuickJS entry** calls `agentdesk.routines.register({ name, tick })` in
+  code. Write the call in this canonical form; `globalThis.agentdesk.routines.register(`
+  and whitespace or line breaks between the tokens also count, but aliases such as
+  `const { register } = agentdesk.routines` do not.
+- A **Node helper** is any other `.js`, typically a script that an agent turn
+  runs with `node` (for example `monitoring/local_worktree_inventory.js`, next
+  to the routine that invokes it). Helpers may use `require`/`process` and live
+  anywhere under the root. The loader never evaluates them, and the
+  unregistered-script audit (`agentdesk doctor`, boot WARN) never lists them.
+  A register call that appears only in a comment, string, template text or regex
+  literal does not turn a helper into an entry.
+
+Existing routine files need no migration: every entry already contains the call.
+
+An already-loaded file is the one exception. If you remove the register call
+from a script the running server has loaded, it stays a candidate: the
+last-known-good routine keeps running, every reload logs a load failure, and
+the discovery audit (`agentdesk doctor`, boot WARN) no longer sees the file. To retire a routine:
+
+1. Pause its row (`POST /api/routines/<id>/pause`).
+2. Remove the `.js` from every routine root, or move it outside them.
+
+Deleting the file from the release workspace alone does not remove it, because
+deploy copies the existing `~/.adk/release/routines/` into the new runtime tree
+before overlaying the workspace (`scripts/deploy-release.sh`). Remove the file
+from the runtime root (and peer nodes) too.
+
 ## Migrated jobs
 
 | # | launchd label | routine script_ref | cron (KST) | agent_id | status |

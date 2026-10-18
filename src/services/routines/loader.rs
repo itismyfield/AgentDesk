@@ -254,7 +254,6 @@ impl RoutineScriptLoader {
             .unwrap_or_else(recover_poisoned_lock)
             .clone();
 
-        let primary_root_identity = roots.first().and_then(|root| root.canonicalize().ok());
         for (root_index, root) in roots.iter().enumerate() {
             if !root.exists() {
                 tracing::warn!("Routines directory does not exist: {}", root.display());
@@ -268,14 +267,8 @@ impl RoutineScriptLoader {
                 continue;
             }
 
-            let exclude_bundled_node_helpers = root
-                .canonicalize()
-                .ok()
-                .is_some_and(|identity| primary_root_identity.as_ref() == Some(&identity));
             let mut entries = Vec::new();
-            if let Err(e) =
-                collect_routine_script_paths(root, exclude_bundled_node_helpers, &mut entries)
-            {
+            if let Err(e) = collect_routine_script_paths(root, &existing_scripts, &mut entries) {
                 tracing::warn!(
                     routines_dir = %root.display(),
                     error = %e,
@@ -624,22 +617,17 @@ impl RoutineScriptLoader {
 }
 
 /// Script refs (root-relative `*.js` paths, `/`-separated) present on disk
-/// under `roots`, using the same walk and bundled-helper exclusion as
+/// under `roots`, using the same walk and register-call rule as
 /// `RoutineScriptLoader::load_dirs` but without evaluating anything. Missing
 /// or unreadable roots contribute nothing. Sorted and de-duplicated.
 pub fn discover_routine_script_refs(roots: &[PathBuf]) -> Vec<String> {
-    let primary_root_identity = roots.first().and_then(|root| root.canonicalize().ok());
     let mut refs = std::collections::BTreeSet::new();
     for root in roots {
         if !root.is_dir() {
             continue;
         }
-        let exclude_bundled_node_helpers = root
-            .canonicalize()
-            .ok()
-            .is_some_and(|identity| primary_root_identity.as_ref() == Some(&identity));
         let mut entries = Vec::new();
-        if collect_routine_script_paths(root, exclude_bundled_node_helpers, &mut entries).is_err() {
+        if collect_routine_script_paths(root, &HashMap::new(), &mut entries).is_err() {
             continue;
         }
         for path in entries {
@@ -992,14 +980,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("routines");
         std::fs::create_dir_all(root.join("nested")).unwrap();
-        std::fs::write(root.join("b.js"), "x").unwrap();
-        std::fs::write(root.join("a.js"), "x").unwrap();
-        std::fs::write(root.join("nested").join("c.js"), "x").unwrap();
-        std::fs::write(root.join("README.md"), "x").unwrap();
+        std::fs::write(root.join("b.js"), "agentdesk.routines.register({});").unwrap();
+        std::fs::write(root.join("a.js"), "agentdesk.routines.register({});").unwrap();
+        std::fs::write(
+            root.join("nested").join("c.js"),
+            "agentdesk.routines.register({});",
+        )
+        .unwrap();
+        std::fs::write(root.join("README.md"), "agentdesk.routines.register({});").unwrap();
         let extra = temp.path().join("extra");
         std::fs::create_dir_all(&extra).unwrap();
-        std::fs::write(extra.join("a.js"), "override").unwrap();
-        std::fs::write(extra.join("d.js"), "x").unwrap();
+        std::fs::write(
+            extra.join("a.js"),
+            "// override\nagentdesk.routines.register({});",
+        )
+        .unwrap();
+        std::fs::write(extra.join("d.js"), "agentdesk.routines.register({});").unwrap();
 
         let refs = discover_routine_script_refs(&[
             root.clone(),
@@ -1007,24 +1003,6 @@ mod tests {
             temp.path().join("does-not-exist"),
         ]);
         assert_eq!(refs, vec!["a.js", "b.js", "d.js", "nested/c.js"]);
-    }
-
-    #[test]
-    fn discover_routine_script_refs_excludes_bundled_node_helper_in_primary_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("routines");
-        std::fs::create_dir_all(root.join("monitoring")).unwrap();
-        std::fs::write(
-            root.join("monitoring").join("local_worktree_inventory.js"),
-            "x",
-        )
-        .unwrap();
-        std::fs::write(root.join("local-worktree-gc.js"), "x").unwrap();
-
-        assert_eq!(
-            discover_routine_script_refs(&[root]),
-            vec!["local-worktree-gc.js"]
-        );
     }
 
     #[test]
@@ -1292,45 +1270,14 @@ mod tests {
     }
 
     #[test]
-    fn load_dir_excludes_node_only_worktree_inventory_helper() {
-        let dir = tempfile::tempdir().unwrap();
-        let monitoring = dir.path().join("monitoring");
-        std::fs::create_dir_all(&monitoring).unwrap();
-        std::fs::write(
-            monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("inventory-routine.js"),
-            "agentdesk.routines.register({ name: 'Inventory', tick() { return { action: 'skip' }; } });",
-        )
-        .unwrap();
-
-        let loader = RoutineScriptLoader::new().unwrap();
-        let logs = capture_debug_logs(|| {
-            assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
-        });
-        assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
-        assert!(
-            loader
-                .state
-                .failed_scripts
-                .lock()
-                .unwrap_or_else(recover_poisoned_lock)
-                .is_empty()
-        );
-        assert!(
-            logs.contains("excluded Node-only worktree inventory helper from QuickJS discovery"),
-            "logs={logs}"
-        );
-    }
-
-    #[test]
     fn load_dir_hashes_and_evaluates_the_same_source_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("atomic-source.js");
-        std::fs::write(&path, "throw new Error('broken snapshot');").unwrap();
+        std::fs::write(
+            &path,
+            "throw new Error('broken snapshot'); agentdesk.routines.register({});",
+        )
+        .unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
         let replacement_path = path.clone();
@@ -1357,80 +1304,11 @@ mod tests {
                 .get(&candidate_failure_key(&path))
                 .unwrap()
                 .source_version,
-            Some(full_source_version("throw new Error('broken snapshot');"))
+            Some(full_source_version(
+                "throw new Error('broken snapshot'); agentdesk.routines.register({});"
+            ))
         );
         assert!(!loader.has_script("atomic-source.js").unwrap());
-    }
-
-    #[test]
-    fn operator_root_can_define_the_bundled_helper_relative_path_as_a_routine() {
-        let bundled = tempfile::tempdir().unwrap();
-        let operator = tempfile::tempdir().unwrap();
-        let bundled_monitoring = bundled.path().join("monitoring");
-        let operator_monitoring = operator.path().join("monitoring");
-        std::fs::create_dir_all(&bundled_monitoring).unwrap();
-        std::fs::create_dir_all(&operator_monitoring).unwrap();
-        std::fs::write(
-            bundled_monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
-        )
-        .unwrap();
-        std::fs::write(
-            operator_monitoring.join("local_worktree_inventory.js"),
-            "agentdesk.routines.register({ name: 'Operator Inventory', tick() { return { action: 'skip' }; } });",
-        )
-        .unwrap();
-
-        let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(
-            loader
-                .load_dirs(&[bundled.path().to_path_buf(), operator.path().to_path_buf()])
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            loader
-                .get_script("monitoring/local_worktree_inventory.js")
-                .unwrap()
-                .unwrap()
-                .name,
-            "Operator Inventory"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn additional_alias_of_primary_root_keeps_bundled_helper_excluded() {
-        use std::os::unix::fs::symlink;
-
-        let bundled = tempfile::tempdir().unwrap();
-        let alias_parent = tempfile::tempdir().unwrap();
-        let monitoring = bundled.path().join("monitoring");
-        std::fs::create_dir_all(&monitoring).unwrap();
-        std::fs::write(
-            monitoring.join("local_worktree_inventory.js"),
-            "const fs = require('node:fs'); module.exports = { fs };",
-        )
-        .unwrap();
-        let alias = alias_parent.path().join("bundled-alias");
-        symlink(bundled.path(), &alias).unwrap();
-
-        let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(
-            loader
-                .load_dirs(&[bundled.path().to_path_buf(), alias])
-                .unwrap(),
-            0
-        );
-        assert!(
-            loader
-                .state
-                .failed_scripts
-                .lock()
-                .unwrap_or_else(recover_poisoned_lock)
-                .is_empty()
-        );
-        assert!(loader.script_refs().unwrap().is_empty());
     }
 
     #[test]
@@ -1528,7 +1406,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let roots = vec![dir.path().to_path_buf()];
         let path = dir.path().join("concurrent.js");
-        std::fs::write(&path, "throw new Error('singleflight failure');").unwrap();
+        std::fs::write(
+            &path,
+            "throw new Error('singleflight failure'); agentdesk.routines.register({});",
+        )
+        .unwrap();
 
         let loaders = (0..8)
             .map(|_| Arc::new(RoutineScriptLoader::new_shared(&roots).unwrap()))
@@ -1599,7 +1481,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let alias_parent = tempfile::tempdir().unwrap();
         let path = root.path().join("broken.js");
-        std::fs::write(&path, "throw new Error('alias failure');").unwrap();
+        std::fs::write(
+            &path,
+            "throw new Error('alias failure'); agentdesk.routines.register({});",
+        )
+        .unwrap();
         let alias = alias_parent.path().join("root-alias");
         symlink(root.path(), &alias).unwrap();
         let roots = vec![root.path().to_path_buf(), alias];
@@ -1628,7 +1514,11 @@ mod tests {
     fn failed_script_backoff_skips_eval_until_due_and_content_change_bypasses_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recoverable.js");
-        std::fs::write(&path, "throw new Error('broken');").unwrap();
+        std::fs::write(
+            &path,
+            "throw new Error('broken'); agentdesk.routines.register({});",
+        )
+        .unwrap();
 
         let loader = RoutineScriptLoader::new().unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
