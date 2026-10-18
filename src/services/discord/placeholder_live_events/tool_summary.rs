@@ -159,7 +159,7 @@ fn redact_env(input: &str) -> String {
 fn redact_prose(input: &str) -> String {
     static PROSE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(&format!(
-            r"(?i)(\b(?:password|passwd|secret|token)\b[ \t]*(?:(?:is\b|[:=])[ \t]*)?)({WORD})"
+            r"(?i)(\b(?:password|passwd|secret|token)\b[ \t]*(?:(?:is\b|[:=])[ \t]*)*)({WORD})"
         ))
         .expect("credential prose")
     });

@@ -474,6 +474,8 @@ fn repair_natural_language_credentials_mask_the_value() {
             "the token is 'PROSE_HEAD PROSE_TAIL'",
             "the password: ProseLeak9",
             "the password=ProseLeak9",
+            "the password is: ProseLeak9",
+            "the password: is ProseLeak9",
         ] {
             let output = render(tool, json!({"description":phrase,"query":phrase})).unwrap();
             let visible = output.replace(['\\', '\u{200b}'], "");
