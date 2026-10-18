@@ -646,7 +646,8 @@ src/
 │   │   │   ├── screen.rs
 │   │   │   ├── screen_tests.rs
 │   │   │   ├── stash.rs
-│   │   │   └── stash_tests.rs
+│   │   │   ├── stash_tests.rs
+│   │   │   └── submit.rs
 │   │   ├── hook_relay/
 │   │   │   ├── ordered_queue/
 │   │   │   │   └── tests/
@@ -1048,7 +1049,8 @@ src/
 │   │   │   │   │   ├── queued_reconcile.rs
 │   │   │   │   │   ├── queued_reconcile_tests.rs
 │   │   │   │   │   ├── queued_support.rs
-│   │   │   │   │   └── test_hook.rs
+│   │   │   │   │   ├── test_hook.rs
+│   │   │   │   │   └── turn_mode_reading_tests.rs
 │   │   │   │   ├── inject.rs
 │   │   │   │   ├── inject_codex_tests.rs
 │   │   │   │   └── inject_tests.rs
@@ -1824,6 +1826,7 @@ src/
 │   │   │   │   │   └── autoheal.rs
 │   │   │   │   ├── busy_inject_e2e_tests.rs
 │   │   │   │   ├── busy_inject_thread_e2e_tests.rs
+│   │   │   │   ├── busy_inject_turn_mode_e2e_tests.rs
 │   │   │   │   ├── cancel_backstop_e2e_tests.rs
 │   │   │   │   ├── catch_up_pagination_e2e.rs
 │   │   │   │   ├── claude_idle_o_host_fixture_tests.rs
