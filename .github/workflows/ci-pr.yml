@@ -530,6 +530,7 @@ jobs:
               - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
               - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
+              - 'src/services/tui_o/writer/tool_result_repost_tests.rs'
               - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'

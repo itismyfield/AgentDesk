@@ -1548,9 +1548,11 @@ struct ChannelMailboxState {
     pending_user_dispatch_yield_count: u32,
     pending_user_dispatch_since: Option<Instant>,
     /// #5937 — since when the drain has had a free slot it did not use. Only
-    /// idle time accrues, and no claim ever resets it, so a channel on a turn
-    /// cycle cannot hide a wedge and a fail-open cannot become a duty cycle.
+    /// idle time accrues, and no claim with work still ahead of it resets it, so
+    /// a turn cycle cannot hide a wedge and a fail-open cannot become a duty cycle.
     inbound_stall_since: Option<Instant>,
+    /// Which head `RequeueFront` keeps returning unclaimed; see `inbound_order.rs`.
+    inbound_restore_streak: inbound_order::HeadRestoreStreak,
     recently_valve_cleared_dispatch: Option<(MessageId, Instant)>,
     last_persistence: Option<QueuePersistenceContext>,
     recovery_started_at: Option<Instant>,
@@ -2310,11 +2312,8 @@ fn input_mailbox_step(
                     );
                     clear_pending_user_dispatch(&mut state);
                 }
-                // #5937 — the head is back at the queue front, so the
-                // drain is between rounds, not wedged: the clock starts
-                // over. Here rather than in the hosted-TUI defer (#4270)
-                // that motivated it — this arm covers every caller.
-                state.inbound_stall_since = None;
+                // A restore ends a drain round, up to a cap of unclaimed returns per head.
+                inbound_order::discount_restored_head(&mut state, &identity_ids);
                 RequeueInterventionResult {
                     enqueued: true,
                     refusal_reason: None,

@@ -467,18 +467,13 @@ impl RoutineAgentExecutor {
                 continue;
             }
 
-            if let Some(message) = self.fresh_provider_session_failure(&run).await {
-                let result_json = Some(merge_pending_result(
-                    &run,
-                    "provider_session_dead",
-                    Some(&message),
-                    None,
-                ));
+            if let Some((status, message)) = self.fresh_run_failure(&run).await? {
+                let result_json = Some(merge_pending_result(&run, status, Some(&message), None));
                 self.teardown_fresh_agent_session(
                     store,
                     &run.routine_id,
                     result_json.as_ref(),
-                    "routine fresh provider session ended before completion",
+                    "routine fresh agent turn ended before completion",
                 )
                 .await;
                 let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
