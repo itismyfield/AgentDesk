@@ -29,8 +29,8 @@ use crate::services::herdr_launch::{
 };
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::session_host::{
-    EvidenceGap, HerdrMutation, HostMutation, HostRefusal, RestoreResume, ServerWitness,
-    herdr_endpoints,
+    EvidenceGap, HerdrMutation, HostMutation, HostRefusal, PaneProvider, PaneReading,
+    RestoreResume, ServerWitness, herdr_endpoints,
 };
 use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use crate::services::turn_host::{HerdrTurnPlan, force_switch_for_test};
@@ -47,7 +47,14 @@ struct Launcher {
     nonces: Mutex<Vec<String>>,
     /// The provider is not confirmed: the launch keeps its pane Pending without evidence.
     unconfirmed: AtomicBool,
+    /// Set by `with_rig_reads`: evidence is the rig's pane as the production view reads it.
+    reads: Mutex<Option<std::sync::mpsc::Sender<PaneRead>>>,
+    /// The next create never reaches the server, or its reply is lost after the write.
+    create_fails: Mutex<Option<HerdrCreateOutcome>>,
 }
+
+/// A pane read the rig answers: the execution's nonce, its recorded pane, and where to reply.
+type PaneRead = (String, HostedLocation, std::sync::mpsc::Sender<PaneReading>);
 
 impl HerdrLaunchHost for Launcher {
     fn restore_resume(&self, _endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
@@ -58,20 +65,40 @@ impl HerdrLaunchHost for Launcher {
 
     fn create(&self, _request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.creates.fetch_add(1, Ordering::SeqCst);
+        if let Some(failed) = self.create_fails.lock().unwrap().take() {
+            return failed;
+        }
         HerdrCreateOutcome::Created {
             pane_id: PANE.into(),
         }
     }
 
     fn launch_evidence(&self, probe: &EvidenceProbe) -> Result<ExpectedExecution, EvidenceGap> {
-        self.nonces
-            .lock()
-            .unwrap()
-            .push(probe.execution_nonce.clone());
+        let nonce = probe.execution_nonce.clone();
+        self.nonces.lock().unwrap().push(nonce.clone());
         if self.unconfirmed.load(Ordering::SeqCst) {
             return Err(EvidenceGap::NoneYet);
         }
-        Ok(expected(&probe.execution_nonce))
+        let Some(reads) = self.reads.lock().unwrap().clone() else {
+            return Ok(expected(&nonce));
+        };
+        let (reply, read) = std::sync::mpsc::channel();
+        reads
+            .send((nonce.clone(), probe.location.clone(), reply))
+            .unwrap();
+        match read.recv().unwrap() {
+            PaneReading::Present {
+                root,
+                provider: PaneProvider::Execution(provider_process),
+            } => Ok(ExpectedExecution {
+                binding_provider: "claude".into(),
+                binding_nonce: nonce,
+                root,
+                provider_process,
+                provenance: "herdr_launch:ppid+env;exec=?".into(),
+            }),
+            other => Err(EvidenceGap::ReadFailed(format!("{other:?}"))),
+        }
     }
 }
 
@@ -148,6 +175,8 @@ struct Fixture {
     /// Installs C2a for the next turns whatever the tag says; each strict turn logs its attempts.
     strict: AtomicBool,
     attempts: Mutex<Vec<i64>>,
+    /// Each turn runs under the provider context dispatch installs, naming the row's session key.
+    dispatched: AtomicBool,
     _home: (Guard, tempfile::TempDir, Guard),
     _root: TestRuntimeRootGuard,
 }
@@ -184,7 +213,7 @@ impl Fixture {
                                        discord_token_hash, channel_id, hosted_execution)
                  VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)",
             )
-            .bind(format!("claude/{TOKEN}/{NODE}:{}", owner.logical_key))
+            .bind(session_key(&owner))
             .bind(TOKEN)
             .bind(CHANNEL.to_string())
             .bind(hosted)
@@ -206,6 +235,7 @@ impl Fixture {
             cancel: Mutex::new(Arc::new(CancelToken::new())),
             strict: AtomicBool::new(false),
             attempts: Mutex::default(),
+            dispatched: AtomicBool::new(false),
             _home: (env, home, bin),
             _root: root,
         }
@@ -401,6 +431,13 @@ impl Fixture {
         *self.cancel.lock().unwrap() = cancel.clone();
         let token = cancel.clone();
         let (strict, attempts) = (self.strict.load(Ordering::SeqCst), &self.attempts);
+        let dispatched = self.dispatched.load(Ordering::SeqCst).then(|| {
+            crate::services::provider_cli::ProviderExecutionContext {
+                provider: "claude".into(),
+                session_key: Some(session_key(&owner)),
+                ..Default::default()
+            }
+        });
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
                 let _runtime = rt.enter();
@@ -434,7 +471,11 @@ impl Fixture {
                     Some(pin)
                 } else { None };
                 let _strict = strict_pin.clone().map(|pin| crate::services::tui_o::exact_submission::install(pool.clone(), pin));
-                let result = crate::services::tui_o::exact_submission::dispatch(|| herdr_turn::execute(turn, ports, sender));
+                let run = || crate::services::tui_o::exact_submission::dispatch(|| herdr_turn::execute(turn, ports, sender));
+                let result = match dispatched {
+                    Some(context) => crate::services::platform::with_provider_execution_context(context, run),
+                    None => run(),
+                };
                 if let Some(pin) = strict_pin {
                     rt.block_on(async {
                         let mut connection = pool.acquire().await.unwrap();
@@ -540,6 +581,91 @@ impl Started {
     }
 }
 
+/// The channel's canonical session key, as the row stores it and dispatch names it.
+fn session_key(owner: &HostedOwner) -> String {
+    format!("claude/{TOKEN}/{NODE}:{}", owner.logical_key)
+}
+
+/// Runs `body` while a thread carrying the rig's registry answers `launcher`'s evidence reads
+/// through the production pane view: a launch probes on a blocking thread that carries none.
+fn with_rig_reads<R>(fx: &Fixture, launcher: &Launcher, body: impl FnOnce() -> R) -> R {
+    fx.rig.show_panes(&[PANE]);
+    let (reads, read) = std::sync::mpsc::channel::<PaneRead>();
+    *launcher.reads.lock().unwrap() = Some(reads);
+    let done = AtomicBool::new(false);
+    let (rig, owner, done_ref) = (&fx.rig, &fx.owner, &done);
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let _registry = rig.registry_on_this_thread();
+            while !done_ref.load(Ordering::SeqCst) {
+                let Ok((nonce, location, reply)) = read.recv_timeout(Duration::from_millis(20))
+                else {
+                    continue;
+                };
+                let record = pending_on(owner, &nonce, Some(location), None);
+                let view = herdr_endpoints().view(&record).expect("the rig's endpoint");
+                let _ = reply.send(view.read_execution());
+            }
+        });
+        let result = body();
+        *launcher.reads.lock().unwrap() = None;
+        done.store(true, Ordering::SeqCst);
+        result
+    })
+}
+
+/// Execution `nonce` of `owner` in Pending, at `location` with `expected`, as a launch writes it.
+fn pending_on(
+    owner: &HostedOwner,
+    nonce: &str,
+    location: Option<HostedLocation>,
+    expected: Option<ExpectedExecution>,
+) -> HostedExecution {
+    HostedExecution {
+        schema: 1,
+        state: HostedState::Pending,
+        execution_nonce: nonce.into(),
+        owner: owner.clone(),
+        location,
+        expected,
+        source_ref: SourceRef {
+            runtime_root: owner.runtime_root.clone(),
+            channel: owner.channel_id.clone(),
+            provider: "claude".into(),
+            logical_key: owner.logical_key.clone(),
+            execution_nonce: nonce.into(),
+            initial_source: None,
+            baseline_event_seq: None,
+        },
+    }
+}
+
+/// A first turn whose launch left its pane Pending without evidence and no start logged, as the
+/// operations case did; returns the execution's nonce.
+fn never_attached(fx: &Fixture, launcher: &Arc<Launcher>) -> String {
+    launcher.unconfirmed.store(true, Ordering::SeqCst);
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(launcher), || {});
+    assert!(first.unwrap_err().contains("herdr launch did not complete"));
+    launcher.unconfirmed.store(false, Ordering::SeqCst);
+    let HostedRecord::Known(pending) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_eq!(
+        (pending.state, pending.expected),
+        (HostedState::Pending, None)
+    );
+    assert!(pending.location.is_some());
+    pending.execution_nonce
+}
+
+/// The rig's process reads that reached its socket, by method.
+fn process_reads(fx: &Fixture) -> usize {
+    let requests = fx.rig.requests().into_iter();
+    requests
+        .filter(|request| request["method"] == "pane.process_info")
+        .count()
+}
+
 /// Where a launch writes execution `nonce`'s context.
 fn context_of(nonce: &str) -> PathBuf {
     let root = crate::config::runtime_root().unwrap();
@@ -634,6 +760,8 @@ fn a_pending_execution_with_no_logged_start_is_not_attached_or_prompted_pg() {
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     let second = second.unwrap_err();
     assert!(second.contains("no logged start"), "{second}");
+    assert!(second.contains("never attached"), "{second}");
+    assert_eq!(launcher.nonces.lock().unwrap().len(), 1, "no probe again");
 }
 
 // A Pending pane launched without evidence, whose provider would now probe as its own, is still
@@ -661,6 +789,235 @@ fn a_reprobed_pending_execution_with_no_logged_start_is_not_attached_or_prompted
     assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
     let second = second.unwrap_err();
     assert!(second.contains("no logged start"), "{second}");
+}
+
+// A never-attached execution whose pane runs its own provider gets that provider recorded as
+// its evidence, read from the rig's socket by the production probe, and still takes no prompt.
+#[test]
+fn a_never_attached_pending_proven_by_its_own_provider_records_that_evidence_pg() {
+    let fx = Fixture::new("never-attached-own", None);
+    let launcher = Arc::new(Launcher::default());
+    let nonce = never_attached(&fx, &launcher);
+    fx.rig.run_provider(&context_of(&nonce), false);
+    let reads = process_reads(&fx);
+    let ports = fx.ports(&launcher);
+    let (second, _) = with_rig_reads(&fx, &launcher, || fx.turn(&fx.record(), &ports, || {}));
+    assert!(ports.attaches.lock().unwrap().is_empty());
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
+    assert!(process_reads(&fx) > reads, "the probe reached the rig");
+    let HostedRecord::Known(record) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_eq!(record.state, HostedState::Pending);
+    assert_eq!(record.expected, Some(fx.rig.expected(&nonce)));
+    // The shape an operator terminate then ends: Pending, pane and evidence recorded, no hold.
+    let holds = crate::services::claude::herdr_turn::input_holds().unwrap();
+    assert!(holds.iter().all(|(held, _)| *held != nonce), "{holds:?}");
+}
+
+// A provider in the recorded pane that names another execution's launch context, as a reused pane
+// would, is never recorded as this execution's evidence; the refusal names why.
+#[test]
+fn a_never_attached_pending_takes_no_evidence_from_another_executions_provider_pg() {
+    let fx = Fixture::new("never-attached-other", None);
+    let launcher = Arc::new(Launcher::default());
+    let nonce = never_attached(&fx, &launcher);
+    fx.rig
+        .run_provider(&fx.rig.context("fedcba9876543210fedcba9876543210"), false);
+    let reads = process_reads(&fx);
+    let ports = fx.ports(&launcher);
+    let (second, _) = with_rig_reads(&fx, &launcher, || fx.turn(&fx.record(), &ports, || {}));
+    let HostedRecord::Known(record) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_eq!(
+        (record.state, record.expected),
+        (HostedState::Pending, None)
+    );
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    let second = second.unwrap_err();
+    assert!(process_reads(&fx) > reads, "the probe reached the rig");
+    assert!(
+        second.contains(&format!("pending execution {nonce} never attached")),
+        "{second}"
+    );
+    assert!(
+        second.contains("is not proven") && second.contains("OtherNonce"),
+        "{second}"
+    );
+}
+
+// A recorded pane showing only its shell, as a launch still starting or one whose provider died
+// does, is judged nothing: no evidence, no close, the row kept; the refusal names the manual exit.
+#[test]
+fn a_never_attached_pending_with_only_its_shell_is_judged_nothing_pg() {
+    let fx = Fixture::new("never-attached-shell", None);
+    let launcher = Arc::new(Launcher::default());
+    let nonce = never_attached(&fx, &launcher);
+    fx.rig.run_provider(&context_of(&nonce), false);
+    fx.rig
+        .foreground(&[crate::services::session_host::herdr_socket_rig_tests::SHELL]);
+    let reads = process_reads(&fx);
+    let ports = fx.ports(&launcher);
+    let (second, _) = with_rig_reads(&fx, &launcher, || fx.turn(&fx.record(), &ports, || {}));
+    assert!(process_reads(&fx) > reads, "the probe reached the rig");
+    let HostedRecord::Known(record) = fx.record() else {
+        panic!("no stored execution");
+    };
+    assert_eq!(
+        (record.state, record.expected),
+        (HostedState::Pending, None)
+    );
+    assert!(fx.rig.sends().is_empty(), "nothing typed");
+    let second = second.unwrap_err();
+    assert!(
+        second.contains(&format!("pending execution {nonce} never attached")),
+        "{second}"
+    );
+    let retire = format!("once that pane is closed, `agentdesk herdr retire {CHANNEL}`");
+    assert!(second.contains(&retire), "{second}");
+}
+
+// Its refusal names the live terminate switch: off, the switch and that termination is disabled;
+// on, the exact session key and nonce an operator terminate takes, and what a clear drops.
+#[test]
+fn a_never_attached_pending_names_the_terminate_switch_and_its_exact_exit_pg() {
+    let path = concat!(
+        module_path!(),
+        "::a_never_attached_pending_names_the_terminate_switch_and_its_exact_exit_pg"
+    );
+    if !crate::services::discord::herdr_terminate::route_tests::in_child(path) {
+        return;
+    }
+    let fx = Fixture::new("never-attached-switch", None);
+    fx.dispatched.store(true, Ordering::SeqCst);
+    let launcher = Arc::new(Launcher::default());
+    let nonce = never_attached(&fx, &launcher);
+    crate::services::discord::herdr_terminate::route_tests::switch(false);
+    let (off, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    let off = off.unwrap_err();
+    assert!(off.contains("runtime.herdr_terminate_enabled"), "{off}");
+    assert!(off.contains("termination is disabled"), "{off}");
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+    crate::services::discord::herdr_terminate::route_tests::switch(true);
+    let (on, _) = fx.turn(&fx.record(), &fx.ports(&launcher), || {});
+    let on = on.unwrap_err();
+    let exit = format!(
+        "agentdesk herdr terminate --session-key {} --execution-nonce {nonce}",
+        session_key(&fx.owner)
+    );
+    assert!(on.contains(&exit), "{on}");
+    assert!(on.contains("/clear (drops the queue)"), "{on}");
+    assert!(fx.rig.sends().is_empty());
+    assert_eq!(fx.row(), Some(HostedState::Pending));
+}
+
+// An execution an operator terminate or a clear retired, its pane and evidence still recorded, is
+// followed by one fresh launch that takes the next prompt.
+#[test]
+fn a_terminated_never_attached_execution_is_followed_by_one_fresh_launch_pg() {
+    let fx = Fixture::new("after-terminate", None);
+    let location = HostedLocation {
+        host: "herdr".into(),
+        execution_node: NODE.into(),
+        endpoint_config_key: KEY.into(),
+        socket_addr: fx.rig.socket().display().to_string(),
+        named_session: SESSION.into(),
+        pane_id: PANE.into(),
+    };
+    let mut retired = pending_on(&fx.owner, NONCE, Some(location), Some(expected(NONCE)));
+    retired.state = HostedState::Retired;
+    fx.rt.block_on(async {
+        sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
+            .bind(serde_json::to_value(&retired).unwrap())
+            .bind(CHANNEL.to_string())
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    });
+    let launcher = Arc::new(Launcher::default());
+    let ports = fx.ports(&launcher);
+    let (result, _) = fx.turn(&fx.record(), &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(result, Ok(()));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+}
+
+// A launch whose create never reached the server leaves no Pending behind: the next turn launches
+// a fresh execution and takes its prompt.
+#[test]
+fn a_launch_that_never_sent_its_create_leaves_the_next_turn_free_to_launch_pg() {
+    let fx = Fixture::new("create-unsent", None);
+    let launcher = Arc::new(Launcher::default());
+    *launcher.create_fails.lock().unwrap() =
+        Some(HerdrCreateOutcome::NotSent("connect refused".into()));
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {});
+    assert!(first.unwrap_err().contains("NotSent"));
+    let ports = fx.ports(&launcher);
+    let (second, _) = fx.turn(&fx.record(), &ports, || {
+        if let Some(started) = fx.start_provider(&launcher, true) {
+            fx.answer(&started);
+        }
+    });
+    assert_eq!(second, Ok(()));
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 2);
+    assert_eq!(fx.rig.sends(), prompt_sends());
+    assert_eq!(fx.row(), Some(HostedState::Bound));
+}
+
+// A create whose reply was lost after the write may have made a pane no row names: that Pending is
+// kept through the next turn and out of the restart pass, and the refusal says so.
+#[test]
+fn a_lost_create_reply_keeps_its_pending_through_the_next_turn_and_restart_pg() {
+    let fx = Fixture::new("create-lost", None);
+    let launcher = Arc::new(Launcher::default());
+    *launcher.create_fails.lock().unwrap() = Some(HerdrCreateOutcome::Indeterminate(
+        "reply EOF after the request was written".into(),
+    ));
+    let (first, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {});
+    assert!(first.unwrap_err().contains("Indeterminate"));
+    let kept = fx.record();
+    let HostedRecord::Known(pending) = &kept else {
+        panic!("no stored execution");
+    };
+    assert_eq!(
+        (pending.state, &pending.location),
+        (HostedState::Pending, &None)
+    );
+    let (second, _) = fx.turn(&kept, &fx.ports(&launcher), || {});
+    assert_eq!(fx.record(), kept);
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+    assert!(
+        fx.rig.requests().is_empty(),
+        "nothing reached the pane's server"
+    );
+    let listed = fx.rt.block_on(
+        crate::db::dispatched_sessions::hosted_execution::list_local_herdr_rows_pg(
+            &fx.pool,
+            NODE,
+            crate::db::dispatched_sessions::hosted_execution::LIVE,
+        ),
+    );
+    assert!(
+        listed.unwrap().is_empty(),
+        "the restart pass never reads it"
+    );
+    let second = second.unwrap_err();
+    assert!(second.contains("no logged start"), "{second}");
+    assert!(
+        second.contains("no pane was recorded") && second.contains("kept"),
+        "{second}"
+    );
 }
 
 // A Pending execution attached after its SessionStart, whose first prompt was cancelled before

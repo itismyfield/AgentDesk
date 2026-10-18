@@ -13,6 +13,7 @@ pub(crate) mod multinode_regression;
 mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
 pub(crate) mod outbox_worker;
+mod policy_tick_logging;
 use outbox_worker::message_outbox_loop;
 mod rate_limit_profiles;
 mod rate_limit_sync;
@@ -50,7 +51,6 @@ const MESSAGE_OUTBOX_MAX_RETRY_COUNT: i64 = 4;
 const MESSAGE_OUTBOX_RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 const POLICY_TICK_ADVISORY_LOCK_ID: i64 = 7_801_001;
 const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
-const POLICY_TICK_WARN_MS: u128 = 500;
 const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 const CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -410,6 +410,7 @@ async fn policy_tick_loop(
     tracing::info!("[policy-tick] 3-tier tick started: 30s / 1min / 5min");
 
     let mut count = 0u64;
+    let mut tick_logging = policy_tick_logging::TickLogging::default();
     let mut leader_epoch_slo_api_friction_pending = true;
 
     if shutdown
@@ -498,7 +499,14 @@ async fn policy_tick_loop(
         };
 
         // ── 30s tier: every tick ── (#134: fire by name for dynamic hook binding)
-        fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick30s", "30s").await;
+        fire_tick_hook_by_name_with_pg(
+            &engine,
+            pg_pool.as_deref(),
+            &mut tick_logging,
+            "OnTick30s",
+            "30s",
+        )
+        .await;
 
         // ── 1min tier: every 2nd tick (60s) ──
         if count % 2 == 0 {
@@ -510,7 +518,14 @@ async fn policy_tick_loop(
             {
                 tracing::warn!("[policy-tick] campaign handoff failed: {error}");
             }
-            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
+            fire_tick_hook_by_name_with_pg(
+                &engine,
+                pg_pool.as_deref(),
+                &mut tick_logging,
+                "OnTick1min",
+                "1min",
+            )
+            .await;
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
                 match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
                     pool,
@@ -580,7 +595,14 @@ async fn policy_tick_loop(
 
         // ── 5min tier: every 10th tick (300s) ──
         if is_five_min_policy_tick(count) {
-            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick5min", "5min").await;
+            fire_tick_hook_by_name_with_pg(
+                &engine,
+                pg_pool.as_deref(),
+                &mut tick_logging,
+                "OnTick5min",
+                "5min",
+            )
+            .await;
             refresh_memory_health_for_five_min_tick().await;
             cleanup_stale_pending_queue_tmp_files_for_five_min_tick().await;
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
@@ -645,7 +667,14 @@ async fn policy_tick_loop(
             }
 
             // Also fire legacy OnTick for backward compat
-            fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick", "legacy").await;
+            fire_tick_hook_by_name_with_pg(
+                &engine,
+                pg_pool.as_deref(),
+                &mut tick_logging,
+                "OnTick",
+                "legacy",
+            )
+            .await;
         }
 
         if let Some(conn) = advisory_lock {
@@ -657,6 +686,7 @@ async fn policy_tick_loop(
 async fn fire_tick_hook_by_name_with_pg(
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
+    tick_logging: &mut policy_tick_logging::TickLogging,
     hook_name: &str,
     label: &str,
 ) {
@@ -664,7 +694,7 @@ async fn fire_tick_hook_by_name_with_pg(
         fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
             .await;
     if let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) {
-        record_tick_hook_execution_pg(pool, label, &execution).await;
+        record_tick_hook_execution_pg(pool, tick_logging, label, &execution).await;
     }
     crate::kanban::drain_hook_side_effects_with_backends(engine);
 }
@@ -749,6 +779,7 @@ async fn fire_tick_hook_by_name_with_timeout(
 
 async fn record_tick_hook_execution_pg(
     pg_pool: &PgPool,
+    tick_logging: &mut policy_tick_logging::TickLogging,
     label: &str,
     execution: &PolicyTickHookExecution,
 ) {
@@ -759,39 +790,7 @@ async fn record_tick_hook_execution_pg(
     let key_skip_ms = format!("last_tick_{}_skip_ms", label);
     let status = execution.outcome.status();
 
-    match execution.outcome {
-        PolicyTickHookOutcome::Ok => {
-            if execution.elapsed.as_millis() > POLICY_TICK_WARN_MS {
-                tracing::warn!(
-                    "[policy-tick] {} took {}ms",
-                    label,
-                    execution.elapsed.as_millis()
-                );
-            } else {
-                tracing::debug!(
-                    "[policy-tick] {} took {}ms",
-                    label,
-                    execution.elapsed.as_millis()
-                );
-            }
-        }
-        PolicyTickHookOutcome::Error | PolicyTickHookOutcome::JoinError => {
-            tracing::warn!(
-                "[policy-tick] {} hook {}: {}",
-                label,
-                status,
-                execution.error.as_deref().unwrap_or("unknown error")
-            );
-        }
-        PolicyTickHookOutcome::Timeout => {
-            tracing::warn!(
-                "[policy-tick] {} hook timed out after {}ms",
-                label,
-                execution.elapsed.as_millis()
-            );
-        }
-        PolicyTickHookOutcome::SkippedInFlight => {}
-    }
+    tick_logging.record(label, execution);
 
     let upsert_sql = "INSERT INTO kv_meta (key, value)
                       VALUES ($1, $2)
@@ -2739,12 +2738,12 @@ async fn routine_runtime_loop(
     let discord_logger =
         RoutineDiscordLogger::new_with_health_registry(pg_pool.clone(), health_registry.clone());
     let agent_executor =
-        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs);
+        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
+            .with_headless_fresh_agents(routines_config.headless_fresh_agents);
     match store.recover_stale_running_runs().await {
         Ok(recovered) if !recovered.is_empty() => {
             for run in &recovered {
-                // Reap the interrupted run's orphaned fresh session (ownership proof required),
-                // or it is later misreported as an abrupt "session ended".
+                // Reap owned orphaned fresh sessions before they look like abrupt exits.
                 agent_executor
                     .teardown_recovered_fresh_session(&store, run)
                     .await;

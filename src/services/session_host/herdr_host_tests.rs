@@ -3333,7 +3333,14 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
                 ],
             ),
             ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
-            ("retire_pg", &[(HERDR_CLI, 1), (TERMINATE_SERVICE, 1)]),
+            (
+                "retire_pg",
+                &[
+                    (HERDR_CLI, 1),
+                    (TERMINATE_SERVICE, 1),
+                    ("src/services/herdr_launch.rs", 1),
+                ],
+            ),
             (
                 "post_json_local_at",
                 &[(HERDR_CLI, 1), ("src/cli/client.rs", 0)],

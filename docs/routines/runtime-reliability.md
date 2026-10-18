@@ -18,6 +18,24 @@ Both keys are hot-reloadable. The alert is independent of the pause knobs:
 `stale_paused_alert_secs: 0` only disables the long-paused reminder. Neither silences the
 consecutive-failure alert.
 
+## Fresh agent execution mode
+
+`routines.headless_fresh_agents` defaults to `false`, preserving fresh routine runs in
+temporary tmux sessions. Set it to `true` to run fresh agent-backed routines through
+headless Claude or Codex processes instead, avoiding temporary tmux sessions. Other providers
+return an unsupported-provider error when this mode is enabled. This setting is bound when
+the executor starts and requires a dcserver restart; both scheduled runs and manual run-now
+use it. Persistent and other non-fresh execution strategies keep their behavior.
+
+The run result and each started attempt record `execution_mode` (`process` or `tmux`).
+Retries, fallback agents, and deferred starts keep that choice after configuration changes;
+older runs without the field retain tmux behavior. Process runs keep their own session key,
+never claim tmux ownership, and cancel only the process belonging to their recorded turn.
+Existing channel host and guarded-input admission still apply.
+
+Before enabling it, check that routine prompts do not require an interactive provider TUI
+or a persistent tmux pane. Shell/JS routines do not use the agent executor.
+
 ## Agent start deferral
 
 Before an agent-backed routine run touches its thread, reservation or run row, the executor
