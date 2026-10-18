@@ -852,9 +852,8 @@ fn intake_at(home: &channel_home::HomeGate, epoch: i64) -> Option<channel_home::
     }
 }
 
-/// A standby the released row targets adopts it unrestored, and only once its writer could run the
-/// first init; while its restore of the channel runs, the home is held with intake closed and the
-/// channel's intake rows wait. The restored queue is in the mailbox before intake opens.
+/// A standby adopts its released home unrestored once its writer could run the first init; intake
+/// stays closed while its restore runs, and the restored queue is in the mailbox before it opens.
 #[tokio::test]
 async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg() {
     use super::queued_recovery::boot_restore_tests::{item, pause};
@@ -982,9 +981,8 @@ async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_rest
     db.drop().await;
 }
 
-/// A standby restarted as its worker row's holder no longer takes intake from its first renewal:
-/// a failed restore keeps the home held and closed with the persisted queue untouched, and a
-/// restart after the cause is gone restores it and opens.
+/// A standby holder's failed restore keeps intake closed from its first renewal on, the persisted
+/// queue untouched; a restart after the cause is gone restores it and opens.
 #[tokio::test]
 async fn a_standby_holder_whose_restore_fails_keeps_intake_closed_until_a_restart_restores_pg() {
     use super::queued_recovery::boot_restore_tests::item;

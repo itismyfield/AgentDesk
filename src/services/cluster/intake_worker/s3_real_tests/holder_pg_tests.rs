@@ -1007,9 +1007,8 @@ pub(super) async fn adopt_target_node(env: &Env) {
     node.stop().await;
 }
 
-/// T-H6 standby target: booted with ports that restore the channel themselves, as a standby's,
-/// MINI adopts the released row unrestored; while its restore runs the home is held with intake
-/// closed and a row routed at the epoch stays pending, then it opens and the row runs there.
+/// T-H6 standby target: MINI, restoring the channel itself, adopts the released row unrestored;
+/// while it restores, intake is closed and a routed row waits, then it opens and the row runs.
 #[tokio::test(flavor = "current_thread")]
 async fn th6_released_target_standby_adopts_closed_then_opens_pg() {
     let scene = Scene::new().await;

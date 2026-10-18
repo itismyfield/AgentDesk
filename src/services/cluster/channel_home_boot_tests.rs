@@ -589,9 +589,8 @@ fn restoring_boot(
     })
 }
 
-/// A target that restores the channel itself adopts the released channel unrestored when its
-/// Herdr endpoint runs here, takes no new intake while its restore runs under the recovery permit,
-/// and opens only once that restore installed; a failed one keeps the home held and closed.
+/// A self-restoring target adopts a released candidate unrestored, takes no intake while its
+/// restore runs under the recovery permit, and opens once it installed; a failed one stays closed.
 #[tokio::test]
 async fn a_self_restoring_target_adopts_a_released_channel_closed_and_opens_once_restored_pg() {
     for installs in [true, false] {

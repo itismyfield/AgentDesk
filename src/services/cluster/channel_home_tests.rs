@@ -829,9 +829,8 @@ fn sampled(home: &HomeGate) -> HomeOwnership {
     }
 }
 
-/// A gate that opens after its runtime's restore flag takes no new intake while held until the
-/// flag is set, yet admits the restore and owed POSTs; a drain's close outlasts the flag, and the
-/// ingress sample reads the same ownership as the gate in each state.
+/// A gate opening after a restore flag takes no intake until it is set but admits the restore and
+/// owed POSTs; a drain's close outlasts it, and the ingress sample reads the gate's ownership.
 #[tokio::test(start_paused = true)]
 async fn a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set() {
     let restored = Arc::new(AtomicBool::new(false));
