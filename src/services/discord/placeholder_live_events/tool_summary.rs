@@ -360,7 +360,9 @@ fn sanitized(raw: &str) -> Option<String> {
 pub(super) fn safe_section(raw: &str) -> Option<String> {
     for line in raw.lines() {
         if let Some(command) = line.trim().strip_prefix("└ Bash ") {
-            shell_masked(command, 0)?;
+            if credential_command(command) {
+                return None;
+            }
         }
     }
     let masked = sanitized(raw)?;

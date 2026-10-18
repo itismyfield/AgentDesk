@@ -374,6 +374,7 @@ fn repair_credential_commands_show_only_class() {
             .contains("CmdLeak9")
     );
     assert!(safe_section("Tasks\n└ Bash Launch codex").is_some());
+    assert!(safe_section("Tasks\n└ Bash cargo test -p ordinary\\_crate · running").is_some());
     for title in ["redis-cli -a CmdLeak9", "-c 'redis-cli -a CmdLeak9'"] {
         assert!(safe_section(&format!("Tasks\n└ Bash {title}")).is_none());
     }
