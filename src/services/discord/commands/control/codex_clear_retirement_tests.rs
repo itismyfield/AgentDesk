@@ -348,7 +348,7 @@ async fn legacy_codex_turn_mode_unknown_keeps_existing_and_new_input_queued_pg()
     vacate(&fixture);
     fixture
         .fake
-        .add_unwatched_inventory("external-e51-unwatched");
+        .add_unwatched_inventory("AgentDesk-codex-external-e51-unwatched");
     let canary = ChannelId::new(CANARY_CHANNEL);
     fixture.shared.core.lock().await.sessions.remove(&canary);
     for channel in [canary, ChannelId::new(6_845_072)] {

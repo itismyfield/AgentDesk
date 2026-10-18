@@ -258,7 +258,7 @@ async fn boot_launch_once(no_core_session: bool, transient_boundary_error: bool)
         fixture.shared.core.lock().await.sessions.remove(&channel);
         fixture
             .fake
-            .add_unwatched_inventory("external-e51-unwatched");
+            .add_unwatched_inventory("AgentDesk-codex-external-e51-unwatched");
         crate::services::discord::restore_tmux_watchers(&api.http, &fixture.shared).await;
         assert!(
             !fixture

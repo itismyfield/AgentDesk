@@ -453,10 +453,13 @@ fn decide_unbound(
     }) {
         return Verdict::Hold("watcher_unbound");
     }
-    if names
-        .iter()
-        .any(|name| !matches!(owners.get(name), Some(Some(owner)) if *owner != candidates.channel))
-    {
+    // Only a name in AgentDesk's tmux namespace can be this channel's session under a name its
+    // own evidence lacks; a session it names or owns already held above.
+    let namespace = format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX);
+    if names.iter().any(|name| {
+        name.starts_with(&namespace)
+            && !matches!(owners.get(name), Some(Some(owner)) if *owner != candidates.channel)
+    }) {
         return Verdict::Hold("owner_unresolved");
     }
     if let Some(absence) = hosted {
@@ -526,3 +529,4 @@ mod tests;
 
 pub(super) mod herdr_bound;
 pub(super) mod live;
+mod routine_owner;

@@ -576,7 +576,7 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     if external_inventory {
         fixture
             .fake
-            .add_unwatched_inventory("external-e51-unwatched");
+            .add_unwatched_inventory("AgentDesk-codex-external-e51-unwatched");
     }
     if without_core {
         fixture.shared.core.lock().await.sessions.remove(&channel);
