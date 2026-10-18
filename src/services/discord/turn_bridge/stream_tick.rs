@@ -18,6 +18,8 @@ use guarded_persist::{
     persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
     sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
 };
+#[path = "stream_tick/output.rs"]
+mod output;
 #[path = "stream_tick/runtime.rs"]
 mod runtime;
 use rollover_guard::{GuardedRolloverEditOutcome, guarded_bridge_rollover_edit};
@@ -396,51 +398,13 @@ pub(super) async fn run_bridge_stream_tick(
         && status_panel_msg_id == Some(status_msg_id)
         && status_panel_generation == status_panel_generation_before_fence
     {
-        let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
-            channel_id,
-            &provider,
-            status_panel_started_at,
-        );
-        let panel_cache_invalidation_epoch = shared_owned
-            .ui
-            .placeholder_live_events
-            .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
-        if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
-            match TurnGateway::edit_message(
-                gateway.as_ref(),
-                channel_id,
-                status_msg_id,
-                &panel_text,
-            )
-            .await
-            {
-                Ok(()) => {
-                    last_status_panel_text = panel_text;
-                    last_status_panel_edit = tokio::time::Instant::now();
-                    if let Some(epoch) = panel_cache_invalidation_epoch {
-                        shared_owned
-                            .ui
-                            .placeholder_live_events
-                            .clear_panel_cache_invalidation_if_epoch(
-                                channel_id,
-                                status_msg_id.get(),
-                                epoch,
-                            );
-                    }
-                    inflight_state.status_message_id = Some(status_msg_id.get());
-                    state_dirty = true;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "[turn_bridge] failed to edit status-panel-v2 message {} in channel {}: {}",
-                        status_msg_id,
-                        channel_id,
-                        error
-                    );
-                }
-            }
-        }
-        status_panel_dirty = false;
+        output::refresh_status_panel(
+            &tick_context!(),
+            &mut tick_runtime!(),
+            &mut state_dirty,
+            status_msg_id,
+        )
+        .await;
     }
     if single_message_panel_footer_mode
         && status_panel_dirty

@@ -460,6 +460,7 @@ mod tests {
     fn production_paths_compose_prefix_and_never_emit_separate_banner_post() {
         let bridge_tick = concat!(
             include_str!("turn_bridge/stream_tick.rs"),
+            include_str!("turn_bridge/stream_tick/output.rs"),
             include_str!("turn_bridge/stream_tick/runtime.rs"),
         );
         let watcher_tick = include_str!("tmux_watcher/streaming_status_tick.rs");
