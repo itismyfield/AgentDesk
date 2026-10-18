@@ -2022,6 +2022,7 @@ src/
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
 │   │   │   ├── before_start_stop_reconcile_tests.rs
+│   │   │   ├── before_start_stop_retry_tests.rs
 │   │   │   ├── before_start_stop_tail_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs
