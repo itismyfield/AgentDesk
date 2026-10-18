@@ -69,6 +69,8 @@ struct Io {
     base: Arc<TestIo>,
     log: Arc<Log>,
     other: Option<Arc<Log>>,
+    /// Runs once as the next custody is read, before it is returned.
+    on_custody: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl HostIo for Io {
@@ -107,6 +109,9 @@ impl HostIo for Io {
         self.base.intake_fence(channel, provider)
     }
     fn local_custody(&self, channel: u64, provider: ShadowProvider) -> Result<Custody, String> {
+        if let Some(hook) = self.on_custody.lock().unwrap().take() {
+            hook();
+        }
         self.base.local_custody(channel, provider)
     }
     fn legacy(&self) -> Arc<dyn LegacyView> {
@@ -195,6 +200,7 @@ impl Fixture {
                 base,
                 log: Log::new(closed_notice),
                 other: None,
+                on_custody: Mutex::default(),
             }),
             legacy,
             ready: Arc::default(),
@@ -566,6 +572,7 @@ async fn late_adopt_binding_unsafe_channel_does_not_block_other_channels_new_bod
         base: f.io.base.clone(),
         log: f.io.log.clone(),
         other: Some(unsafe_log.clone()),
+        on_custody: Mutex::default(),
     });
     let handles = start_managed(
         ShadowProvider::Claude,
@@ -682,6 +689,7 @@ async fn late_adopt_binding_two_simultaneous_sources_each_commit_and_post_new_on
         base: f.io.base.clone(),
         log: f.io.log.clone(),
         other: Some(other_log.clone()),
+        on_custody: Mutex::default(),
     });
     let handles = start_managed(
         ShadowProvider::Claude,
@@ -805,4 +813,109 @@ async fn late_adopt_binding_two_simultaneous_sources_each_commit_and_post_new_on
     for handle in handles {
         handle.stop_and_join().await.unwrap();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_adopt_binding_legacy_send_while_the_boundary_reads_custody_keeps_the_whole_history() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_binding_legacy_send_while_the_boundary_reads_custody_keeps_the_whole_history"
+    )) {
+        return;
+    }
+    let f = Fixture::new(false);
+    let mut sources = Vec::new();
+    for name in ["first", "second"] {
+        let path = f.harness._runtime.path().join(format!("{name}.jsonl"));
+        std::fs::write(
+            &path,
+            [row(name, "delivered before a restart"), closed()].concat(),
+        )
+        .unwrap();
+        sources.push(source_id_for(name, &path).unwrap());
+    }
+    append(&f.path, &row("binding-old", "old delivered payload"));
+    append(&f.path, &closed());
+    let end = std::fs::metadata(&f.path).unwrap().len();
+    f.legacy.frontier.store(end, Ordering::SeqCst);
+    sources.push(source_id_for("s1", &f.path).unwrap());
+    let events = (sources.iter().enumerate())
+        .map(|(index, source)| bound(index as u64 + 1, source.clone()))
+        .collect();
+    f.io.log.replace(events);
+    // A Legacy body completes between the boundary's first look at its sends and its custody read.
+    *f.io.on_custody.lock().unwrap() = Some(Box::new(|| {
+        let claim = Some(BodyClaim::new(CHANNEL, Some(ClaudeTui)));
+        let sent = futures::executor::block_on(claim_then_send(claim, || async {}));
+        assert_eq!(sent.unwrap(), BodySend::Sent(()));
+    }));
+    let handle = f.start();
+    for _ in 0..10 {
+        tokio::time::advance(Duration::from_secs(5)).await;
+        spin().await;
+    }
+    test_override::with_channels(|boot| {
+        assert_eq!(boot.unwrap().candidate(CHANNEL).unwrap().sends(), (1, 1))
+    });
+    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    let (rotated, first) = (sources[1].path.display(), sources[0].path.display());
+    let expected = format!(
+        "source {rotated} was bound while the adoption waited (seq 2; baseline {first}@1; boundary 0;"
+    );
+    let released = f.io.base.alarms.released();
+    assert!(
+        released
+            .iter()
+            .any(|(_, detail)| detail.contains(&expected)),
+        "{released:?}"
+    );
+    assert!(!init_path(&f.harness, CHANNEL).exists());
+    assert!(f.harness.port.posts().is_empty());
+    handle.stop_and_join().await.unwrap();
+}
+
+#[test]
+fn late_adopt_binding_baseline_at_boundary_zero_is_the_first_bind_ever_logged() {
+    use crate::services::tui_o::writer::late_adopt::{baseline, first_bound};
+    let dir = tempfile::tempdir().unwrap();
+    let source = |name: &str| {
+        let path = dir.path().join(format!("{name}.jsonl"));
+        std::fs::write(&path, b"").unwrap();
+        source_id_for(name, &path).unwrap()
+    };
+    let (a, b) = (source("a"), source("b"));
+    let resolved = |seq, source: &SourceId| {
+        let source = source.clone();
+        event(
+            seq,
+            BindingRecord::Resolved {
+                resolves_seq: 1,
+                source,
+            },
+        )
+    };
+    let rotation = vec![
+        audit(1),
+        bound(2, a.clone()),
+        audit(3),
+        resolved(4, &b),
+        audit(5),
+    ];
+    for events in [rotation.clone(), vec![audit(1), audit(2)], Vec::new()] {
+        assert_eq!(baseline(&events, 0), first_bound(&events), "{events:?}");
+    }
+    assert_eq!(baseline(&rotation, 0), Some((a.clone(), 2)));
+    assert_eq!(
+        baseline(&rotation, 1),
+        Some((a.clone(), 2)),
+        "the first bind after it"
+    );
+    assert_eq!(
+        baseline(&rotation, 3),
+        Some((a.clone(), 2)),
+        "the last bind within it"
+    );
+    assert_eq!(baseline(&rotation, 5), Some((b.clone(), 4)));
+    let back = vec![bound(1, a.clone()), bound(2, b), bound(3, a.clone())];
+    assert_eq!(baseline(&back, 3), Some((a, 3)));
 }
