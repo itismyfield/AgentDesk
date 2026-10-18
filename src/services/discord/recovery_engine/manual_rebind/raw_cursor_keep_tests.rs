@@ -129,8 +129,8 @@ fn normalized_relay(cursor: Cursor) -> String {
     })
 }
 
-/// The crossed-turn rebuild restarts the relay in a new file, and the writer's
-/// rebuilt turn sits at the offset the rebind chose, with none of the old relay.
+/// The crossed-turn rebuild restarts the relay coordinates in a new file that
+/// holds none of the old relay.
 fn assert_crossed_rebuild_restarts_in_a_new_relay_file(
     relay: &std::path::Path,
     before: crate::services::cluster::stream_relay::SourceFileIdentity,
@@ -140,26 +140,30 @@ fn assert_crossed_rebuild_restarts_in_a_new_relay_file(
         initial_offset, 0,
         "a crossed-turn rebuild restarts the relay coordinates"
     );
-    let after = file_identity(relay);
     assert_ne!(
-        after, before,
+        file_identity(relay),
+        before,
         "restarted relay coordinates must come with a new relay file"
     );
-    let mut rebuilt = String::new();
-    for _ in 0..50 {
+    let rebuilt = std::fs::read_to_string(relay).unwrap();
+    assert!(!rebuilt.contains("stale-normalized-"), "{rebuilt:?}");
+}
+
+/// The rebind's writer puts the rebuilt turn and its result at the chosen offset
+/// of that same new file; no result before the deadline fails the case.
+fn assert_writer_rebuilds_the_new_turn(relay: &std::path::Path, initial_offset: u64) {
+    let file = file_identity(relay);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut rebuilt = std::fs::read_to_string(relay).unwrap();
+    while !rebuilt.contains("\"type\":\"result\"") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the writer never wrote the rebuilt turn's result: {rebuilt:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
         rebuilt = std::fs::read_to_string(relay).unwrap();
-        if rebuilt.contains("\"type\":\"result\"") {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if !rebuilt.contains("\"type\":\"result\"") {
-        // The writer leg is unobserved; only the plan and the file identity are proven.
-        println!("T-B2-6 writer->relay: NOT_PROVEN");
-        return;
-    }
-    println!("T-B2-6 writer->relay: PROVEN");
-    assert_eq!(file_identity(relay), after);
+    assert_eq!(file_identity(relay), file);
     let from_offset = &rebuilt[initial_offset as usize..];
     assert!(from_offset.contains("new-turn-7120"), "{from_offset:?}");
     assert!(
@@ -176,6 +180,17 @@ fn normalized_line(text: &str) -> String {
 }
 
 fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
+    rebind_case_proving_writer(cursor, cancelled, entry, alias, false);
+}
+
+/// `writer` also waits for the rebuilt relay the rebind's writer produces.
+fn rebind_case_proving_writer(
+    cursor: Cursor,
+    cancelled: bool,
+    entry: Entry,
+    alias: bool,
+    writer: bool,
+) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -292,6 +307,9 @@ fn rebind_case(cursor: Cursor, cancelled: bool, entry: Entry, alias: bool) {
             }
         } else if let Some(relay_before) = relay_before {
             assert_crossed_rebuild_restarts_in_a_new_relay_file(&relay, relay_before, outcome.initial_offset);
+            if writer {
+                assert_writer_rebuilds_the_new_turn(&relay, outcome.initial_offset);
+            }
         } else {
             assert!(!outcome.watcher_spawned && !outcome.watcher_replaced);
             assert!(Arc::ptr_eq(&shared.tmux_watchers.get(&channel).unwrap().cancel, &original_cancel));
@@ -338,8 +356,14 @@ fn default_override_rebind_reuses_healthy_matching_raw_incumbent() {
 }
 
 /// The stall watchdog's pinned rebind of a normalized row whose rollout moved to
-/// the next prompt rebuilds that new turn into a new relay file.
+/// the next prompt restarts the relay in a new file.
 #[test]
 fn crossed_turn_rebind_rebuilds_the_new_turn_into_a_new_relay_file() {
     rebind_case(Cursor::Crossed, false, Entry::Default, false);
+}
+
+/// The same rebind's writer fills that new file with the new turn.
+#[test]
+fn crossed_turn_rebind_writer_rebuilds_the_new_turn_at_the_chosen_offset() {
+    rebind_case_proving_writer(Cursor::Crossed, false, Entry::Default, false, true);
 }
