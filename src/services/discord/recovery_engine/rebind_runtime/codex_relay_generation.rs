@@ -33,7 +33,7 @@ pub(super) fn prepare(
         let mut generation = gate.lock().unwrap_or_else(|poison| poison.into_inner());
         *generation = generation.saturating_add(1).max(1);
         if truncate_relay_output {
-            std::fs::File::create(relay_output_path).map_err(|error| {
+            replace_relay_output(relay_output_path).map_err(|error| {
                 RebindError::Internal(format!(
                     "create Codex TUI rebind relay output {relay_output_path}: {error}"
                 ))
@@ -52,6 +52,30 @@ pub(super) fn prepare(
         *generation
     };
     Ok((gate, generation))
+}
+
+/// Restarting the relay's byte coordinates also gives it a new file, so a reader
+/// keyed on the file identity never reads the new bytes as the old file's.
+#[cfg(unix)]
+fn replace_relay_output(relay_output_path: &str) -> std::io::Result<()> {
+    let staging = format!(
+        "{relay_output_path}.replace-{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)?;
+    // Noted before the rename so an idle tick can never see the new file first.
+    crate::services::discord::session_relay_sink::note_relay_output_replaced(relay_output_path);
+    std::fs::rename(&staging, relay_output_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staging);
+    })
+}
+
+#[cfg(not(unix))]
+fn replace_relay_output(relay_output_path: &str) -> std::io::Result<()> {
+    std::fs::File::create(relay_output_path).map(drop)
 }
 
 pub(super) fn write_message(
@@ -87,3 +111,7 @@ pub(super) fn write_message(
         .map_err(|error| format!("write {}: {error}", relay_path.display()))?;
     Ok(true)
 }
+
+#[cfg(all(test, unix))]
+#[path = "codex_relay_generation_tests.rs"]
+mod tests;

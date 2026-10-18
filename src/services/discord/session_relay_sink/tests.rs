@@ -5,6 +5,7 @@ use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout
 use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
 
+mod idle_replace_tests;
 mod stream_frame_fixtures;
 use stream_frame_fixtures::{frame, ranged_frame, terminal_frame};
 

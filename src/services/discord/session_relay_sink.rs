@@ -50,6 +50,9 @@ mod delivery_outcome_classify;
 mod idle_jsonl;
 #[cfg(test)]
 pub(in crate::services::discord) use idle_jsonl::idle_range_is_committed;
+pub(crate) use idle_jsonl::note_relay_output_replaced;
+#[cfg(test)]
+pub(crate) use idle_jsonl::relay_output_replacements;
 pub(in crate::services::discord) mod journal;
 mod short_controller;
 #[path = "session_relay_sink/supervision.rs"]

@@ -83,10 +83,12 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                 relay_source.path.clone(),
                 expected_file,
             );
-            if offsets
-                .get(&session_name)
-                .is_some_and(|cursor| cursor.source != source)
-            {
+            let replacements = idle_jsonl::relay_output_replacements(&relay_source.path);
+            let mut replaced_in_place = false;
+            if let Some(cursor) = offsets.get(&session_name).filter(|c| c.source != source) {
+                // Only a rebind's replacement restarts at 0; another new file keeps EOF.
+                replaced_in_place =
+                    cursor.source.2 == source.2 && cursor.replacements != replacements;
                 offsets.remove(&session_name);
                 first_seen = Instant::now();
                 first_seen_at.insert(session_name.clone(), first_seen);
@@ -94,9 +96,10 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                 session_init_seen.remove(&session_name);
             }
             let cursor = offsets.entry(session_name.clone()).or_insert(IdleCursor {
-                offset: len,
+                offset: if replaced_in_place { 0 } else { len },
                 source,
-                first_restore: true,
+                first_restore: !replaced_in_place,
+                replacements,
             });
             if len < cursor.offset {
                 cursor.offset = 0;
