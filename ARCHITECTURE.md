@@ -854,8 +854,11 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
+│   │   │   ├── handoff.rs
 │   │   │   ├── legacy_selection.rs
+│   │   │   ├── options.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
@@ -901,8 +904,10 @@ src/
 │   │   │   ├── held_range.rs
 │   │   │   ├── injected_catch_up_tests.rs
 │   │   │   ├── merged_alias_tests.rs
+│   │   │   ├── phase1_sweep.rs
 │   │   │   ├── phase2.rs
 │   │   │   ├── phase2_age_tests.rs
+│   │   │   ├── phase2_sweep.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
@@ -1022,16 +1027,21 @@ src/
 │   │   │   │   │   └── policy.rs
 │   │   │   │   ├── stop_judgement/
 │   │   │   │   │   └── judged_finish_tests.rs
+│   │   │   │   ├── channel_runtime.rs
+│   │   │   │   ├── inflight_repair.rs
 │   │   │   │   ├── leak_recovery_ledger.rs
 │   │   │   │   ├── legacy_send_tests.rs
 │   │   │   │   ├── live_agent_recovery.rs
 │   │   │   │   ├── retirement_await_tests.rs
+│   │   │   │   ├── runtime_lookup.rs
+│   │   │   │   ├── runtime_stop.rs
 │   │   │   │   ├── self_watchdog.rs
 │   │   │   │   ├── stall_alert.rs
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_judgement.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   ├── watchdog_decisions.rs
+│   │   │   │   ├── watchdog_pass.rs
 │   │   │   │   └── zombie_reclaim.rs
 │   │   │   ├── relay_auto_heal/
 │   │   │   │   ├── orphan_token_tests.rs
@@ -1214,6 +1224,12 @@ src/
 │   │   │   │   ├── tests.rs
 │   │   │   │   ├── validation.rs
 │   │   │   │   └── validation_tests.rs
+│   │   │   ├── delivery_record/
+│   │   │   │   ├── content.rs
+│   │   │   │   ├── frontier.rs
+│   │   │   │   ├── owner_context.rs
+│   │   │   │   ├── rollout.rs
+│   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
 │   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
@@ -1614,6 +1630,7 @@ src/
 │   │   │   ├── o_delivery_e2e_tests.rs
 │   │   │   ├── orphan_reclaim.rs
 │   │   │   ├── relay_format.rs
+│   │   │   ├── routing.rs
 │   │   │   ├── short_controller.rs
 │   │   │   ├── supervision.rs
 │   │   │   ├── task_notification_context.rs
@@ -1662,7 +1679,9 @@ src/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   ├── n1a_monitor_tests.rs
-│   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
+│   │   │   ├── relay_decisions.rs
+│   │   │   ├── task_notification_kind_restart_roundtrip_tests.rs
+│   │   │   └── turn_lifecycle.rs
 │   │   ├── tmux_output_stream/
 │   │   │   ├── tests/
 │   │   │   │   └── compact_summary_tests.rs
@@ -1712,8 +1731,11 @@ src/
 │   │   │   ├── turn_stream_collector/
 │   │   │   │   ├── chunk_forward.rs
 │   │   │   │   ├── entry.rs
+│   │   │   │   ├── idle_read.rs
 │   │   │   │   ├── observations.rs
-│   │   │   │   └── state.rs
+│   │   │   │   ├── state.rs
+│   │   │   │   ├── stream_chunk.rs
+│   │   │   │   └── stream_seed.rs
 │   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
@@ -1864,6 +1886,7 @@ src/
 │   │   │   │   ├── claim.rs
 │   │   │   │   ├── claim_entry_tests.rs
 │   │   │   │   ├── non_bridge_claim.rs
+│   │   │   │   ├── ownership.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── tests/
 │   │   │   │   ├── codex_direct_owner_tests/
@@ -1978,7 +2001,9 @@ src/
 │   │   │   │   ├── lock_liveness_tests.rs
 │   │   │   │   ├── o_adoption_tests.rs
 │   │   │   │   ├── o_panel.rs
-│   │   │   │   └── rollover_guard.rs
+│   │   │   │   ├── output.rs
+│   │   │   │   ├── rollover_guard.rs
+│   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   ├── o_body.rs
 │   │   │   │   └── unix_journal.rs

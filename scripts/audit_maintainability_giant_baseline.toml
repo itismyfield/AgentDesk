@@ -601,7 +601,7 @@
 # size means the next one-line correctness fix on the file this investigation is
 # most likely to touch fails a hard gate before it can be reviewed. Any use of
 # the 18 still shows as a diff on this line.
-"src/services/discord/health/recovery.rs" = 2660
+"src/services/discord/health/recovery.rs" = 841
 # inflight.rs was decomposed in #3835: the store-side CAS "save" cluster moved to
 # inflight/save_store.rs, the "clear" cluster to inflight/clear_store/mod.rs, and
 # the shared persist/lock + validate primitives to inflight/store.rs (each sub-1000
@@ -646,7 +646,7 @@
 # builds a `WatcherStreamProgressPatch` + delegates the read-modify-write to the
 # single-flock `inflight::persist_watcher_stream_progress_locked`. Locks in the
 # shrink win.
-"src/services/discord/tmux.rs" = 2049
+"src/services/discord/tmux.rs" = 818
 # completion_guard.rs decomposed in #3479 (1834 -> 872 prod LoC); dropped below
 # the giant threshold, so its ratchet baseline is retired (no longer tracked).
 # session_runtime.rs decomposed in #3842 (worktree, restore_cwd, and
@@ -657,7 +657,7 @@
 # #3610 PR-1: 1731 -> 1738 — pass terminal anchor (current_msg_id) explicitly to
 # shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
 # irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
-"src/services/discord/session_relay_sink.rs" = 1499 # 2026-08-03 #5071 T0-S4: measured prod LoC 1599 -> 1499 (-100), while the prior ratchet value 1690 -> 1499 also removes 91 lines of accumulated slack; moved the sink-local terminal outcome fold and RelaySink::deliver implementation to session_relay_sink/terminal_handoff.rs; deliver_response stays in root. # 2026-07-08 #4164: 1679 -> 1690 (+11 prod LoC), reviewable admission — idle JSONL now gates the producer send on dedup SharedData availability, logging provider/channel/range and retrying without cursor consumption when the offset authority is unavailable after boot. # 2026-07-03 #3998 S1-f2: 1738 -> 1679 (-59 prod LoC), ratchet down after retiring the A2b rollout getter/cache and flag-OFF pin tests.
+"src/services/discord/session_relay_sink.rs" = 840 # 2026-08-03 #5071 T0-S4: measured prod LoC 1599 -> 1499 (-100), while the prior ratchet value 1690 -> 1499 also removes 91 lines of accumulated slack; moved the sink-local terminal outcome fold and RelaySink::deliver implementation to session_relay_sink/terminal_handoff.rs; deliver_response stays in root. # 2026-07-08 #4164: 1679 -> 1690 (+11 prod LoC), reviewable admission — idle JSONL now gates the producer send on dedup SharedData availability, logging provider/channel/range and retrying without cursor consumption when the offset authority is unavailable after boot. # 2026-07-03 #3998 S1-f2: 1738 -> 1679 (-59 prod LoC), ratchet down after retiring the A2b rollout getter/cache and flag-OFF pin tests.
 # #3635: placeholder_sweeper.rs crossed the 1000-prod-LoC giant threshold (993 ->
 # 1004) when the dead-watcher rebind-origin reap branch was added to the
 # rebind-origin arm of the sweep loop (the watcher-owned #897 orphan the #3581
@@ -826,14 +826,14 @@
 "src/services/codex.rs" = 2775
 "src/services/codex_tmux_wrapper.rs" = 1115
 "src/services/codex_tui/input.rs" = 1898
-"src/services/codex_tui/rollout_tail.rs" = 1480
-"src/services/discord/catch_up.rs" = 1656
+"src/services/codex_tui/rollout_tail.rs" = 829
+"src/services/discord/catch_up.rs" = 644
 "src/services/discord/health/snapshot.rs" = 1183
-"src/services/discord/outbound/delivery_record.rs" = 2580
+"src/services/discord/outbound/delivery_record.rs" = 842
 "src/services/discord/standby_relay.rs" = 1012
-"src/services/discord/tmux_watcher/turn_stream_collector.rs" = 1100
-"src/services/discord/tui_prompt_relay/synthetic_start.rs" = 1000
-"src/services/discord/turn_bridge/stream_tick.rs" = 1109
+"src/services/discord/tmux_watcher/turn_stream_collector.rs" = 846
+"src/services/discord/tui_prompt_relay/synthetic_start.rs" = 843
+"src/services/discord/turn_bridge/stream_tick.rs" = 758 # 2026-10-18 giant1031-c1: 1109 -> 758, behavior-preserving decompose to stream_tick/{runtime,output}.rs
 "src/services/discord_config_audit.rs" = 1280
 "src/services/dispatched_sessions.rs" = 1377
 "src/services/dispatches/discord_delivery/orchestration.rs" = 1502
