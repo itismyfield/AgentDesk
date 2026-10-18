@@ -843,8 +843,11 @@ src/
 │   │   │   │   ├── herdr_replay.rs
 │   │   │   │   └── herdr_terminal_tests.rs
 │   │   │   ├── child_binding_tests.rs
+│   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
+│   │   │   ├── handoff.rs
 │   │   │   ├── legacy_selection.rs
+│   │   │   ├── options.rs
 │   │   │   ├── parser.rs
 │   │   │   ├── provenance.rs
 │   │   │   └── provenance_tests.rs
