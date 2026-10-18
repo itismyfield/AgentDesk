@@ -17,9 +17,15 @@ const STRAY: &str = "AgentDesk-claude-stray";
 const THREAD: u64 = 69_183_950;
 
 /// Real tmux sessions on the rig's private socket, which is never the host's own server.
-struct HostSessions(PathBuf);
+struct HostSessions {
+    socket: PathBuf,
+    _selector: crate::config::TestEnvVarGuard,
+}
 impl HostSessions {
     async fn new(rig: &Rig) -> Self {
+        let selector = crate::config::TestEnvVarGuard::capture_after_shared_test_env_lock("TMUX");
+        // The rig holds the shared environment lock; an inherited selector wins over TMUX_TMPDIR.
+        unsafe { std::env::remove_var("TMUX") };
         let watch = Arc::new(Mutex::new(Watch::default()));
         let (_, stamp) = read(&rig.shared, &ProviderKind::Claude, rig.channel, watch).await;
         let socket = match &stamp.namespace.as_ref().unwrap().inventory {
@@ -31,13 +37,16 @@ impl HostSessions {
         std::fs::create_dir_all(dir).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        Self(socket)
+        Self {
+            socket,
+            _selector: selector,
+        }
     }
     fn tmux(&self, args: &[&str]) {
         let output = crate::services::platform::binary_resolver::runtime_command("tmux")
             .unwrap()
             .arg("-S")
-            .arg(&self.0)
+            .arg(&self.socket)
             .args(["-u", "-f", "/dev/null"])
             .args(args)
             .env_remove("TMUX")
@@ -55,7 +64,7 @@ impl Drop for HostSessions {
         let _ = crate::services::platform::binary_resolver::runtime_command("tmux")
             .unwrap()
             .arg("-S")
-            .arg(&self.0)
+            .arg(&self.socket)
             .arg("kill-server")
             .output();
     }
@@ -173,8 +182,8 @@ fn queued(id: u64, text: &str) -> Intervention {
     }
 }
 
-/// Input queued while the channel read unknown drains in order, once each, by the automatic
-/// dequeue once only unrelated host sessions remain.
+/// Input queued while the channel read unknown stays queued, then drains in order, once each, by
+/// the automatic dequeue once only unrelated host sessions remain.
 #[tokio::test(flavor = "current_thread")]
 async fn queued_input_drains_in_order_once_unrelated_sessions_remain_pg() {
     let rig = Rig::new(69_183_102, false, false).await;
@@ -182,7 +191,8 @@ async fn queued_input_drains_in_order_once_unrelated_sessions_remain_pg() {
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
     host.start(ROUTINE);
-    routine_ran(&rig, ROUTINE, THREAD).await;
+    let unknown = observed(Activity::Unknown, "session_identity_unresolved");
+    assert_eq!(unbound(&rig).await.0, unknown);
     let mailbox = rig.shared.mailbox(rig.channel);
     for (id, text) in [(701, "A"), (702, "B")] {
         let token = &rig.shared.token_hash;
@@ -190,13 +200,20 @@ async fn queued_input_drains_in_order_once_unrelated_sessions_remain_pg() {
         let enqueued = mailbox.enqueue(queued(id, text), persistence).await;
         assert!(enqueued.enqueued);
     }
+    let take = crate::services::discord::mailbox_take_next_automatic_intervention;
+    let held = take(&rig.shared, &ProviderKind::Claude, rig.channel).await;
+    assert!(held.intervention.is_none(), "an unknown channel dequeued");
+    let queue = mailbox.snapshot().await.intervention_queue;
+    let texts: Vec<_> = queue.iter().map(|item| item.text.as_str()).collect();
+    assert_eq!(texts, ["A", "B"]);
+
+    routine_ran(&rig, ROUTINE, THREAD).await;
     assert_eq!(
         unbound(&rig).await.0,
         observed(Activity::Idle, "no_session")
     );
     let mut taken = Vec::new();
     for _ in 0..3 {
-        let take = crate::services::discord::mailbox_take_next_automatic_intervention;
         let outcome = take(&rig.shared, &ProviderKind::Claude, rig.channel).await;
         let Some(intervention) = outcome.intervention else {
             break;
@@ -262,4 +279,146 @@ async fn start_gate_and_deliver_start_once_beside_unrelated_sessions_pg() {
         matches!(&second, HumanInputDelivery::Queued { reason, .. } if reason == "turn_active"),
         "a second start ran beside the first: {second:?}"
     );
+}
+
+async fn post_start(
+    app: &axum::Router,
+    agent: &str,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .uri(format!("/agents/{agent}/turn/start"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"prompt": "status?"}"#))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// The turn-start route answers such a channel with a started turn whose provider runs once.
+#[tokio::test(flavor = "current_thread")]
+async fn turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg() {
+    use crate::services::discord::router::message_handler::{
+        CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
+    };
+    use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+    use crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let rig = Rig::new(69_183_104, false, false).await;
+    let _turn_mode = TestConfirmation::new(rig.channel.get());
+    let host = HostSessions::new(&rig).await;
+    host.start(MANUAL);
+    host.start(ROUTINE);
+    routine_ran(&rig, ROUTINE, THREAD).await;
+    let channel = rig.channel.get();
+    let pool = rig.shared.pg_pool.clone().unwrap();
+    let seed = crate::db::agents::insert_agent_channels_for_tests;
+    seed(&pool, "e1-route", Some(&channel.to_string()), None).await;
+    let workspace = rig.root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut core = rig.shared.core.lock().await;
+    core.sessions.get_mut(&rig.channel).unwrap().current_path =
+        Some(workspace.display().to_string());
+    drop(core);
+    let mock = discord_mock::DiscordMockState::new();
+    mock.allow_channel(channel);
+    let (proxy, gateway, server) = discord_mock::start(mock).await;
+    let ctx = discord_mock::serenity_context(proxy, gateway).await;
+    assert!(rig.shared.http.cached_serenity_ctx.set(ctx).is_ok());
+    assert!(
+        rig.shared
+            .http
+            .cached_bot_token
+            .set("test-token".into())
+            .is_ok()
+    );
+    let registry = Arc::new(HealthRegistry::new());
+    registry.register("claude".into(), rig.shared.clone()).await;
+    let (entered, ran) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let probe = InputEffectProbe {
+        channel,
+        entered,
+        release: wait,
+        terminal_before_release: false,
+    };
+    assert!(INPUT_EFFECT_PROBE.lock().unwrap().replace(probe).is_none());
+    let extra_starts = Arc::new(AtomicUsize::new(0));
+    let extra = extra_starts.clone();
+    assert!(
+        CLAUDE_LEGACY_PROBE
+            .lock()
+            .unwrap()
+            .replace((
+                channel,
+                Box::new(move || {
+                    extra.fetch_add(1, Ordering::SeqCst);
+                    Err("duplicate provider start".into())
+                })
+            ))
+            .is_none()
+    );
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    assert!(
+        BRIDGE_COMPLETION_PROBE
+            .lock()
+            .unwrap()
+            .replace((rig.channel, completed))
+            .is_none()
+    );
+    let config = crate::config::Config::default();
+    let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+    let broadcast = crate::eventbus::new_broadcast();
+    let buffer = crate::eventbus::spawn_batch_flusher(broadcast.clone());
+    let app = crate::server::routes::api_router_with_pg(
+        engine,
+        config,
+        broadcast,
+        buffer,
+        Some(registry),
+        Some(pool),
+    );
+
+    let (status, body) = post_start(&app, "e1-route").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert_eq!(
+        (&body["ok"], &body["status"]),
+        (&serde_json::json!(true), &serde_json::json!("started"))
+    );
+    let turn_id = body["turn_id"].as_str().unwrap_or_default();
+    assert!(
+        turn_id
+            .strip_prefix(&format!("discord:{channel}:"))
+            .and_then(|id| id.parse::<u64>().ok())
+            .is_some_and(|id| id != 0),
+        "{body}"
+    );
+    let ran = tokio::time::timeout(std::time::Duration::from_secs(10), ran).await;
+    assert!(
+        matches!(ran, Ok(Ok(_))),
+        "the started turn never reached its provider"
+    );
+    assert_ne!(ran.unwrap().unwrap(), std::thread::current().id());
+    let inflight = inflight::load_inflight_state(&ProviderKind::Claude, channel).unwrap();
+    assert_eq!(
+        turn_id,
+        format!("discord:{channel}:{}", inflight.user_msg_id)
+    );
+    let (again, refused) = post_start(&app, "e1-route").await;
+    assert_eq!(again, axum::http::StatusCode::CONFLICT, "{refused}");
+    assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), completion)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(extra_starts.load(Ordering::SeqCst), 0, "duplicate starter");
+    CLAUDE_LEGACY_PROBE.lock().unwrap().take();
+    eprintln!("E1_ROUTE_START channel={channel} starter=1 extra=0 skip=0");
+    server.abort();
 }
