@@ -37,7 +37,7 @@ mod herdr_terminate_e2e;
 #[path = "herdr_terminate_o_e2e_tests.rs"]
 mod herdr_terminate_o_e2e;
 #[path = "n1a_turn_mode_tests.rs"]
-mod n1a_turn_mode;
+pub(in crate::services::discord) mod n1a_turn_mode;
 #[path = "pending_admission_e2e_tests.rs"]
 mod pending_admission_e2e;
 #[path = "prompt_identity_e2e_tests.rs"]

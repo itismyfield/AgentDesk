@@ -4321,6 +4321,13 @@ services::discord::health::turn_deliver::inject_tests::input_queued_reserved_or_
 services::discord::health::turn_deliver::inject_tests::shared_deliver_rejects_contaminated_submit_and_holds_mixed_direct_draft_pg
 services::discord::health::turn_deliver::inject_tests::the_row_stamp_or_the_first_bound_pane_decides_whether_a_session_is_tui
 services::discord::health::turn_deliver::inject_tests::the_switch_opens_only_on_external_or_all
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_configured_herdr_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_idle_user_receipt_is_relayed_once_by_o_without_new_inflight_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_large_single_record_keeps_injection_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_live_rollover_bypasses_legacy_unknown_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_modal_and_person_draft_keep_zero_paste_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_non_turn_mode_preserves_legacy_nonbusy_veto_pg
+services::discord::health::turn_deliver::inject_tests::turn_mode_reading::bb_queued_rollover_bypasses_legacy_idle_pg
 services::discord::health::turn_deliver::tests::an_external_turn_row_queues_without_a_start_and_keeps_mailbox_reasons
 services::discord::health::turn_deliver::tests::each_mailbox_state_reaches_exactly_one_commit_point
 services::discord::health::turn_deliver::tests::only_listed_authors_of_an_owned_bot_pass_even_when_allow_all_is_on
@@ -8656,6 +8663,7 @@ services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_paren
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_is_refused_while_the_parent_pastes_the_message_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_arrival_of_an_injected_message_never_runs_pg
 services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::thread::a_thread_takes_a_message_whose_parent_owner_died_pg
+services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e::turn_mode::bb_live_rollover_uses_real_intake_and_redelivery_is_not_reinjected_pg
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::active_q_reinsert_and_real_kick_leave_one_provider_input_and_answer
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::autoheal::periodic_orphan_token_refusal_preserves_q_then_cancel_backstop_runs_it_once
 services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e::bang_stop_with_dead_bridge_parks_then_owner_runs_q_once
