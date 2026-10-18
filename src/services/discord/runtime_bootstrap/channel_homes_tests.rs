@@ -852,13 +852,67 @@ fn intake_at(home: &channel_home::HomeGate, epoch: i64) -> Option<channel_home::
     }
 }
 
-/// A standby adopts its released home unrestored once its writer could run the first init; intake
-/// stays closed while its restore runs, and the restored queue is in the mailbox before it opens.
+/// A message the gateway routed to `channel`'s home on this node at `epoch`, as its router inserts it.
+async fn routed_at(pool: &sqlx::PgPool, channel: u64, epoch: i64) -> i64 {
+    let payload = crate::db::intake_outbox::InsertPendingPayload {
+        target_instance_id: "mini".into(),
+        forwarded_by_instance_id: "gw".into(),
+        required_labels: serde_json::json!([]),
+        execution_requirements: serde_json::json!({}),
+        attachment_refs: serde_json::json!([]),
+        channel_id: channel.to_string(),
+        user_msg_id: "9300000000000045".into(),
+        replay_source_message_ids: None,
+        request_owner_id: "100".into(),
+        request_owner_name: None,
+        user_text: "hello".into(),
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: None,
+        turn_kind: "foreground".into(),
+        merge_consecutive: false,
+        reply_to_user_message: false,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        preserve_on_cancel: false,
+        agent_id: format!("sbr-{channel}"),
+        provider: "claude".into(),
+        home_epoch: Some(epoch),
+    };
+    let inserted = crate::db::intake_outbox::insert_pending(pool, &payload, 1, None);
+    inserted.await.unwrap()
+}
+
+/// Status, claim owner and whether it was accepted, of outbox row `id`.
+async fn outbox_row(pool: &sqlx::PgPool, id: i64) -> (String, Option<String>, bool) {
+    sqlx::query_as(
+        "SELECT status::TEXT, claim_owner, accepted_at IS NOT NULL FROM intake_outbox WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// One intake worker tick on this node, as its poll loop runs it.
+async fn tick(
+    pool: &sqlx::PgPool,
+    owner: &Arc<SharedData>,
+) -> crate::services::cluster::intake_worker::TickOutcome {
+    use crate::services::cluster::intake_worker::run_intake_worker_tick;
+    let ticked = run_intake_worker_tick(pool, owner, "mini", "claude", "o-mini", &|| false);
+    ticked.await.unwrap()
+}
+
+/// A standby adopts its released home unrestored once its writer could run the first init; while
+/// it restores, a routed message waits unclaimed; the queue is restored before intake opens.
 #[tokio::test]
 async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_restore_pg() {
     use super::queued_recovery::boot_restore_tests::{item, pause};
     use crate::services::cluster::channel_home::HomeIntake;
     use crate::services::cluster::channel_home_boot::events::{self, Event};
+    use crate::services::cluster::intake_worker::{TickOutcome, test_executor};
+    use crate::services::discord::health::owner_runtime_for_tests;
     use crate::services::tui_o::cutover::intake_route;
     use crate::services::turn_orchestrator::save_channel_queue;
     const CH: u64 = 9_300_000_000_000_041;
@@ -959,6 +1013,14 @@ async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_rest
         Vec::<u64>::new(),
         "nothing restored yet"
     );
+    // A message routed while the restore runs stays pending: the tick claims and runs nothing.
+    let (_owners, owner) = owner_runtime_for_tests::registered("claude").await;
+    let recorder = test_executor::record();
+    let routed = routed_at(&pool, CH, epoch).await;
+    assert_eq!(tick(&pool, &owner).await, TickOutcome::QueueEmpty);
+    let pending = ("pending".to_string(), None, false);
+    assert_eq!(outbox_row(&pool, routed).await, pending, "the row waits");
+    assert_eq!(recorder.channels(), Vec::<u64>::new(), "no turn ran");
 
     paused.release();
     let mut opened = None;
@@ -972,6 +1034,8 @@ async fn a_standby_adopts_its_released_home_and_opens_intake_only_after_its_rest
     assert_eq!(opened, Some(vec![ITEM]), "opened with the queue restored");
     assert_eq!(channel_home::intake_hold(&channel, Some(epoch)), None);
     assert_eq!(channel_home_boot::running(&channel), (true, Some(epoch)));
+    assert_eq!(outbox_row(&pool, routed).await, pending, "the row stays");
+    assert_eq!(recorder.channels(), Vec::<u64>::new());
     use crate::services::cluster::home_supervisor::{HomeLifecycle, StopReason};
     let homes = o_writer_host::home_writers(&ProviderKind::Claude, true);
     homes.stop_and_join(StopReason::Sigterm).await;
