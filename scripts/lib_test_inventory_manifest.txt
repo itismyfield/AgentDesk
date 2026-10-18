@@ -6133,6 +6133,7 @@ services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::absent
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::another_raw_rollout_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::cancelled_raw_successor_does_not_skip_gap_to_a_later_floor
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_rebuilds_the_new_turn_into_a_new_relay_file
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_writer_rebuilds_the_new_turn_at_the_chosen_offset
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::default_override_rebind_reuses_healthy_matching_raw_incumbent
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::matching_raw_canonical_alias_keeps_saved_coordinates
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::normalized_cursor_still_uses_normalized_plan
@@ -8286,6 +8287,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stre
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::read_source_switch_tests::crossed_rebind_relay_reaches_discord_once_below_the_old_watermark
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
