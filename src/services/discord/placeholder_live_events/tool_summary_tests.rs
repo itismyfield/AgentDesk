@@ -237,9 +237,10 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
                 json!({"command":command,"cmd":command,"description":command,"query":command}),
             )
             .unwrap_or_default();
+            let visible = output.replace('\\', "").replace('\u{200b}', "");
             for secret in *secrets {
                 assert!(
-                    !output.contains(secret),
+                    !output.contains(secret) && !visible.contains(secret),
                     "{tool}: {secret:?} survived in {output:?}"
                 );
             }

@@ -20,6 +20,7 @@ struct Row {
     result: Option<bool>,
     elapsed: Option<u64>,
     background: bool,
+    unconfirmed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -89,6 +90,7 @@ impl ToolActivityRing {
                         started: Instant::now(),
                         result: None,
                         elapsed: None,
+                        unconfirmed: false,
                         background: matches!(class(name), "Task" | "Bash")
                             && input
                                 .as_deref()
@@ -158,6 +160,7 @@ impl ToolActivityRing {
     fn finish(&mut self, id: Option<&str>, success: bool, terminal: bool) {
         let exact = id.and_then(|id| self.rows.iter().position(|r| r.id.as_deref() == Some(id)));
         if id.is_some() && exact.is_none() {
+            self.mark_unconfirmed();
             return;
         }
         // Never attach a duplicate result or an unknown ID to an ID-bearing peer.
@@ -172,15 +175,22 @@ impl ToolActivityRing {
                 .iter()
                 .position(|r| r.id.is_none() && r.result.is_none())
         };
-        if let Some(row) = index.and_then(|index| self.rows.get_mut(index))
-            && row.result.is_none()
-        {
-            if row.background && success && !terminal {
-                return;
-            }
-            row.result = Some(success);
-            row.elapsed = Some(row.started.elapsed().as_secs());
-            self.failed = self.failed.saturating_add(usize::from(!success));
+        let Some(index) = index else {
+            self.mark_unconfirmed();
+            return;
+        };
+        let row = &mut self.rows[index];
+        if row.result.is_some() || row.background && success && !terminal {
+            return;
+        }
+        row.result = Some(success);
+        row.elapsed = Some(row.started.elapsed().as_secs());
+        self.failed = self.failed.saturating_add(usize::from(!success));
+    }
+
+    fn mark_unconfirmed(&mut self) {
+        for row in self.rows.iter_mut().filter(|row| row.result.is_none()) {
+            row.unconfirmed = true;
         }
     }
 
@@ -203,7 +213,10 @@ impl ToolActivityRing {
         let running = if self.completed {
             0
         } else {
-            self.rows.iter().filter(|r| r.result.is_none()).count()
+            self.rows
+                .iter()
+                .filter(|r| r.result.is_none() && !r.unconfirmed)
+                .count()
         };
         let mut lines = vec![format!(
             "🔧 도구 {} · 실행 {running} · 실패 {}",
@@ -213,7 +226,7 @@ impl ToolActivityRing {
             let glyph = match row.result {
                 Some(true) => "✓",
                 Some(false) => "✗",
-                None if self.completed => "?",
+                None if self.completed || row.unconfirmed => "?",
                 None => "▶",
             };
             let elapsed = row

@@ -77,7 +77,11 @@ fn activity_unmatched_result_and_ring_eviction_fail_closed() {
     end(&mut state, "Read", None, false);
     assert!(!state.tool_activity.render(6).contains("✓"));
     end(&mut state, "Read", Some("never-observed"), false);
-    assert!(!state.tool_activity.render(6).contains("✓"));
+    let live = render(state.clone());
+    assert!(
+        live.contains("? Read") && !live.contains("✓ Read"),
+        "{live}"
+    );
     state.apply(StatusEvent::TurnCompleted {
         background: false,
         background_agent_pending: false,
@@ -275,7 +279,7 @@ fn activity_whole_panel_does_not_repeat_secret_descriptions_in_other_sections() 
             json!({"description":"check ghp_ShortFakeLeak9", "command":"echo --password 'FLAG_HEAD FLAG_TAIL'", "cmd":"curl https://SHORTUSER:SHORTPASS@example.test", "query":"api_key=SHORTQUERY"}),
             Some("s"),
         );
-        let out = render(state);
+        let out = render(state).replace('\\', "").replace('\u{200b}', "");
         for forbidden in [
             "ghp_ShortFakeLeak9",
             "FLAG_HEAD",
