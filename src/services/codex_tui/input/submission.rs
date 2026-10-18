@@ -89,69 +89,17 @@ pub(crate) fn submission_draft_in_pane(pane: &str) -> Option<String> {
 }
 
 fn submission_draft_with_start_in_pane(pane: &str) -> Option<(usize, String)> {
-    let lines: Vec<&str> = pane.lines().collect();
-    let footer = lines.iter().rposition(|line| {
-        line_is_codex_footer_hint(line)
-            || line_is_codex_model_first_status(line)
-            || line_is_codex_fast_context_status(line)
-            || line_is_codex_compact_status_line(line)
-    })?;
-    if lines[footer + 1..]
-        .iter()
-        .any(|line| !line.trim().is_empty())
-    {
-        return None;
-    }
-    let end = (0..footer).rfind(|&at| !lines[at].trim().is_empty())?;
-    let border = |line: &str, left: char, right: char| {
-        line.trim()
-            .strip_prefix(left)
-            .and_then(|body| body.strip_suffix(right))
-            .is_some_and(|body| {
-                body.chars().count() + 2 >= COMPOSER_EDGE_MIN_GLYPHS
-                    && body.chars().all(|ch| ch == '─')
-            })
-    };
-    if border(lines[end], '╰', '╯') {
-        let start = (0..end).rfind(|&at| border(lines[at], '╭', '╮'))?;
-        let mut rows = Vec::new();
-        let mut cursors = 0;
-        for line in &lines[start + 1..end] {
-            let body = line
-                .trim_start()
-                .strip_prefix("│ ")?
-                .strip_suffix('│')?
-                .trim_end();
-            let body = if let Some(body) = body.strip_suffix('▌') {
-                cursors += 1;
-                body.strip_suffix(' ').unwrap_or(body)
-            } else {
-                body
-            };
-            if body.contains('▌') {
-                return None;
-            }
-            rows.push(body);
-        }
-        return (cursors == 1).then(|| (start, rows.join("\n")));
-    }
-    let start = (0..=end).rfind(|&at| lines[at].starts_with('›'))?;
-    let first = lines[start].strip_prefix('›')?;
-    let mut rows = vec![first.strip_prefix(' ').unwrap_or(first)];
-    for line in &lines[start + 1..=end] {
-        rows.push(line.strip_prefix("  ").or(line.is_empty().then_some(""))?);
-    }
-    Some((start, rows.join("\n")))
+    super::composer_status::composer_draft_with_start_in_pane(pane)
 }
 
 /// Submission requires a complete empty body or one raw dim compact suggestion row.
 pub(crate) fn submission_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
     let plain = strip_ansi_escape_sequences(pane_with_escapes);
-    let draft = submission_draft_in_pane(&plain);
+    let draft = submission_draft_with_start_in_pane(pane_with_escapes).map(|(_, body)| body);
     let dim_hint = draft
         .as_deref()
         .is_some_and(|body| !body.is_empty() && !body.contains('\n'))
-        && submission_composer_start_in_pane(&plain)
+        && submission_composer_start_in_pane(pane_with_escapes)
             .and_then(|at| pane_with_escapes.lines().nth(at))
             .is_some_and(submission_compact_body_is_fully_dim);
     let empty = draft.as_deref().is_some_and(str::is_empty) || dim_hint;
@@ -162,83 +110,8 @@ pub(crate) fn submission_readiness_from_ansi_pane(pane_with_escapes: &str) -> (b
     )
 }
 
-// Track raw current-row SGR state so a dim span cannot hide ordinary typed characters.
 fn submission_compact_body_is_fully_dim(line: &str) -> bool {
-    let mut remaining = line;
-    let (mut dim, mut marker, mut body) = (false, false, false);
-    while !remaining.is_empty() {
-        if let Some(sequence) = remaining.strip_prefix("\x1b[") {
-            let Some((parameters, after)) = sequence.split_once('m') else {
-                return false;
-            };
-            if !parameters
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte == b';')
-            {
-                return false;
-            }
-            let Some(codes) = parameters
-                .split(';')
-                .map(|code| {
-                    if code.is_empty() {
-                        Some(0)
-                    } else {
-                        code.parse::<u16>().ok()
-                    }
-                })
-                .collect::<Option<Vec<_>>>()
-            else {
-                return false;
-            };
-            let mut at = 0;
-            while at < codes.len() {
-                match codes[at] {
-                    0 | 22 => dim = false,
-                    2 => dim = true,
-                    38 | 48 | 58 => {
-                        let channels = match codes.get(at + 1) {
-                            Some(2) => 3,
-                            Some(5) => 1,
-                            _ => return false,
-                        };
-                        if !codes
-                            .get(at + 2..at + 2 + channels)
-                            .is_some_and(|values| values.iter().all(|value| *value <= 255))
-                        {
-                            return false;
-                        }
-                        at += channels + 2;
-                        continue;
-                    }
-                    1 | 3..=9 | 23..=37 | 39..=47 | 49 | 53 | 55 | 59 | 90..=97 | 100..=107 => {}
-                    _ => return false,
-                }
-                at += 1;
-            }
-            remaining = after;
-            continue;
-        }
-        let mut characters = remaining.chars();
-        let Some(character) = characters.next() else {
-            return false;
-        };
-        remaining = characters.as_str();
-        if character.is_control() {
-            return false;
-        }
-        if !marker {
-            if character != '›' {
-                return false;
-            }
-            marker = true;
-        } else if !character.is_whitespace() {
-            if !dim {
-                return false;
-            }
-            body = true;
-        }
-    }
-    marker && body
+    super::composer_status::compact_body_is_fully_dim(line)
 }
 
 // The same complete body proof supplies the current composer boundary.
