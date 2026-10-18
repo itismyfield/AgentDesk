@@ -8,7 +8,8 @@ ambiguous/non-commit ref, merge-base and producer errors fail closed.
 
 ## Measurement and CI
 
-The cap is **30 production files with a code change / net +800 code lines**.
+The cap is **30 production files with a code change / net +1500 code lines**
+(raised from +800 on 2026-10-13 so dependent slices can be reviewed together).
 Code deletions offset code additions. Blank/comment-only lines, matching tests,
 fixtures, generated paths and documentation do not count. Rust inline
 `#[cfg(test)] mod name { ... }` blocks are excluded using rustfmt indentation;
@@ -18,7 +19,7 @@ a test-module declaration without an inline body does not hide following code.
 Its `EXCLUDE` tuple is the precise path policy: `tests/*`, `*/tests/*`,
 `*_tests.rs`, `*_test.rs`, `*/test_*.py`, `test_*.py`, `*/fixtures/*`,
 `*/testdata/*`, `*.snap`, `docs/*`, `*.md`,
-`scripts/lib_test_inventory_manifest.txt`,
+`scripts/lib_test_inventory_manifest.txt`, `scripts/pg_test_lane_manifest.txt`,
 `scripts/sql_execution_surface_inventory.json`, and `*/generated/*`.
 Other generated-looking paths are not implicitly exempt.
 
@@ -63,7 +64,7 @@ The rollout sample measured the latest 40 merged PRs by `mergedAt` (2026-10-06,
 #6657 through #6613), using each landed merge's first parent: old gross
 20-files/+800 failed 26/40 (65%); production 30-files/net+800 failed 0/40.
 The production failure rate is below the 15% report-only trigger, so enforcement
-is enabled immediately. This sample is not a future warning baseline.
+was enabled immediately at +800. This sample is not a future warning baseline.
 
 ## Verification and producer limits
 
