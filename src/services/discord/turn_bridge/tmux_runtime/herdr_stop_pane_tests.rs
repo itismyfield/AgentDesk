@@ -36,9 +36,8 @@ macro_rules! claude_capture {
     };
 }
 
-/// Fronts the rig's socket as Herdr 0.9.3 answers: only a `format: "ansi"` read keeps SGR, with
-/// CRLF rows; any other read is plain whatever its `strip_ansi`. An older server answers all reads
-/// as text.
+/// Fronts the rig's socket as Herdr 0.9.3 answers: only a `format: "ansi"` read keeps SGR (CRLF
+/// rows), any other read is plain; a server that `styles` nothing answers every read as text.
 struct HerdrStrips {
     backend: PathBuf,
     /// Each `pane.read` request line as the client wrote it, its id masked.
