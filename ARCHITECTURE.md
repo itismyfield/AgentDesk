@@ -1877,6 +1877,7 @@ src/
 │   │   │   │   ├── herdr_terminate_o_e2e_tests.rs
 │   │   │   │   ├── herdr_terminate_o_real_tests.rs
 │   │   │   │   ├── herdr_terminate_route_e2e_tests.rs
+│   │   │   │   ├── idle_inject_echo_e2e_tests.rs
 │   │   │   │   ├── idle_phase_split_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── n1a_turn_mode_tests.rs
