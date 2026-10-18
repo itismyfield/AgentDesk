@@ -95,6 +95,9 @@ fn credential_command(input: &str) -> bool {
                     | "--chdir"
                     | "--unset"
             );
+            if !skip_value && !matches!(word.as_str(), "--" | "-n" | "-E" | "-H") {
+                return true;
+            }
             continue;
         }
         if matches!(

@@ -335,6 +335,8 @@ fn repair_credential_commands_show_only_class() {
         "docker lo\"gin\" registry",
         "sudo -u root env MODE='two words' /usr/bin/psql -c query",
         "sh -c 'redis-cli -a CmdLeak9'",
+        "sudo --chroot /tmp redis-cli -a CmdLeak9",
+        "env -S 'redis-cli -a CmdLeak9'",
     ] {
         for tool in ["Bash", "exec_command"] {
             assert!(
