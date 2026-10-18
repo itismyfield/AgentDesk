@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use super::model::{
     ControlPlane, ExecutionState, HERDR_PROTOCOL, HerdrCall, HerdrErrorBody, HerdrObservation,
-    HerdrPane, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
+    HerdrPane, HerdrReadFormat, HerdrReadSource, HerdrReply, HerdrRequest, HerdrResult, PaneState,
 };
 use super::observe::RestoreUnverified;
 use super::provenance::StartIdentity;
@@ -207,15 +207,15 @@ pub(crate) fn working_dir_result(
 
 /// `scroll_back` < 0 asks for that many unwrapped history lines, capped.
 pub(crate) fn capture_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
-    read_request(pane_id, scroll_back, true)
+    read_request(pane_id, scroll_back, None)
 }
 
-/// The same read with the screen's ANSI styling kept.
+/// The same read with the screen's SGR styling kept; Herdr keeps it only for `format: ansi`.
 pub(crate) fn capture_ansi_request(pane_id: &str, scroll_back: i32) -> HerdrRequest {
-    read_request(pane_id, scroll_back, false)
+    read_request(pane_id, scroll_back, Some(HerdrReadFormat::Ansi))
 }
 
-fn read_request(pane_id: &str, scroll_back: i32, strip_ansi: bool) -> HerdrRequest {
+fn read_request(pane_id: &str, scroll_back: i32, format: Option<HerdrReadFormat>) -> HerdrRequest {
     let (source, lines) = if scroll_back < 0 {
         let lines = scroll_back.unsigned_abs().min(CAPTURE_MAX_LINES);
         (HerdrReadSource::RecentUnwrapped, Some(lines))
@@ -226,26 +226,30 @@ fn read_request(pane_id: &str, scroll_back: i32, strip_ansi: bool) -> HerdrReque
         pane_id: pane_id.to_string(),
         source,
         lines,
-        strip_ansi,
+        strip_ansi: format.is_none(),
+        format,
     }
 }
 
-/// A truncated read is an error, never a complete screen.
+/// A truncated read, or a styled read answered in another format, is never a complete screen.
 pub(crate) fn capture_result(
     call: &HerdrCall,
     outcome: HerdrOutcome,
     pane_id: &str,
 ) -> Result<String, HostError> {
-    let HerdrRequest::PaneRead { source, .. } = &call.request else {
+    let HerdrRequest::PaneRead { source, format, .. } = &call.request else {
         return Err(HostError::Protocol("capture without pane.read".to_string()));
     };
     match reply_result(call, outcome)? {
         HerdrResult::PaneRead { read } => {
             same_pane(pane_id, &read.pane_id)?;
-            if read.source != *source || read.truncated {
+            if read.source != *source
+                || read.truncated
+                || format.is_some_and(|f| read.format != Some(f))
+            {
                 return Err(HostError::Protocol(format!(
-                    "read source {:?} truncated={}",
-                    read.source, read.truncated
+                    "read source {:?} format {:?} truncated={}",
+                    read.source, read.format, read.truncated
                 )));
             }
             Ok(read.text)

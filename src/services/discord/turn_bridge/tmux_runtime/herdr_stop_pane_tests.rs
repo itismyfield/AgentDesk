@@ -38,6 +38,8 @@ macro_rules! claude_capture {
 /// CRLF rows; any other read is plain whatever its `strip_ansi`.
 struct HerdrStrips {
     backend: PathBuf,
+    /// Each `pane.read` request line as the client wrote it, its id masked.
+    reads: Arc<std::sync::Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -50,25 +52,27 @@ impl HerdrStrips {
         let listener = UnixListener::bind(&front).unwrap();
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
-        let (stopped, rig_socket) = (stop.clone(), backend.clone());
+        let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stopped, rig_socket, log) = (stop.clone(), backend.clone(), reads.clone());
         let thread = std::thread::spawn(move || {
             while !stopped.load(Ordering::SeqCst) {
                 let Ok((client, _)) = listener.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                     continue;
                 };
-                relay(client, &rig_socket);
+                relay(client, &rig_socket, &log);
             }
         });
         Self {
             backend,
+            reads,
             stop,
             thread: Some(thread),
         }
     }
 }
 
-fn relay(client: UnixStream, rig_socket: &Path) {
+fn relay(client: UnixStream, rig_socket: &Path, reads: &std::sync::Mutex<Vec<String>>) {
     let _ = client.set_nonblocking(false);
     let _ = client.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let mut writer = client.try_clone().unwrap();
@@ -78,6 +82,11 @@ fn relay(client: UnixStream, rig_socket: &Path) {
     let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
         return;
     };
+    if request["method"] == "pane.read" {
+        let id = format!("\"id\":{}", request["id"]);
+        let line = line.trim_end().replacen(&id, "\"id\":\"ID\"", 1);
+        reads.lock().unwrap().push(line);
+    }
     let mut rig = UnixStream::connect(rig_socket).unwrap();
     rig.write_all(line.as_bytes()).unwrap();
     let _ = rig.shutdown(Shutdown::Write);
@@ -111,7 +120,7 @@ impl Drop for HerdrStrips {
     }
 }
 
-/// A fresh turn per screen: the `/stop` reply, the Escapes sent and whether each read asked ANSI.
+/// A fresh turn per screen: the `/stop` reply, the Escapes sent and each `pane.read` line sent.
 fn stop_on(
     pool: &sqlx::PgPool,
     root: &Path,
@@ -119,21 +128,16 @@ fn stop_on(
     provider: ProviderKind,
     n: u64,
     screen: &str,
-) -> (&'static str, usize, Vec<bool>) {
+) -> (&'static str, usize, Vec<String>) {
     let case = runtime.block_on(Case::new(pool, root, provider, n));
     let _registry = case.rig.registry_on_this_thread();
-    let _strips = HerdrStrips::over(&case.rig);
+    let strips = HerdrStrips::over(&case.rig);
     case.rig.answer("pane.read", json!({"type":"pane_read","read":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","source":"recent_unwrapped","format":"text","text":screen,"revision":3,"truncated":false}}));
     let reply = runtime.block_on(run_slash_stop(&case.shared, &case.provider, case.channel));
     let text = reply.text();
     runtime.block_on(reply.finish(&case.shared, &case.provider, case.channel));
-    let reads = case
-        .rig
-        .requests()
-        .into_iter()
-        .filter(|r| r["method"] == "pane.read");
-    let ansi = reads.map(|r| r["params"]["format"] == "ansi").collect();
-    (text, case.escapes(), ansi)
+    let reads = strips.reads.lock().unwrap().clone();
+    (text, case.escapes(), reads)
 }
 
 fn with_pool(check: impl FnOnce(&sqlx::PgPool, &Path, &tokio::runtime::Runtime)) {
@@ -152,6 +156,19 @@ fn with_pool(check: impl FnOnce(&sqlx::PgPool, &Path, &tokio::runtime::Runtime))
     assert!(fx.take_calls().is_empty(), "no tmux call on a Herdr stop");
     runtime.block_on(pool.close());
     runtime.block_on(db.drop());
+}
+
+/// The plain read as `HerdrTarget::capture` has always written it, byte for byte.
+fn plain_read() -> Vec<String> {
+    vec![format!(
+        r#"{{"id":"ID","method":"pane.read","params":{{"pane_id":"{PANE}","source":"recent_unwrapped","lines":160,"strip_ansi":true}}}}"#
+    )]
+}
+
+fn ansi_read() -> Vec<String> {
+    vec![format!(
+        r#"{{"id":"ID","method":"pane.read","params":{{"pane_id":"{PANE}","source":"recent_unwrapped","lines":160,"strip_ansi":false,"format":"ansi"}}}}"#
+    )]
 }
 
 fn sent() -> &'static str {
@@ -187,7 +204,7 @@ fn herdr_codex_stop_reads_the_cut_width_composer_from_one_styled_read() {
                 n += 1;
                 let seen = stop_on(pool, root, runtime, ProviderKind::Codex, n, screen);
                 observed.push((width, name, seen));
-                expected.push((width, name, (reply, escapes, vec![true])));
+                expected.push((width, name, (reply, escapes, ansi_read())));
             }
         }
         assert_eq!(observed, expected);
@@ -211,7 +228,7 @@ fn herdr_claude_stop_shares_the_tmux_pane_evidence() {
             let n = 700 + n as u64;
             let seen = stop_on(pool, root, runtime, ProviderKind::Claude, n, screen);
             observed.push((name, seen));
-            expected.push((name, (reply, escapes, vec![false])));
+            expected.push((name, (reply, escapes, plain_read())));
         }
         assert_eq!(observed, expected);
     });

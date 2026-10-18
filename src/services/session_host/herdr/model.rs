@@ -161,6 +161,14 @@ pub(crate) enum HerdrReadSource {
     Detection,
 }
 
+/// How a `pane.read` renders the screen; only `Ansi` keeps SGR styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HerdrReadFormat {
+    Text,
+    Ansi,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "params")]
 pub(crate) enum HerdrRequest {
@@ -179,6 +187,8 @@ pub(crate) enum HerdrRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         lines: Option<u32>,
         strip_ansi: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        format: Option<HerdrReadFormat>,
     },
     #[serde(rename = "pane.close")]
     PaneClose { pane_id: String },
@@ -262,6 +272,8 @@ pub(crate) struct HerdrForegroundProcess {
 pub(crate) struct HerdrRead {
     pub pane_id: String,
     pub source: HerdrReadSource,
+    #[serde(default)]
+    pub format: Option<HerdrReadFormat>,
     pub text: String,
     pub revision: u64,
     pub truncated: bool,
