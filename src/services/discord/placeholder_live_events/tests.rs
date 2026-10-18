@@ -9035,24 +9035,16 @@ fn rehydration_bound_skips_records_before_compact_boundary() {
     );
 }
 
-// ===========================================================================
-// #4093 + #4367: the live (turn-in-progress) status panel HIDES completed
-// Tasks/Subagents outright (superseding #3404's terminal-slot compaction, now
-// removed — see completion_footer.rs).
-// ===========================================================================
+// Live Tasks/Subagents sections hide completed slots. The separate tool
+// activity list can still show those tools' completion history.
 
 // Representative "several completed" backlog size for the hide-completed tests.
 // (Formerly aliased the removed #3404 `LIVE_PANEL_TERMINAL_RENDER_CAP`; the live
 // panel no longer caps terminal rows, so this is now just an arbitrary count.)
 const COMPLETED_SAMPLE: usize = 3;
 
-// #4093 (supersedes #3404 for the Tasks section): during a long turn the LIVE
-// panel used to accumulate completed Tasks — #3404 capped the display at a few
-// completions plus a `… (+N completed)` summary. #4093 goes further: completed
-// Task slots are hidden from the live panel entirely so they can never mask or
-// crowd out in-progress work, while every running entry and the section header
-// stay. (The completion footer still renders the ✓ result summary.) #4093 후속
-// removed the #3404 compactor outright — see completion_footer.rs.
+// Completed Tasks cannot crowd out running slots. Keep the section header and
+// every running title while excluding completed titles from that section.
 #[test]
 fn live_panel_hides_completed_tasks_keeping_running_and_header() {
     let events = PlaceholderLiveEvents::default();
@@ -9197,9 +9189,8 @@ fn live_panel_render_preserves_state_for_footer_eviction() {
     );
 }
 
-// #4093 (supersedes #3404 for the Tasks section): even a small backlog of
-// completed tasks (at or under the old compaction cap) is now hidden entirely —
-// no ✓ marks and no `… (+N completed)` summary render in the live panel.
+// Even a small completed backlog is hidden from Tasks; the separate activity
+// list may show tool success without restoring those completed task slots.
 #[test]
 fn live_panel_hides_completed_tasks_even_under_cap() {
     let events = PlaceholderLiveEvents::default();
