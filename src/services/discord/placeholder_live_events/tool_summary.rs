@@ -61,7 +61,7 @@ fn credential_command(input: &str) -> bool {
             continue;
         }
         if skip_argument {
-            if raw_word.starts_with('-') {
+            if raw_word.trim_matches(['\'', '"']).starts_with('-') {
                 return true;
             }
             skip_argument = false;

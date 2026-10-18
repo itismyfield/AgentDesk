@@ -861,6 +861,7 @@ fn credential_wrappers_spaced_keys_and_prose_mask_their_values() {
         "ssh -p 22 db1 redis-cli -a WrapLeak9",
         "ssh db1 'redis-cli -a WrapLeak9'",
         "ssh db1 'env MODE=dev' redis-cli -a WrapLeak9",
+        "ssh '-p' 22 db1 redis-cli --pass WrapLeak9",
     ] {
         assert!(
             render("Bash", json!({"command":command})).is_none(),
