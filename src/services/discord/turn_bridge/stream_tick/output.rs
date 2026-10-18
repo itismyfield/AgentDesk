@@ -310,3 +310,144 @@ pub(super) async fn run_rollover_loop(
 
     ControlFlow::Continue(rolled_over_this_interval)
 }
+
+// Refresh the panel and current response after rollover using the same mutation fences.
+pub(super) async fn refresh_streaming_response(
+    ctx: &runtime::TickContext<'_>,
+    tick: &mut runtime::TickRuntime<'_>,
+    state_dirty: &mut bool,
+    rolled_over_this_interval: bool,
+    indicator: &str,
+    body_claim: super::super::terminal_controller_cutover::BodyClaim<'static>,
+) -> ControlFlow<(), ()> {
+    let runtime::TickContext {
+        channel_id,
+        done,
+        gateway,
+        provider,
+        shared_owned,
+        single_message_panel_footer_mode,
+        status_interval,
+        status_panel_started_at,
+        ..
+    } = *ctx;
+    let provider = ProviderRef(provider);
+    // #3805 P2 (PR-D): after a mid-turn answer rollover the live status
+    // panel is now stranded ABOVE the new tail answer chunk. Under the
+    // two-message flag, re-anchor it BELOW the new answer (send new,
+    // retire old, bump the generation epoch) so it stays pinned to the
+    // latest chunk. Gate is OFF-inert → the rollover path is
+    // byte-identical when the flag is off.
+    if rolled_over_this_interval
+        && two_message_panel::two_message_should_reanchor_panel_on_rollover(
+            shared_owned.ui.two_message_panel_enabled,
+            tick.status_panel_msg_id.is_some(),
+        )
+        && runtime::authorize_tick_mutation!(
+            ctx,
+            tick,
+            state_dirty,
+            "turn_bridge::stream_tick::panel_reanchor"
+        )
+        && tick.status_panel_msg_id.is_some()
+    {
+        let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
+            channel_id,
+            &provider,
+            status_panel_started_at,
+        );
+        let _ = two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
+            gateway.as_ref(),
+            shared_owned.as_ref(),
+            channel_id,
+            &provider,
+            &panel_text,
+            *tick.current_msg_id,
+            tick.status_panel_msg_id,
+            tick.inflight_state,
+            tick.status_panel_generation,
+            tick.last_status_panel_text,
+        )
+        .await;
+    }
+
+    let streaming_edit_authorized = runtime::authorize_tick_mutation!(
+        ctx,
+        tick,
+        state_dirty,
+        "turn_bridge::stream_tick::streaming_edit"
+    );
+    let raw_current_portion =
+        response_portion_after_offset(tick.full_response, *tick.response_sent_offset);
+    let status_block = build_bridge_single_message_panel_status_block(
+        shared_owned.as_ref(),
+        channel_id,
+        &provider,
+        status_panel_started_at,
+        indicator,
+        tick.prev_tool_status.as_deref(),
+        tick.current_tool_line.as_deref(),
+        tick.full_response,
+    );
+    let rendered_current_portion =
+        crate::services::discord::session_banner::with_discord_turn_session_banner_identity_prefix(
+            shared_owned.as_ref(),
+            channel_id,
+            &provider,
+            tick.inflight_state.user_msg_id,
+            Some(&tick.inflight_state.started_at),
+            tick.inflight_state.turn_start_offset,
+            *tick.response_sent_offset == 0,
+            raw_current_portion.to_string(),
+        );
+    let stable_display_text = build_turn_bridge_streaming_edit_text(
+        shared_owned.ui.status_panel_v2_enabled,
+        &rendered_current_portion,
+        &status_block,
+        &provider,
+    );
+
+    if streaming_edit_authorized
+        && super::super::super::single_message_panel::streaming_footer_text_changed(
+            single_message_panel_footer_mode,
+            tick.last_edit_text,
+            &stable_display_text,
+        )
+        && !done
+        && bridge_streaming_edit_gate_open(
+            tick.last_status_edit.elapsed() >= status_interval,
+            *tick.first_answer_relayed,
+            raw_current_portion.is_empty(),
+        )
+        && tick.long_running_placeholder_active.is_none()
+        && tick.pending_long_running_open_after_state_save.is_none()
+        && tick
+            .pending_long_running_retarget_after_state_save
+            .is_none()
+    {
+        let edit = || {
+            let text = &stable_display_text;
+            TurnGateway::edit_message(gateway.as_ref(), channel_id, *tick.current_msg_id, text)
+        };
+        let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
+        let edit_ok = matches!(
+            claim_then_send(claim, edit).await,
+            Ok(BodySend::Sent(Ok(())))
+        );
+        *tick.last_status_edit = tokio::time::Instant::now();
+        if edit_ok {
+            *tick.first_answer_relayed |= !raw_current_portion.is_empty();
+            // #3813 AC#1 tail: first bridge-owned relay delivered.
+            tick.bridge_spans
+                .mark_first_relay(!raw_current_portion.is_empty());
+            *tick.last_edit_text = stable_display_text;
+            tick.inflight_state.current_msg_id =
+                durable_current_msg_id_from_detached(*tick.current_msg_id);
+            tick.inflight_state.current_msg_len = tick.last_edit_text.len();
+            tick.inflight_state.response_sent_offset = *tick.response_sent_offset;
+            tick.inflight_state.full_response = tick.full_response.clone();
+            *state_dirty = true;
+        }
+    }
+    ControlFlow::Continue(())
+}

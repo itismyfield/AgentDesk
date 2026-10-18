@@ -100,7 +100,7 @@ pub(super) fn reconcile_tick_runtime_from_inflight(
 pub(super) async fn authorize_visible_mutation(
     ctx: &TickContext<'_>,
     tick: &mut TickRuntime<'_>,
-    caller: &str,
+    caller: &'static str,
 ) -> (bool, ControlFlow<(), bool>) {
     let TickContext {
         channel_id,

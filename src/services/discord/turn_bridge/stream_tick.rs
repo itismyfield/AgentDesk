@@ -516,110 +516,17 @@ pub(super) async fn run_bridge_stream_tick(
             std::ops::ControlFlow::Continue(rolled_over) => rolled_over,
             std::ops::ControlFlow::Break(()) => return_authority_lost!(),
         };
-        // #3805 P2 (PR-D): after a mid-turn answer rollover the live status
-        // panel is now stranded ABOVE the new tail answer chunk. Under the
-        // two-message flag, re-anchor it BELOW the new answer (send new,
-        // retire old, bump the generation epoch) so it stays pinned to the
-        // latest chunk. Gate is OFF-inert → the rollover path is
-        // byte-identical when the flag is off.
-        if rolled_over_this_interval
-            && two_message_panel::two_message_should_reanchor_panel_on_rollover(
-                shared_owned.ui.two_message_panel_enabled,
-                status_panel_msg_id.is_some(),
-            )
-            && authorize_visible_mutation!("turn_bridge::stream_tick::panel_reanchor")
-            && status_panel_msg_id.is_some()
-        {
-            let panel_text = shared_owned.ui.placeholder_live_events.render_status_panel(
-                channel_id,
-                &provider,
-                status_panel_started_at,
-            );
-            let _ = two_message_panel::reanchor_bridge_two_message_status_panel_below_answer(
-                gateway.as_ref(),
-                shared_owned.as_ref(),
-                channel_id,
-                &provider,
-                &panel_text,
-                current_msg_id,
-                &mut status_panel_msg_id,
-                &mut *inflight_state,
-                &mut status_panel_generation,
-                &mut last_status_panel_text,
-            )
-            .await;
-        }
-
-        let streaming_edit_authorized =
-            authorize_visible_mutation!("turn_bridge::stream_tick::streaming_edit");
-        let raw_current_portion =
-            response_portion_after_offset(&full_response, response_sent_offset);
-        let status_block = build_bridge_single_message_panel_status_block(
-            shared_owned.as_ref(),
-            channel_id,
-            &provider,
-            status_panel_started_at,
+        if let std::ops::ControlFlow::Break(()) = output::refresh_streaming_response(
+            &tick_context!(),
+            &mut tick_runtime!(),
+            &mut state_dirty,
+            rolled_over_this_interval,
             indicator,
-            prev_tool_status.as_deref(),
-            current_tool_line.as_deref(),
-            &full_response,
-        );
-        let rendered_current_portion =
-            crate::services::discord::session_banner::with_discord_turn_session_banner_identity_prefix(
-                shared_owned.as_ref(),
-                channel_id,
-                &provider,
-                inflight_state.user_msg_id,
-                Some(&inflight_state.started_at),
-                inflight_state.turn_start_offset,
-                response_sent_offset == 0,
-                raw_current_portion.to_string(),
-            );
-        let stable_display_text = build_turn_bridge_streaming_edit_text(
-            shared_owned.ui.status_panel_v2_enabled,
-            &rendered_current_portion,
-            &status_block,
-            &provider,
-        );
-
-        if streaming_edit_authorized
-            && super::super::single_message_panel::streaming_footer_text_changed(
-                single_message_panel_footer_mode,
-                &last_edit_text,
-                &stable_display_text,
-            )
-            && !done
-            && bridge_streaming_edit_gate_open(
-                last_status_edit.elapsed() >= status_interval,
-                first_answer_relayed,
-                raw_current_portion.is_empty(),
-            )
-            && long_running_placeholder_active.is_none()
-            && pending_long_running_open_after_state_save.is_none()
-            && pending_long_running_retarget_after_state_save.is_none()
+            body_claim,
+        )
+        .await
         {
-            let edit = || {
-                let text = &stable_display_text;
-                TurnGateway::edit_message(gateway.as_ref(), channel_id, current_msg_id, text)
-            };
-            let claim = (!raw_current_portion.trim().is_empty()).then_some(body_claim);
-            let edit_ok = matches!(
-                claim_then_send(claim, edit).await,
-                Ok(BodySend::Sent(Ok(())))
-            );
-            last_status_edit = tokio::time::Instant::now();
-            if edit_ok {
-                first_answer_relayed |= !raw_current_portion.is_empty();
-                // #3813 AC#1 tail: first bridge-owned relay delivered.
-                bridge_spans.mark_first_relay(!raw_current_portion.is_empty());
-                last_edit_text = stable_display_text;
-                inflight_state.current_msg_id =
-                    durable_current_msg_id_from_detached(current_msg_id);
-                inflight_state.current_msg_len = last_edit_text.len();
-                inflight_state.response_sent_offset = response_sent_offset;
-                inflight_state.full_response = full_response.clone();
-                state_dirty = true;
-            }
+            return_authority_lost!();
         }
     }
 
