@@ -174,7 +174,9 @@ once all of these hold, logged as `deferred adoption committed`:
 A deferred channel is released for good, with `adoption held: <reason>`, if the reason is final
 (sessions on another node, a node override or a non-authoritative delivery record) or if
 the binding log bound another transcript while it waited (`was bound while the adoption
-waited`), since Legacy may still owe output it read from that one.
+waited`), since Legacy may still owe output it read from that one. A late reservation waits from
+its boundary: the log's end at its first read, only if this process's Legacy had then started no
+body and held no inflight row, pending start or terminal custody for the channel, else seq 0.
 
 Deferred adoption does not promise an unlimited wait. After 40 minutes without delivery progress
 (soft stall), or the 80-minute frontier-progress cap (hard stall), the guarded non-late path may

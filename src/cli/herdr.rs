@@ -361,7 +361,7 @@ mod node {
 }
 
 #[cfg(all(test, unix))]
-use node::{RetireRefusal, Retired, retire, retire_on_reading, status};
+pub(crate) use node::{RetireRefusal, Retired, retire, retire_on_reading, status};
 
 #[cfg(test)]
 #[path = "herdr_tests.rs"]

@@ -357,6 +357,9 @@ src/
 │   │   │   └── agent_read.rs
 │   │   ├── agents_turn_deliver/
 │   │   │   └── pg_tests.rs
+│   │   ├── auth/
+│   │   │   ├── tailnet_peer.rs
+│   │   │   └── tailnet_peer_tests.rs
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
@@ -623,6 +626,7 @@ src/
 │   │   └── worker.rs
 │   ├── claude/
 │   │   ├── herdr_turn/
+│   │   │   ├── never_attached.rs
 │   │   │   └── provider_terminal_tests.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
@@ -2022,6 +2026,7 @@ src/
 │   │   │   ├── before_start_stop_policy_tests.rs
 │   │   │   ├── before_start_stop_protected_tests.rs
 │   │   │   ├── before_start_stop_reconcile_tests.rs
+│   │   │   ├── before_start_stop_retry_tests.rs
 │   │   │   ├── before_start_stop_tail_tests.rs
 │   │   │   ├── before_start_stop_tests.rs
 │   │   │   ├── body_mutation_telemetry.rs

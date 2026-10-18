@@ -248,6 +248,7 @@ impl InflightTurnState {
             .ok()?;
         let fresh = guard.state();
         if fresh.turn_nonce.as_deref() != Some(receipt.turn_nonce())
+            || fresh.current_msg_id == 0
             || !InflightTurnIdentity::from_state(self).matches_state(fresh)
             || fresh.effective_finalizer_turn_id() != self.effective_finalizer_turn_id()
             || fresh.rebind_origin
