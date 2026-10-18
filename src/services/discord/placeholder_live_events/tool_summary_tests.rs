@@ -141,6 +141,10 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
         ),
         ("mysql -pSHORTPWD", &["SHORTPWD"]),
         (
+            "cat '/Users/SPACE_HEAD SPACE_TAIL/file.rs'",
+            &["SPACE_HEAD", "SPACE_TAIL"],
+        ),
+        (
             "mysql --pass\"word\" OBFUSCATED_VALUE",
             &["OBFUSCATED_VALUE"],
         ),
@@ -240,7 +244,7 @@ fn secret_corpus_masks_each_value_and_quoted_fragment() {
             &["COOKIE_HEAD", "COOKIE_TAIL"],
         ),
     ];
-    assert_eq!(cases.len(), 46);
+    assert_eq!(cases.len(), 47);
     for (command, secrets) in cases {
         for tool in ["Bash", "exec_command", "Task", "WebSearch"] {
             let output = render(
@@ -293,6 +297,17 @@ fn paths_are_relative_private_or_anonymous_before_display() {
     ] {
         let output = render("Read", json!({"file_path":path})).unwrap();
         assert!(!output.contains("FAKEUSER"), "{output}");
+    }
+    for path in [
+        "/Users/SPACE_HEAD SPACE_TAIL/file.rs",
+        "/home/SPACE_HEAD SPACE_TAIL/file.rs",
+        "C:\\Users\\SPACE_HEAD SPACE_TAIL\\file.rs",
+    ] {
+        let output = render("Read", json!({"file_path":path})).unwrap();
+        assert!(
+            !output.contains("SPACE_HEAD") && !output.contains("SPACE_TAIL"),
+            "{output}"
+        );
     }
     assert_eq!(
         render("Read", json!({"file_path":"/elsewhere/dir/file.rs"})).as_deref(),

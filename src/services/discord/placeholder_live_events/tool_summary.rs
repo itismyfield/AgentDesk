@@ -102,7 +102,7 @@ fn redact_tokens(input: &str) -> String {
 
 fn anonymize_home(input: &str) -> String {
     static HOME: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?i)(?:[a-z]:[/\\]users[/\\]|/(?:users|home)/)[^/\\\s'"<>]+"#)
+        Regex::new(r"(?i)(?:[a-z]:[/\\]users[/\\]|/(?:users|home)/)[^/\\\r\n]+")
             .expect("account home paths")
     });
     HOME.replace_all(input, "~").into_owned()
@@ -151,7 +151,7 @@ fn sanitized(raw: &str) -> Option<String> {
     let masked = anonymize_home(&masked);
     // Recheck without quotes: quoted key/prefix fragments can hide sensitive
     // material. New matches after masking are ambiguous, so omit the detail.
-    let dequoted = masked.replace('\'', "").replace('"', "");
+    let dequoted = masked.replace(['\'', '"'], "");
     if dequoted != masked
         && (redact_credentials(&dequoted) != dequoted
             || redact_urls(&dequoted) != dequoted
