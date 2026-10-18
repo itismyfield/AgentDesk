@@ -37,7 +37,8 @@ Existing routine files need no migration: every entry already contains the call.
 
 An already-loaded file is the one exception. If you remove the register call
 from a script the running server has loaded, it stays a candidate: the
-last-known-good routine keeps running, every reload logs a load failure, and
+last-known-good routine keeps running, each re-evaluation that the failure
+backoff allows logs a load failure (reloads inside the backoff skip it silently), and
 the discovery audit (`agentdesk doctor`, boot WARN) no longer sees the file. To retire a routine:
 
 1. Pause its row (`POST /api/routines/<id>/pause`).

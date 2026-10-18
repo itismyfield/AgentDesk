@@ -145,6 +145,8 @@ fn declares_quickjs_routine(source: &str) -> bool {
 enum Token {
     Ident(String),
     Punct(char),
+    /// A `)` closing an `if`/`while`/`for`/`with` head, so a statement follows.
+    HeadClose,
     Literal,
 }
 
@@ -171,6 +173,8 @@ const REGEX_PRECEDING_KEYWORDS: [&str; 14] = [
     "await",
 ];
 
+const CONTROL_HEAD_KEYWORDS: [&str; 4] = ["if", "while", "for", "with"];
+
 /// Minimal JS lexer: drops comments and literal contents, keeps identifiers and
 /// punctuation, and lexes `${...}` template substitutions as code.
 fn code_tokens(source: &str) -> Vec<Token> {
@@ -179,6 +183,8 @@ fn code_tokens(source: &str) -> Vec<Token> {
     // Brace depth at which each open template substitution resumes its template.
     let mut templates: Vec<usize> = Vec::new();
     let mut depth = 0usize;
+    // Whether each open `(` starts a control-statement head.
+    let mut parens: Vec<bool> = Vec::new();
     let mut i = usize::from(chars.first() == Some(&'\u{feff}'));
     if chars.get(i) == Some(&'#') && chars.get(i + 1) == Some(&'!') {
         i = skip_line(&chars, i);
@@ -200,6 +206,17 @@ fn code_tokens(source: &str) -> Vec<Token> {
             tokens.push(Token::Literal);
         } else if c == '`' {
             i = lex_template(&chars, i + 1, &mut templates, &mut depth, &mut tokens);
+        } else if c == '(' {
+            parens.push(opens_control_head(&tokens));
+            tokens.push(Token::Punct(c));
+            i += 1;
+        } else if c == ')' {
+            tokens.push(if parens.pop() == Some(true) {
+                Token::HeadClose
+            } else {
+                Token::Punct(c)
+            });
+            i += 1;
         } else if c == '{' {
             depth += 1;
             tokens.push(Token::Punct(c));
@@ -231,11 +248,25 @@ fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '$' || (!c.is_ascii() && !c.is_whitespace())
 }
 
+// `if (`, `while (`, `for (`, `for await (` or `with (`, but not a property
+// call such as `o.if(`.
+fn opens_control_head(tokens: &[Token]) -> bool {
+    let mut end = tokens.len();
+    if end >= 2 && tokens[end - 1].is_ident("await") && tokens[end - 2].is_ident("for") {
+        end -= 1;
+    }
+    end >= 1
+        && CONTROL_HEAD_KEYWORDS
+            .iter()
+            .any(|keyword| tokens[end - 1].is_ident(keyword))
+        && (end < 2 || tokens[end - 2] != Token::Punct('.'))
+}
+
 // A `/` starts a regex unless it follows something that ends an expression,
-// including a postfix `++`/`--`.
+// including a postfix `++`/`--` and a `)` other than a control-statement head's.
 fn regex_allowed(tokens: &[Token]) -> bool {
     match tokens.last() {
-        None => true,
+        None | Some(Token::HeadClose) => true,
         Some(Token::Punct(c @ ('+' | '-'))) => {
             tokens.len() < 2 || tokens[tokens.len() - 2] != Token::Punct(*c)
         }
@@ -333,6 +364,7 @@ fn lex_template(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::capture_debug_logs;
     use super::super::{RoutineScriptLoader, discover_routine_script_refs, recover_poisoned_lock};
     use super::candidate_failure_key;
     use std::path::{Path, PathBuf};
@@ -345,7 +377,7 @@ mod tests {
     }
 
     // Node-only helpers that mention the register call only outside code.
-    const HELPERS: [(&str, &str); 5] = [
+    const HELPERS: [(&str, &str); 7] = [
         (
             "line-comment.js",
             "const fs = require('node:fs'); // agentdesk.routines.register(\nmodule.exports = { fs };\n",
@@ -365,6 +397,14 @@ mod tests {
         (
             "regex.js",
             "const pattern = /agentdesk.routines.register(\\{)/u;\nmodule.exports = pattern;\n",
+        ),
+        (
+            "control-regex.js",
+            "const fs = require(\"node:fs\");\nif (process.argv[2])\n  /agentdesk.routines.register(\\{)/u.test(\n    fs.readFileSync(process.argv[2], \"utf8\")\n  );\n",
+        ),
+        (
+            "for-await-regex.js",
+            "async function scan(lines) {\n  for await (const line of lines) /agentdesk.routines.register(\\{)/u.test(line);\n}\nmodule.exports = scan;\n",
         ),
     ];
 
@@ -418,24 +458,47 @@ mod tests {
             "after-literals.js",
             "const label = `a ${ `b` } c`; const re = /\\/[/]/; // agentdesk\nlet i = 4; i++ / 2; agentdesk.routines.register({ name: 'After', tick() { return { action: 'skip' }; } });",
         );
+        write(
+            primary.path(),
+            "control-regex-entry.js",
+            "if (true) /`/.test('a');\nagentdesk.routines.register({ name: 'Control', tick() { return { action: 'skip' }; } });",
+        );
+        write(
+            operator.path(),
+            "call-division.js",
+            "const f = () => 4; f() / 2; agentdesk.routines.register({ name: 'Call', tick() { return { action: 'skip' }; } });",
+        );
+        write(
+            operator.path(),
+            "property-if-division.js",
+            "const o = { if: (x) => x }; o.if(4) / 2; agentdesk.routines.register({ name: 'Prop', tick() { return { action: 'skip' }; } });",
+        );
+        write(
+            operator.path(),
+            "paren-division.js",
+            "const a = 2; (a) / 2; agentdesk.routines.register({ name: 'Paren', tick() { return { action: 'skip' }; } });",
+        );
         let roots = [primary.path().to_path_buf(), operator.path().to_path_buf()];
         let expected = vec![
             "after-literals.js",
+            "call-division.js",
+            "control-regex-entry.js",
             "global.js",
             "ops/daily/nested.js",
+            "paren-division.js",
+            "property-if-division.js",
             "split.js",
             "star.js",
             "top.js",
         ];
 
         let loader = RoutineScriptLoader::new().unwrap();
-        assert_eq!(loader.load_dirs(&roots).unwrap(), expected.len());
+        let loaded = loader.load_dirs(&roots).unwrap();
         assert_eq!(
-            attempts(&loader),
-            expected.len(),
-            "only entries are evaluated"
+            (loaded, attempts(&loader), failure_count(&loader)),
+            (expected.len(), expected.len(), 0),
+            "(loaded, evaluated, failed): only entries are evaluated"
         );
-        assert_eq!(failure_count(&loader), 0);
         assert_eq!(loader.script_refs().unwrap(), expected);
         assert_eq!(discover_routine_script_refs(&roots), expected);
     }
@@ -520,8 +583,12 @@ mod tests {
         let loader = RoutineScriptLoader::new().unwrap();
         assert_eq!(loader.load_dirs(&roots).unwrap(), 1);
 
-        std::fs::write(&path, "module.exports = { retired: true };").unwrap();
-        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+        std::fs::write(&path, "const retired = true;").unwrap();
+        let logs = capture_debug_logs(|| assert_eq!(loader.load_dirs(&roots).unwrap(), 0));
+        assert!(
+            logs.contains("did not call agentdesk.routines.register()"),
+            "logs={logs}"
+        );
         assert_eq!(
             loader.get_script("retiring.js").unwrap().unwrap().name,
             "Live"

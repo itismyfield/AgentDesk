@@ -1046,7 +1046,7 @@ mod tests {
         }
     }
 
-    fn capture_debug_logs<F>(emit: F) -> String
+    pub(super) fn capture_debug_logs<F>(emit: F) -> String
     where
         F: FnOnce(),
     {
