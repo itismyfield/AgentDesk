@@ -58,7 +58,8 @@ struct Server {
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
-    replies: Arc<Mutex<HashMap<String, Value>>>,
+    close_reply: Arc<Mutex<Option<Value>>>,
+    process_info: Arc<Mutex<Option<Value>>>,
     /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
     vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -79,11 +80,11 @@ fn serve() -> Server {
     let conns = Arc::new(Mutex::new(BTreeMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let version = Arc::new(Mutex::new("0.9.3".into()));
-    let replies = Arc::<Mutex<HashMap<String, Value>>>::default();
+    let (close_reply, process_info) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
     let vanish_on_close = Arc::new(AtomicBool::new(false));
     let gone = Arc::new(AtomicBool::new(false));
     let (state, stopped) = (conns.clone(), stop.clone());
-    let (hello_version, scripted) = (version.clone(), replies.clone());
+    let (hello_version, closed) = (version.clone(), (close_reply.clone(), process_info.clone()));
     let vanish = vanish_on_close.clone();
     let thread = thread::spawn(move || {
         let mut handlers = Vec::new();
@@ -95,10 +96,10 @@ fn serve() -> Server {
             };
             state.lock().unwrap().insert(index, Seen::default());
             let state = state.clone();
-            let (version, replies) = (hello_version.clone(), scripted.clone());
+            let (version, close_reply) = (hello_version.clone(), closed.clone());
             let pane = (vanish.clone(), gone.clone());
             handlers.push(thread::spawn(move || {
-                answer(stream, index, &state, &version, &replies, &pane)
+                answer(stream, index, &state, &version, &close_reply, &pane)
             }));
             index += 1;
         }
@@ -111,13 +112,14 @@ fn serve() -> Server {
         conns,
         stop,
         version,
-        replies,
+        close_reply,
+        process_info,
         vanish_on_close,
         thread: Some(thread),
     }
 }
 
-/// `scripted` takes the default reply's place.
+/// `scripted` is set only for the request its slot answers.
 fn reply(request: &Value, version: &str, scripted: Option<Value>, gone: bool) -> Value {
     if let Some(mut reply) = scripted {
         reply["id"] = request["id"].clone();
@@ -153,7 +155,7 @@ fn answer(
     index: usize,
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
-    replies: &Mutex<HashMap<String, Value>>,
+    (close_reply, process_info): &(Arc<Mutex<Option<Value>>>, Arc<Mutex<Option<Value>>>),
     (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let _ = stream.set_nonblocking(false);
@@ -166,12 +168,13 @@ fn answer(
     conns.lock().unwrap().get_mut(&index).unwrap().request = request.clone();
     if let Some(request) = request {
         let close = request["method"] == "pane.close";
-        let method = request["method"].as_str().unwrap_or("");
-        let scripted = replies.lock().unwrap().get(method).cloned();
+        let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
+        let info = process_info.lock().unwrap().clone();
+        let info = info.filter(|_| request["method"] == "pane.process_info");
         let reply = reply(
             &request,
             &version.lock().unwrap(),
-            scripted,
+            close_reply.or(info),
             gone.load(Ordering::SeqCst),
         );
         if close && vanish_on_close.load(Ordering::SeqCst) {
@@ -187,13 +190,6 @@ fn answer(
 }
 
 impl Server {
-    /// Every later `method` request is answered `reply` whole, or as by default once it is `None`.
-    fn script(&self, method: &str, reply: Option<Value>) {
-        let mut replies = self.replies.lock().unwrap();
-        replies.remove(method);
-        replies.extend(reply.map(|reply| (method.to_string(), reply)));
-    }
-
     fn mutations(&self) -> Vec<Value> {
         self.conns()
             .into_iter()
@@ -1081,9 +1077,9 @@ fn m0_confirmation_required_no_escalation() {
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
-    rig.server.script("pane.close", Some(json!({"error": {
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
         "code": "confirmation_required", "message": "closing this pane would close a worktree group"
-    }})));
+    }}));
     let result = terminate(&target);
     let mutations = rig.server.mutations();
     assert_eq!(mutations.len(), 1);
@@ -1103,7 +1099,7 @@ fn m0_close_uncertain_reply_never_retries() {
         json!({"result": {"type": "future_close"}}),
         json!({"error": {"code": "other", "message": "unknown"}}),
     ] {
-        rig.server.script("pane.close", Some(body));
+        *rig.server.close_reply.lock().unwrap() = Some(body);
         assert!(matches!(
             terminate(&target),
             HerdrTerminateResult::Indeterminate(_)
@@ -1620,8 +1616,7 @@ fn m1_afterwrite_never_auto_retries_pg() {
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
     let os = ScriptedOs::new(launched_os(&rig), Ok(false));
-    let future = json!({"result": {"type": "future_close"}});
-    rig.server.script("pane.close", Some(future));
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"result": {"type": "future_close"}}));
     block_on(async {
         let service = Service::start(&rig, pane, os.clone(), NONCE).await;
         assert!(matches!(
@@ -1658,9 +1653,9 @@ fn m1_confirmation_required_stops_pg() {
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
     let os = ScriptedOs::new(launched_os(&rig), Ok(false));
-    rig.server.script("pane.close", Some(json!({"error": {
+    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
         "code": "confirmation_required", "message": "closing this pane would close a worktree group"
-    }})));
+    }}));
     block_on(async {
         let service = Service::start(&rig, pane, os, NONCE).await;
         assert_eq!(
@@ -2230,7 +2225,7 @@ pub(crate) mod p11 {
             let info = json!({"pane_id": PANE, "shell_pid": FRESH,
                 "foreground_process_group_id": FRESH, "foreground_processes": [{"pid": FRESH}]});
             let reply = json!({"result": {"type": "pane_process_info", "process_info": info}});
-            self.server.script("pane.process_info", Some(reply));
+            *self.server.process_info.lock().unwrap() = Some(reply);
         }
 
         /// Every write the server received, as `(method, pane_id)`, in order.
@@ -2412,7 +2407,7 @@ pub(crate) mod p11 {
                 "code": "confirmation_required",
                 "message": "closing this pane would close a worktree group"
             }});
-            self.server.script("pane.close", required.then_some(reply));
+            *self.server.close_reply.lock().unwrap() = required.then_some(reply);
             self.server
                 .vanish_on_close
                 .store(!required, Ordering::SeqCst);
