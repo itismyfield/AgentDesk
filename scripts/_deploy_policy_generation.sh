@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Keeps the release policy directory in the same deploy generation as the binary.
-# policies.prev pairs with bin/agentdesk.prev: kept, restored and dropped with it.
-# Sourced by deploy-release.sh; bash 3.2 compatible.
+# Keeps release policies in the binary's deploy generation: policies.prev is kept,
+# restored and dropped with bin/agentdesk.prev. Sourced by deploy-release.sh (bash 3.2).
 
 POLICY_GENERATION_SWAPPED=0
 
