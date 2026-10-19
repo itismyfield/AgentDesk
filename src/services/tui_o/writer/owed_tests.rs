@@ -529,7 +529,7 @@ async fn the_running_actor_posts_the_same_and_leaves_the_sidecar_alone() {
         );
         seen.push(port.posts());
     }
-    assert_eq!(seen[0], ["first"]);
+    assert_eq!(seen[0], ["first", "-# ✅ 완료"]);
     assert!(seen.iter().all(|posts| *posts == seen[0]), "{seen:?}");
 }
 
