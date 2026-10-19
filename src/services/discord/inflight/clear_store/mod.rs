@@ -11,6 +11,8 @@
 //! explicit-root seams keep `pub(super)` for the parent's test re-imports.
 
 mod abandon;
+#[cfg(unix)]
+mod herdr_row_end;
 mod identity;
 pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;
@@ -600,9 +602,8 @@ fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
         "clear_inflight_state_if_matches_identity_generation",
         &path,
     );
-    match fs::remove_file(&path) {
-        Ok(()) => GuardedClearOutcome::Cleared,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+    match remove_row(&path) {
+        Ok(outcome) => outcome,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -614,6 +615,17 @@ fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
             );
             GuardedClearOutcome::IoError
         }
+    }
+}
+
+/// Removes a locked row's file; a peer's earlier removal is `Missing`.
+fn remove_row(path: &std::path::Path) -> std::io::Result<GuardedClearOutcome> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(GuardedClearOutcome::Cleared),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(GuardedClearOutcome::Missing)
+        }
+        Err(error) => Err(error),
     }
 }
 

@@ -187,11 +187,11 @@ mod dispatched_origin_ghost_order_pg_tests {
             root.path(),
         );
         let current_generation = 54_620;
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
         crate::services::discord::runtime_store::set_process_generation_for_tests(Some(
             current_generation,
         ));
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
         let session_key = "claude/test/current-generation-live-5462";
         let channel_id = 546_200_005_u64;
         let turn_nonce = "current-generation-live-nonce-5462";

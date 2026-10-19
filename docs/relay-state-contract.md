@@ -170,7 +170,7 @@ Repair, in priority order:
    section's own thesis forbids shape rules: a reviewer applying the count
    literally and one running the judgment diverge, exactly as they did on the
    static form above. The manifest cost is real and small:
-   `docs/pr-cap-check.md` sets the cap at 30 production files and net +800 code
+   `docs/pr-cap-check.md` sets the cap at 30 production files and net +1500 code
    lines; test and manifest paths follow its exclusion policy. Spend an id when the name buys a
    claim; do not spend it to restate one an existing test's name already makes.
    `intake_delivery_sweep::tests` has the pattern to copy in

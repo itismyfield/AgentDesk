@@ -2870,20 +2870,20 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
+    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retired-shadow-config.yaml");
-        let settings = format!(
-            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n\
-             writer: {{channels: [41, 42], late_adopt: true, dormant_channels: [42]}}\n\
-             turn: {{channels: [41], all_owned: true}}\n\
-             repost: {{enabled: true, channels: [41]}}\n\
+        let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
+             turn: {channels: [41], all_owned: true}\n\
+             repost: {enabled: true, channels: [41]}\n\
              alert_channel_id: 42\n\
-             codex_history_adoption: false\n"
-        );
+             codex_history_adoption: false\n";
+        let settings =
+            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
-            serde_yaml::from_str(&settings).unwrap();
+            serde_yaml::from_str(live).unwrap();
         let indented = settings
             .lines()
             .map(|line| format!("  {line}\n"))
@@ -2906,12 +2906,10 @@ mod secret_bearing_config_file_tests {
         let output = loaded.tui_o.as_ref().unwrap();
 
         assert_eq!(output, &expected);
-        assert_eq!(output.shadow.enabled, enabled);
-        assert_eq!(output.shadow.channel_allowlist, [41, 42]);
-        assert_eq!(
-            serde_yaml::to_string(output).unwrap(),
-            serde_yaml::to_string(&expected).unwrap()
-        );
+        assert!(output.writer.late_adopt && output.repost.enabled);
+        let rendered = serde_yaml::to_string(output).unwrap();
+        assert_eq!(rendered, serde_yaml::to_string(&expected).unwrap());
+        assert!(!rendered.contains("shadow"), "{rendered}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
     }
 

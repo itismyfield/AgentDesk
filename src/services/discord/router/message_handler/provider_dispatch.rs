@@ -47,7 +47,7 @@ pub(super) struct StreamingTurn<'a> {
 }
 
 #[cfg(test)]
-pub(super) struct InputEffectProbe {
+pub(in crate::services::discord) struct InputEffectProbe {
     pub channel: u64,
     /// Receives the thread the provider ran on, so a caller can tell it left the async task.
     pub entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
@@ -55,8 +55,9 @@ pub(super) struct InputEffectProbe {
     pub terminal_before_release: bool,
 }
 #[cfg(test)]
-pub(super) static INPUT_EFFECT_PROBE: std::sync::Mutex<Option<InputEffectProbe>> =
-    std::sync::Mutex::new(None);
+pub(in crate::services::discord) static INPUT_EFFECT_PROBE: std::sync::Mutex<
+    Option<InputEffectProbe>,
+> = std::sync::Mutex::new(None);
 #[cfg(test)]
 pub(super) struct SubmittedPrompt {
     pub prompt: String,
@@ -105,10 +106,12 @@ fn input_effect_probe(
 
 /// Stands in for the Claude driver inside the submission scope, on the real provider thread.
 #[cfg(test)]
-pub(super) type ClaudeLegacyProbe = Box<dyn FnOnce() -> Result<(), String> + Send>;
+pub(in crate::services::discord) type ClaudeLegacyProbe =
+    Box<dyn FnOnce() -> Result<(), String> + Send>;
 #[cfg(test)]
-pub(super) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<Option<(u64, ClaudeLegacyProbe)>> =
-    std::sync::Mutex::new(None);
+pub(in crate::services::discord) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<
+    Option<(u64, ClaudeLegacyProbe)>,
+> = std::sync::Mutex::new(None);
 #[cfg(test)]
 fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
     let mut slot = CLAUDE_LEGACY_PROBE.lock().unwrap();

@@ -633,7 +633,8 @@ src/
 │   ├── claude/
 │   │   ├── herdr_turn/
 │   │   │   ├── never_attached.rs
-│   │   │   └── provider_terminal_tests.rs
+│   │   │   ├── provider_terminal_tests.rs
+│   │   │   └── terminal_replay.rs
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
 │   │   ├── c1_teardown_tests.rs
@@ -1119,6 +1120,7 @@ src/
 │   │   ├── inflight/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
+│   │   │   │   ├── herdr_row_end.rs
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── operator_disposition.rs
@@ -1405,6 +1407,10 @@ src/
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_tests.rs
+│   │   │   ├── herdr_row_end.rs
+│   │   │   ├── herdr_row_end_guard_tests.rs
+│   │   │   ├── herdr_row_end_rig_tests.rs
+│   │   │   ├── herdr_row_end_tests.rs
 │   │   │   ├── host_reconcile.rs
 │   │   │   ├── host_reconcile_tests.rs
 │   │   │   ├── idle_captured_response.rs
@@ -2194,8 +2200,11 @@ src/
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   ├── routine_owner.rs
+│   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -2208,6 +2217,7 @@ src/
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
+│   │   │   ├── supervisor_deadline_tests.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs

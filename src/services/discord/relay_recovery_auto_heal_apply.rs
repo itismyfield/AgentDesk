@@ -348,6 +348,8 @@ mod tests {
     };
     use super::*;
     use crate::services::provider::CancelToken;
+    use crate::services::session_host::test_support::InjectedLivenessGuard;
+    use crate::services::session_host::{HostLiveness, HostSessionRef};
 
     /// What `apply_rebind` reports when it reused a live same-session incumbent:
     /// nothing spawned, nothing replaced, no error.
@@ -962,8 +964,8 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        // Match the established suite-wide lock order: auto-heal budget first,
-        // shared environment second. The inverse order deadlocks parallel tests.
+        // Take the auto-heal budget lock before the shared environment lock;
+        // the inverse order deadlocks parallel tests.
         let _guard = runtime.block_on(auto_heal_test_lock().lock());
         let root = tempfile::tempdir().expect("isolated AgentDesk root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
@@ -976,17 +978,13 @@ mod tests {
                 .register(provider.as_str().to_string(), shared.clone())
                 .await;
             let channel = ChannelId::new(4_423_301);
-            if !crate::services::platform::tmux::is_available() {
-                eprintln!("skipping manual apply after probe exhaustion: tmux unavailable");
-                return;
-            }
-
+            let tmux = format!("plain-shell-4423301-dead-{}", std::process::id());
+            // State producer death explicitly; a cold tmux socket is a probe failure.
+            let _dead =
+                InjectedLivenessGuard::set(HostSessionRef::tmux(&tmux), HostLiveness::DeadOrAbsent);
             start_turn(&shared, channel, 4_423_311)
                 .await
-                .bind_unmanaged_session_name(&format!(
-                    "plain-shell-4423301-dead-{}",
-                    std::process::id()
-                ));
+                .bind_unmanaged_session_name(&tmux);
             shared
                 .mailboxes
                 .handle(channel)
@@ -1027,9 +1025,10 @@ mod tests {
             )
             .await
             .expect("manual apply after probe exhaustion");
+            assert_eq!(manual.decision.evidence.tmux_alive, Some(false));
             assert!(
                 manual.applied,
-                "internal probe budget must never lock an operator"
+                "internal probe budget must never lock an operator: {manual:?}"
             );
         });
     }
