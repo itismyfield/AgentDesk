@@ -79,11 +79,32 @@ pub(in crate::services::discord) async fn ensure(
     let Ok(permit) = PROOFS.clone().try_acquire_owned() else {
         return ResumeOutcome::RetryLater;
     };
-    let prepared = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        prepare(shared, channel, tmux, cancel, reservation)
-    })
-    .await;
+    let mut permit = permit;
+    let mut retries = 0;
+    // Startup and the same health pass can briefly hold the episode/source lock.
+    // Retain one reservation and proof slot; every lock attempt remains non-blocking.
+    let prepared = loop {
+        let (shared, tmux, cancel, reservation) = (
+            shared.clone(),
+            tmux.clone(),
+            cancel.clone(),
+            reservation.clone(),
+        );
+        let prepared = tokio::task::spawn_blocking(move || {
+            let result = prepare(shared, channel, tmux, cancel, reservation);
+            (permit, result)
+        })
+        .await;
+        match prepared {
+            Ok((returned, Err(ResumeOutcome::RetryLater))) if retries < 3 => {
+                permit = returned;
+                retries += 1;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok((_, result)) => break Ok(result),
+            Err(error) => break Err(error),
+        }
+    };
     let outcome = match prepared {
         Ok(Ok((context, plan, witnesses))) => writer::spawn(context, plan, witnesses).await,
         Ok(Err(outcome)) => outcome,
@@ -204,7 +225,11 @@ fn prepare(
     let root = inflight::inflight_runtime_root().ok_or(RetryLater)?;
     let state_path = inflight::inflight_state_path(&root, &ProviderKind::Codex, channel.get());
     let (state, binding) = {
-        let _lock = inflight::try_lock_inflight_state_path(&state_path).map_err(|_| RetryLater)?;
+        let _lock = inflight::try_lock_inflight_state_path(&state_path).map_err(|_| {
+            #[cfg(test)]
+            entry_tests::preflight_refused(&tmux);
+            RetryLater
+        })?;
         let state =
             inflight::load_inflight_state_read_only_result(&ProviderKind::Codex, channel.get())
                 .map_err(|_| RetryLater)?

@@ -897,11 +897,33 @@ async fn r2_periodic_revives_live_incumbent_despite_fresh_row_and_open_circuit()
 async fn r6_contention_retains_event_order_and_clear_blocks_old_output() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Box::pin(Fixture::new(7_139_106, false)).await;
-    f.ensure_ready().await;
     let row_path = inflight::inflight_state_path(
         &inflight::inflight_runtime_root().unwrap(),
         &ProviderKind::Codex,
         f.channel.get(),
+    );
+    let initial_lock = inflight::try_lock_inflight_state_path(&row_path).unwrap();
+    let refused = Arc::new(tokio::sync::Notify::new());
+    *PREFLIGHT_REFUSED.lock().unwrap() =
+        Some((f.handle.tmux_session_name.clone(), Arc::downgrade(&refused)));
+    let (outcome, ()) = tokio::join!(
+        super::ensure(
+            f.shared.clone(),
+            f.handle.tmux_session_name.clone(),
+            f.handle.cancel.clone(),
+        ),
+        async {
+            tokio::time::timeout(Duration::from_secs(3), refused.notified())
+                .await
+                .expect("first preflight must actually encounter the held episode lock");
+            assert_eq!(std::fs::read(&f.wrapper).unwrap(), f.prefix);
+            drop(initial_lock);
+        }
+    );
+    assert_eq!(
+        outcome,
+        super::ResumeOutcome::WriterReady,
+        "one entry must retry transient preflight contention without another recovery tick"
     );
     let row_lock = inflight::try_lock_inflight_state_path(&row_path).unwrap();
     f.append_native(records([prose("first"), prose("second")]));
@@ -950,6 +972,7 @@ async fn r6_contention_retains_event_order_and_clear_blocks_old_output() {
 
 #[test]
 fn r9_applicability_requires_old_codex_wrapper_episode_and_retains_scope_fences() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let tmux = "resume-scope";
     let wrapper = crate::services::tmux_common::session_temp_path(tmux, "jsonl");
     let mut row = InflightTurnState::new(
@@ -989,6 +1012,18 @@ fn r9_applicability_requires_old_codex_wrapper_episode_and_retains_scope_fences(
     row = original;
     row.turn_source = inflight::TurnSource::ExternalInput;
     assert!(!super::applicable(&row, tmux, 10));
+}
+
+type PreflightRefusal = Option<(String, std::sync::Weak<tokio::sync::Notify>)>;
+static PREFLIGHT_REFUSED: std::sync::Mutex<PreflightRefusal> = std::sync::Mutex::new(None);
+
+pub(super) fn preflight_refused(tmux: &str) {
+    if let Some((key, notification)) = PREFLIGHT_REFUSED.lock().unwrap().as_ref()
+        && key == tmux
+        && let Some(notification) = notification.upgrade()
+    {
+        notification.notify_one();
+    }
 }
 
 thread_local! {
