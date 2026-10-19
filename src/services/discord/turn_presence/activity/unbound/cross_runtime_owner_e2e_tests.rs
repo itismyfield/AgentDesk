@@ -239,7 +239,7 @@ impl Fixture {
         {
             let caller = Arc::get_mut(&mut rig.shared).unwrap();
             caller.provider = provider.clone();
-            caller.token_hash = "a2-caller-token".into();
+            caller.token_hash = "discord_a6d1408a5a1d12ca".into();
             caller.health_registry = Arc::downgrade(&registry);
         }
         let workspace = root.join("workspace");
@@ -306,7 +306,7 @@ impl Fixture {
             .register_http(provider.as_str().into(), ctx.http.clone())
             .await;
         let mut foreign = Vec::new();
-        for token in ["a2-codex-token-one", "a2-codex-token-two"] {
+        for token in ["discord_e4bdfa034f57d568", "discord_8153e29f029b147c"] {
             let mut runtime = crate::services::discord::make_shared_data_for_tests_with_storage(
                 Some(pool.clone()),
             );

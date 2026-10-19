@@ -132,6 +132,41 @@ fn log_has(logs: &LogSink, message: &str, reason: &str) -> bool {
         .any(|line| line.contains(message) && line.contains(reason))
 }
 
+struct FailureLogs(LogSink);
+
+impl Drop for FailureLogs {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let bytes = self.0.0.lock().unwrap_or_else(|error| error.into_inner());
+        let markers = [
+            "[turn_presence] dequeue_held",
+            "[turn_presence] unbound hold leaf",
+            "Deferred drain: one-shot kick for channel",
+            "Deferred drain: kickoff already active for channel; coalescing duplicate request",
+        ];
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if let Some(start) = markers.iter().find_map(|marker| line.rfind(*marker)) {
+                // Spans before the event message may contain a full namespaced key.
+                eprintln!("A2_SAFE_FAILURE_LOG {}", &line[start..]);
+            }
+        }
+    }
+}
+
+fn trace_supervisor_tick(supervisor: &LiveSupervisor, recovery_tick: usize) {
+    let state = supervisor.state();
+    let safe = serde_json::json!({
+        "activity": state["activity"],
+        "reason": state["reason"],
+        "generation": state["generation"],
+        "kickoffs_total": state["kickoffs_total"],
+        "queue_held": state["queue_held"]["reason"],
+    });
+    eprintln!("A2_SUPERVISOR_TICK recovery_tick={recovery_tick} state={safe}");
+}
+
 fn recovery_kick_observed(logs: &LogSink, channel: ChannelId) -> bool {
     let fresh = format!("one-shot kick for channel {channel} (turn_presence_idle)");
     let channel_field = format!("channel_id={channel}");
@@ -194,6 +229,28 @@ async fn baseline_idle_supervisor(fixture: &Fixture) -> Arc<LiveSupervisor> {
     supervisor
 }
 
+async fn start_completion_listener(fixture: &Fixture) {
+    let mailbox = fixture.rig.shared.mailbox(fixture.rig.channel);
+    let empty = mailbox.snapshot().await;
+    assert!(empty.intervention_queue.is_empty());
+    assert!(empty.cancel_token.is_none());
+    assert!(empty.pending_user_dispatch.is_none());
+    let ready_before = crate::services::discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles(fixture.rig.channel);
+    let receivers_before = fixture.rig.shared.turn_completion_events.receiver_count();
+    // The exact isolated child's Tokio runtime owns this void-returning production listener.
+    crate::services::discord::queue_io::spawn_turn_completion_idle_queue_listener(
+        fixture.rig.shared.clone(),
+        fixture.provider.clone(),
+    );
+    assert!(fixture.rig.shared.turn_completion_events.receiver_count() > receivers_before);
+    until(async || {
+        crate::services::discord::queue_io::cancel_backstop_test_support::listener_completed_reconciles(
+            fixture.rig.channel,
+        ) > ready_before
+    })
+    .await;
+}
+
 struct DrainCase {
     ids: [u64; 2],
     began: tokio::time::Instant,
@@ -217,8 +274,9 @@ impl RecoveryDriver {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                counted.fetch_add(1, Ordering::SeqCst);
+                let tick = counted.fetch_add(1, Ordering::SeqCst) + 1;
                 supervisor.tick().await;
+                trace_supervisor_tick(&supervisor, tick);
             }
         });
         Self {
@@ -261,6 +319,7 @@ async fn supervisor_drains_pair(
         began,
         label,
     } = case;
+    let _failure_logs = FailureLogs(logs.clone());
     let baseline = supervisor.state();
     assert_eq!(baseline["activity"], "idle");
     assert_eq!(baseline["generation"], 1);
@@ -271,6 +330,7 @@ async fn supervisor_drains_pair(
     assert_eq!(state["reason"], "no_session");
     assert_eq!(state["generation"], baseline["generation"]);
     assert_eq!(state["kickoffs_total"], 1);
+    trace_supervisor_tick(supervisor, 1);
     let driver = RecoveryDriver::start(supervisor.clone());
     let mut ledger = vec![first.wait(fixture, a).await];
     assert!(
@@ -336,6 +396,46 @@ async fn a2_actual_foreign_watcher_release_mid_kick_read_is_superseded_then_supe
     let id = 69_184_131;
     let fixture = Fixture::connect_and_migrate_fixture(id, ProviderKind::Claude).await;
     fixture.produce_owners();
+    let (target_before_release, release_target) =
+        install_owner_race_pause(fixture.rig.channel, "watcher_before_release");
+    let (target_after_release, finish_target) =
+        install_owner_race_pause(fixture.rig.channel, "watcher_after_release");
+    let target_watcher = fixture.attach_old_watcher().await;
+    fixture.clear().await;
+    reached(&target_before_release).await;
+    assert!(
+        fixture
+            .rig
+            .shared
+            .tmux_watchers
+            .channel_binding(&fixture.rig.channel)
+            .is_some(),
+        "actual clear precondition must retain the target watcher until its real release"
+    );
+    release_target.notify_one();
+    reached(&target_after_release).await;
+    assert!(
+        fixture
+            .rig
+            .shared
+            .tmux_watchers
+            .channel_binding(&fixture.rig.channel)
+            .is_none()
+    );
+    finish_target.notify_one();
+    tokio::time::timeout(DRAIN_LIMIT, target_watcher)
+        .await
+        .expect("the actual target watcher did not finish after clear and registry release")
+        .unwrap();
+    {
+        let core = fixture.rig.shared.core.lock().await;
+        let session = core.sessions.get(&fixture.rig.channel).unwrap();
+        assert!(session.cleared && session.channel_name.is_some());
+    }
+    assert!(fixture.disk_ids().is_empty());
+    eprintln!(
+        "A2_P5_ACTUAL_CLEAR core_basis_retained=true target_watcher_released=true prior_queue_empty=true"
+    );
     let (before_release, release_watcher) =
         install_owner_race_pause(fixture.foreign_channel, "watcher_before_release");
     let (after_release, finish_watcher) =
@@ -362,6 +462,7 @@ async fn a2_actual_foreign_watcher_release_mid_kick_read_is_superseded_then_supe
         observed(Activity::Idle, "no_session")
     );
     let supervisor = baseline_idle_supervisor(&fixture).await;
+    start_completion_listener(&fixture).await;
     let (a, b) = (id + 201, id + 202);
     fixture.enqueue_pair(a, b).await;
     let guard = ProviderGuard::new(id);
@@ -522,6 +623,7 @@ async fn a2_s1_no_core_stale_canonical_private_fixture_supervisor_drains_fifo_pg
             .is_none()
     );
     let supervisor = baseline_idle_supervisor(&fixture).await;
+    start_completion_listener(&fixture).await;
     let (a, b) = (id + 201, id + 202);
     fixture.enqueue_pair(a, b).await;
     assert_pair_untouched(&fixture, a, b).await;

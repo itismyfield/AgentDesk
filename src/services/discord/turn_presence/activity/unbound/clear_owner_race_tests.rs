@@ -67,6 +67,42 @@ impl ProviderTurn {
     }
     async fn wait(&mut self, fixture: &Fixture, expected: u64) -> u64 {
         let entry = tokio::time::timeout(DRAIN_LIMIT, &mut self.entered).await;
+        if !matches!(&entry, Ok(Ok(_))) {
+            let mailbox = tokio::time::timeout(
+                Duration::from_secs(1),
+                fixture.rig.shared.mailbox(fixture.rig.channel).snapshot(),
+            )
+            .await;
+            if let Ok(state) = mailbox {
+                let ids = state
+                    .intervention_queue
+                    .iter()
+                    .map(|item| item.message_id.get())
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "A2_FIFO_TIMEOUT expected={expected} queue_ids={ids:?} disk_ids={:?} token_present={} active_user_message_id={:?} pending_user_dispatch={:?}",
+                    fixture.disk_ids(),
+                    state.cancel_token.is_some(),
+                    state.active_user_message_id.map(|id| id.get()),
+                    state.pending_user_dispatch.map(|id| id.get()),
+                );
+            } else {
+                eprintln!("A2_FIFO_TIMEOUT expected={expected} mailbox_snapshot=timeout");
+            }
+            match inflight::load_inflight_state_read_only_result(
+                &fixture.provider,
+                fixture.rig.channel.get(),
+            ) {
+                Ok(Some(row)) => eprintln!(
+                    "A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=present user_msg_id={} runtime_kind={:?} runtime_unknown={}",
+                    row.user_msg_id, row.runtime_kind, row.runtime_kind_unknown_on_disk
+                ),
+                Ok(None) => eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=absent"),
+                Err(_) => {
+                    eprintln!("A2_FIFO_TIMEOUT_INFLIGHT expected={expected} state=unreadable")
+                }
+            }
+        }
         assert!(
             matches!(&entry, Ok(Ok(_))),
             "queued FIFO source {expected} must enter provider within {DRAIN_LIMIT:?}: {entry:?}"
