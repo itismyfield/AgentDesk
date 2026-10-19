@@ -179,12 +179,12 @@ async fn assert_pair_untouched(fixture: &Fixture, a: u64, b: u64) {
     assert!(inflight::load_inflight_state(&fixture.provider, fixture.rig.channel.get()).is_none());
 }
 
-async fn baseline_idle_supervisor(fixture: &Fixture) -> LiveSupervisor {
-    let supervisor = LiveSupervisor::new(
+async fn baseline_idle_supervisor(fixture: &Fixture) -> Arc<LiveSupervisor> {
+    let supervisor = Arc::new(LiveSupervisor::new(
         fixture.rig.shared.clone(),
         fixture.provider.clone(),
         fixture.rig.channel.get(),
-    );
+    ));
     supervisor.tick().await;
     let state = supervisor.state();
     assert_eq!(state["activity"], "idle");
@@ -200,9 +200,57 @@ struct DrainCase {
     label: &'static str,
 }
 
+struct RecoveryDriver {
+    task: Option<tokio::task::JoinHandle<()>>,
+    ticks: Arc<AtomicUsize>,
+}
+
+impl RecoveryDriver {
+    fn start(supervisor: Arc<LiveSupervisor>) -> Self {
+        // The first recovery tick has already completed with the same Idle generation.
+        let ticks = Arc::new(AtomicUsize::new(1));
+        let counted = ticks.clone();
+        let task = tokio::spawn(async move {
+            let period = Duration::from_secs(3);
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                counted.fetch_add(1, Ordering::SeqCst);
+                supervisor.tick().await;
+            }
+        });
+        Self {
+            task: Some(task),
+            ticks,
+        }
+    }
+
+    async fn stop(mut self) -> usize {
+        let task = self.task.take().unwrap();
+        task.abort();
+        if let Err(error) = task.await {
+            assert!(
+                error.is_cancelled(),
+                "live supervisor driver failed: {error}"
+            );
+        }
+        self.ticks.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for RecoveryDriver {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 async fn supervisor_drains_pair(
     fixture: &Fixture,
-    supervisor: &LiveSupervisor,
+    supervisor: &Arc<LiveSupervisor>,
     logs: &LogSink,
     mut first: ProviderTurn,
     guard: &ProviderGuard,
@@ -223,6 +271,7 @@ async fn supervisor_drains_pair(
     assert_eq!(state["reason"], "no_session");
     assert_eq!(state["generation"], baseline["generation"]);
     assert_eq!(state["kickoffs_total"], 1);
+    let driver = RecoveryDriver::start(supervisor.clone());
     let mut ledger = vec![first.wait(fixture, a).await];
     assert!(
         recovery_kick_observed(logs, fixture.rig.channel),
@@ -250,18 +299,24 @@ async fn supervisor_drains_pair(
     ledger.push(second.wait(fixture, b).await);
     second.finish();
     fixture.assert_finished().await;
+    let recovery_ticks = driver.stop().await;
     let drained = began.elapsed();
     assert!(
         drained <= DRAIN_LIMIT,
         "{label}: final drain exceeded six ticks: {drained:?}"
+    );
+    assert!(
+        recovery_ticks <= 6,
+        "{label}: recovery used {recovery_ticks} real ticks"
     );
     assert_eq!(ledger, [a, b]);
     assert_eq!(ledger.iter().filter(|id| **id == a).count(), 1);
     assert_eq!(ledger.iter().filter(|id| **id == b).count(), 1);
     assert_eq!(guard.0.load(Ordering::SeqCst), 0);
     eprintln!(
-        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks=2 recovery_ticks=1 supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={}",
+        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks={} recovery_ticks={recovery_ticks} tick_ms=3000 supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={}",
         guard.0.load(Ordering::SeqCst),
+        1 + recovery_ticks,
         supervisor.state()["kickoffs_total"],
         first_entry.as_millis(),
         drained.as_millis(),
