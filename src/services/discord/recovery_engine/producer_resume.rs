@@ -391,3 +391,5 @@ fn retry(context: &Context) {
 #[cfg(test)]
 #[path = "producer_resume/entry_tests.rs"]
 mod entry_tests;
+#[cfg(test)]
+pub(in crate::services::discord) use entry_tests::record_epilogue_body;

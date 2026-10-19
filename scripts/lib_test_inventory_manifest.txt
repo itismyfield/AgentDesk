@@ -6200,6 +6200,8 @@ services::discord::recovery_engine::phase_policy::tests::ownerless_live_restores
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_absent_root
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_present_root
+services::discord::recovery_engine::producer_resume::custody::tests::live_row_without_receipt_retains_custody_ticket
+services::discord::recovery_engine::producer_resume::custody::tests::retired_row_releases_live_custody_ticket
 services::discord::recovery_engine::producer_resume::entry_tests::r11_incident_shaped_pending_row_still_rejects_whole_rebind_without_mutation
 services::discord::recovery_engine::producer_resume::entry_tests::r12_ensure_panic_uses_watcher_cleanup_and_completion
 services::discord::recovery_engine::producer_resume::entry_tests::r12_slow_ensure_does_not_delay_watcher_first_poll_past_startup_budget

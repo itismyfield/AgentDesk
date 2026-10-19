@@ -1,10 +1,11 @@
 //! Producer revival through the supervised watcher and periodic health entry points.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
@@ -24,6 +25,20 @@ const OWNER: u64 = 343_742_347_365_974_026;
 const SESSION: &str = "resume-entry-session";
 const NATIVE_TURN: &str = "resume-entry-native-turn";
 const PROMPT: &str = "continue this exact managed turn";
+
+type EpilogueObservers = HashMap<(u64, String), Weak<AtomicU64>>;
+static EPILOGUES: LazyLock<Mutex<EpilogueObservers>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(in crate::services::discord) fn record_epilogue_body(channel: u64, nonce: Option<&str>) {
+    if let Some(observer) = EPILOGUES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&(channel, nonce.unwrap_or_default().to_owned()))
+        .and_then(Weak::upgrade)
+    {
+        observer.fetch_add(1, Ordering::AcqRel);
+    }
+}
 
 fn records(values: impl IntoIterator<Item = Value>) -> Vec<u8> {
     values
@@ -96,6 +111,7 @@ struct Fixture {
     gateway: MockDiscord,
     http_fail: Arc<AtomicBool>,
     failed_requests: Arc<AtomicU64>,
+    epilogue_body: Arc<AtomicU64>,
     watcher: Option<tokio::task::JoinHandle<()>>,
     supervisor: Option<tokio::task::JoinHandle<()>>,
     supervisor_shutdown: Arc<AtomicBool>,
@@ -339,6 +355,14 @@ impl Fixture {
                 supervisor_shutdown.clone(),
             ))
         });
+        let epilogue_body = Arc::new(AtomicU64::new(0));
+        let mut observers = EPILOGUES.lock().unwrap_or_else(|p| p.into_inner());
+        observers.retain(|_, observer| observer.strong_count() > 0);
+        observers.insert(
+            (channel.get(), row.turn_nonce.clone().unwrap()),
+            Arc::downgrade(&epilogue_body),
+        );
+        drop(observers);
         Self {
             channel,
             shared,
@@ -360,6 +384,7 @@ impl Fixture {
             gateway,
             http_fail,
             failed_requests,
+            epilogue_body,
             watcher: None,
             supervisor,
             supervisor_shutdown,
@@ -495,9 +520,10 @@ impl Fixture {
         .expect("production entry must revive producer and append exact native terminal")
     }
 
-    async fn wait_suffix(&self) {
+    async fn periodic_until_suffix(&self) {
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
+                self.periodic().await;
                 let bytes = std::fs::read(&self.wrapper).unwrap();
                 let rows = bytes
                     .split(|b| *b == b'\n')
@@ -513,7 +539,7 @@ impl Fixture {
                 }) {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
@@ -787,6 +813,13 @@ async fn restart_entry(channel: u64, session_bound: bool) {
     f.assert_source_preserved(false);
     f.handle.paused.store(false, Ordering::Release);
     f.assert_settled().await;
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while f.epilogue_body.load(Ordering::Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("committed terminal epilogue body must execute after receipt and row retirement");
     if session_bound {
         f.assert_idle_does_not_replay().await;
     }
@@ -864,9 +897,7 @@ async fn r2_periodic_revives_live_incumbent_despite_fresh_row_and_open_circuit()
     f.start_watcher(false);
     let owner_cancel = f.handle.cancel.clone();
     f.append_suffix();
-    f.periodic().await;
-    f.periodic().await;
-    f.wait_suffix().await;
+    f.periodic_until_suffix().await;
     assert_eq!(
         serde_json::from_slice::<Value>(&std::fs::read(&circuit).unwrap()).unwrap(),
         state,

@@ -181,6 +181,11 @@ pub(super) async fn run_terminal_commit_epilogue(
     // re-evaluates the gate and finishes the cleanup once the pane
     // actually reports idle.
     if terminal_output_committed && !lifecycle_stage_paused {
+        #[cfg(test)]
+        crate::services::discord::recovery_engine::producer_resume::record_epilogue_body(
+            channel_id.get(),
+            watcher_turn_nonce.as_deref(),
+        );
         // #3142: gate the TUI history push on `!completion_is_stale_for_newer_turn`.
         // When stale, the late `inflight_state.user_text` is the NEWER turn's
         // prompt; pairing it with the OLDER `full_response` would poison the
