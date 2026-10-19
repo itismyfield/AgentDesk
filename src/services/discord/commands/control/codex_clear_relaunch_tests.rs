@@ -36,6 +36,8 @@ const AFTER_CLEAR: &str = "first instruction after clear";
 pub(in crate::services::discord) const NEW_NATIVE_ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c744";
 const TEST_BOT: &str = "e51-isolated-test-bot";
 
+mod absent_launch_tests;
+
 struct SourceMode(Option<CodexSourceMode>);
 
 fn mode_name(mode: CodexSourceMode) -> &'static str {
@@ -126,6 +128,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     _hosts: crate::config::session_hosts::ForcedSessionHosts,
     _env: [crate::config::TestEnvVarGuard; 2],
     _source_env: crate::config::TestEnvVarGuard,
+    _host_env: Option<crate::config::TestEnvVarGuard>,
     _binding_env: crate::config::TestEnvVarGuard,
     _hosting: Hosting,
     _isolation: Isolation,
@@ -146,8 +149,22 @@ impl CanaryFixture {
     }
 
     async fn build(prefix: u64, process_mode: CodexSourceMode) -> Self {
+        Self::build_with_host(prefix, process_mode, None).await
+    }
+
+    async fn build_with_host(
+        prefix: u64,
+        process_mode: CodexSourceMode,
+        host: Option<&str>,
+    ) -> Self {
         let environment = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let live = crate::config_live_reload::test_live_guard(environment);
+        let host_env = host.map(|host| {
+            crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+                "AGENTDESK_INSTANCE_ID",
+                std::ffi::OsStr::new(host),
+            )
+        });
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let isolation = Isolation {
             _dedupe: dedupe_lock,
@@ -209,7 +226,7 @@ impl CanaryFixture {
             tmux_session: CANARY_TMUX.into(),
             channel_id: Some(CANARY_CHANNEL),
             owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
-            host: None,
+            host: host.map(str::to_owned),
             expected_native_session_id: None,
             launch_mode: "fresh".into(),
             provider_root: Some(sessions.canonicalize().unwrap()),
@@ -354,6 +371,7 @@ impl CanaryFixture {
             _hosts: hosts,
             _env: env,
             _source_env: source_env,
+            _host_env: host_env,
             _binding_env: binding_env,
             _hosting: hosting,
             _isolation: isolation,

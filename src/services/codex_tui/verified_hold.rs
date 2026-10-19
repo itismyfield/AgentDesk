@@ -6,11 +6,32 @@ use crate::services::{
 };
 use std::{sync::Arc, time::Duration};
 
+#[cfg(test)]
+pub(crate) static HOLD_ENTERED_FOR_TESTS: std::sync::Mutex<
+    Option<std::sync::mpsc::Sender<String>>,
+> = std::sync::Mutex::new(None);
+
 pub(crate) fn existing_incarnation(tmux: &str) -> bool {
     dedupe::codex_verified_requires_proof(tmux) && !dedupe::clear_relaunch::relaunch_open(tmux)
 }
 
+pub(crate) fn existing_incarnation_observed(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+) -> bool {
+    dedupe::clear_relaunch::absent_capture(tmux, observation).is_none()
+        && existing_incarnation(tmux)
+}
+
 pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(sender) = HOLD_ENTERED_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        let _ = sender.send(tmux.to_owned());
+    }
     tracing::info!(
         tmux_session = tmux,
         "Codex verified turn is waiting for admission; preserving its source and pane"

@@ -7,6 +7,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Read, path::PathBuf};
 
+#[path = "absent_open.rs"]
+mod absent_open;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Captured {
     pub seq: u64,
@@ -141,6 +144,38 @@ pub(crate) fn relaunch_open(tmux: &str) -> bool {
 
 pub(crate) fn launch_blocked(tmux: &str) -> bool {
     codex_verified_input_blocked(tmux) && !relaunch_open(tmux)
+}
+
+pub(crate) fn launch_blocked_observed(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+) -> bool {
+    absent_capture(tmux, observation).is_none() && launch_blocked(tmux)
+}
+
+pub(crate) fn absent_capture(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+) -> Option<Captured> {
+    tc::with_tmux_source_authority(tmux, |authority| {
+        absent_open::capture_under(authority, observation)
+    })
+}
+
+pub(crate) fn absent_matches(
+    tmux: &str,
+    observation: &crate::services::discord::codex_absence::InflightObs,
+    captured: &Captured,
+) -> bool {
+    absent_capture(tmux, observation).as_ref() == Some(captured)
+}
+
+pub(super) fn successor_unproved_under(
+    authority: &TmuxSourceAuthority<'_>,
+    nonce: &str,
+    context: &BindingContext,
+) -> bool {
+    absent_open::successor_unproved_under(authority, nonce, context)
 }
 
 pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {

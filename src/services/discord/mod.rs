@@ -10,6 +10,7 @@ pub(crate) mod busy_followup_retry_store;
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
+pub(crate) mod codex_absence;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
@@ -35,9 +36,7 @@ mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
 #[cfg(test)]
-pub(crate) use inflight::read_only_owner_snapshot::{
-    CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
-};
+pub(crate) use inflight::read_only_owner_snapshot::*;
 mod inflight_heartbeat_sweeper;
 mod ingress_shadow;
 pub(crate) mod inject_disposition;
@@ -3491,6 +3490,3 @@ pub(crate) use recovery_engine::{codex_rebind_spawn_for_tests, codex_restart_out
 pub(crate) use tmux::tmux_output_stream::{
     codex_native_read_for_tests, codex_source_witness_present_for_tests,
 };
-
-#[cfg(test)]
-pub(crate) use inflight::read_only_owner_snapshot::save_actual_episode_for_tests;

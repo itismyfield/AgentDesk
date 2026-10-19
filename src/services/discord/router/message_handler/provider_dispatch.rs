@@ -5,6 +5,7 @@ use std::sync::{Arc, mpsc::Sender};
 use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
+use crate::services::discord::codex_absence::InflightObs;
 use crate::services::discord::inflight::{ManagedSubmission, SubmissionFailure};
 use crate::services::discord::replay_policy::permit::EffectTarget;
 use crate::services::discord::router::intake_dispatch::replay_admission::ReplayStart;
@@ -26,6 +27,7 @@ pub(super) struct StreamingTurn<'a> {
     pub system_prompt: Option<&'a str>,
     pub allowed_tools: &'a [String],
     pub cancel: Arc<CancelToken>,
+    pub codex_observation: Option<&'a InflightObs>,
     pub remote_profile: Option<&'a RemoteProfile>,
     pub tmux_session_name: Option<&'a str>,
     /// Host-guard verdict for the turn's tmux teardowns, judged before spawn.
@@ -44,6 +46,20 @@ pub(super) struct StreamingTurn<'a> {
     pub force_fresh: bool,
     /// Pre-payload fence of a managed Claude TUI turn; only the Claude legacy driver reads it.
     pub submission: Option<&'a ManagedSubmission>,
+}
+
+pub(super) async fn observe_codex_turn(
+    provider: &ProviderKind,
+    channel: u64,
+    tmux: Option<&str>,
+    remote: bool,
+    host: &TurnHost,
+    token: &Arc<CancelToken>,
+) -> Option<InflightObs> {
+    if !matches!(provider, ProviderKind::Codex) || remote || !matches!(host, TurnHost::Tmux) {
+        return None;
+    }
+    crate::services::discord::codex_absence::observe_turn(channel, tmux?, token).await
 }
 
 #[cfg(test)]
@@ -234,6 +250,9 @@ pub(super) fn execute(
         }),
         ..turn
     };
+    #[cfg(test)]
+    let _driver_setup =
+        crate::services::discord::codex_absence::test_setup::enter(turn.channel_id, turn.prompt);
     match turn.provider.legacy_streaming_dispatch_kind() {
         LegacyDispatchKind::Claude => claude_tui::guarded_outcome::with_owner(
             turn.submission.map(ManagedSubmission::observer),
@@ -277,24 +296,27 @@ pub(super) fn execute(
                 )
             },
         ),
-        LegacyDispatchKind::Codex => codex::execute_command_streaming(
-            turn.prompt,
-            turn.session_id,
-            turn.working_dir,
-            sender,
-            turn.system_prompt,
-            Some(turn.allowed_tools),
-            Some(turn.cancel),
-            turn.remote_profile,
-            turn.tmux_session_name,
-            turn.teardown,
-            Some(turn.channel_id),
-            Some(turn.provider.clone()),
-            turn.model,
-            turn.native_fast_mode,
-            turn.codex_goals,
-            turn.compact_token_limit,
-            turn.force_fresh,
+        LegacyDispatchKind::Codex => codex::execute_command_streaming_observed(
+            codex::CommandStreamingRequest {
+                prompt: turn.prompt,
+                session_id: turn.session_id,
+                working_dir: turn.working_dir,
+                sender,
+                system_prompt: turn.system_prompt,
+                allowed_tools: Some(turn.allowed_tools),
+                cancel_token: Some(turn.cancel),
+                remote_profile: turn.remote_profile,
+                tmux_session_name: turn.tmux_session_name,
+                teardown: turn.teardown,
+                report_channel_id: Some(turn.channel_id),
+                report_provider: Some(turn.provider.clone()),
+                model: turn.model,
+                fast_mode_enabled: turn.native_fast_mode,
+                goals_enabled: turn.codex_goals,
+                compact_token_limit: turn.compact_token_limit,
+                force_fresh_provider_session: turn.force_fresh,
+            },
+            turn.codex_observation,
         ),
         LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
             turn.prompt,
@@ -721,6 +743,7 @@ pub(super) mod tests {
             system_prompt: Some("role"),
             allowed_tools: &tools,
             cancel: Arc::clone(&cancel),
+            codex_observation: None,
             remote_profile: None,
             tmux_session_name: None,
             teardown: None,
@@ -815,6 +838,7 @@ pub(super) mod tests {
                 system_prompt: None,
                 allowed_tools: &[],
                 cancel: Arc::new(CancelToken::new()),
+                codex_observation: None,
                 remote_profile: None,
                 tmux_session_name: Some("AgentDesk-claude-dash"),
                 teardown: None,

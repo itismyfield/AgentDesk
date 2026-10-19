@@ -48,7 +48,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
 | `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
-| `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
+| `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup/nameless_gate.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
 | `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
@@ -70,7 +70,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs` |  |
 | `AGENTDESK_CODEX_LIVE_BRIDGE_GUARD` | `src/services/discord/live_bridge.rs` |  |
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs` |  |
-| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs` |  |
+| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_SHADOW_TEST_MUTATION` | `src/services/codex_tui/session/source_observation.rs`, `src/services/tui_prompt_dedupe/runtime_binding/codex_hook.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
 | `AGENTDESK_CONFIG` | `src/config.rs`, `src/services/discord/router/intake_dispatch/queued.rs`, `src/services/discord/settings.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/git/repo_resolver.rs`, `src/services/mcp_config.rs` | The on-disk config path the running server loaded from, resolved with the same precedence as [`load`] (`$AGENTDESK_CONFIG` → runtime root → cwd → home). |

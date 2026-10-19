@@ -25,6 +25,9 @@ pub(crate) fn codex_verified_hold_detail(tmux: &str) -> &'static str {
         if context.source_policy.as_deref() != Some("verified") {
             return "source_policy_changed";
         }
+        if clear_relaunch::successor_unproved_under(authority, &nonce, &context) {
+            return "successor_unproved";
+        }
         let fold = match binding_events::codex::read_ownership(&context) {
             Ok(fold) => fold,
             Err(_) => return "ownership_unreadable",

@@ -835,8 +835,14 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
+│   │   ├── actual_submit_tests/
+│   │   │   └── source_io.rs
+│   │   ├── tui_session_launch/
+│   │   │   └── launch_policy.rs
+│   │   ├── absence_launch.rs
 │   │   ├── actual_submit_tests.rs
 │   │   ├── c1_teardown_tests.rs
+│   │   ├── command_streaming.rs
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
@@ -923,11 +929,23 @@ src/
 │   │   │   ├── settled_frontier.rs
 │   │   │   ├── settled_ledger_consult.rs
 │   │   │   └── too_old_drop_pg_tests.rs
+│   │   ├── codex_absence/
+│   │   │   ├── test_setup.rs
+│   │   │   └── tests.rs
 │   │   ├── commands/
 │   │   │   ├── control/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   └── clear_end_record_tests.rs
+│   │   │   │   ├── codex_clear_relaunch_tests/
+│   │   │   │   │   ├── absent_launch_tests/
+│   │   │   │   │   │   ├── auxiliary_tests/
+│   │   │   │   │   │   │   └── policy_tests.rs
+│   │   │   │   │   │   ├── auxiliary_tests.rs
+│   │   │   │   │   │   ├── late_tests.rs
+│   │   │   │   │   │   ├── negative_tests.rs
+│   │   │   │   │   │   └── source_boundary_tests.rs
+│   │   │   │   │   └── absent_launch_tests.rs
 │   │   │   │   ├── clear_count_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
@@ -1530,6 +1548,7 @@ src/
 │   │   │   │   │   │   ├── bridge_tests.rs
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── entrypoints.rs
+│   │   │   │   │   ├── foreign_row_refusal_tests.rs
 │   │   │   │   │   ├── process_mailbox.rs
 │   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
@@ -1549,6 +1568,7 @@ src/
 │   │   │   │   │   ├── dispatch_stamp.rs
 │   │   │   │   │   ├── host_refusal.rs
 │   │   │   │   │   ├── inflight_create_log.rs
+│   │   │   │   │   ├── input_effect_tests.rs
 │   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── native_fresh_prompt_tests.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
@@ -2304,6 +2324,7 @@ src/
 │   │   ├── bot_role.rs
 │   │   ├── busy_followup_retry_store.rs
 │   │   ├── catch_up.rs
+│   │   ├── codex_absence.rs
 │   │   ├── compact_turn_authority.rs
 │   │   ├── completion_footer_metadata.rs
 │   │   ├── delivery_lease_cell.rs
@@ -3033,6 +3054,8 @@ src/
 │   │   │   └── log_record.rs
 │   │   ├── runtime_binding/
 │   │   │   ├── codex_policy/
+│   │   │   │   ├── absent_open.rs
+│   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
 │   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs

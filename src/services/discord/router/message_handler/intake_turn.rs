@@ -31,33 +31,7 @@ mod context;
 pub(in crate::services::discord) use context::IntakeDeps;
 
 #[cfg(test)]
-mod input_effect_tests {
-
-    #[test]
-    fn c1b_off_role_override_keeps_runtime_transition_on_original_provider() {
-        let source = include_str!("intake_turn.rs");
-        let handler_marker = ["\npub(super) async fn handle_", "text_message("].concat();
-        let body = source.split_once(handler_marker.as_str()).unwrap().1;
-        let start = body
-            .find("    let Some((route, bootstrapped_fresh_thread_session))")
-            .unwrap();
-        let end = body[start..]
-            .find("    let (mut session_id, mut memento_context_loaded")
-            .unwrap()
-            + start;
-        let transition = &body[start..end];
-        assert!(
-            !transition.contains("let provider ="),
-            "role override must not shadow the original native-clear provider"
-        );
-        assert!(
-            transition.contains("(http, shared, token, &provider)"),
-            "runtime transition and native-clear admission retain settings.provider"
-        );
-        let runtime = include_str!("intake_turn/runtime_transition.rs");
-        assert!(runtime.contains("&mut t.recovered_fresh"));
-    }
-}
+mod input_effect_tests;
 
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
@@ -2348,6 +2322,15 @@ pub(super) async fn handle_text_message(
             tmux_session_name.as_deref(),
         )
         .await;
+        let codex_observation = super::provider_dispatch::observe_codex_turn(
+            &provider,
+            channel_id.get(),
+            tmux_session_name.as_deref(),
+            remote_profile.is_some(),
+            &turn_host,
+            &cancel_token,
+        )
+        .await;
         tokio::task::spawn_blocking(move || {
             let _original_registration = producer_registration;
             let _upload_lifetime = materialized_uploads;
@@ -2365,6 +2348,7 @@ pub(super) async fn handle_text_message(
                                 system_prompt: Some(&system_prompt_owned),
                                 allowed_tools: &allowed_tools,
                                 cancel: cancel_token_clone,
+                                codex_observation: codex_observation.as_ref(),
                                 remote_profile: remote_profile.as_ref(),
                                 tmux_session_name: tmux_session_name.as_deref(),
                                 teardown: teardown_clearance.as_ref(),
