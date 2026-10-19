@@ -780,8 +780,11 @@ db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_glo
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
 db::prompt_manifests::tests::prompt_manifest_token_estimate_is_chars_div_four
 db::prompt_manifests::tests::prompt_manifest_totals_exclude_disabled_layers
+db::relay_dead_letter::migration_tests::state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg
+db::relay_dead_letter::migration_tests::upgrade_path_preserves_original_migration_checksums_pg
 db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
+db::relay_dead_letter::tests::redelivery_state_check_rejects_unknown_values_pg
 db::replay_disposition::register_tests::register_compares_the_whole_request_identity_pg
 db::replay_disposition::register_tests::register_reports_a_lost_commit_as_unknown_pg
 db::replay_disposition::register_tests::same_key_registrations_serialise_and_reuse_one_receipt_pg
@@ -10444,6 +10447,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::queued_i
 services::discord::turn_presence::activity::unbound::live::owner_tests::start_gate_and_deliver_start_once_beside_unrelated_sessions_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::unrelated_host_sessions_leave_a_session_less_channel_idle_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::unresolved_hold_leaf_is_logged_once_per_transition_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
