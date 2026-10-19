@@ -12,7 +12,7 @@ use crate::services::discord::{self, SharedData, inflight};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::session_host::herdr_socket_rig_tests::{PANE, SHELL};
 
-use super::{HostedState, PathBuf, StreamMessage, json};
+use super::{HostedRecord, HostedState, PathBuf, StreamMessage, json};
 
 const GENERATION: u64 = 9;
 const USER_MSG: u64 = 7_145_000_001;
@@ -176,14 +176,11 @@ impl LiveEnd {
         let before = std::fs::read(&path).unwrap();
         let (shared, provider, channel) = (&self.shared, &self.provider, self.channel);
         let (active, refusal) = self.rt.block_on(async {
-            use crate::services::discord::router::intake_gate::stale_turn::queue_guard_test_api;
+            use crate::services::discord::router::intake_gate::stale_turn::queue_guard_active;
             let refusal =
                 discord::admin_host_guard::turn_release_refusal(shared, provider, channel);
             let refusal = refusal.await;
-            (
-                queue_guard_test_api::active(shared, provider, channel).await,
-                refusal,
-            )
+            (queue_guard_active(shared, provider, channel).await, refusal)
         });
         (active, refusal, std::fs::read(&path).unwrap() == before)
     }
@@ -460,18 +457,13 @@ fn a_live_turn_the_pass_cannot_own_or_read_is_left_as_it_was_pg() {
     use crate::services::agent_protocol::NativeTerminalKind;
     let fx = super::Fixture::new("livekeep", None);
     let nonce = |to: &str| {
-        let set = "UPDATE sessions SET hosted_execution = jsonb_set(jsonb_set(jsonb_set(
-            hosted_execution, '{execution_nonce}', to_jsonb($1::text)),
-            '{source_ref,execution_nonce}', to_jsonb($1::text)),
-            '{expected,binding_nonce}', to_jsonb($1::text)) WHERE channel_id = $2";
-        fx.rt
-            .block_on(
-                sqlx::query(set)
-                    .bind(to)
-                    .bind(super::CHANNEL.to_string())
-                    .execute(&fx.pool),
-            )
-            .unwrap();
+        let HostedRecord::Known(mut record) = fx.record() else {
+            panic!("the stored record")
+        };
+        record.execution_nonce = to.into();
+        record.source_ref.execution_nonce = to.into();
+        record.expected.as_mut().unwrap().binding_nonce = to.into();
+        fx.store(&record);
     };
     let (_, _, seen) = claude_live_turn(&fx, |live, token| {
         live.route();

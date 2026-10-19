@@ -342,16 +342,21 @@ impl Fixture {
     /// `bound()` written to the row, with the pane running its provider.
     fn store_bound(&self) -> HostedRecord {
         let record = self.bound();
+        self.store(&record);
+        self.rig.run_provider(&self.rig.context(NONCE), false);
+        HostedRecord::Known(record)
+    }
+
+    /// `record` written to the row.
+    fn store(&self, record: &HostedExecution) {
         self.rt.block_on(async {
             sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
-                .bind(serde_json::to_value(&record).unwrap())
+                .bind(serde_json::to_value(record).unwrap())
                 .bind(CHANNEL.to_string())
                 .execute(&self.pool)
                 .await
                 .unwrap();
         });
-        self.rig.run_provider(&self.rig.context(NONCE), false);
-        HostedRecord::Known(record)
     }
 
     /// Plays a launched pane's provider once its launch is evidenced, up to its SessionStart

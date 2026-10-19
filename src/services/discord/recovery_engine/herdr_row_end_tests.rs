@@ -332,3 +332,69 @@ fn the_turn_body_is_its_result_or_its_streamed_text() {
         assert_eq!(body.as_ref().map(Option::as_deref), expected, "{case}");
     }
 }
+
+/// Once the writer is gone a final record without its newline counts only when it parses whole,
+/// in a Claude transcript and a Codex rollout alike; no torn tail leaves the source unread.
+#[test]
+fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
+    use crate::services::claude::herdr_turn::{EndedTurn, ended_turn};
+    use serde_json::json;
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let input = chrono::Utc::now();
+    let at = (input + chrono::Duration::seconds(1)).to_rfc3339();
+    let user =
+        json!({"type": "user", "timestamp": at, "message": {"role": "user", "content": "q"}});
+    let text = json!({"type": "assistant", "timestamp": at, "message": {"role": "assistant",
+        "content": [{"type": "text", "text": "부분"}]}});
+    let stop = json!({"type": "assistant", "timestamp": at, "message": {"role": "assistant",
+        "stop_reason": "end_turn", "content": [{"type": "text", "text": "답"}]}});
+    let took = json!({"type": "system", "subtype": "turn_duration", "timestamp": at}).to_string();
+    let started = [
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t1"}}),
+        json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+            "id": "msg_t1", "content": [{"type": "output_text", "text": "부분"}]}}),
+    ];
+    let complete = json!({"type": "event_msg", "payload": {"type": "task_complete",
+        "turn_id": "t1", "last_agent_message": "부분"}})
+    .to_string();
+    let cases = [
+        (
+            "claude torn",
+            vec![user.clone(), text.clone()],
+            &took[..took.len() / 2],
+        ),
+        ("claude whole terminal", vec![user, text, stop], &took[..]),
+        (
+            "codex torn",
+            started.to_vec(),
+            &complete[..complete.len() / 2],
+        ),
+        ("codex whole terminal", started.to_vec(), &complete[..]),
+    ];
+    let actor = Arc::new(crate::services::provider::CancelToken::new());
+    let ended =
+        crate::services::codex_tui::rollout_tail::RolloutRecordDecoder::replay_ended_herdr_turn;
+    let mut read = Vec::new();
+    for (case, lines, tail) in cases {
+        let mut file = tempfile::tempfile_in(dir.path()).unwrap();
+        for line in &lines {
+            writeln!(file, "{line}").unwrap();
+        }
+        write!(file, "{tail}").unwrap();
+        let len = file.metadata().unwrap().len();
+        read.push(match case.starts_with("claude") {
+            true => (case, ended_turn(&mut file, input, len).ok()),
+            false => (case, ended(&mut file, 0, len, &actor)),
+        });
+    }
+    assert_eq!(
+        read,
+        [
+            ("claude torn", Some(EndedTurn::NoTerminal)),
+            ("claude whole terminal", Some(EndedTurn::Terminal)),
+            ("codex torn", Some(EndedTurn::NoTerminal)),
+            ("codex whole terminal", Some(EndedTurn::Terminal)),
+        ]
+    );
+}

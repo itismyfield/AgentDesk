@@ -6060,6 +6060,7 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::the_resta
 services::discord::recovery_engine::herdr_before_start_restart::tests::the_restart_scan_settles_a_marked_receipt_before_the_marker_hold
 services::discord::recovery_engine::herdr_reader::tests::the_restart_pass_reads_nothing_without_a_local_endpoint
 services::discord::recovery_engine::herdr_reader::tests::the_socket_reader_reports_one_servers_reading_of_the_stored_pane
+services::discord::recovery_engine::herdr_row_end::tests::an_ended_sources_torn_tail_counts_only_when_it_parses_whole
 services::discord::recovery_engine::herdr_row_end::tests::boot_restore_leaves_only_a_restarted_herdr_row_to_the_end_pass
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_codex_draft_keeps_a_closed_turn_pg
 services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_live_actor_keeps_an_idle_row_pg
@@ -6911,7 +6912,6 @@ services::discord::router::message_handler::provider_dispatch::codex_herdr_tests
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::changed_or_unkept_launch_options_refuse_the_follow_up_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::followup::o_posts_only_the_rest_of_a_turn_across_a_restart_and_its_restore_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::a_live_codex_turn_ends_once_only_after_its_provider_is_gone_pg
-services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::live_end::an_ended_sources_torn_tail_counts_only_when_it_parses_whole
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::o_posts_a_cold_start_once_across_its_attach_and_a_repeated_start_pg
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::only_the_live_reader_runs_a_late_stop_at_the_turns_own_start
 services::discord::router::message_handler::provider_dispatch::codex_herdr_tests::without_its_own_session_start_the_prompt_stays_held_and_is_never_resent_pg

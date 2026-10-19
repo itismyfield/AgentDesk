@@ -313,19 +313,14 @@ mod host_tests;
 #[path = "stale_turn_witness_tests.rs"]
 mod witness_tests;
 
-/// The QUEUE-GUARD as intake runs it, for tests outside intake.
+/// Whether the QUEUE-GUARD, as intake runs it, reads the channel's turn as active, for tests outside intake.
 #[cfg(test)]
-pub(in crate::services::discord) mod queue_guard_test_api {
-    use super::*;
-
-    /// Whether intake reads the channel's turn as active, after releasing a stale one it may.
-    pub(in crate::services::discord) async fn active(
-        shared: &std::sync::Arc<SharedData>,
-        provider: &ProviderKind,
-        channel: serenity::ChannelId,
-    ) -> bool {
-        mailbox_has_live_active_turn_or_cleanup_stale_proof(shared, provider, channel).await
-    }
+pub(in crate::services::discord) async fn queue_guard_active(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> bool {
+    mailbox_has_live_active_turn_or_cleanup_stale_proof(shared, provider, channel).await
 }
 
 /// The THREAD-GUARD verdict and clean as intake runs them, for tests outside intake.
