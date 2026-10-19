@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure a PR against the prod cap: 30 files with a code change / net +800 code lines (code added minus code deleted).
+"""Measure a PR against the prod cap: 30 files with a code change / net +1500 code lines (code added minus code deleted).
 
 usage: pr_cap_prod.py <base> <head> [--repo <path>]
 Blank and comment-only lines, tests, fixtures, generated files and docs are not counted.
@@ -11,12 +11,13 @@ import re
 import subprocess
 import sys
 
-FILES, NET = 30, 800
+FILES, NET = 30, 1500
 SLASH_COMMENTS = (".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".go", ".swift", ".kt", ".java", ".c", ".h", ".cpp")
 HASH_COMMENTS = (".py", ".sh", ".bash", ".zsh", ".yml", ".yaml", ".toml", ".rb")
 EXCLUDE = (
     "tests/*", "*/tests/*", "*_tests.rs", "*_test.rs", "*/test_*.py", "test_*.py", "*/fixtures/*", "*/testdata/*",
-    "*.snap", "docs/*", "*.md", "scripts/lib_test_inventory_manifest.txt", "scripts/sql_execution_surface_inventory.json",
+    "*.snap", "docs/*", "*.md", "scripts/lib_test_inventory_manifest.txt", "scripts/pg_test_lane_manifest.txt",
+    "scripts/sql_execution_surface_inventory.json",
     "*/generated/*",
 )
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")

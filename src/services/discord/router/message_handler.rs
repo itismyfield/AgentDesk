@@ -328,3 +328,8 @@ pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
 
 mod turn_context;
 use turn_context::TurnContext;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn input_result_for_tests(at: (u64, String)) -> impl Drop {
+    provider_dispatch::tests::set_result(at.0, at.1)
+}

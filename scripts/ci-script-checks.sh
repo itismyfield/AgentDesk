@@ -728,6 +728,7 @@ required_shell_suites=(
   tests/test_deploy_e2e_readers_gate_6577.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
+  tests/test_deploy_rollback_policies_6355.sh
   tests/test_deploy_smoke_scope.sh
   tests/test_deploy_smoke_runner_profile.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
