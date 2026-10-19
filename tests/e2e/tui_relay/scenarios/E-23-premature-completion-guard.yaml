@@ -2,6 +2,7 @@ id: E-23
 title: 본문 전/본문 없는 completion chrome 회귀 가드
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-pipe, claude-tui]
 isolation: required
 acceptance_criteria:
