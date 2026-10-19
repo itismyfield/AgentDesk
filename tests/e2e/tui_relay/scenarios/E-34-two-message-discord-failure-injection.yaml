@@ -2,7 +2,7 @@ id: E-34
 title: two-message recovery converges after injected Discord send and delete failures
 agent_mode: real_live
 coverage_class: live
-# Manual execution specification; not run in CI. Post-deploy subset: README.md.
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 destructive: true

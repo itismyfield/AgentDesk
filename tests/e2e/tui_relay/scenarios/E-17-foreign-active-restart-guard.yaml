@@ -2,7 +2,7 @@ id: E-17
 title: Destructive restart refuses while a foreign mailbox is active
 agent_mode: real_live
 coverage_class: live
-# Manual execution specification; not run in CI. Post-deploy subset: README.md.
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: []  # orchestrator-owned restart-guard scenario (run_multi_provider_matrix.py)
 orchestration: foreign_active_restart_guard
 isolation: required
