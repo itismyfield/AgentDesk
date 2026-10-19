@@ -1,7 +1,7 @@
 //! Scrollback capture and transcript parsing for the idle-recap summarizer.
 //!
 //! Extracted verbatim from the parent `idle_recap` module (#3479): tmux pane
-//! capture, the `claude-e` transcript-tail fallback, JSONL line parsing, and
+//! capture, the former `claude-e` transcript-tail fallback, JSONL line parsing, and
 //! the Claude Haiku summarizer call. Behavior is unchanged — only the module
 //! boundary moved.
 
@@ -47,9 +47,8 @@ pub(crate) async fn capture_tmux_scrollback(session_name: &str) -> Option<String
     .filter(|s| !s.is_empty())
 }
 
-/// Fallback scrollback source for runtimes without a live tmux pane —
-/// notably the `claude-e` per-turn spawn runtime, which never attaches a
-/// long-lived tmux session. Reads the Claude transcript JSONL at
+/// Fallback scrollback source when a session has no live tmux pane.
+/// Reads the Claude transcript JSONL at
 /// `~/.claude/projects/<encoded-cwd>/<session_id>.jsonl`, parses each line,
 /// and emits the last ~`TMUX_SCROLLBACK_LINES` user/assistant text turns in
 /// a `[role] text` shape that the recap summarizer can consume the same

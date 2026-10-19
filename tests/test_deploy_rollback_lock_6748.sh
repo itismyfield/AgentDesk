@@ -37,6 +37,10 @@ for fn in _rollback_release_binary _signal_release_lock_pid _wait_release_stoppe
     bash -n <<<"$body" || { fail "$fn cannot be extracted"; exit 1; }
     eval "$body"
 done
+# The rollback also restores policies through the helper deploy-release.sh sources.
+POLICY_HELPER="$(dirname "$DEPLOY_SH")/_deploy_policy_generation.sh"
+# shellcheck source=/dev/null
+if [ -f "$POLICY_HELPER" ]; then . "$POLICY_HELPER"; fi
 main_stop="$(awk '
     /^echo "▸ Stopping release[.][.][.]"$/ { printing = 1 }
     printing && /^_post_deploy_smoke_log_identity_and_size[(][)] [{]$/ { exit }

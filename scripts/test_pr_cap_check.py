@@ -93,7 +93,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assertEqual(len(self.git(self.repo, "diff", "--numstat", "main", "HEAD").splitlines()), 22)
         result = self.check_cap()
         self.assert_pass(result, "1 files net +1 code")
-        self.assertIn("remaining 29 files/+799", result.stdout)
+        self.assertIn("remaining 29 files/+1499", result.stdout)
         self.assertIn(f"base={fresh}", result.stdout)
         self.assertEqual(self.git(self.repo, "rev-parse", "origin/main"), fresh)
         self.assertEqual(self.git(self.repo, "rev-parse", "main"), self.initial)
@@ -108,18 +108,18 @@ class PrCapCheckTest(unittest.TestCase):
 
     def test_exact_caps_pass(self) -> None:
         for index in range(30):
-            self.add_lines(1 if index else 771, f"file-{index}")
+            self.add_lines(1 if index else 1471, f"file-{index}")
         self.commit()
         result = self.check_cap()
-        self.assert_pass(result, "30 files net +800 code")
+        self.assert_pass(result, "30 files net +1500 code")
         self.assertIn("remaining 0 files/+0", result.stdout)
 
-    def test_801_additions_fail(self) -> None:
-        self.add_lines(801)
+    def test_1501_additions_fail(self) -> None:
+        self.add_lines(1501)
         self.commit()
         result = self.check_cap()
         self.assert_fail(result)
-        self.assertIn("1 files net +801 code", result.stdout)
+        self.assertIn("1 files net +1501 code", result.stdout)
 
     def test_31_files_fail(self) -> None:
         for index in range(31):
@@ -131,10 +131,10 @@ class PrCapCheckTest(unittest.TestCase):
 
     def test_deletions_offset_additions(self) -> None:
         (self.repo / "existing.txt").unlink()
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         result = self.check_cap()
-        self.assert_pass(result, "2 files net -199 code")
+        self.assert_pass(result, "2 files net +501 code")
 
     def test_fetch_failure_cannot_use_existing_local_refs(self) -> None:
         self.git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
@@ -162,7 +162,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assertIn("no usable merge-base", result.stderr)
 
     def test_ambiguous_ref_does_not_select_a_smaller_target(self) -> None:
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.git(self.repo, "tag", "feature", "main")
         self.git(self.repo, "config", "core.warnAmbiguousRefs", "false")
@@ -215,7 +215,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.env.update(PR_CAP_CI="1", GITHUB_EVENT_PATH=str(path))
 
     def test_modes_and_exception(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.assert_fail(self.check_cap())
         self.env["PR_CAP_MODE"] = "report-only"
@@ -233,7 +233,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assert_fail(self.check_cap())
 
     def test_exemption_accepts_crlf_and_cr_body_lines(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         for ending in ("\r\n", "\r"):
             with self.subTest(ending=repr(ending)):
@@ -243,7 +243,7 @@ class PrCapCheckTest(unittest.TestCase):
                 self.assertIn("CAP: EXEMPT (compatibility migration)", result.stdout)
 
     def test_exemption_examples_do_not_authorize_a_violation(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         examples = (
             "```text\nPR-CAP-EXEMPT: example\n```",
@@ -266,7 +266,7 @@ class PrCapCheckTest(unittest.TestCase):
                 self.assertIn("CAP: EXEMPT (reviewed migration)", result.stdout)
 
     def test_lazy_quote_continuation_cannot_authorize_exemption(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.event("> Quoted example\nPR-CAP-EXEMPT: quoted reason")
         result = self.check_cap()
@@ -280,7 +280,7 @@ class PrCapCheckTest(unittest.TestCase):
     def test_multiple_exemptions_error_only_after_measured_violation(self):
         self.event("PR-CAP-EXEMPT: one\nPR-CAP-EXEMPT: two")
         self.assert_pass(self.check_cap(), "0 files net +0 code")
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.event("PR-CAP-EXEMPT: one\nPR-CAP-EXEMPT: two")
         result = self.check_cap()
@@ -289,7 +289,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assertIn("multiple exemption reasons", result.stderr)
 
     def test_advisory_modes_and_exemption_annotate_github_checks(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         summary = self.root / "step-summary.md"
         self.env.update(GITHUB_ACTIONS="true", GITHUB_STEP_SUMMARY=str(summary))
@@ -308,7 +308,7 @@ class PrCapCheckTest(unittest.TestCase):
                 self.assertEqual(summary.read_text(), "Earlier step\n" + status + "\n")
 
     def test_github_annotation_escapes_exemption_and_summary_is_optional(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.env["GITHUB_ACTIONS"] = "true"
         self.env.pop("GITHUB_STEP_SUMMARY", None)
@@ -339,7 +339,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assertFalse(summary.exists())
 
     def test_report_only_and_exemption_cannot_hide_errors(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         self.event("PR-CAP-EXEMPT: migration")
         self.env["PR_CAP_MODE"] = "report-only"
@@ -347,7 +347,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assert_fail(self.check_cap())
 
     def test_ci_declared_stack_base_and_event_head(self):
-        self.add_lines(801)
+        self.add_lines(1501)
         self.commit()
         parent = self.git(self.repo, "rev-parse", "HEAD")
         self.add_lines(1, "child")
@@ -377,7 +377,7 @@ class PrCapCheckTest(unittest.TestCase):
         self.assertNotIn("cannot fetch", result.stderr)
 
     def test_exclusions_comments_and_inline_tests(self):
-        for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py"):
+        for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py", "scripts/pg_test_lane_manifest.txt"):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("test\n" * 900)
@@ -387,7 +387,7 @@ class PrCapCheckTest(unittest.TestCase):
 
     def test_canonical_snapshot(self):
         digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
-        self.assertEqual(digest, "3a64a9eb82a7ceef9a243aa71181610b0ba831ad488006389e0839fbe9b3af76")
+        self.assertEqual(digest, "8ecaf5d34d6f4b6045052e1aabcc69edcc26bd678c795f0640ed38da13157c1d")
 
 if __name__ == "__main__":
     unittest.main()
