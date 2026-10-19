@@ -155,6 +155,10 @@ impl OwnerInputs {
         owners
     }
 
+    pub(super) fn local_conflict(&self, name: &str) -> bool {
+        self.evidence.local_conflict(name)
+    }
+
     pub(super) fn with_current<R>(&self, publish: impl FnOnce() -> R) -> Result<R, &'static str> {
         let shared = self.shared.upgrade().ok_or("membership")?;
         if !self.membership.current_registry(&shared) {

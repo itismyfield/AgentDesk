@@ -13,10 +13,19 @@ impl Stamp {
                 return None;
             }
         }
+        #[cfg(test)]
+        crate::services::discord::queue_dispatch::kickoff::owner_race_pause(
+            self.channel,
+            "activity_before_final_publication",
+        )
+        .await;
         self.publish_checked(watch, publish)
     }
 
     fn publish_checked<R>(&self, watch: &Mutex<Watch>, publish: impl FnOnce() -> R) -> Option<R> {
+        if self.superseded {
+            return None;
+        }
         if crate::config::runtime_root() != self.runtime_root {
             return None;
         }

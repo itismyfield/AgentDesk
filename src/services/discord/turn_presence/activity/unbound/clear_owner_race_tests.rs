@@ -8,6 +8,9 @@ use crate::services::discord::router::message_handler::{
 };
 use std::sync::mpsc;
 
+#[path = "midread_owner_tests.rs"]
+mod midread_owner_tests;
+
 const DRAIN_LIMIT: Duration = Duration::from_secs(3 * 6);
 
 struct ProviderGuard(Arc<AtomicUsize>);
@@ -63,10 +66,12 @@ impl ProviderTurn {
         }
     }
     async fn wait(&mut self, fixture: &Fixture, expected: u64) -> u64 {
-        let thread = tokio::time::timeout(DRAIN_LIMIT, &mut self.entered)
-            .await
-            .unwrap()
-            .unwrap();
+        let entry = tokio::time::timeout(DRAIN_LIMIT, &mut self.entered).await;
+        assert!(
+            matches!(&entry, Ok(Ok(_))),
+            "queued FIFO source {expected} must enter provider within {DRAIN_LIMIT:?}: {entry:?}"
+        );
+        let thread = entry.unwrap().unwrap();
         assert_ne!(thread, std::thread::current().id());
         assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
         let row =
@@ -514,6 +519,32 @@ async fn a2_relaunch_open_canary_foreign_self_holds_dequeue_with_watcher_reason_
     )) {
         return;
     }
+    canary_conflict_holds(false, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_local_foreign_owner_cannot_hide_runtime_self_claim_at_canary_dequeue_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a2_local_foreign_owner_cannot_hide_runtime_self_claim_at_canary_dequeue_pg"
+    )) {
+        return;
+    }
+    canary_conflict_holds(true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a2_conflicting_foreign_runtime_owners_hold_canary_dequeue_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a2_conflicting_foreign_runtime_owners_hold_canary_dequeue_pg"
+    )) {
+        return;
+    }
+    canary_conflict_holds(true, false).await;
+}
+
+async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool) {
     use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
     use crate::services::tui_prompt_dedupe::{
         binding_context::PreparedIncarnation, binding_events::codex, clear_relaunch,
@@ -528,10 +559,24 @@ async fn a2_relaunch_open_canary_foreign_self_holds_dequeue_with_watcher_reason_
         .unwrap();
     let fixture = Fixture::connect_and_migrate_fixture(CANARY_CHANNEL, ProviderKind::Codex).await;
     fixture.produce_owners();
-    for runtime in &fixture.foreign {
-        runtime
-            .tmux_watchers
-            .restore_owner_channel_for_tmux_session(&fixture.foreign_name, fixture.rig.channel);
+    if foreign_self {
+        for runtime in &fixture.foreign {
+            runtime
+                .tmux_watchers
+                .restore_owner_channel_for_tmux_session(&fixture.foreign_name, fixture.rig.channel);
+        }
+    }
+    if local_conflict {
+        assert!(
+            fixture
+                .rig
+                .shared
+                .tmux_watchers
+                .restore_owner_channel_for_tmux_session(
+                    &fixture.foreign_name,
+                    ChannelId::new(fixture.foreign_channel.get() + 1),
+                )
+        );
     }
     let digest = format!("sha256:{}", "0".repeat(64));
     let prepared = PreparedIncarnation::prepare_pinned(

@@ -17,6 +17,60 @@ const UNKNOWN: Observed = Observed {
     reason: "facts_halted",
 };
 
+pub(in crate::services::discord) struct LiveSupervisor {
+    inner: Supervisor<LiveEffects>,
+    provider: ProviderKind,
+    channel: u64,
+}
+
+impl LiveSupervisor {
+    pub(in crate::services::discord) fn new(
+        shared: Arc<SharedData>,
+        provider: ProviderKind,
+        channel: u64,
+    ) -> Self {
+        register(&provider, &[channel]);
+        let mut inner = Supervisor::new(Arc::new(LiveEffects {
+            shared,
+            provider: provider.clone(),
+        }));
+        inner.presence(channel);
+        Self {
+            inner,
+            provider,
+            channel,
+        }
+    }
+
+    pub(in crate::services::discord) async fn tick(&self) {
+        self.inner.tick(Instant::now()).await;
+    }
+
+    pub(in crate::services::discord) fn state(&self) -> serde_json::Value {
+        lock(&self.inner.channels[&self.channel]).json()
+    }
+}
+
+impl Drop for LiveSupervisor {
+    fn drop(&mut self) {
+        let mut registered = lock(&REGISTERED);
+        if let Some(channels) = registered.get_mut(self.provider.as_str()) {
+            channels.remove(&self.channel);
+            if channels.is_empty() {
+                registered.remove(self.provider.as_str());
+            }
+        }
+        drop(registered);
+        let mut presence = lock(&PRESENCE);
+        if presence
+            .get(&self.channel)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.inner.channels[&self.channel]))
+        {
+            presence.remove(&self.channel);
+        }
+    }
+}
+
 /// Scripted reads and recorded sends, timed from the test's start on tokio's paused clock.
 struct Fake {
     start: Instant,

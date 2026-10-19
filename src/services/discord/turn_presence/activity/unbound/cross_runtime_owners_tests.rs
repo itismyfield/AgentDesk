@@ -65,7 +65,7 @@ fn cross_runtime_watcher_agreement_preserves_local_and_self_claims() {
             &[TARGET],
             Err("receipt read failed".into())
         )),
-        Some(FOREIGN)
+        Some(TARGET)
     );
     assert_eq!(
         owner(&evidence(
@@ -81,6 +81,35 @@ fn cross_runtime_watcher_agreement_preserves_local_and_self_claims() {
             &[TARGET],
             Err("receipt read failed".into())
         )),
+        Some(TARGET)
+    );
+}
+
+#[test]
+fn cross_runtime_local_foreign_owner_conflicts_with_another_foreign_claim() {
+    assert_eq!(
+        owner(&evidence(Some(FOREIGN), &[FOREIGN + 1], Ok(vec![]))),
+        None,
+        "contradictory runtime owners cannot prove a foreign owner"
+    );
+    assert_eq!(
+        owner(&evidence(
+            Some(FOREIGN),
+            &[FOREIGN],
+            Ok(vec![receipt("key-a", &[FOREIGN + 1])])
+        )),
+        None
+    );
+    assert_eq!(
+        owner(&evidence(
+            Some(FOREIGN),
+            &[FOREIGN],
+            Err("receipt read failed".into())
+        )),
+        Some(FOREIGN)
+    );
+    assert_eq!(
+        owner(&evidence(Some(TARGET), &[FOREIGN], Ok(vec![]))),
         Some(TARGET)
     );
 }
@@ -122,7 +151,7 @@ fn cross_runtime_receipt_distinct_keys_and_invalid_history_cannot_fill_foreign_o
             &[],
             Ok(vec![receipt("key-self", &[TARGET])])
         )),
-        Some(FOREIGN)
+        Some(TARGET)
     );
 }
 

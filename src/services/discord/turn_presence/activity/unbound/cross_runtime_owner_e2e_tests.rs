@@ -192,6 +192,7 @@ impl Fixture {
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let env = vec![
             set("AGENTDESK_CONFIG", &config_path),
+            set("TMPDIR", root),
             set("CODEX_HOME", &codex_home),
             set("CLAUDE_CONFIG_DIR", &claude_home),
             set("AGENTDESK_CLAUDE_PATH", &root.join("provider-must-not-run")),

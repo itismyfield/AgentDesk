@@ -818,6 +818,7 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_presence::activity::tests::s1_actual_tail_initial_resume_and_poll_have_bounded_hash_free_reads
   services::discord::turn_presence::activity::tests::s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await
   services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
+  services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_local_foreign_owner_conflicts_with_another_foreign_claim
   services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_receipt_distinct_keys_and_invalid_history_cannot_fill_foreign_owner
   services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_watcher_agreement_preserves_local_and_self_claims
   services::discord::turn_presence::activity::unbound::cross_runtime_owners::tests::cross_runtime_watcher_receipt_agreement_checks_all_historical_channels

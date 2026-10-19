@@ -1,4 +1,4 @@
-//! Registry and exact receipt observations only fill an otherwise unowned session name.
+//! Exact owner evidence fills empty slots and prevents conflicting claims from proving absence.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -87,23 +87,48 @@ impl OwnerEvidence {
             .local
             .iter()
             .map(|(name, local)| {
-                let owner = local.or_else(|| self.foreign_owner(name, target));
+                let owner = if self.self_claim(name, target) {
+                    Some(target)
+                } else if self.local_conflict(name) {
+                    None
+                } else {
+                    local.or_else(|| self.foreign_owner(name, target))
+                };
                 (name.clone(), owner)
             })
             .collect()
     }
 
-    fn foreign_owner(&self, name: &str, target: u64) -> Option<u64> {
-        let claims = self.watchers.claims(name);
-        // Every source's self claim uses the existing watcher-unbound reason, including canaries.
-        if claims.contains(&target)
+    fn self_claim(&self, name: &str, target: u64) -> bool {
+        self.watchers.local.get(name) == Some(&Some(target))
+            || self.watchers.claims(name).contains(&target)
             || self
                 .routines
                 .as_ref()
                 .is_ok_and(|proof| proof.self_claim(name, target))
-        {
+    }
+
+    pub(super) fn local_conflict(&self, name: &str) -> bool {
+        let Some(local) = self.watchers.local.get(name).copied().flatten() else {
+            return false;
+        };
+        self.watchers
+            .claims(name)
+            .iter()
+            .any(|claim| *claim != local)
+            || self.routines.as_ref().is_ok_and(|proof| {
+                proof
+                    .for_name(name)
+                    .any(|key| key.channels().iter().any(|claim| *claim != local))
+            })
+    }
+
+    fn foreign_owner(&self, name: &str, target: u64) -> Option<u64> {
+        // A self claim retains the existing nonexempt watcher-unbound result.
+        if self.self_claim(name, target) {
             return Some(target);
         }
+        let claims = self.watchers.claims(name);
         let routines = self.routines.as_ref().ok()?;
         let mut recorded = routines
             .for_name(name)

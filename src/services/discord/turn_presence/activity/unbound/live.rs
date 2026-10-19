@@ -443,12 +443,24 @@ impl Snapshot {
     }
     fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
         let candidates = self.files.candidates.clone();
-        let verdict = decide_unbound(
-            candidates,
-            self.scope(shared),
-            inventory,
-            &self.effective_owners(),
-        );
+        let conflict = match inventory {
+            Inventory::Sessions(names) => self
+                .ownership
+                .as_ref()
+                .is_some_and(|owners| names.iter().any(|name| owners.local_conflict(name))),
+            Inventory::Empty(_) | Inventory::ProbeFailed(_) => false,
+        };
+        let verdict = if conflict {
+            // Conflicting exact claims keep the existing watcher Hold for every consumer.
+            Verdict::Hold("watcher_unbound")
+        } else {
+            decide_unbound(
+                candidates,
+                self.scope(shared),
+                inventory,
+                &self.effective_owners(),
+            )
+        };
         if matches!(verdict, Verdict::Absent(_))
             && self.files.recovered.is_some()
             && !self.ownership.as_ref().is_some_and(|owners| {
@@ -642,6 +654,7 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     revision: u64,
     snapshot: Option<Snapshot>,
     namespace: Option<Observation>,
+    superseded: bool,
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
@@ -679,6 +692,9 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let result = collect(shared, provider, channel, ports).await;
+    let superseded = result
+        .as_ref()
+        .is_err_and(|error| ownership::superseded_error(error));
     let (mut answer, snapshot, namespace, hold) = match result {
         Ok((answer, snapshot, namespace, hold)) => (answer, Some(snapshot), Some(namespace), hold),
         Err(error) => (
@@ -705,6 +721,7 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
         revision,
         snapshot,
         namespace,
+        superseded,
     };
     if stamp.publish(&watch, || ()).await.is_none() {
         answer = observed(Activity::Unknown, "superseded");
