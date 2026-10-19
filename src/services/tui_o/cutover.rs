@@ -112,6 +112,36 @@ pub(crate) fn turn_selected(channel: u64) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| s.turn().selects(channel)))
 }
 
+/// Fresh local Codex admission precedes provider effects; delegated hosts keep their own fences.
+pub(crate) fn mark_codex_turn_admitted(
+    channel: u64,
+    provider: &crate::services::provider::ProviderKind,
+    provider_session_id: Option<&str>,
+) {
+    use super::writer::binding::{BindingEvents, ChannelBindingLog};
+    if !writer_enabled()
+        || *provider != crate::services::provider::ProviderKind::Codex
+        || provider_session_id.is_some()
+        || delegated(channel).is_some()
+    {
+        return;
+    }
+    test_override::with_channels(|snapshot| {
+        let Some(snapshot) = snapshot.filter(|s| {
+            s.site() == &Site::Home && s.kind(channel) == Some(RuntimeHandoffKind::CodexTui)
+        }) else {
+            return;
+        };
+        if let Some(candidate) = snapshot.candidate(channel) {
+            candidate.mark_turn_admitted(channel, || {
+                ChannelBindingLog::new(channel, super::shadow::ShadowProvider::Codex)
+                    .binding_events_since(channel, 0)
+                    .map(|events| events.last().map_or(0, |event| event.seq))
+            });
+        }
+    });
+}
+
 /// A reserved delegated host still needs Legacy to execute its first input and bind a source.
 fn late_legacy_input(provider: &str, channel: u64) -> bool {
     let kind = match provider.trim().to_ascii_lowercase().as_str() {

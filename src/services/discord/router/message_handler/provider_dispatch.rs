@@ -59,6 +59,11 @@ pub(in crate::services::discord) static INPUT_EFFECT_PROBE: std::sync::Mutex<
     Option<InputEffectProbe>,
 > = std::sync::Mutex::new(None);
 #[cfg(test)]
+pub(super) type InputEffectObserver = Box<dyn FnOnce(String) + Send>;
+#[cfg(test)]
+pub(super) static INPUT_EFFECT_OBSERVER: std::sync::Mutex<Option<(u64, InputEffectObserver)>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
 pub(super) struct SubmittedPrompt {
     pub prompt: String,
     pub system_prompt: Option<String>,
@@ -84,6 +89,20 @@ fn input_effect_probe(
             None
         }
     }?;
+    let observer = {
+        let mut slot = INPUT_EFFECT_OBSERVER.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|(channel, _)| *channel == turn.channel_id)
+        {
+            slot.take().map(|(_, observer)| observer)
+        } else {
+            None
+        }
+    };
+    if let Some(observer) = observer {
+        observer(turn.provider.as_str().to_owned());
+    }
     let _ = probe.entered.send(std::thread::current().id());
     let terminal = || {
         sender
