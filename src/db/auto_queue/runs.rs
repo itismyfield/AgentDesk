@@ -457,6 +457,10 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
     .map_err(|error| format!("complete auto-queue run {run_id}: {error}"))?
     .rows_affected();
     if updated == 0 {
+        // Diagnosis re-reads later snapshots, not the UPDATE's; it only labels the
+        // refusal, in the same priority order as the readiness checks above.
+        let gate_blocks =
+            super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await?;
         let in_grace = sqlx::query_scalar::<_, bool>(
             "SELECT COALESCE(phase_gate_grace_until > NOW(), false)
              FROM auto_queue_runs WHERE id = $1",
@@ -466,10 +470,10 @@ pub(crate) async fn finalize_run_if_ready_on_pg_tx(
         .await
         .map_err(|error| format!("reload auto-queue grace window for {run_id}: {error}"))?
         .unwrap_or(false);
-        let reason = if in_grace {
-            Reason::PhaseGateGraceWindow
-        } else if super::phase_gates::run_has_blocking_phase_gate_on_pg_tx(tx, run_id).await? {
+        let reason = if gate_blocks {
             Reason::BlockingPhaseGate
+        } else if in_grace {
+            Reason::PhaseGateGraceWindow
         } else {
             let entries = run_entry_readiness_on_pg_tx(tx, run_id).await?;
             if entries.user_cancelled > 0 {
