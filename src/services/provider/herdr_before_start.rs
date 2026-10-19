@@ -30,7 +30,7 @@ pub(crate) struct HerdrInputState {
     pub(crate) execution: Option<String>,
     /// The executor returned an error: no reader is left to read this turn's terminal.
     pub(crate) failed: bool,
-    /// The row pass logged once that the execution ended before its source was known.
+    /// The row pass logged once that the execution ended while its source read nothing.
     pub(crate) source_unknown_logged: bool,
 }
 

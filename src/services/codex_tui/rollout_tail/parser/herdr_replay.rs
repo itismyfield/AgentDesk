@@ -1,4 +1,4 @@
-//! Bridge admission and the row pass re-read a Herdr Codex turn with the tail's own record acceptance.
+//! Bridge admission and the row pass re-read a Herdr Codex turn under the tail's acceptance.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;

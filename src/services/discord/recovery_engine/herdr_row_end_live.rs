@@ -25,26 +25,18 @@ pub(super) fn live_target(
     herdr_turn(&logical, nonce).filter(|state| state.owner.logical_key == logical)
 }
 
-/// The channel's transition is held from the read through the settlement.
+/// The captured actor's turn ends only once its pinned execution reads as ended (E) and its own
+/// source, read after E, shows no terminal of it. The channel's transition is held throughout.
 pub(super) async fn end_live(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
-    picked: inflight::InflightTurnState,
-) {
-    let channel = ChannelId::new(picked.channel_id);
-    if let Ok(transition) = shared.session_transition_lock(channel).try_lock_owned() {
-        settle(shared, provider, &picked).await;
-        drop(transition);
-    }
-}
-
-/// The captured actor's turn ends only once its pinned execution reads as ended (E) and its own
-/// source, read after E, shows no terminal of it.
-async fn settle(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    picked: &InflightTurnState,
+    picked: InflightTurnState,
 ) -> Option<()> {
+    let channel = ChannelId::new(picked.channel_id);
+    let _transition = shared
+        .session_transition_lock(channel)
+        .try_lock_owned()
+        .ok()?;
     let fresh = inflight::load_inflight_state_read_only(provider, picked.channel_id);
     let same = |row: &InflightTurnState| {
         row.turn_nonce == picked.turn_nonce && row.save_generation == picked.save_generation
@@ -52,16 +44,13 @@ async fn settle(
     let row = fresh.filter(same)?;
     let state = live_target(provider, &row, shared.restart.current_generation)?;
     // Only the mailbox actor holding this very state is settled here.
-    let channel = ChannelId::new(row.channel_id);
     let turn = capture_turn(shared, provider, channel).await.ok()??;
     let own = turn.token.herdr_interrupt_state();
     own.filter(|own| Arc::ptr_eq(own, &state))?;
     let pin = |input: &HerdrInputState| input.execution.clone();
     let nonce = pin(&state.submission.lock().unwrap_or_else(|e| e.into_inner()))?;
-    let (pool, http) = (
-        shared.pg_pool.as_ref()?,
-        shared.serenity_http_or_token_fallback()?,
-    );
+    let pool = shared.pg_pool.as_ref()?;
+    let http = shared.serenity_http_or_token_fallback()?;
     let read = || read_ended(provider, &state, &turn.token);
     let early = mutant("prb-read-before-end").then(read);
     let retire = execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
@@ -75,13 +64,13 @@ async fn settle(
         Some(false) => {}
         // Its own terminal is the reader's to admit: the native settlement owns the turn.
         Some(true) => return None,
-        None => return source_unread(&row, &state, &turn.token),
+        None => return source_unread(&state, &turn.token),
     }
     if let Some((observation, record)) = &retire {
-        retire_confirmed(pool, observation, record)
-            .await
+        let retired = retire_confirmed(pool, observation, record).await;
+        retired
             .ok()
-            .or_else(|| keep(&row, "retire"))?;
+            .or_else(|| keep(&row, "the ended execution's retire did not land"))?;
     }
     if release_hold(&nonce) != HoldRelease::Released {
         return keep(&row, "retired, hold release incomplete");
@@ -153,16 +142,14 @@ fn read_ended(
     Some(read? == EndedTurn::Terminal)
 }
 
-/// An ended Codex execution whose source never published is logged once per turn.
-fn source_unread(
-    row: &InflightTurnState,
-    state: &HerdrInterruptState,
-    token: &CancelToken,
-) -> Option<()> {
+/// The first unread source after E is logged; a Codex one never published names that.
+fn source_unread(state: &HerdrInterruptState, token: &CancelToken) -> Option<()> {
     let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-    let first = !std::mem::replace(&mut input.source_unknown_logged, true);
-    if state.turn_start.get().is_none() && first {
-        let reason = "execution_ended_source_unknown";
+    if !std::mem::replace(&mut input.source_unknown_logged, true) {
+        let reason = match state.turn_start.get() {
+            None => "execution_ended_source_unknown",
+            Some(_) => "execution_ended_source_unread",
+        };
         let (logical, nonce) = (&state.owner.logical_key, token.turn_nonce());
         tracing::info!(
             event = "herdr_turn_held",
@@ -172,6 +159,5 @@ fn source_unread(
             "Herdr turn remains held"
         );
     }
-    drop(input);
-    keep(row, "the ended turn's own source is unread")
+    None
 }
