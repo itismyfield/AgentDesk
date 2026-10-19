@@ -18,9 +18,7 @@ const GRACE_SECS: i64 = stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn redrive_entrypoint_counts_a_durable_zero_frontier_refusal_5986() {
-    let _env_lock = crate::config::shared_test_env_lock()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let tmp = tempfile::tempdir().expect("temp runtime root");
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
