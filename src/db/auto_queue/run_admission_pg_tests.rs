@@ -472,7 +472,7 @@ async fn gate_save_waiting_on_phase_key_holds_no_run_row_lock_pg() {
     pg_db.drop().await;
 }
 
-fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
+pub(super) fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
@@ -480,7 +480,7 @@ fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
         .expect("create policy engine")
 }
 
-fn begin_grace(
+pub(super) fn begin_grace(
     engine: &crate::engine::PolicyEngine,
     run_id: &'static str,
 ) -> tokio::task::JoinHandle<String> {

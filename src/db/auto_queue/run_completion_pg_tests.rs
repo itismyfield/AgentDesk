@@ -284,6 +284,53 @@ async fn grace_opened_after_readiness_read_blocks_completion_pg() {
     pg_db.drop().await;
 }
 
+// The policy grace writer commits on the run row after the finalizer read it; the final
+// UPDATE re-reads grace and refuses, and completion follows once the window lapses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grace_writer_committed_after_grace_read_blocks_completion_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db).await;
+    seed_entry(&pool, "entry-done", "failed").await;
+    let engine = super::run_admission_pg_tests::policy_engine(&pool);
+    let (completion, resume) = paused_completion(&pool, "grace_read").await;
+    let opened = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        super::run_admission_pg_tests::begin_grace(&engine, "run-1"),
+    )
+    .await
+    .expect("grace writer commits while the finalizer is paused")
+    .expect("join grace writer");
+    assert_eq!(opened, "true");
+    let graced: bool = sqlx::query_scalar(
+        "SELECT phase_gate_grace_until > NOW() FROM auto_queue_runs WHERE id = 'run-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read grace window");
+    assert!(graced, "grace writer left no open window");
+    assert_completion_blocked(
+        &pool,
+        completion,
+        resume,
+        RunCompletionBlockedReason::PhaseGateGraceWindow,
+    )
+    .await;
+
+    set_grace(&pool, -1.0).await;
+    assert_eq!(
+        finalize_run_if_ready_pg(&pool, "run-1")
+            .await
+            .expect("completion after grace lapses"),
+        RunCompletionOutcome::Completed
+    );
+    assert_eq!(run_status(&pool, "run-1").await, "completed");
+    assert_eq!(slot_run(&pool).await, None);
+    assert_eq!(outbox_count(&pool).await, 1);
+    // Like the other policy-engine PG tests, drop the database without closing the pool.
+    drop(engine);
+    pg_db.drop().await;
+}
+
 /// Let a completion paused at `point` finish once `writer` waits on the run token.
 async fn completion_after_writer_waits<T>(
     pool: &PgPool,

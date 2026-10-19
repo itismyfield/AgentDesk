@@ -426,3 +426,36 @@ async fn empty_order_completes_run_and_records_rationale_pg() {
     pool.close().await;
     pg_db.drop().await;
 }
+
+/// Contract: restore takes the run token before it writes the run row, so while another
+/// transaction holds the token the waiting restore leaves the row unlocked, then finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restore_waits_on_the_run_token_before_locking_the_run_row_pg() {
+    let pg_db = TestPostgresDb::create().await;
+    let pool = setup_pool(&pg_db, "cancelled").await;
+    seed_entry(&pool, "entry-1", "skipped").await;
+    let app = test_router(pool.clone());
+    let mut token_holder = pool.begin().await.expect("begin token holder");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('aq_run:' || 'run-1'))")
+        .execute(&mut *token_holder)
+        .await
+        .expect("hold run token");
+    let restore = spawn_request(&app, Method::POST, "/queue/runs/run-1/restore", json!({}));
+    assert!(wait_for_lock_waiter(&pool, &restore).await);
+
+    let mut probe = pool.begin().await.expect("begin row probe");
+    let row_free =
+        sqlx::query("SELECT id FROM auto_queue_runs WHERE id = 'run-1' FOR UPDATE NOWAIT")
+            .execute(&mut *probe)
+            .await;
+    probe.rollback().await.expect("release row probe");
+    token_holder.rollback().await.expect("release run token");
+    let (status, body) = join(restore).await;
+
+    row_free.expect("waiting restore must not hold the run row");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(run_status(&pool).await, "active");
+    assert_eq!(live_entries(&pool).await, 1);
+    pool.close().await;
+    pg_db.drop().await;
+}
