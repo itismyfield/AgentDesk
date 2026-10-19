@@ -1,5 +1,6 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
 use super::*;
+use crate::services::discord::adk_session::build_namespaced_session_key;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
 
 mod process_mailbox;
@@ -151,10 +152,9 @@ async fn start_reserved_headless_turn_admitted(
             early_stale_session_id,
         )
         .await;
-        return Ok(HeadlessTurnStartOutcome {
-            turn_id: reservation.turn_id(channel_id),
-            status: HeadlessTurnStartStatus::Consumed,
-        });
+        return Ok(HeadlessTurnStartOutcome::consumed(
+            reservation.turn_id(channel_id),
+        ));
     }
     let identity = (
         provider.clone(),
@@ -454,10 +454,9 @@ async fn start_reserved_headless_turn_admitted(
         )
         .await;
         unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
-        return Ok(HeadlessTurnStartOutcome {
-            turn_id: reservation.turn_id(channel_id),
-            status: HeadlessTurnStartStatus::Consumed,
-        });
+        return Ok(HeadlessTurnStartOutcome::consumed(
+            reservation.turn_id(channel_id),
+        ));
     }
     let session_retry_context = take_session_retry_context(shared, channel_id, Some(&turn_id));
     let retry_context = session_retry_context.as_ref();
@@ -841,6 +840,9 @@ async fn start_reserved_headless_turn_admitted(
             prelaunch_runtime_kind,
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
+    let receipt = watcher_tmux_name
+        .as_deref()
+        .map(|name| build_namespaced_session_key(&shared.token_hash, &provider, name));
     let watcher_output_path = prelaunch_watcher_output_path(
         inflight_tmux_name.as_deref(),
         inflight_output_path.as_deref(),
@@ -1129,10 +1131,7 @@ async fn start_reserved_headless_turn_admitted(
         },
     );
 
-    Ok(HeadlessTurnStartOutcome {
-        turn_id: reservation.turn_id(channel_id),
-        status: HeadlessTurnStartStatus::Started,
-    })
+    Ok(HeadlessTurnStartOutcome::started(turn_id, receipt))
 }
 
 #[cfg(test)]
@@ -1306,7 +1305,7 @@ mod recovery_context_take_order_tests {
             .find("tokio::task::spawn_blocking")
             .expect("headless provider spawn boundary exists");
         let started_return = module_src[spawn_pos..]
-            .find("status: HeadlessTurnStartStatus::Started")
+            .find("Ok(HeadlessTurnStartOutcome::started(")
             .map(|offset| spawn_pos + offset)
             .expect("headless Started return exists after provider spawn");
         let post_spawn = &module_src[spawn_pos..started_return];
@@ -1326,7 +1325,7 @@ mod recovery_context_take_order_tests {
             .expect("headless lifecycle command branch exists");
         let consumed_return_pos = lifecycle_pos
             + module_src[lifecycle_pos..]
-                .find("status: HeadlessTurnStartStatus::Consumed")
+                .find("return Ok(HeadlessTurnStartOutcome::consumed(")
                 .expect("headless lifecycle consumed return exists");
         let take_call = recovery_context_take_call();
         let take_pos = module_src

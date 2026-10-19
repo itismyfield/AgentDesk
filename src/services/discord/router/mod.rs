@@ -30,8 +30,7 @@ pub(super) use intake_gate::{handle_event, should_process_turn_message};
 pub(super) use message_handler::set_hosted_tui_promote_busy_for_tests;
 pub(super) use message_handler::{
     IntakeDeps, defer_promoted_dispatch_if_hosted_tui_busy, hosted_tui_promote_readiness_blocked,
-    mailbox_try_start_turn_with_terminal_marker_cleanup, start_headless_turn,
-    start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
+    start_headless_turn, start_reserved_headless_turn, start_reserved_headless_turn_with_owner,
 };
 pub(crate) use message_handler::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
 pub(in crate::services::discord) use queue_status_presentation::queue_status_card_enabled;
@@ -40,7 +39,6 @@ pub(super) use turn_start::claim_reserved_headless_turn;
 pub(super) use turn_start::reserve_headless_turn;
 pub(crate) use turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
-    HeadlessTurnStartStatus,
 };
 #[cfg(test)]
 pub(crate) use turn_start::{

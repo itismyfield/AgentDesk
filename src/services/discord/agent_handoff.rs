@@ -1031,10 +1031,10 @@ mod tests {
         let target = sample_target();
         let response = map_turn_start_result(
             &target,
-            Ok(HeadlessTurnStartOutcome {
-                turn_id: "discord:111:222".to_string(),
-                status: super::super::router::HeadlessTurnStartStatus::Started,
-            }),
+            Ok(HeadlessTurnStartOutcome::started(
+                "discord:111:222".into(),
+                None,
+            )),
         )
         .expect("started outcome maps to response");
         let value = response.to_value();
