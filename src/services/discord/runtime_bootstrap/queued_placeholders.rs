@@ -214,6 +214,56 @@ pub(in crate::services::discord) async fn collect_live_queue_message_ids(
     by_channel
 }
 
+/// Queued ids of every channel whose actor answered, and the channels whose actor never did.
+pub(in crate::services::discord) struct LiveQueueObservation {
+    pub(in crate::services::discord) ids:
+        std::collections::HashMap<ChannelId, std::collections::HashSet<u64>>,
+    /// Unmeasured, not empty: restore keeps their cards instead of judging them stale.
+    pub(in crate::services::discord) unmeasured: std::collections::HashSet<ChannelId>,
+}
+
+/// Like `collect_live_queue_message_ids`, but a closed actor or a dropped reply is reported
+/// as unmeasured rather than read as an empty queue.
+pub(in crate::services::discord) async fn observe_live_queue_message_ids(
+    shared: &SharedData,
+) -> LiveQueueObservation {
+    let mut observation = LiveQueueObservation {
+        ids: std::collections::HashMap::new(),
+        unmeasured: std::collections::HashSet::new(),
+    };
+    let snapshots = shared
+        .mailboxes
+        .try_snapshot_all_observed(std::iter::empty())
+        .await;
+    for (channel_id, snapshot) in snapshots {
+        let Ok(snapshot) = snapshot else {
+            observation.unmeasured.insert(channel_id);
+            continue;
+        };
+        let ids = queued_message_ids(&snapshot);
+        if !ids.is_empty() {
+            observation.ids.insert(channel_id, ids);
+        }
+    }
+    observation
+}
+
+/// The channel's queued ids, `None` when its actor never answered; a channel with no actor
+/// has no queue.
+async fn observed_queued_ids(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> Option<std::collections::HashSet<u64>> {
+    match shared.mailbox_peek(channel) {
+        Some(handle) => handle
+            .try_snapshot()
+            .await
+            .ok()
+            .map(|snapshot| queued_message_ids(&snapshot)),
+        None => Some(std::collections::HashSet::new()),
+    }
+}
+
 /// Install disk candidates without overwriting newer map ownership. The actor
 /// remains independent of the persist lock; cleanup always goes through A8.
 pub(in crate::services::discord) async fn install_restored_queued_placeholders(
@@ -239,7 +289,7 @@ pub(in crate::services::discord) async fn install_restored_queued_placeholders(
 }
 
 /// Installs one channel's rows under the caller's persist lock and saves the channel; refuses an
-/// unqueued owner (if `check_queued`), an owner with another card, or another owner's card.
+/// owner an answered queue lacks (if `check_queued`), an owner with another card, or another owner's card.
 pub(in crate::services::discord) async fn install_channel_rows_locked(
     shared: &SharedData,
     channel: ChannelId,
@@ -249,8 +299,9 @@ pub(in crate::services::discord) async fn install_channel_rows_locked(
     Vec<(MessageId, MessageId)>,
     Vec<(ChannelId, MessageId, MessageId)>,
 ) {
+    // An unanswered actor measured no queue, so its owners are not refused as unqueued.
     let queued = match check_queued {
-        true => Some(queued_message_ids(&mailbox_snapshot(shared, channel).await)),
+        true => observed_queued_ids(shared, channel).await,
         false => None,
     };
     let (mut installed, mut uninstalled) = (Vec::new(), Vec::new());

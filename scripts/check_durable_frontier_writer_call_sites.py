@@ -119,7 +119,7 @@ no anchor to escape and no boolean to saturate.
 PRODUCTION vs TEST. Files named `tests.rs` / `*_tests.rs` and files the shared
 inventory resolver classifies as test-only are skipped whole. Basenames follow
 the name rule and reject production module mounts; resolver paths match the
-pin in `scripts/test_only_module_skip_pin.py`; `src/` symlinks are rejected.
+pin in `scripts/test_only_module_skip_pin_paths.py` plus `.d/` fragments; `src/` symlinks are rejected.
 The skipped census equals basename count plus resolver pin count. Symlink checks
 are lexical rather than atomic against post-enumeration replacements; CI assumes
 a static checkout. In remaining files, only cfg expressions proven by the lexical

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "8310503ae755e20b444bb73742fdfc79f8f5bb0b",
+  "measured_at_sha": "e03a80f478c89a39064a91fbd4060af6e6e1b17e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -36433,15 +36433,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:47bd9d584eb459980700e1d832786a5848db6e1a11eb58938ed7d5c003933bb3"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/ready_failure.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:8909f747b713c873c4718be41c7272121e4f0e268887bd9ea9b51df19eeb9a28"
     },
     {
       "root": "src",

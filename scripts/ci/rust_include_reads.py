@@ -75,16 +75,17 @@ def decode(literal: str) -> str | None:
 
 def group_end(toks: list[tuple[str, str, int]], start: int) -> int:
     """Index of the token closing the delimiter at ``start``."""
-    depth = 0
+    expected: list[str] = []
     for index in range(start, len(toks)):
         kind, value, _line = toks[index]
         if kind != CODE:
             continue
         if value in CLOSERS:
-            depth += 1
+            expected.append(CLOSERS[value])
         elif value in CLOSERS.values():
-            depth -= 1
-            if depth == 0:
+            if not expected or expected.pop() != value:
+                raise ValueError("mismatched macro delimiters")
+            if not expected:
                 return index
     raise ValueError("unbalanced macro arguments")
 
@@ -164,18 +165,28 @@ def crate_dir(path: str, cargo_dirs: set[str]) -> str | None:
 
 
 def scan(path: str, text: str, cargo_dirs: set[str], symlinks: set[str]) -> list[Site]:
-    """Every include call in ``text``; a bare macro name (a ``use ... as`` alias) is unresolved."""
+    """Include calls and imports; an imported macro may be aliased in another file."""
     toks = tokens(text)
     crate = crate_dir(path, cargo_dirs)
     sites: list[Site] = []
+    importing = False
     for index, (kind, value, line) in enumerate(toks):
-        if kind != CODE or value not in INCLUDE_MACROS:
+        if kind != CODE:
             continue
-        is_call = index + 2 < len(toks) and toks[index + 1][1] == "!" and toks[index + 2][1] in CLOSERS
-        if not is_call:
+        if value in ("use", ";"):
+            importing = value == "use"
+        if value not in INCLUDE_MACROS:
+            continue
+        after = toks[index + 1][1] if index + 1 < len(toks) else ""
+        # Only an import's leaf names the macro; path prefixes and alias names do not.
+        if importing and after != ":" and (index == 0 or toks[index - 1][1] != "as"):
             sites.append(Site(path, line, value, None, ""))
             continue
+        if after != "!":
+            continue
         try:
+            if index + 2 >= len(toks) or toks[index + 2][1] not in CLOSERS:
+                raise ValueError("missing macro delimiter")
             args = split_args(toks[index + 3:group_end(toks, index + 2)])
             parts = pieces(args[0], path, crate) if len(args) == 1 else [None]
             target, tail = resolve(parts, path, crate, symlinks)
@@ -220,7 +231,7 @@ def tree_sites(root: str, rev: str) -> set[Site]:
             symlinks.add(path)
         if posixpath.basename(path) == "Cargo.toml":
             cargo_dirs.add(posixpath.dirname(path))
-    # Every call names a macro containing "include", so other .rs files cannot hold one.
+    # Imports cover aliases used in other files, so their calls need not contain "include".
     listed = git_bytes(root, "grep", "-l", "-z", "--full-name", "-F", "-e", "include", rev, "--", "*.rs", ok=(0, 1))
     pending = [item.decode().removeprefix(f"{rev}:") for item in listed.split(b"\0") if item]
     scanned: set[str] = set()

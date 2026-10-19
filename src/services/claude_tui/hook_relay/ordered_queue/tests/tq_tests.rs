@@ -7,6 +7,7 @@ use std::sync::{Mutex, MutexGuard};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_registry::{self, RegistryKey};
+use crate::services::claude_tui::hook_relay::response_window::{DEADLINES, DeadlineObservation};
 use crate::services::claude_tui::hook_server::adoption_retry::reset_deferred_adoptions_for_tests;
 use crate::services::claude_tui::hook_server::{
     HookEvent, HookEventKind, HookServerState, hook_receiver_router_with_state,
@@ -128,13 +129,13 @@ impl Tq {
     }
 
     /// Runs the waiting CLI handoff on its own thread, as the provider's hook process would.
-    /// Yields how long the CLI waited, when it returned, and its result.
+    /// Yields how long the CLI waited, the deadlines its handoff used, and its result.
     fn waiting_cli(
         &self,
         event: &str,
         payload: Value,
         wait: Duration,
-    ) -> std::thread::JoinHandle<(Duration, DateTime<Utc>, Result<Value, String>)> {
+    ) -> std::thread::JoinHandle<(Duration, DeadlineObservation, Result<Value, String>)> {
         let (endpoint, event, a) = (self.endpoint.clone(), event.to_owned(), self.a.clone());
         let cli_started = self.cli_started.clone();
         std::thread::spawn(move || {
@@ -143,7 +144,11 @@ impl Tq {
             let result = handoff_ordered_hook_event_response_with_timeout(
                 &endpoint, "claude", &event, &a, payload, wait,
             );
-            (started.elapsed(), Utc::now(), result)
+            (
+                started.elapsed(),
+                DEADLINES.with(std::cell::Cell::get),
+                result,
+            )
         })
     }
 
@@ -410,28 +415,26 @@ async fn late_stop_after_refusals(tq: &Tq, producer_delay: Duration) {
     tq.settled(|tq| !tq.accepted("Stop").is_empty()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (elapsed, returned_at, result) =
+    let (elapsed, deadlines, result) =
         cli.expect("the CLI waits for the refused Stop past its own wait");
     assert!(elapsed >= REPLY_WAIT, "CLI waited {elapsed:?}");
-    // The worker's window is cut from the caller's deadline, which the CLI reached before it
-    // returned; both sides of the comparison only grow on a slow runner.
+    // The window is cut from what the caller's first deadline left at publish, and the caller
+    // keeps that deadline after enqueue; neither side reads when the CLI returned.
     let window = request.response.expect("the waiting Stop asks for a reply");
-    let window_end = respond_by(request.published_at, window.timeout_millis);
+    let first = deadlines
+        .first
+        .expect("the handoff hands its deadline to enqueue");
+    let left = first.saturating_duration_since(deadlines.published.expect("publish observed"));
     assert!(
-        window_end <= returned_at,
-        "the reply window ({}ms from publish) outlives the caller's wait",
+        Duration::from_millis(window.timeout_millis) <= left,
+        "the reply window ({}ms) outlives the {left:?} the caller's deadline left at publish",
         window.timeout_millis
     );
-    if !producer_delay.is_zero() {
-        // A caller wait restarted at enqueue returns at least `REPLY_WAIT` after the publish;
-        // one charged with the held lock returns about `producer_delay` before that.
-        assert!(
-            returned_at < request.published_at + REPLY_WAIT,
-            "the slow enqueue was added to the caller's wait instead of charged to it: \
-             returned {}ms after publish",
-            (returned_at - request.published_at).num_milliseconds()
-        );
-    }
+    assert_eq!(
+        deadlines.waited,
+        Some(first),
+        "the caller's wait was restarted after enqueue (slow producers: {producer_delay:?})"
+    );
     assert!(
         result.is_err_and(|e| e.contains("timed out")),
         "CLI returns Err(timeout)"

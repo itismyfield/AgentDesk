@@ -5,21 +5,9 @@ Environment: ``BASE_SHA``/``HEAD_SHA`` (the pull request's base and head),
 ``FILTER_OUTPUTS`` (``toJSON`` of the dorny/paths-filter step run with
 ``list-files: json``), and the usual ``GITHUB_OUTPUT``/``GITHUB_STEP_SUMMARY``.
 
-``comment_only=true`` needs all of: scripts/check_comment_only_change.py exits
-0 for base..head, at least one ``.rs`` file changed and every changed ``.rs``
-file was edited in place, every other changed file is ``*.md`` on both sides,
-and every file any path filter selected is one of those verified ``.rs`` files
-(so a ``.md`` that selects a filter, or a file the filter saw but git did not,
-keeps the full run), and no changed ``.rs`` file holds a line break other than
-LF/CRLF on either side, since the judge's ``splitlines()`` erases those inside
-literals. Anything else -- including a missing input or an exception --
-writes ``comment_only=false``; the workflow reads only ``'true'``.
-
-``rust_tests_skip=true`` also lets the library sweep skip. It needs
-``comment_only=true`` and no ``include!``/``include_str!``/``include_bytes!``
-call in the base or head tree that reads, or may read, a changed file
-(scripts/ci/rust_include_reads.py); tests see those files' comments. A scan
-that cannot finish writes ``comment_only=false`` too.
+Markdown, token-identical in-place YAML edits and verified Rust comment edits
+may skip. Protected paths/filters, raw-file readers, missing inputs or scan
+failures keep the full run. Included Rust comments retain the library sweep.
 """
 
 from __future__ import annotations
@@ -31,10 +19,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JUDGE = REPO_ROOT / "scripts" / "check_comment_only_change.py"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MARKDOWN_STATUSES = {"A", "M", "D", "R", "C"}
+REQUIRED_FILTERS = {"dashboard", "high_risk_recovery", "pg_db", "rust_or_policy", "rust_compile",
+                    "relay_contract", "cross_os_rust", "win32_build_token"}
+PROTECTED_FILTERS = {"dashboard", "relay_contract", "win32_build_token"}
 SUMMARY_LINE_LIMIT = 200
 # str.splitlines() boundaries other than LF and CRLF; the judge rejoins split lines with LF.
 OTHER_LINE_BREAK = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
@@ -51,27 +47,44 @@ def decide(
     if judge_rc != 0:
         reasons.append(f"check_comment_only_change.py exited {judge_rc}")
 
-    rust: set[str] = set()
+    allowed: set[str] = set()
+    if not entries:
+        reasons.append("no changed files")
     for status, old_path, new_path in entries:
+        for path in {old_path, new_path}:
+            if path.startswith((".github/", "scripts/", "policies/", "migrations/")) or Path(path).name.startswith("Cargo.") or Path(path).name == "build.rs":
+                reasons.append(f"{path}: protected execution or policy path")
         if old_path.endswith(".rs") or new_path.endswith(".rs"):
             if status == "M" and old_path == new_path:
-                rust.add(new_path)
+                allowed.add(new_path)
             else:
                 reasons.append(f"{old_path} -> {new_path}: Rust change with status {status} is not an in-place edit")
+        elif old_path.endswith((".yaml", ".yml")) or new_path.endswith((".yaml", ".yml")):
+            if status == "M" and old_path == new_path:
+                allowed.add(new_path)
+            else:
+                reasons.append(f"{new_path}: YAML change with status {status} is not an in-place edit")
         elif not (old_path.endswith(".md") and new_path.endswith(".md")):
             reasons.append(f"{new_path}: non-Rust, non-Markdown change ({status})")
         elif status not in MARKDOWN_STATUSES:
             reasons.append(f"{new_path}: Markdown change with unexpected status {status}")
-    if not rust:
-        reasons.append("no changed .rs file")
+        else:
+            allowed.update((old_path, new_path))
 
-    if not isinstance(filter_outputs, dict):
+    if not isinstance(filter_outputs, dict) or not all(isinstance(key, str) for key in filter_outputs):
         reasons.append("paths-filter outputs are missing or not a JSON object")
         return False, reasons
-    names = sorted(key for key, value in filter_outputs.items() if value in ("true", "false"))
-    if not names:
-        reasons.append("paths-filter outputs name no filter")
+    names = sorted(REQUIRED_FILTERS | {key for key, value in filter_outputs.items() if value in ("true", "false")})
+    try:
+        selected_names = json.loads(filter_outputs.get("changes", ""))
+    except (json.JSONDecodeError, TypeError):
+        selected_names = None
+    if not isinstance(selected_names, list) or not all(isinstance(name, str) for name in selected_names) or set(selected_names) != {name for name in names if filter_outputs.get(name) == "true"}:
+        reasons.append("paths-filter changes output missing or inconsistent")
     for name in names:
+        selected = filter_outputs.get(name)
+        if selected not in ("true", "false"):
+            reasons.append(f"filter {name}: selection output missing or unreadable")
         raw = filter_outputs.get(f"{name}_files")
         try:
             files = json.loads(raw) if isinstance(raw, str) else None
@@ -80,12 +93,24 @@ def decide(
         if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
             reasons.append(f"filter {name}: file list missing or unreadable")
             continue
-        if filter_outputs[name] == "true" and not files:
-            reasons.append(f"filter {name}: true with an empty file list")
+        if (selected == "true") != bool(files) or filter_outputs.get(f"{name}_count") != str(len(files)):
+            reasons.append(f"filter {name}: selection/count disagrees with its file list")
         for path in files:
-            if path not in rust:
-                reasons.append(f"filter {name}: selected by {path}, which is not a verified comment-only .rs edit")
+            if name in PROTECTED_FILTERS:
+                reasons.append(f"filter {name}: protected consumer selected by {path}")
+            elif path not in allowed:
+                reasons.append(f"filter {name}: selected by unverified file {path}")
     return not reasons, reasons
+
+
+def yaml_tokens(raw: bytes) -> list[tuple[str, dict]]:
+    """Validate YAML and compare every token attribute except source coordinates."""
+    if yaml is None:
+        raise RuntimeError("PyYAML unavailable")
+    text = raw.decode("utf-8")
+    list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    return [(type(token).__name__, {key: value for key, value in vars(token).items()
+                                  if key not in ("start_mark", "end_mark")}) for token in yaml.scan(text)]
 
 
 def include_readers(changed: set[str], sites) -> list[str]:
@@ -131,10 +156,20 @@ def git(*args: str) -> str:
     return result.stdout
 
 
-def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str]]:
-    """(comment_only, its refusals, judge log, library sweep may skip, sweep notes)."""
+def regular_files(rev: str, paths: set[str]) -> bool:
+    if not paths:
+        return True
+    entries = git("--literal-pathspecs", "ls-tree", "-r", "-z", rev, "--", *sorted(paths))
+    modes = {entry.split("\t", 1)[1]: entry.split(" ", 1)[0] for entry in entries.split("\0") if entry}
+    return all(modes.get(path) in ("100644", "100755") for path in paths)
+
+
+def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str], bool]:
+    """(comment_only, refusals, judge log, sweep may skip, sweep notes, no Rust edits)."""
     if not SHA.match(base) or not SHA.match(head):
-        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, []
+        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, [], False
+    if yaml is None:
+        return False, ["PyYAML unavailable"], "", False, [], False
     judge = subprocess.run(
         [sys.executable, str(JUDGE), base, head, "--allow-non-rust"],
         check=False, capture_output=True, text=True,
@@ -156,8 +191,17 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
         reasons = other_line_breaks(
             {f"{path} ({side})": blob(rev, path) for path in rust for side, rev in (("base", merge_base), ("head", head))}
         )
+        if not regular_files(merge_base, {old for status, old, _new in entries if status != "A"}) or not regular_files(head, {new for status, _old, new in entries if status != "D"}):
+            reasons.append("changed path is not a regular tracked file")
+        for _status, _old, path in entries:
+            if path.endswith((".yaml", ".yml")):
+                try:
+                    if yaml_tokens(blob(merge_base, path)) != yaml_tokens(blob(head, path)):
+                        reasons.append(f"{path}: YAML tokens differ")
+                except Exception as error:
+                    reasons.append(f"{path}: YAML scan/parse failed: {error!r}")
     if not verdict or reasons:
-        return False, reasons, judge_log, False, []
+        return False, reasons, judge_log, False, [], False
     try:
         from rust_include_reads import tree_sites
 
@@ -166,28 +210,45 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
         readers = include_readers(changed, sites)
         notes = [*readers, f"scanned {len(sites)} include calls in the base and head trees"]
     except Exception as error:  # a scan that cannot finish falls back to the full run
-        return False, [f"include scan error: {error!r}"], judge_log, False, []
-    return True, [], judge_log, not readers, notes
+        return False, [f"include scan error: {error!r}"], judge_log, False, [], False
+    data_paths = {path for path in changed if not path.endswith(".rs")}
+    if any(site.reads(path) for site in sites for path in data_paths):
+        return False, readers, judge_log, False, notes, False
+    try:
+        from rust_runtime_reads import runtime_readers
+
+        yaml_inplace = {new for status, old, new in entries if status == "M" and old == new and new.endswith((".yaml", ".yml"))}
+        path_changes = {path for status, old, new in entries if status in {"A", "D", "R", "C"}
+                        for path in (old, new) if path in data_paths}
+        runtime = sorted({reason for rev in {base, merge_base, head}
+                          for reason in runtime_readers(str(REPO_ROOT), rev, data_paths, yaml_inplace, path_changes)})
+        if runtime:
+            return False, runtime, judge_log, False, notes, False
+    except Exception as error:
+        return False, [f"runtime reader scan error: {error!r}"], judge_log, False, notes, False
+    return True, [], judge_log, not readers, notes, not any(path.endswith(".rs") for path in changed)
 
 
 def main() -> int:
     try:
-        verdict, reasons, judge_log, skip_sweep, sweep_notes = evaluate(
+        verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = evaluate(
             os.environ.get("BASE_SHA", ""),
             os.environ.get("HEAD_SHA", ""),
             os.environ.get("FILTER_OUTPUTS"),
         )
     except Exception as error:  # every failure falls back to the full run
-        verdict, reasons, judge_log, skip_sweep, sweep_notes = False, [f"gate error: {error!r}"], "", False, []
+        verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = False, [f"gate error: {error!r}"], "", False, [], False
 
     value = "true" if verdict else "false"
     skip = "true" if verdict and skip_sweep else "false"
+    lint = "true" if verdict and skip_sweep and no_rust else "false"
     judge_lines = judge_log.splitlines()
     if len(judge_lines) > SUMMARY_LINE_LIMIT:
         judge_lines = judge_lines[:SUMMARY_LINE_LIMIT] + ["... (truncated)"]
-    report = [f"comment_only={value}", *(f"- {reason}" for reason in reasons)]
+    report = [f"yaml_available={str(yaml is not None).lower()} version={getattr(yaml, '__version__', 'unavailable')}",
+              f"comment_only={value}", *(f"- {reason}" for reason in reasons)]
     if verdict:
-        report += [f"rust_tests_skip={skip}", *(f"- {note}" for note in sweep_notes)]
+        report += [f"rust_tests_skip={skip}", f"rust_lint_skip={lint}", *(f"- {note}" for note in sweep_notes)]
     report += ["", "check_comment_only_change.py:", *(judge_lines or ["<not run>"])]
     print("\n".join(report))
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -197,7 +258,7 @@ def main() -> int:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with open(output_path, "a", encoding="utf-8") as output:
-            output.write(f"comment_only={value}\nrust_tests_skip={skip}\n")
+            output.write(f"comment_only={value}\nrust_tests_skip={skip}\nrust_lint_skip={lint}\n")
     return 0
 
 

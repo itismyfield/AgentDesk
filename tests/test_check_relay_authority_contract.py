@@ -64,14 +64,21 @@ def write_workflow(
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text(
         yaml.safe_dump({"jobs": {
+            "changes": {"outputs": {"rust_tests_skip": contract.VERIFIED_RUST_SKIP}},
             contract.RELAY_AUTHORITY_JOB: {
                 "if": "${{ !cancelled() }}",
-                "needs": [contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
+                "needs": ["changes", contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB],
+                "steps": [{"run": "./scripts/required-check-mirror.sh", "env": {
+                    "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "relay_authority",
+                    "FILTER_OUTPUT": contract.RUST_REQUIRED_OUTPUT, "UPSTREAM_JOB_NAME": job,
+                    "UPSTREAM_RESULT": "${{ needs." + job + ".result }}",
+                }} for job in (contract.RELAY_AUTHORITY_TARGETS_JOB, contract.RELAY_AUTHORITY_MUTATIONS_JOB)],
             },
             contract.RELAY_AUTHORITY_TARGETS_JOB: {
-                "needs": ["lib_test_prepare"], "if": "${{ !cancelled() }}", "steps": steps,
+                "needs": ["changes", "lib_test_prepare"], "if": contract.RUST_REQUIRED_IF, "steps": steps,
             },
             contract.RELAY_AUTHORITY_MUTATIONS_JOB: {
+                "needs": "changes", "if": contract.RUST_REQUIRED_IF,
                 "strategy": {"fail-fast": False, "matrix": {"shard": [0, 1, 2]}},
                 "env": {
                     "RELAY_AUTHORITY_MUTATION_SHARD_INDEX": "${{ matrix.shard }}",
@@ -125,6 +132,9 @@ class ManifestContract(unittest.TestCase):
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", None),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "needs", ["changes"]),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "false"),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", "${{ !cancelled() }}"),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!cancelled() && ", "")),
+            (contract.RELAY_AUTHORITY_TARGETS_JOB, "if", contract.RUST_REQUIRED_IF.replace("!= 'true'", "== 'false'")),
             (contract.RELAY_AUTHORITY_TARGETS_JOB, "continue-on-error", True),
             (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "needs", ["changes"]),
             (contract.RELAY_AUTHORITY_MUTATIONS_JOB, "if", "false"),
@@ -142,8 +152,71 @@ class ManifestContract(unittest.TestCase):
                 workflow = root / contract.PR_WORKFLOW
                 workflow.parent.mkdir(parents=True)
                 workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
-                with self.assertRaisesRegex(contract.ManifestError, "must always publish|must execute unconditionally"):
+                with self.assertRaisesRegex(contract.ManifestError, "must always publish|must use the verified skip"):
                     contract.validate_workflow_contract(root, lanes, True)
+
+    def test_verified_skip_output_rejects_missing_or_partial_proofs(self) -> None:
+        temporary, path = manifest_path([active_lane()])
+        with temporary:
+            root = Path(temporary.name)
+            workflow = root / contract.PR_WORKFLOW
+            original = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+            lanes, _ = contract.load_active_lanes(path, root)
+            for output in (None, "", "true", True,
+                           contract.VERIFIED_RUST_SKIP.replace("steps.comment_only.outcome == 'success' && ", ""),
+                           contract.VERIFIED_RUST_SKIP.replace("steps.comment_only.outputs.comment_only == 'true' && ", ""),
+                           contract.VERIFIED_RUST_SKIP.replace("steps.comment_only.outputs.rust_tests_skip == 'true' && ", "")):
+                with self.subTest(output=output):
+                    payload = copy.deepcopy(original)
+                    payload["jobs"]["changes"]["outputs"]["rust_tests_skip"] = output
+                    workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(contract.ManifestError, "Rust skip output must fail closed"):
+                        contract.validate_workflow_contract(root, lanes, False)
+
+    def test_publisher_cannot_hide_changed_paths_or_execution_results(self) -> None:
+        temporary, path = manifest_path([active_lane()])
+        with temporary:
+            root = Path(temporary.name)
+            workflow = root / contract.PR_WORKFLOW
+            original = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+            lanes, _ = contract.load_active_lanes(path, root)
+            for index in (0, 1):
+                for key, value in (("CHANGED_PATHS_RESULT", "success"), ("CHANGED_PATHS_RESULT", ""),
+                                   ("FILTER_OUTPUT", "false"), ("FILTER_OUTPUT", ""),
+                                   ("UPSTREAM_RESULT", "success")):
+                    with self.subTest(index=index, key=key, value=value):
+                        payload = copy.deepcopy(original)
+                        payload["jobs"][contract.RELAY_AUTHORITY_JOB]["steps"][index]["env"][key] = value
+                        workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                        with self.assertRaisesRegex(contract.ManifestError, "actual changes and the shared Rust skip filter"):
+                            contract.validate_workflow_contract(root, lanes, False)
+            for name, change in (("missing", lambda steps: steps.pop()),
+                                 ("masked", lambda steps: steps[0].update({"continue-on-error": True})),
+                                 ("conditional", lambda steps: steps[0].update({"if": "false"}))):
+                with self.subTest(mutation=name):
+                    payload = copy.deepcopy(original)
+                    change(payload["jobs"][contract.RELAY_AUTHORITY_JOB]["steps"])
+                    workflow.write_text(yaml.safe_dump(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(contract.ManifestError, "must mirror"):
+                        contract.validate_workflow_contract(root, lanes, False)
+
+    def test_removing_the_changed_paths_mirror_guard_makes_its_cases_red(self) -> None:
+        import types
+        source = SCRIPT.read_text(encoding="utf-8")
+        original = "or any(env.get(key) != value for key, value in expected.items())):"
+        self.assertEqual(source.count(original), 1)
+        weakened = source.replace(original,
+            "or any(env.get(key) != value for key, value in expected.items() if key != 'CHANGED_PATHS_RESULT')):")
+        mutant = types.ModuleType("relay_contract_mirror_mutant")
+        mutant.__file__ = str(SCRIPT)
+        with mock.patch.dict(sys.modules, {mutant.__name__: mutant}):
+            exec(compile(weakened, str(SCRIPT), "exec"), mutant.__dict__)
+            with mock.patch.object(sys.modules[__name__], "contract", mutant):
+                result = unittest.TestResult()
+                ManifestContract("test_publisher_cannot_hide_changed_paths_or_execution_results").run(result)
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.failures), 4)
 
     def test_mutation_matrix_and_shard_environment_cannot_drop_rows(self) -> None:
         lanes, _ = contract.load_active_lanes(REPO_ROOT / contract.DEFAULT_MANIFEST)
@@ -231,8 +304,8 @@ class ManifestContract(unittest.TestCase):
         self.assertIn("t5-structural-signal-authority-teardown",
                       {gap["name"] for gap in gaps})
         job = contract.load_relay_authority_job(REPO_ROOT)
-        self.assertEqual(job["if"], "${{ !cancelled() }}")
-        self.assertIn(job["needs"], ("lib_test_prepare", ["lib_test_prepare"]))
+        self.assertEqual(job["if"], contract.RUST_REQUIRED_IF)
+        self.assertEqual(job["needs"], ["changes", "lib_test_prepare"])
         workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
         for lane in selected:
             command = contract.expected_workflow_command(lane)

@@ -30,8 +30,8 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
     "narrate_progress",
-    // Retired rows deleted at boot: the human-alert channel (its frozen reader then has
-    // no target), the PM decision gate toggle, and the escalation routing override.
+    // Retired rows deleted at boot: the human-alert channel, the PM decision gate
+    // toggle, and the escalation routing override.
     "kanban_human_alert_channel_id",
     "pm_decision_gate_enabled",
     "escalation-settings-override",
@@ -1714,9 +1714,8 @@ mod retired_key_tests {
         readers
     }
 
-    /// #5993: the retired human-alert key is deleted at boot, never seeded or
-    /// listed as a config entry, and referenced by no code outside the listed
-    /// follow-up slice.
+    /// The retired human-alert key is deleted at boot, never seeded or listed
+    /// as a config entry, and named by no code outside this file.
     #[test]
     fn retired_human_alert_channel_key_is_deleted_and_unread() {
         let key = concat!("kanban_", "human_alert_channel_id");
@@ -1729,13 +1728,10 @@ mod retired_key_tests {
         assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
         assert!(CONFIG_KEYS.iter().all(|(k, ..)| *k != key));
 
-        // The frozen watcher reader (#6210) is the only remaining follow-up.
+        // Only the boot delete list and this test name the key; nothing reads it.
         assert_eq!(
             repo_files_containing(&[key]),
-            [
-                "src/services/discord/watchers/lifecycle/ready_failure.rs",
-                "src/services/settings.rs",
-            ],
+            ["src/services/settings.rs"],
             "new or removed references to the retired key"
         );
     }

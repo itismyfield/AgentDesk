@@ -25,6 +25,11 @@ RELAY_AUTHORITY_MUTATIONS_JOB = "relay_authority_mutations"
 CONDITION3_MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONDITION3_MUTATION_COMMAND = f"bash {CONDITION3_MUTATION_SCRIPT}"
 RELAY_TARGET_STEP = "Run named relay-authority contract targets"
+RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+RUST_REQUIRED_OUTPUT = "${{ needs.changes.outputs.rust_tests_skip != 'true' }}"
+VERIFIED_RUST_SKIP = ("${{ steps.comment_only.outcome == 'success' && "
+                      "steps.comment_only.outputs.comment_only == 'true' && "
+                      "steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}")
 # An absent filter or wiring output must run mutations; only two explicit falses skip them.
 CONDITION3_MUTATION_IF = (
     "steps.mutation_paths.outputs.mutation_sources != 'false'"
@@ -86,23 +91,36 @@ def validate_workflow_contract(
     lanes: Sequence[Lane],
     mutations_present: bool,
 ) -> None:
+    changes = load_relay_authority_job(repo_root, "changes")
+    if not isinstance(changes.get("outputs"), dict) or changes["outputs"].get("rust_tests_skip") != VERIFIED_RUST_SKIP:
+        raise ManifestError("workflow verified Rust skip output must fail closed")
     publisher = load_relay_authority_job(repo_root, RELAY_AUTHORITY_JOB)
     if (
         publisher.get("if") != "${{ !cancelled() }}"
-        or publisher.get("needs") != [RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB]
+        or publisher.get("needs") != ["changes", RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB]
         or "continue-on-error" in publisher
     ):
         raise ManifestError(
             f"workflow jobs.{RELAY_AUTHORITY_JOB} must always publish both execution results"
         )
-    for job_id in (RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB):
+    execution_jobs = (RELAY_AUTHORITY_TARGETS_JOB, RELAY_AUTHORITY_MUTATIONS_JOB)
+    mirrors = [step for step in publisher.get("steps", [])
+               if isinstance(step, dict) and step.get("run") == "./scripts/required-check-mirror.sh"]
+    if len(mirrors) != 2:
+        raise ManifestError("workflow publisher must mirror both execution results")
+    for job_id, mirror in zip(execution_jobs, mirrors):
+        expected = {"CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "relay_authority",
+                    "FILTER_OUTPUT": RUST_REQUIRED_OUTPUT, "UPSTREAM_JOB_NAME": job_id,
+                    "UPSTREAM_RESULT": "${{ needs." + job_id + ".result }}"}
+        env = mirror.get("env")
+        if (any(key in mirror for key in ("if", "continue-on-error")) or not isinstance(env, dict)
+            or any(env.get(key) != value for key, value in expected.items())):
+            raise ManifestError("workflow publisher must mirror actual changes and the shared Rust skip filter")
         execution = load_relay_authority_job(repo_root, job_id)
-        shared = job_id == RELAY_AUTHORITY_TARGETS_JOB
-        if ("continue-on-error" in execution or
-            (shared and (execution.get("needs") not in ("lib_test_prepare", ["lib_test_prepare"])
-                         or execution.get("if") != "${{ !cancelled() }}")) or
-            (not shared and any(key in execution for key in ("if", "needs")))):
-            raise ManifestError(f"workflow jobs.{job_id} must execute unconditionally with exact preparation dependencies")
+        needs = ["changes", "lib_test_prepare"] if job_id == RELAY_AUTHORITY_TARGETS_JOB else "changes"
+        if ("continue-on-error" in execution or execution.get("needs") != needs
+            or execution.get("if") != RUST_REQUIRED_IF):
+            raise ManifestError(f"workflow jobs.{job_id} must use the verified skip gate with exact preparation dependencies")
 
     job = load_relay_authority_job(repo_root)
     steps = job.get("steps")

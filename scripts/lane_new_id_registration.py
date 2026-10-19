@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 EXCEPTIONS_REL = Path("scripts/test_lane_required_id_exceptions.txt")
+FRAGMENTS_REL = EXCEPTIONS_REL.with_suffix(".d")
+RECORD_IN = f"a {FRAGMENTS_REL.as_posix()}/<node>-<issue>-<slice>.txt fragment"
 UNREQUIRED = "new-id-unrequired"
 CONTEXT = "new-id-context-unproven"
 PATH = "new-id-path-unproven"
@@ -92,7 +94,7 @@ class Mapped:
 
 @dataclass(frozen=True)
 class IdException:
-    line: int
+    location: str
     test_id: str
     mode: str
 
@@ -142,50 +144,71 @@ def changed_paths(repo_root: Path, base: str) -> dict[str, tuple[str, str]]:
 
 
 def load_exceptions(parity, path: Path, today: datetime.date):
-    """Parse `exact-test-id | mode | #issue | expires=YYYY-MM-DD | reason` rows sorted by id."""
-    rows: list[IdException] = []
-    findings = []
-    keys: list[str] = []
+    """Parse `exact-test-id | mode | #issue | expires=YYYY-MM-DD | reason` rows from the legacy
+    file and its `.d` fragments, each sorted by id. Every row is validated first, then one id
+    may appear once across all of them, and only then do rows become the judged set."""
+    fragments = parity._sibling("registration_fragments.py")
     text = path.read_text("utf-8") if path.is_file() else ""
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        row = raw.strip()
-        if not row or row.startswith("#"):
-            continue
-        fields = [field.strip() for field in row.split("|")]
-        location = f"{EXCEPTIONS_REL.as_posix()}:{lineno}"
-        expires = _EXPIRES.match(fields[3]) if len(fields) == 5 else None
-        problem = None
-        if len(fields) != 5 or not all(fields):
-            problem = "expected `exact-test-id | mode | #issue | expires=YYYY-MM-DD | reason`"
-        elif "*" in fields[0] or fields[0].endswith("::") or len(fields[0].split()) != 1:
-            problem = "the key must be one exact test id, never a module prefix or pattern"
-        elif fields[1] not in MODE_KINDS:
-            problem = f"mode must be one of {', '.join(sorted(MODE_KINDS))}"
-        elif not _ISSUE.match(fields[2]):
-            problem = "issue must be a tracking `#<number>`"
-        elif not expires:
-            problem = "expiry must read `expires=YYYY-MM-DD`"
-        elif len(fields[4].split()) < 3:
-            problem = "the reason must say why in words, not a placeholder"
-        keys.extend(fields[:1])
-        if problem is None:
-            try:
-                date = datetime.date.fromisoformat(expires.group(1))
-            except ValueError:
-                problem = f"{expires.group(1)} is not a calendar date"
-        if problem:
-            findings.append(parity.Finding(INVALID, location, problem))
-        elif date < today:
-            findings.append(parity.Finding(
-                STALE, location, f"`{fields[0]}` expired on {date}; register it or renew the row",
-            ))
+    lines = [fragments.Line(f"{EXCEPTIONS_REL.as_posix()}:{lineno}", raw)
+             for lineno, raw in enumerate(text.splitlines(), 1)
+             if raw.strip() and not raw.strip().startswith("#")]
+    added, problems = fragments.read_lines(path.with_suffix(".d"), FRAGMENTS_REL.as_posix())
+    findings = [parity.Finding(INVALID, location, detail) for location, detail in problems]
+    rows: list[IdException] = []
+    keyed, keys, last = [], [], {}
+    for line in [*lines, *added]:
+        fields, finding, row = _exception_row(parity, line.location, line.text, today)
+        file = line.location.rsplit(":", 1)[0]
+        if file == EXCEPTIONS_REL.as_posix():
+            keys.extend(fields[:1])
         else:
-            rows.append(IdException(lineno, fields[0], fields[1]))
+            if file in last and last[file] >= fields[0]:
+                findings.append(parity.Finding(
+                    INVALID, line.location, "rows must be unique and sorted by test id in a fragment"
+                ))
+            last[file] = fields[0]
+        findings.extend([finding] if finding else [])
+        rows.extend([row] if row else [])
+        if fields[0]:
+            keyed.append(fragments.Row(fields[0], tuple(fields[1:]), line.location))
     if keys != sorted(set(keys)):
         findings.append(parity.Finding(
             INVALID, EXCEPTIONS_REL.as_posix(), "rows must be unique and sorted by test id"
         ))
-    return rows, findings
+    indexed, clashes = fragments.index(keyed)
+    findings.extend(parity.Finding(INVALID, location, detail) for location, detail in clashes)
+    return [row for row in rows if indexed[row.test_id].location == row.location], findings
+
+
+def _exception_row(parity, location: str, raw: str, today: datetime.date):
+    """One row's fields with either its finding or its live exception."""
+    fields = [field.strip() for field in raw.strip().split("|")]
+    expires = _EXPIRES.match(fields[3]) if len(fields) == 5 else None
+    problem = None
+    if len(fields) != 5 or not all(fields):
+        problem = "expected `exact-test-id | mode | #issue | expires=YYYY-MM-DD | reason`"
+    elif "*" in fields[0] or fields[0].endswith("::") or len(fields[0].split()) != 1:
+        problem = "the key must be one exact test id, never a module prefix or pattern"
+    elif fields[1] not in MODE_KINDS:
+        problem = f"mode must be one of {', '.join(sorted(MODE_KINDS))}"
+    elif not _ISSUE.match(fields[2]):
+        problem = "issue must be a tracking `#<number>`"
+    elif not expires:
+        problem = "expiry must read `expires=YYYY-MM-DD`"
+    elif len(fields[4].split()) < 3:
+        problem = "the reason must say why in words, not a placeholder"
+    if problem is None:
+        try:
+            date = datetime.date.fromisoformat(expires.group(1))
+        except ValueError:
+            problem = f"{expires.group(1)} is not a calendar date"
+    if problem:
+        return fields, parity.Finding(INVALID, location, problem), None
+    if date < today:
+        return fields, parity.Finding(
+            STALE, location, f"`{fields[0]}` expired on {date}; register it or renew the row",
+        ), None
+    return fields, None, IdException(location, fields[0], fields[1])
 
 
 def _glob(pattern: str):
@@ -667,8 +690,7 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
     excepted = 0
     for test_id in sorted(set(added) | set(by_id)):
         row = by_id.get(test_id)
-        location = (f"{EXCEPTIONS_REL.as_posix()}:{row.line}" if row
-                    else site_of.get(test_id, manifest).rsplit(":", 1)[0])
+        location = row.location if row else site_of.get(test_id, manifest).rsplit(":", 1)[0]
         if row and test_id not in head_ids:
             findings.append(parity.Finding(
                 STALE, location, f"`{test_id}` is no lib inventory id; delete the row"
@@ -696,17 +718,17 @@ def judge(repo_root: Path, base: str, coverage, parity, sources, pg_tests, skip_
                 f"`{test_id}`: " + "; ".join(reason for _, reason in outcome)
                 + f"; run it in a required PR job ({sources.required_test_jobs}) or record "
                 f"`{test_id} | <mode> | #<issue> | expires=YYYY-MM-DD | <reason>` in "
-                + EXCEPTIONS_REL.as_posix()
+                + RECORD_IN
             )))
     for module, path in empty:
         if module not in helpers:
             findings.append(parity.Finding(EMPTY_MODULE, path, (
                 f"new test module `{module}` adds no id to the lib inventory manifest; give it "
                 f"a test, or if it only serves other tests record `{module} | {HELPER} | "
-                f"#<issue> | expires=YYYY-MM-DD | <reason>` in {EXCEPTIONS_REL.as_posix()}"
+                f"#<issue> | expires=YYYY-MM-DD | <reason>` in {RECORD_IN}"
             )))
     for module, row in sorted(helpers.items()):
-        location = f"{EXCEPTIONS_REL.as_posix()}:{row.line}"
+        location = row.location
         if module not in modules:
             findings.append(parity.Finding(
                 STALE, location, f"`{module}` is no cfg(test) module; delete the row"

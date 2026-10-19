@@ -272,6 +272,7 @@ fi
 
 if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
+git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 fi
 
@@ -355,6 +356,7 @@ fi
 if run_check guards "Dormant boot retirement census"; then
 "$PYTHON" scripts/check_legacy_supervision_census.py
 "$PYTHON" -m unittest tests.test_check_legacy_supervision_census
+"$PYTHON" -m unittest tests.test_registration_fragments tests.test_skip_pin_fragments
 fi
 
 if run_check guards "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"; then
@@ -378,7 +380,7 @@ if run_check guards "Comment-only change checker self-tests"; then
 # what stops that. ci-pr.yml's changes job also runs it, through
 # scripts/ci/comment_only_gate.py, to skip the heavy test jobs.
 "$PYTHON" -m unittest tests.test_comment_only_change
-"$PYTHON" -m unittest tests.test_comment_only_ci_gate
+"$PYTHON" -m unittest tests.test_comment_only_ci_gate tests.test_rust_include_reads tests.test_rust_runtime_reads
 fi
 
 if run_check guards "Hotfile LOC ratchet guard (#3565)"; then
@@ -439,7 +441,8 @@ fi
 
 if run_check guards "Relay-authority fixed mutation gate (#5071)"; then
 "$PYTHON" scripts/check_relay_mutation_sources.py
-"$PYTHON" -m unittest tests.test_relay_authority_mutations
+"$PYTHON" -m unittest tests.test_relay_authority_mutations \
+  tests.test_relay_authority_mutation_coupling
 fi
 
 if run_check guards "Relay-authority mutation wiring digest (#5997)"; then
@@ -497,6 +500,7 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 "$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
+"$PYTHON" -m unittest tests.test_required_id_exception_fragments
 fi
 
 if run_check contracts "PR test selection plan (main runs every lane in full)"; then
