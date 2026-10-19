@@ -304,7 +304,11 @@ fn s2a_purge_refuses_an_unresolved_head_and_a_clear_discards_it() {
             assert_eq!(after.active_request_owner, Some(UserId::new(9)));
 
             let cleared = handle.clear(ctx()).await;
-            assert_eq!(cleared.persistence, Default::default(), "{phase}");
+            assert_eq!(
+                (cleared.persistence.retried, cleared.persistence.failed),
+                Default::default(),
+                "{phase}"
+            );
             assert!(cleared.removed_token.is_some());
             let (head_id, behind) = (head.message_id, MessageId::new(230 + index as u64));
             let reclaimed = MessageId::new(999);
@@ -580,7 +584,10 @@ fn s2a_changed_metadata_refuses_a_queue_write_and_a_clear_replaces_it() {
         );
         assert_eq!(bytes(channel), before);
         let cleared = handle.clear(ctx()).await;
-        assert_eq!(cleared.persistence, Default::default());
+        assert_eq!(
+            (cleared.persistence.retried, cleared.persistence.failed),
+            Default::default()
+        );
         assert!(cleared.discarded_message_ids.contains(&head.message_id));
         let written = disk(channel);
         assert_eq!(written["items"], serde_json::json!([]));

@@ -22,6 +22,10 @@ pub(crate) struct ClearPersistence {
     pub(crate) retried: Vec<&'static str>,
     /// Writes that failed twice; a restart may restore what they would have removed.
     pub(crate) failed: Vec<&'static str>,
+    /// The mailbox did not answer, so what the clear discarded is unknown.
+    pub(crate) count_unknown: bool,
+    /// The active turn's and a starting turn's ids: discarded, but not waiting in the queue.
+    pub(crate) not_waiting: Vec<MessageId>,
 }
 
 impl ClearPersistence {
@@ -68,6 +72,7 @@ pub(super) fn clear_channel_state(
     // Liveness-blind: an orphaned reservation is discarded all the same.
     discarded_message_ids.extend(state.pending_user_dispatch);
     discarded_message_ids.extend(state.pending_user_dispatch_source_ids.iter().copied());
+    let not_waiting = discarded_message_ids.clone();
     let queue_exit_events: Vec<QueueExitEvent> = (marker.into_iter())
         .chain(state.intervention_queue.drain(..))
         .map(|intervention| QueueExitEvent::new(intervention, QueueExitKind::Superseded))
@@ -82,7 +87,8 @@ pub(super) fn clear_channel_state(
     // An explicit clear discards the queued head too, whatever its phase.
     queued_head::release_for_clear(state, &persistence);
     state.remint_fence.begin_clear();
-    let persistence = write_cleared_files(state, channel_id, &persistence, disk_trusted);
+    let mut persistence = write_cleared_files(state, channel_id, &persistence, disk_trusted);
+    persistence.not_waiting = not_waiting;
     ClearChannelResult {
         removed_token,
         queue_exit_events,
