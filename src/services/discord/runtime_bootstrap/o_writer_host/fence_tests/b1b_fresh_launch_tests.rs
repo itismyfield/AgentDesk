@@ -28,8 +28,13 @@ const FIRST_REPLY: &str = "B1b fresh O first reply";
 const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
+mod delegated_tests;
+#[path = "b1b_terminal_tests.rs"]
+mod native_output;
 #[path = "b1b_repeated_absence_tests.rs"]
 mod repeated_absence;
+#[path = "b1b_restart_phase_tests.rs"]
+mod restart_phase;
 
 #[derive(Clone, Copy)]
 enum BeforeInput {
@@ -38,6 +43,9 @@ enum BeforeInput {
     ExplicitClear,
     RepeatAbsent,
     InPlaceAbsent,
+    RestartAfterContext,
+    RestartAfterProof,
+    RestartAfterFirstPost,
 }
 
 struct Discord {
@@ -356,7 +364,12 @@ async fn scenario(retained: bool, before: BeforeInput) {
         )
         .await;
         match before {
-            BeforeInput::Absent | BeforeInput::RepeatAbsent | BeforeInput::InPlaceAbsent => {}
+            BeforeInput::Absent
+            | BeforeInput::RepeatAbsent
+            | BeforeInput::InPlaceAbsent
+            | BeforeInput::RestartAfterContext
+            | BeforeInput::RestartAfterProof
+            | BeforeInput::RestartAfterFirstPost => {}
             BeforeInput::Restart => {
                 let old_generation = handles[0].generation();
                 tokio::time::timeout(
@@ -417,11 +430,21 @@ async fn scenario(retained: bool, before: BeforeInput) {
             &output,
             &readiness,
             &mut old_io,
-            matches!(before, BeforeInput::InPlaceAbsent),
+            before,
+            &mut handles,
         )
         .await;
-        assert_eq!(handles[0].generation(), generation);
-        assert!(actor.same_run(&readiness.submission(CANARY_CHANNEL).unwrap()));
+        let restarted = matches!(
+            before,
+            BeforeInput::RestartAfterContext
+                | BeforeInput::RestartAfterProof
+                | BeforeInput::RestartAfterFirstPost
+        );
+        assert_eq!(handles[0].generation() != generation, restarted);
+        assert_eq!(
+            !actor.same_run(&readiness.submission(CANARY_CHANNEL).unwrap()),
+            restarted
+        );
         if matches!(before, BeforeInput::RepeatAbsent) {
             let preserved = repeated_absence::repeat_absence(
                 &mut fixture,
@@ -513,7 +536,8 @@ async fn run_fifo(
     output: &Discord,
     readiness: &Arc<host::Readiness>,
     old_io: &mut Option<crate::services::codex::actual_submit_tests::source_io::Watch>,
-    in_place: bool,
+    before: BeforeInput,
+    handles: &mut Vec<host::ManagedWriterHandle>,
 ) -> dedupe::binding_context::BindingContext {
     eventually(
         || readiness.submission(CANARY_CHANNEL).is_some(),
@@ -521,7 +545,7 @@ async fn run_fifo(
     )
     .await;
     assert!(readiness.is_hosted(CANARY_CHANNEL));
-    if in_place {
+    if matches!(before, BeforeInput::InPlaceAbsent) {
         eventually(
             || readiness.is_ready(CANARY_CHANNEL) && readiness.accepts(CANARY_CHANNEL),
             "ordinary N2 full resume before the real target disappears",
@@ -634,6 +658,11 @@ async fn run_fifo(
     assert_eq!(fresh.launch_mode, "fresh");
     assert_eq!(fresh.source_policy.as_deref(), Some("verified"));
     assert!(fresh.expected_native_session_id.is_none());
+    if matches!(before, BeforeInput::RestartAfterContext) {
+        restart_phase::restart(fixture, output, readiness, handles, &fresh, false).await;
+        assert!(!readiness.is_ready(CANARY_CHANNEL));
+        assert!(!readiness.accepts(CANARY_CHANNEL));
+    }
     let argv: Vec<String> =
         serde_json::from_slice(&fs::read(fixture.root.path().join("fresh-argv.json")).unwrap())
             .unwrap();
@@ -646,10 +675,13 @@ async fn run_fifo(
     let accepted = Arc::new(Mutex::new(Vec::new()));
     let input_calls = Arc::new(Mutex::new(Vec::new()));
     let (_warm, entered, release, boundary) =
-        b1::warm_probe(&fresh, Arc::clone(&accepted), Arc::clone(&input_calls));
+        native_output::warm_probe(&fresh, Arc::clone(&accepted), Arc::clone(&input_calls));
     let path = b1::publish_named_source(fixture, &fresh, NEW_NATIVE_ID);
     let new_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&path);
-    b1::terminal(&path, "new-clear-turn", FIRST_REPLY);
+    if matches!(before, BeforeInput::RestartAfterProof) {
+        restart_phase::restart(fixture, output, readiness, handles, &fresh, false).await;
+    }
+    native_output::terminal(&path, "new-clear-turn", FIRST_REPLY);
     b1::wait_completion(&first_token).await;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -690,6 +722,9 @@ async fn run_fifo(
     )
     .await;
     first.finish();
+    if matches!(before, BeforeInput::RestartAfterFirstPost) {
+        restart_phase::restart(fixture, output, readiness, handles, &fresh, true).await;
+    }
     crate::services::discord::turn_presence::activity::tests::companion_attach_log_watcher(
         &fixture.shared,
         CANARY_CHANNEL,

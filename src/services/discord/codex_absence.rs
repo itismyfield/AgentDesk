@@ -73,20 +73,13 @@ pub(crate) async fn observe_turn(
     let snapshot = read_only_owner_snapshot::codex_episode_snapshot(channel, tmux, token)
         .await
         .ok()?;
-    let kind = ObservationKind::ExactSelf {
-        episode: snapshot.episode().clone(),
-        token: Arc::clone(token),
-    };
-    #[cfg(test)]
-    let kind = if crate::services::claude_tui::source_verify::n2b_mutant("b1b-observation") {
-        ObservationKind::NoPriorRow
-    } else {
-        kind
-    };
     Some(InflightObs {
         channel,
         tmux: tmux.to_owned(),
-        kind,
+        kind: ObservationKind::ExactSelf {
+            episode: snapshot.episode().clone(),
+            token: Arc::clone(token),
+        },
     })
 }
 

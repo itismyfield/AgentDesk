@@ -1638,7 +1638,13 @@ src/
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
 │   │   │   ├── o_writer_host/
-│   │   │   │   └── b1b_fresh_launch_tests.rs
+│   │   │   │   └── fence_tests/
+│   │   │   │       ├── b1b_fresh_launch_tests/
+│   │   │   │       │   └── delegated_tests.rs
+│   │   │   │       ├── b1b_fresh_launch_tests.rs
+│   │   │   │       ├── b1b_repeated_absence_tests.rs
+│   │   │   │       ├── b1b_restart_phase_tests.rs
+│   │   │   │       └── b1b_terminal_tests.rs
 │   │   │   ├── queued_placeholders/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── n3bc_tests.rs
@@ -2899,6 +2905,8 @@ src/
 │   │   │   ├── actor/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
+│   │   │   │   ├── scoped_submission_tests.rs
+│   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── binding/

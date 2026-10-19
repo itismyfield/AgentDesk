@@ -188,28 +188,7 @@ pub(in crate::services::discord) async fn kickoff(
     .started
 }
 
-pub(in crate::services::discord) async fn wait_context_after(
-    fixture: &CanaryFixture,
-    previous: &str,
-) -> BindingContext {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Ok(path) = fs::read_to_string(fixture.root.path().join("fresh-context")) {
-                let context: BindingContext =
-                    serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-                if context.execution_nonce != previous
-                    && dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX)
-                        == SpawnNonceMarker::Known(context.execution_nonce.clone())
-                {
-                    return context;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the actual CLI did not publish a different launch nonce")
-}
+pub(in crate::services::discord) use super::late_tests::wait_context_after;
 
 pub(in crate::services::discord) fn publish_named_source(
     fixture: &CanaryFixture,
@@ -318,7 +297,7 @@ impl Drop for WarmProbe {
     }
 }
 
-fn warm_draft(prompt: &str) -> String {
+pub(crate) fn warm_draft(prompt: &str) -> String {
     use unicode_width::UnicodeWidthChar;
     let canonical = prompt.replace("\r\n", "\n").replace('\r', "\n");
     let mut rows = Vec::new();
@@ -874,7 +853,11 @@ async fn recovery_diagnostic(
     );
 }
 
-pub(in crate::services::discord) async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingContext, boot: bool) {
+pub(in crate::services::discord) async fn wait_recovery_custody_settled(
+    fixture: &CanaryFixture,
+    n2: &BindingContext,
+    boot: bool,
+) {
     recovery_diagnostic(fixture, n2, boot, "before_settle", None).await;
     let channel = serenity::ChannelId::new(CANARY_CHANNEL);
     let settled = tokio::time::timeout(Duration::from_secs(5), async {

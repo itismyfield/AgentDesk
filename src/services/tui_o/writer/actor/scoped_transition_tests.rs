@@ -17,16 +17,26 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
         gate.acquired();
         let (_stop, stopped) = watch::channel(false);
         let (port, receiver) = TransitionPort::new(
-            81, gate, Arc::new(std::time::SystemTime::now), stopped.clone(),
+            81,
+            gate,
+            Arc::new(std::time::SystemTime::now),
+            stopped.clone(),
         );
         let operation = Operation::Inspect(Request {
-            channel: 7, cutoff: 1, job_id: "queued-before-selection".into(),
-            operator: "test".into(), at: chrono::Utc::now(),
-            reason: "inspect queued boundary".into(), termination: None,
+            channel: 7,
+            cutoff: 1,
+            job_id: "queued-before-selection".into(),
+            operator: "test".into(),
+            at: chrono::Utc::now(),
+            reason: "inspect queued boundary".into(),
+            termination: None,
         });
         let context = Context {
-            tmux: "test-pane".into(), nonce: "old-execution".into(), home_epoch: None,
-            lock: Arc::new(tokio::sync::Mutex::new(())), permit: None,
+            tmux: "test-pane".into(),
+            nonce: "old-execution".into(),
+            home_epoch: None,
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            permit: None,
         };
         // Leave the port's selection empty: only Actor.poll_transition may reject this envelope.
         let request = port.request(operation, context);
@@ -34,14 +44,23 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
         assert!(futures::poll!(&mut request).is_pending());
         let bindings = Arc::new(ChannelBindingLog::new(7, ShadowProvider::Claude));
         let mut actor = Actor {
-            writer, deriver: UnitDeriver::new(7, ShadowProvider::Claude), owed: VecDeque::new(), verified: None,
-            sources: Sources::new(7, ShadowProvider::Claude, bindings.clone()), bindings,
-            transitions: Transitions::new(Some(receiver), stopped), notice: None,
-            waiting: Waiting::default(), clock: (Instant::now(), chrono::Utc::now()),
+            writer,
+            deriver: UnitDeriver::new(7, ShadowProvider::Claude),
+            owed: VecDeque::new(),
+            verified: None,
+            sources: Sources::new(7, ShadowProvider::Claude, bindings.clone()),
+            bindings,
+            transitions: Transitions::new(Some(receiver), stopped),
+            notice: None,
+            waiting: Waiting::default(),
+            clock: (Instant::now(), chrono::Utc::now()),
             scope_hold: None,
         };
         if freeze {
-            actor.writer.suspension.extend("successor".into(), [floor.checkpoint().0.clone()]);
+            actor
+                .writer
+                .suspension
+                .extend("successor".into(), [floor.checkpoint().0.clone()]);
         }
         // An unresolved ordinary actor leaves the mailbox queued; a scoped one must refuse now.
         actor.poll_transition(false, &watch::channel(None).0);
@@ -51,7 +70,9 @@ async fn queued_transition_is_refused_when_selection_freezes_before_actor_poll()
                 assert!(reply.hops.is_empty());
             }
             (false, Poll::Pending) => {}
-            (freeze, other) => panic!("scope frozen={freeze}: expected immediate scope refusal, got {other:?}"),
+            (freeze, other) => {
+                panic!("scope frozen={freeze}: expected immediate scope refusal, got {other:?}")
+            }
         }
         assert!(!actor.transitions.has_job());
         assert_eq!(tree(&root.path().join(STORE_DIR_NAME)), before);

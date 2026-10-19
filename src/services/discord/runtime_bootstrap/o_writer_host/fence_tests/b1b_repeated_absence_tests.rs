@@ -195,7 +195,7 @@ pub(super) async fn repeat_absence(
     let watch = Watch::start(&source.path);
     let path = b1::publish_named_source(fixture, &n4, THIRD_NATIVE_ID);
     let new_io = Watch::start(&path);
-    b1::terminal(&path, "new-clear-turn", THIRD_REPLY);
+    native_output::terminal(&path, "new-clear-turn", THIRD_REPLY);
     b1::wait_completion(&third_token).await;
     b1::wait_idle(fixture).await;
     eventually(

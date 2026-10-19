@@ -48,11 +48,13 @@ async fn scenario(case: Case) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _scope = ScopeFixture::new();
     let _fake_tmux =
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());
+    assert!(dedupe::clear_relaunch::fresh_scope_eligible(CANARY_CHANNEL));
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| {
         vec![InitSource {
             source_id: old.clone(),

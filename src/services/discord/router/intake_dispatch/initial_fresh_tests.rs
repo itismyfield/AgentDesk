@@ -16,6 +16,7 @@ use crate::services::tui_o::store::{Initialized, OStore, StoreConfig};
 use crate::services::tui_o::writer::host::{self, HostParts, test_io::TestHost};
 use crate::services::tui_prompt_dedupe as dedupe;
 use chrono::Utc;
+use futures::FutureExt;
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,18 @@ impl IntakeSubmission {
             attachments: Vec::new(),
             preloaded_uploads: Vec::new(),
             voice_announcement: None,
+        }
+    }
+}
+
+impl IntakeAdmission {
+    pub(in crate::services::discord) fn forwarded_for_tests(&self) -> Option<(&str, i64)> {
+        match self {
+            Self::Forwarded {
+                target_instance_id,
+                outbox_id,
+            } => Some((target_instance_id, *outbox_id)),
+            _ => None,
         }
     }
 }
@@ -169,7 +182,10 @@ enum Case {
 }
 
 #[derive(Clone, Copy)]
-enum Metadata { Missing, Unreadable }
+enum Metadata {
+    Missing,
+    Unreadable,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
@@ -217,16 +233,31 @@ async fn admission_case(case: Case) {
     let _cli = fixture.cold_cli();
     assert!(crate::services::codex::successor_hooks_ready());
     fixture.fake.enable_fixture_launch();
+    let custody = matches!(
+        case,
+        Case::Negative(Refusal::CustodyPending | Refusal::LegacyReceiptCustody)
+    );
+    if custody {
+        auxiliary_tests::target_missing(&fixture, false);
+        let observed =
+            crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
+                .unwrap();
+        assert!(dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &observed).is_some());
+        let (local, range) = custody_tests::admitted_terminal(&fixture, true).await;
+        custody_tests::retain_after_successor(&fixture, &local, &range).await;
+    }
     auxiliary_tests::target_missing(&fixture, true);
     crate::services::platform::tmux::invalidate_availability_cache();
 
     let observation =
         crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
             .expect("the initial placement has no inflight row");
-    assert!(
-        dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &observation).is_some(),
-        "the existing B1 absence predicate must accept this fixture"
-    );
+    if !custody {
+        assert!(
+            dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &observation).is_some(),
+            "the existing B1 absence predicate must accept this fixture"
+        );
+    }
     assert!(!dedupe::codex_verified_channel_delivery_allowed(
         CANARY_CHANNEL
     ));
@@ -335,14 +366,25 @@ async fn admission_case(case: Case) {
         let cursor = channel.attach_source(&fixture.old_source).unwrap();
         assert!(channel.binding_checkpoint().unwrap().is_none());
         if matches!(kind, Metadata::Unreadable) {
-            let path = fixture.root.path().join("o_store").join(CANARY_CHANNEL.to_string())
+            let path = fixture
+                .root
+                .path()
+                .join("o_store")
+                .join(CANARY_CHANNEL.to_string())
                 .join(crate::services::tui_o::store::rotation::CHECKPOINT_FILE);
             std::fs::write(path, "{torn checkpoint").unwrap();
             assert!(channel.binding_checkpoint().is_err());
         }
-        Some((cursor, std::fs::read(&fixture.old_source.path).unwrap(),
-            crate::services::codex::actual_submit_tests::source_io::Watch::start(&fixture.old_source.path)))
-    } else { None };
+        Some((
+            cursor,
+            std::fs::read(&fixture.old_source.path).unwrap(),
+            crate::services::codex::actual_submit_tests::source_io::Watch::start(
+                &fixture.old_source.path,
+            ),
+        ))
+    } else {
+        None
+    };
     let io = TestHost::new([(CANARY_CHANNEL, fixture.old_source.clone())]);
     let gate = Arc::new(OwnershipGate::default());
     gate.acquired();
@@ -363,6 +405,7 @@ async fn admission_case(case: Case) {
         1,
         "the selected channel must start its real host"
     );
+    let run = std::panic::AssertUnwindSafe(async {
     if let Some((cursor, bytes, old_io)) = metadata {
         tokio::time::timeout(Duration::from_secs(5), async {
             while hosts[0].live() && readiness.submission(CANARY_CHANNEL).is_none() {
@@ -432,7 +475,9 @@ async fn admission_case(case: Case) {
             crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
         );
         assert!(host::initial_fresh_refusal(CANARY_CHANNEL).is_none());
-        assert!(dedupe::clear_relaunch::input_reason_for_channel(CANARY_CHANNEL).is_some());
+        if !custody {
+            assert!(dedupe::clear_relaunch::input_reason_for_channel(CANARY_CHANNEL).is_some());
+        }
         match refusal {
             Refusal::PanePresent => fixture.fake.mark_present(),
             Refusal::ProbeFailed => fixture.fake.fail_probes(),
@@ -483,8 +528,6 @@ async fn admission_case(case: Case) {
                     crate::services::platform::tmux::SessionPresence::Missing);
             }
             Refusal::CustodyPending | Refusal::LegacyReceiptCustody => {
-                let (local, range) = custody_tests::admitted_terminal(&fixture, true).await;
-                custody_tests::retain_after_successor(&fixture, &local, &range).await;
                 assert!(crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX).is_some());
                 assert_eq!(dedupe::clear_relaunch::input_hold_reason_for_channel(CANARY_CHANNEL), "absence_custody_pending");
             }
@@ -609,6 +652,13 @@ async fn admission_case(case: Case) {
         matches!(admission, IntakeAdmission::Local(_)),
         "an existing false-resumed O actor with exact B1 absence must admit input: {admission:?}"
     );
+    }).catch_unwind().await;
+    for host in hosts {
+        let _ = host.stop_and_join().await;
+    }
+    if let Err(panic) = run {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 fn queue_bytes(fixture: &CanaryFixture) -> Vec<u8> {

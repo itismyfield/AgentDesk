@@ -126,7 +126,7 @@ pub(crate) enum IntakeAdmission {
     ),
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl IntakeAdmission {
     pub(in crate::services::discord) fn is_local_for_tests(&self) -> bool {
         matches!(self, Self::Local(_))

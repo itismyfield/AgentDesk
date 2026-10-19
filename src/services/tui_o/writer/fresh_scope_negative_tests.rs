@@ -48,7 +48,9 @@ fn metadata(next: &BindingContext, id: &str, path: &Path, root: &Path) {
     let at = (next.created_at + chrono::Duration::seconds(1)).to_rfc3339();
     let row = serde_json::json!({"type":"session_meta", "timestamp":at,
         "payload":{"id":id,"timestamp":at,"cwd":root,"source":"cli","originator":"codex_cli_rs"}});
-    std::fs::write(path, format!("{row}\n")).unwrap();
+    let prompt = serde_json::json!({"type":"response_item", "payload":{
+        "type":"message", "role":"user", "content":[{"type":"input_text", "text":"warm proof input"}]}});
+    std::fs::write(path, format!("{row}\n{prompt}\n")).unwrap();
 }
 
 fn old_harness(source: &SourceId) -> Harness {
@@ -86,14 +88,16 @@ async fn exercise(case: Case) {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _scope = ScopeFixture::new();
     let _tmux =
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
-    let (old_context, old) = proven(root.path());
+    let (_, old) = proven(root.path());
+    assert!(dedupe::clear_relaunch::fresh_scope_eligible(CANARY_CHANNEL));
     let harness = old_harness(&old);
     let old_cursor = harness.channel().cursor(&old).unwrap().clone();
-    let old_bytes = std::fs::read(&old.path).unwrap();
+    let mut old_bytes = std::fs::read(&old.path).unwrap();
     match case {
         Case::Eligibility => {
             for policy in ["shadow", "legacy"] {
@@ -135,6 +139,10 @@ async fn exercise(case: Case) {
                     CANARY_CHANNEL
                 ))
             );
+            assert!(
+                !dedupe::clear_relaunch::fresh_scope_eligible(CANARY_CHANNEL),
+                "a real Herdr endpoint must close the shared scope eligibility predicate"
+            );
             let mut installed = false;
             assert_eq!(
                 dedupe::clear_relaunch::with_fresh_scope(
@@ -149,15 +157,17 @@ async fn exercise(case: Case) {
             assert!(!installed, "Herdr acquired the direct-tmux scope exception");
         }
         Case::Alias => {
-            let mut next = next_context(root.path(), "verified");
-            next.created_at = old_context.created_at;
+            let next = next_context(root.path(), "verified");
             publish_context(&next);
             let alias_dir = next.provider_root.as_ref().unwrap().join("alias");
             std::fs::create_dir(&alias_dir).unwrap();
-            let alias = alias_dir.join(format!("rollout-{}.jsonl", old.session_id));
+            let id = uuid::Uuid::new_v4().to_string();
+            let alias = alias_dir.join(format!("rollout-{id}.jsonl"));
             std::fs::hard_link(&old.path, &alias).unwrap();
-            std::fs::write(&alias, &old_bytes).unwrap();
-            hook(&next, &old.session_id, &alias, "session_start");
+            // Model external inode reuse during setup; the admission phase must not read it.
+            metadata(&next, &id, &alias, root.path());
+            old_bytes = std::fs::read(&old.path).unwrap();
+            hook(&next, &id, &alias, "session_start");
             let fold = dedupe::binding_events::codex::read_ownership(&next).unwrap();
             let proof = fold
                 .verified

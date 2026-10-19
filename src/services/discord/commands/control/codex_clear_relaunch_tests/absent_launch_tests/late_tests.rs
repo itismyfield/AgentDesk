@@ -436,3 +436,26 @@ async fn late_change_holds(change: LateChange, boundary: Boundary) {
     // Intentional cancellation leaves completion assertions armed on this failure guard.
     drop(guard);
 }
+
+pub(in crate::services::discord) async fn wait_context_after(
+    fixture: &CanaryFixture,
+    previous: &str,
+) -> BindingContext {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(path) = fs::read_to_string(fixture.root.path().join("fresh-context")) {
+                let context: BindingContext =
+                    serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                if context.execution_nonce != previous
+                    && dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX)
+                        == SpawnNonceMarker::Known(context.execution_nonce.clone())
+                {
+                    return context;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the actual CLI did not publish a different launch nonce")
+}

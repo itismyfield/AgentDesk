@@ -6,6 +6,42 @@ mod gc_waiting;
 #[path = "fresh_scope_negative_tests.rs"]
 mod negative;
 
+struct ScopeFixture {
+    previous: crate::config::Config,
+    _hosting: std::sync::MutexGuard<'static, ()>,
+    _instance: crate::config::TestEnvVarGuard,
+}
+
+impl ScopeFixture {
+    fn new() -> Self {
+        let instance = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_INSTANCE_ID",
+            std::ffi::OsStr::new("b1b-scoped-writer-test"),
+        );
+        let hosting = crate::services::provider_hosting::TEST_CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = crate::config_live_reload::current()
+            .map(|config| (*config).clone())
+            .unwrap_or_default();
+        let config =
+            serde_yaml::from_str("server: {}\nproviders:\n  codex: {runtime: tui}\n").unwrap();
+        crate::services::provider_hosting::install_provider_hosting_config(&config);
+        assert!(dedupe::binding_context::stable_host_identity().is_some());
+        Self {
+            previous,
+            _hosting: hosting,
+            _instance: instance,
+        }
+    }
+}
+
+impl Drop for ScopeFixture {
+    fn drop(&mut self) {
+        crate::services::provider_hosting::install_provider_hosting_config(&self.previous);
+    }
+}
+
 pub(crate) fn proven(root: &Path) -> (BindingContext, SourceId) {
     let mut context = context(root, CANARY_TMUX, "verified");
     context.host = dedupe::binding_context::stable_host_identity();
@@ -82,12 +118,14 @@ async fn scenario(in_place: bool, retired_old: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _scope = ScopeFixture::new();
     let _fake_tmux =
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let n1 = retired_old.then(|| proven(root.path()).1);
     let (_, n2) = proven(root.path());
+    assert!(dedupe::clear_relaunch::fresh_scope_eligible(CANARY_CHANNEL));
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| {
         n1.iter()
             .chain(std::iter::once(&n2))
@@ -253,11 +291,13 @@ async fn held_work(retired: bool, unsealed: bool) {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let _scope = ScopeFixture::new();
     let _fake_tmux =
         crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, n2) = proven(root.path());
+    assert!(dedupe::clear_relaunch::fresh_scope_eligible(CANARY_CHANNEL));
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| {
         vec![InitSource {
             source_id: n2.clone(),
