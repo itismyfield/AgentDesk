@@ -261,7 +261,7 @@ assert_eq "consumption alone reaches timeout, not acknowledgement" \
   "not evaluated: restart drain acknowledgement timed out" \
   "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "consumption-only deploy still requires phase 2" "0" \
-  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 
 echo "== Test 5c: health_turn_snapshot fails closed when counters absent =="
 # Regression for #1447 review iteration 4 P2: previously a redacted body
@@ -739,7 +739,7 @@ assert_eq "S4-M21 killer: health alone reaches timeout" \
   "not evaluated: restart drain acknowledgement timed out" \
   "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "health-only deploy still requires phase 2" "0" \
-  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 if grep -Fq 'waiting for request-specific persistence' "$S1_TMP/health.out"; then
   pass "the health observation waits without terminal authority"
 else
@@ -803,7 +803,7 @@ assert_eq "S4-M22 killer: consumption alone reaches timeout" \
   "not evaluated: restart drain acknowledgement timed out" \
   "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "consumption-only deploy still requires phase 2" "0" \
-  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 if grep -Fq 'waiting for request-specific persistence' "$S1_TMP/consumed.out"; then
   pass "the consumption observation waits without terminal authority"
 else
@@ -828,7 +828,7 @@ rc=$?
 set -e
 assert_eq "stopped runtime path returns 0" "0" "$rc"
 assert_eq "stopped runtime retains the approved cold escape" "1" \
-  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 stopped_verdict="${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "stopped runtime names the unevaluated reason" \
   "not evaluated: launchd job is not running" "$stopped_verdict"
@@ -849,7 +849,7 @@ rc=$?
 set -e
 assert_eq "deploy timeout remains phase-1 permissive" "0" "$rc"
 assert_eq "deploy timeout leaves phase 2 required" "0" \
-  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 timeout_verdict="${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "timeout names why durability was not evaluated" \
   "not evaluated: restart drain acknowledgement timed out" "$timeout_verdict"
@@ -908,7 +908,7 @@ run_actual_deploy_composition() {
 
   assert_eq "composition phase 1 keeps its permissive return" "0" "$phase1_rc"
   assert_eq "composition phase 1 leaves durability required" "0" \
-    "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+    "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
   RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
   [ -n "$RESTART_REQUEST_NONCE" ] \
     || fail "composition phase 1 exports a request nonce"
@@ -934,6 +934,81 @@ run_actual_deploy_composition() {
 }
 
 run_actual_deploy_composition
+
+# Operator input and phase-1 verdict compose at the production gate: phase 1
+# runs for real, then the gate region runs in the same child shell, as in deploy.
+compose_operator_gate() {
+  local operator="$1" compose_job_state="$2" case_dir="$S1_TMP/operator-$1-${2// /-}"
+  mkdir -p "$case_dir/release"
+  set +e
+  (
+    if [ "$operator" = unset ]; then
+      unset AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED
+    else
+      export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED="$operator"
+    fi
+    # shellcheck source=/dev/null
+    . "$DEFAULTS_SH"
+    guard_no_foreign_active_turns_or_warn() { return 0; }
+    _launchd_job_state() { echo "$compose_job_state"; }
+    PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+      request_restart_drain_mode_or_fail \
+        "release" "running.label" 0 "$case_dir/release" "deploy-release" \
+        >"$case_dir/phase1.out" 2>&1 || exit 90
+    RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
+    ADK_REL="$case_dir/release"
+    _release_runtime_is_serving() { return 0; }
+    wait_for_restart_persistence_or_fail() { echo phase-2-ran; return 1; }
+    eval "$(<"$S1_TMP/durability-region.sh")"
+  ) >"$case_dir/gate.out" 2>&1
+  COMPOSE_RC=$?
+  set -e
+  COMPOSE_OUT=$(<"$case_dir/gate.out")
+}
+
+compose_operator_gate 1 running
+assert_eq "operator override passes the gate after a deploy drain timeout" "0" "$COMPOSE_RC"
+case "$COMPOSE_OUT" in
+  *phase-2-ran*) fail "operator override does not wait for persistence (got: $COMPOSE_OUT)" ;;
+  *'skipped by operator override AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1 (drain: not evaluated: restart drain acknowledgement timed out)'*)
+    pass "operator override is named with the drain verdict" ;;
+  *) fail "operator override is named with the drain verdict (got: $COMPOSE_OUT)" ;;
+esac
+for operator in unset 0; do
+  compose_operator_gate "$operator" running
+  assert_eq "operator=$operator deploy drain timeout fails closed" "1" "$COMPOSE_RC"
+  case "$COMPOSE_OUT" in
+    *phase-2-ran*) pass "operator=$operator enters the phase-2 wait" ;;
+    *) fail "operator=$operator enters the phase-2 wait (got: $COMPOSE_OUT)" ;;
+  esac
+done
+compose_operator_gate unset "not running"
+assert_eq "stopped launchd job still passes the gate without an operator" "0" "$COMPOSE_RC"
+case "$COMPOSE_OUT" in
+  *phase-2-ran*|*'operator override'*)
+    fail "stopped job skip is the function verdict, not an override (got: $COMPOSE_OUT)" ;;
+  *'restart durability gate=not evaluated: launchd job is not running'*)
+    pass "stopped job skip is the function verdict, not an override" ;;
+  *) fail "stopped job skip is the function verdict, not an override (got: $COMPOSE_OUT)" ;;
+esac
+
+# The restart skill has no phase 2; its timeout keeps the permissive verdict.
+# shellcheck source=/dev/null
+. "$DEFAULTS_SH"
+guard_no_foreign_active_turns_or_warn() { return 0; }
+_launchd_job_state() { echo "running"; }
+mkdir -p "$S1_TMP/skill-timeout-root"
+set +e
+PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail \
+    "test" "running.label" 0 "$S1_TMP/skill-timeout-root" "agentdesk-restart-skill" \
+    >"$S1_TMP/skill-timeout.out" 2>&1
+rc=$?
+set -e
+unset -f _launchd_job_state
+assert_eq "restart skill timeout returns 0" "0" "$rc"
+assert_eq "restart skill timeout does not require phase 2" "1" \
+  "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 
 # A rollback-era runtime may leave only the fixed compatibility index while its
 # same-nonce canonical pending marker is still linked. Execute the production
@@ -993,7 +1068,7 @@ skip_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   set -euo pipefail
   ADK_REL="/unused"
   RESTART_REQUEST_NONCE=""
-  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+  AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=1
   AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: launchd job is not running"
   clear_restart_drain_mode() { :; }
   wait_for_restart_persistence_or_fail() { echo phase-2-ran; }
@@ -1027,7 +1102,7 @@ run_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   set -euo pipefail
   ADK_REL="/unused"
   RESTART_REQUEST_NONCE="test-nonce"
-  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+  AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=0
   AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
   clear_restart_drain_mode() { :; }
   _release_runtime_is_serving() { return 0; }
@@ -1055,7 +1130,7 @@ gate_not_serving() {
     set -euo pipefail
     ADK_REL="/unused"
     RESTART_REQUEST_NONCE="test-nonce"
-    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+    AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=0
     AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
     clear_restart_drain_mode() { :; }
     _release_runtime_is_serving() { return 1; }
