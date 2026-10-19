@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-10-19T03:06:16Z",
+  "refreshed_at": "2026-10-19T08:39:50Z",
   "ratchets": {
-    "closed_deadline_entries": 73,
+    "closed_deadline_entries": 72,
     "transition_list_entries": 74
   },
   "issues": [
@@ -156,6 +156,17 @@
       ],
       "files": [
         "src/services/discord/tmux_watcher_registry.rs"
+      ]
+    },
+    {
+      "number": 6487,
+      "state": "open",
+      "title": "[commands] Discord 커맨드 정리 — 미사용·죽은·중복 24개와 `!` 텍스트 계층 제거, /help 재작성, 남는 저사용 커맨드 소규모 결함 수정",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/commands/text_commands.rs"
       ]
     }
   ]
