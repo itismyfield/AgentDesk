@@ -2,6 +2,12 @@
 use super::*;
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
 
+// A new head retains the prior wake timestamp; allow the normal wake and two observation ticks.
+const RECOVERY_LIMIT: Duration = LiveSupervisor::SUPERVISOR_WAKE_EVERY
+    .saturating_add(LiveSupervisor::SUPERVISOR_TICK.saturating_mul(2));
+const RECOVERY_TICK_LIMIT: usize =
+    (RECOVERY_LIMIT.as_nanos() / LiveSupervisor::SUPERVISOR_TICK.as_nanos()) as usize + 1;
+
 struct ForeignWatcher {
     task: Option<tokio::task::JoinHandle<()>>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -155,7 +161,11 @@ impl Drop for FailureLogs {
     }
 }
 
-fn trace_supervisor_tick(supervisor: &LiveSupervisor, recovery_tick: usize) {
+fn trace_supervisor_tick(
+    supervisor: &LiveSupervisor,
+    recovery_tick: usize,
+    first_wake: tokio::time::Instant,
+) {
     let state = supervisor.state();
     let safe = serde_json::json!({
         "activity": state["activity"],
@@ -164,13 +174,26 @@ fn trace_supervisor_tick(supervisor: &LiveSupervisor, recovery_tick: usize) {
         "kickoffs_total": state["kickoffs_total"],
         "queue_held": state["queue_held"]["reason"],
     });
-    eprintln!("A2_SUPERVISOR_TICK recovery_tick={recovery_tick} state={safe}");
+    let last_kick_after_a_ms = supervisor
+        .last_kick_at()
+        .unwrap()
+        .duration_since(first_wake)
+        .as_millis();
+    eprintln!(
+        "A2_SUPERVISOR_TICK recovery_tick={recovery_tick} last_kick_after_a_ms={last_kick_after_a_ms} state={safe}"
+    );
 }
 
 fn recovery_kick_observed(logs: &LogSink, channel: ChannelId) -> bool {
-    let fresh = format!("one-shot kick for channel {channel} (turn_presence_idle)");
+    kick_observed_after(logs, channel, "turn_presence_idle", 0)
+}
+
+fn kick_observed_after(logs: &LogSink, channel: ChannelId, origin: &str, offset: usize) -> bool {
+    let fresh = format!("one-shot kick for channel {channel} ({origin})");
     let channel_field = format!("channel_id={channel}");
-    String::from_utf8(logs.0.lock().unwrap().clone())
+    let quoted_reason = format!("reason=\"{origin}\"");
+    let plain_reason = format!("reason={origin}");
+    String::from_utf8(logs.0.lock().unwrap()[offset..].to_vec())
         .unwrap()
         .lines()
         .any(|line| {
@@ -178,12 +201,9 @@ fn recovery_kick_observed(logs: &LogSink, channel: ChannelId) -> bool {
                 || (line
                     .contains("kickoff already active for channel; coalescing duplicate request")
                     && line.split_whitespace().any(|field| field == channel_field)
-                    && line.split_whitespace().any(|field| {
-                        matches!(
-                            field,
-                            "reason=\"turn_presence_idle\"" | "reason=turn_presence_idle"
-                        )
-                    })
+                    && line
+                        .split_whitespace()
+                        .any(|field| field == quoted_reason || field == plain_reason)
                     && line
                         .split_whitespace()
                         .any(|field| field == "immediate=true")
@@ -267,8 +287,9 @@ impl RecoveryDriver {
         // The first recovery tick has already completed with the same Idle generation.
         let ticks = Arc::new(AtomicUsize::new(1));
         let counted = ticks.clone();
+        let first_wake = supervisor.last_kick_at().unwrap();
         let task = tokio::spawn(async move {
-            let period = Duration::from_secs(3);
+            let period = LiveSupervisor::SUPERVISOR_TICK;
             let mut interval =
                 tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -276,7 +297,7 @@ impl RecoveryDriver {
                 interval.tick().await;
                 let tick = counted.fetch_add(1, Ordering::SeqCst) + 1;
                 supervisor.tick().await;
-                trace_supervisor_tick(&supervisor, tick);
+                trace_supervisor_tick(&supervisor, tick, first_wake);
             }
         });
         Self {
@@ -330,7 +351,8 @@ async fn supervisor_drains_pair(
     assert_eq!(state["reason"], "no_session");
     assert_eq!(state["generation"], baseline["generation"]);
     assert_eq!(state["kickoffs_total"], 1);
-    trace_supervisor_tick(supervisor, 1);
+    let first_wake = supervisor.last_kick_at().unwrap();
+    trace_supervisor_tick(supervisor, 1, first_wake);
     let driver = RecoveryDriver::start(supervisor.clone());
     let mut ledger = vec![first.wait(fixture, a).await];
     assert!(
@@ -338,6 +360,7 @@ async fn supervisor_drains_pair(
         "the real LiveEffects recovery kick origin was not observed"
     );
     let first_entry = began.elapsed();
+    assert!(first_entry <= DRAIN_LIMIT);
     assert_eq!(fixture.disk_ids(), [b]);
     let state = fixture
         .rig
@@ -355,18 +378,57 @@ async fn supervisor_drains_pair(
         [b]
     );
     let mut second = ProviderTurn::arm(fixture.rig.channel.get());
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        second.entered.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_some());
+    assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture
+            .rig
+            .shared
+            .mailbox(fixture.rig.channel)
+            .snapshot()
+            .await
+            .active_user_message_id,
+        Some(MessageId::new(a))
+    );
+    let completion_offset = logs.0.lock().unwrap().len();
+    eprintln!("A2_S3_A_HELD a_entered=1 no_early_b=1");
     first.finish();
-    ledger.push(second.wait(fixture, b).await);
+    until(async || {
+        kick_observed_after(
+            logs,
+            fixture.rig.channel,
+            "turn_completion_event",
+            completion_offset,
+        )
+    })
+    .await;
+    ledger.push(second.wait_with_limit(fixture, b, RECOVERY_LIMIT).await);
+    let b_entry = began.elapsed();
+    let b_after_a_kick = first_wake.elapsed();
+    let periodic_wake = supervisor
+        .last_kick_at()
+        .unwrap()
+        .duration_since(first_wake);
+    assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
+    assert!(b_after_a_kick <= RECOVERY_LIMIT);
+    assert_eq!(supervisor.woken_head(), Some(b));
+    assert_eq!(supervisor.state()["generation"], baseline["generation"]);
+    assert_eq!(supervisor.state()["kickoffs_total"], 2);
     second.finish();
     fixture.assert_finished().await;
     let recovery_ticks = driver.stop().await;
     let drained = began.elapsed();
     assert!(
-        drained <= DRAIN_LIMIT,
-        "{label}: final drain exceeded six ticks: {drained:?}"
+        drained <= RECOVERY_LIMIT,
+        "{label}: final drain exceeded the supervisor wake interval and two ticks: {drained:?}"
     );
     assert!(
-        recovery_ticks <= 6,
+        recovery_ticks <= RECOVERY_TICK_LIMIT,
         "{label}: recovery used {recovery_ticks} real ticks"
     );
     assert_eq!(ledger, [a, b]);
@@ -374,13 +436,23 @@ async fn supervisor_drains_pair(
     assert_eq!(ledger.iter().filter(|id| **id == b).count(), 1);
     assert_eq!(guard.0.load(Ordering::SeqCst), 0);
     eprintln!(
-        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks={} recovery_ticks={recovery_ticks} tick_ms=3000 supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={}",
+        "A2_SUPERVISOR_DRAIN case={label} entries={ledger:?} a_entries=1 b_entries=1 duplicates={} supervisor_ticks={} recovery_ticks={recovery_ticks} tick_ms={} supervisor_kickoffs={} first_entry_ms={} final_drain_ms={} limit_ms={}",
         guard.0.load(Ordering::SeqCst),
         1 + recovery_ticks,
+        LiveSupervisor::SUPERVISOR_TICK.as_millis(),
         supervisor.state()["kickoffs_total"],
         first_entry.as_millis(),
         drained.as_millis(),
-        DRAIN_LIMIT.as_millis(),
+        RECOVERY_LIMIT.as_millis(),
+    );
+    eprintln!(
+        "A2_S3_B_RECOVERY case={label} a_entered=1 no_early_b=1 wake_every_ms={} tick_ms={} bound_ms={} b_after_a_kick_ms={} b_entry_ms={} periodic_wake_ms={}",
+        LiveSupervisor::SUPERVISOR_WAKE_EVERY.as_millis(),
+        LiveSupervisor::SUPERVISOR_TICK.as_millis(),
+        RECOVERY_LIMIT.as_millis(),
+        b_after_a_kick.as_millis(),
+        b_entry.as_millis(),
+        periodic_wake.as_millis(),
     );
 }
 

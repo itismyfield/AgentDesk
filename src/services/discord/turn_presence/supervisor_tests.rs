@@ -24,6 +24,9 @@ pub(in crate::services::discord) struct LiveSupervisor {
 }
 
 impl LiveSupervisor {
+    pub(in crate::services::discord) const SUPERVISOR_TICK: Duration = super::TICK;
+    pub(in crate::services::discord) const SUPERVISOR_WAKE_EVERY: Duration = super::WAKE_EVERY;
+
     pub(in crate::services::discord) fn new(
         shared: Arc<SharedData>,
         provider: ProviderKind,
@@ -48,6 +51,16 @@ impl LiveSupervisor {
 
     pub(in crate::services::discord) fn state(&self) -> serde_json::Value {
         lock(&self.inner.channels[&self.channel]).json()
+    }
+
+    pub(in crate::services::discord) fn last_kick_at(&self) -> Option<Instant> {
+        lock(&self.inner.channels[&self.channel]).last_kick_at
+    }
+
+    pub(in crate::services::discord) fn woken_head(&self) -> Option<u64> {
+        lock(&self.inner.channels[&self.channel])
+            .woken_head
+            .map(|(head, _)| head)
     }
 }
 

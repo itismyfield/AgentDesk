@@ -66,7 +66,10 @@ impl ProviderTurn {
         }
     }
     async fn wait(&mut self, fixture: &Fixture, expected: u64) -> u64 {
-        let entry = tokio::time::timeout(DRAIN_LIMIT, &mut self.entered).await;
+        self.wait_with_limit(fixture, expected, DRAIN_LIMIT).await
+    }
+    async fn wait_with_limit(&mut self, fixture: &Fixture, expected: u64, limit: Duration) -> u64 {
+        let entry = tokio::time::timeout(limit, &mut self.entered).await;
         if !matches!(&entry, Ok(Ok(_))) {
             let mailbox = tokio::time::timeout(
                 Duration::from_secs(1),
@@ -105,7 +108,7 @@ impl ProviderTurn {
         }
         assert!(
             matches!(&entry, Ok(Ok(_))),
-            "queued FIFO source {expected} must enter provider within {DRAIN_LIMIT:?}: {entry:?}"
+            "queued FIFO source {expected} must enter provider within {limit:?}: {entry:?}"
         );
         let thread = entry.unwrap().unwrap();
         assert_ne!(thread, std::thread::current().id());
