@@ -28,6 +28,18 @@ const FIRST_REPLY: &str = "B1b fresh O first reply";
 const SECOND_REPLY: &str = "clear relaunch completed";
 const OLD_REPLY: &str = "B1b suspended historical reply";
 
+#[path = "b1b_repeated_absence_tests.rs"]
+mod repeated_absence;
+
+#[derive(Clone, Copy)]
+enum BeforeInput {
+    Absent,
+    Restart,
+    ExplicitClear,
+    RepeatAbsent,
+    InPlaceAbsent,
+}
+
 struct Discord {
     http: Arc<serenity::Http>,
     messages: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -103,9 +115,9 @@ impl Drop for Discord {
 
 fn input() -> IntakeSubmission {
     let message = serenity::MessageId::new(CANARY_CHANNEL + 101);
-    IntakeSubmission {
-        provider: ProviderKind::Codex,
-        request: IntakeRequest {
+    IntakeSubmission::text_for_tests(
+        ProviderKind::Codex,
+        IntakeRequest {
             intake_outbox_id: None,
             channel_id: serenity::ChannelId::new(CANARY_CHANNEL),
             user_msg_id: message,
@@ -124,13 +136,8 @@ fn input() -> IntakeSubmission {
             turn_kind: TurnKind::Foreground,
             preserve_on_cancel: false,
         },
-        origin: IntakeOrigin::QueuedDrain(None),
-        preserve_on_cancel: false,
-        has_nonportable_uploads: false,
-        attachments: Vec::new(),
-        preloaded_uploads: Vec::new(),
-        voice_announcement: None,
-    }
+        IntakeOrigin::QueuedDrain(None),
+    )
 }
 
 fn subtree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -191,7 +198,7 @@ async fn actual_gateway_empty_store_launches_fresh_then_warm_fifo_pg() {
         module_path!(),
         "::actual_gateway_empty_store_launches_fresh_then_warm_fifo_pg"
     )) {
-        scenario(false).await;
+        scenario(false, BeforeInput::Absent).await;
     }
 }
 
@@ -201,11 +208,31 @@ async fn actual_gateway_retained_cursor_launches_fresh_without_old_consumption_p
         module_path!(),
         "::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg"
     )) {
-        scenario(true).await;
+        scenario(true, BeforeInput::Absent).await;
     }
 }
 
-async fn scenario(retained: bool) {
+#[tokio::test(flavor = "current_thread")]
+async fn actual_gateway_restart_before_proof_preserves_fresh_fifo_pg() {
+    if test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::actual_gateway_restart_before_proof_preserves_fresh_fifo_pg"
+    )) {
+        scenario(true, BeforeInput::Restart).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_gateway_explicit_clear_discards_old_queue_then_new_fifo_pg() {
+    if test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::actual_gateway_explicit_clear_discards_old_queue_then_new_fifo_pg"
+    )) {
+        scenario(true, BeforeInput::ExplicitClear).await;
+    }
+}
+
+async fn scenario(retained: bool, before: BeforeInput) {
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
@@ -221,11 +248,15 @@ async fn scenario(retained: bool) {
     let channels = serde_json::to_string(&[(CANARY_CHANNEL, CodexTui)]).unwrap();
     let _channels = set(test_override::CHANNELS_ENV, channels.as_ref());
     let _selected = test_override::force_channels(&[(CANARY_CHANNEL, CodexTui)]);
-    b1::target_missing(&fixture, true);
+    if !matches!(before, BeforeInput::InPlaceAbsent) {
+        b1::target_missing(&fixture, true);
+    }
     crate::services::platform::tmux::invalidate_availability_cache();
-    assert!(!dedupe::codex_verified_channel_delivery_allowed(
-        CANARY_CHANNEL
-    ));
+    assert_eq!(
+        dedupe::codex_verified_channel_delivery_allowed(CANARY_CHANNEL),
+        matches!(before, BeforeInput::InPlaceAbsent),
+        "the ordinary in-place case must begin with real current N2 permission"
+    );
     if retained {
         b1::terminal(&fixture.old_source.path, "historical-turn", OLD_REPLY);
     }
@@ -298,6 +329,11 @@ async fn scenario(retained: bool) {
         "O2 must preserve actual retained spool bytes"
     );
     let output = Discord::start().await;
+    let mut old_io = (!matches!(before, BeforeInput::InPlaceAbsent)).then(|| {
+        crate::services::codex::actual_submit_tests::source_io::Watch::start(
+            &fixture.old_source.path,
+        )
+    });
     let prepared = parts(
         &fixture.shared,
         &ProviderKind::Codex,
@@ -313,9 +349,99 @@ async fn scenario(retained: bool) {
         || prepared,
     );
     assert_eq!(handles.len(), 1);
-    let run = std::panic::AssertUnwindSafe(run_fifo(&mut fixture, &api, &output, &readiness))
-        .catch_unwind()
+    let run = std::panic::AssertUnwindSafe(async {
+        eventually(
+            || readiness.submission(CANARY_CHANNEL).is_some(),
+            "the first actual O actor",
+        )
         .await;
+        match before {
+            BeforeInput::Absent | BeforeInput::RepeatAbsent | BeforeInput::InPlaceAbsent => {}
+            BeforeInput::Restart => {
+                let old_generation = handles[0].generation();
+                tokio::time::timeout(
+                    Duration::from_secs(20),
+                    handles.pop().unwrap().stop_and_join(),
+                )
+                .await
+                .expect("the pre-proof host must stop")
+                .unwrap();
+                assert!(!readiness.is_hosted(CANARY_CHANNEL));
+                let restarted = parts(
+                    &fixture.shared,
+                    &ProviderKind::Codex,
+                    None,
+                    Some(Arc::clone(&output.http)),
+                );
+                handles = host::start_managed(
+                    ShadowProvider::Codex,
+                    true,
+                    cutover::boot_ownership(),
+                    || restarted,
+                );
+                assert_eq!(handles.len(), 1);
+                assert_ne!(handles[0].generation(), old_generation);
+            }
+            BeforeInput::ExplicitClear => {
+                let discarded = b1::restore_instructions(
+                    &mut fixture,
+                    vec![b1::instruction(
+                        CANARY_CHANNEL + 90,
+                        "discard this pre-clear input",
+                    )],
+                )
+                .await;
+                assert_eq!(b1::queue_identities(&fixture).await, discarded);
+                crate::services::discord::commands::clear_channel_session_state(
+                    &api.http,
+                    &fixture.shared,
+                    &ProviderKind::Codex,
+                    serenity::ChannelId::new(CANARY_CHANNEL),
+                    "!clear",
+                    crate::services::discord::commands::SoftClearNotifyMode::Suppress,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    b1::queue_identities(&fixture).await.is_empty(),
+                    "explicit clear must discard its old queue"
+                );
+                assert!(dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+            }
+        }
+        let generation = handles[0].generation();
+        let actor = readiness.submission(CANARY_CHANNEL).unwrap();
+        let fresh = run_fifo(
+            &mut fixture,
+            &api,
+            &output,
+            &readiness,
+            &mut old_io,
+            matches!(before, BeforeInput::InPlaceAbsent),
+        )
+        .await;
+        assert_eq!(handles[0].generation(), generation);
+        assert!(actor.same_run(&readiness.submission(CANARY_CHANNEL).unwrap()));
+        if matches!(before, BeforeInput::RepeatAbsent) {
+            let preserved = repeated_absence::repeat_absence(
+                &mut fixture,
+                &api,
+                &output,
+                &readiness,
+                &store,
+                &era,
+                &fresh,
+            )
+            .await;
+            assert_eq!(handles[0].generation(), generation);
+            assert!(actor.same_run(&readiness.submission(CANARY_CHANNEL).unwrap()));
+            Some(preserved)
+        } else {
+            None
+        }
+    })
+    .catch_unwind()
+    .await;
     if let Some(token) = fixture
         .shared
         .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
@@ -326,16 +452,21 @@ async fn scenario(retained: bool) {
         token.cancelled.store(true, Ordering::SeqCst);
         b1::wait_idle(&fixture).await;
     }
-    let stopped = tokio::time::timeout(
-        Duration::from_secs(20),
-        handles.pop().unwrap().stop_and_join(),
-    )
-    .await;
-    if let Err(panic) = run {
-        std::panic::resume_unwind(panic);
-    }
-    stopped.expect("the real O host must stop").unwrap();
+    let stopped = match handles.pop() {
+        Some(handle) => {
+            Some(tokio::time::timeout(Duration::from_secs(20), handle.stop_and_join()).await)
+        }
+        None => None,
+    };
+    let preserved = run.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    stopped
+        .expect("the fixture must retain its active host")
+        .expect("the real O host must stop")
+        .unwrap();
     let recovered = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+    if let Some(preserved) = preserved {
+        preserved.assert_preserved(&recovered);
+    }
     assert_eq!(recovered.cursor(&fixture.old_source).cloned(), old_cursor);
     assert_eq!(
         recovered.rotation().unwrap().links.get(&old_key),
@@ -347,6 +478,11 @@ async fn scenario(retained: bool) {
     );
     assert_eq!(source_spool(&channel_dir, &old_key), old_spool);
     assert_eq!(fs::read(&fixture.old_source.path).unwrap(), old_bytes);
+    assert_eq!(
+        old_io.as_ref().unwrap().stats(),
+        Default::default(),
+        "old source IO stays zero from its historical observation boundary through shutdown"
+    );
     assert_eq!(
         output
             .texts()
@@ -376,15 +512,36 @@ async fn run_fifo(
     api: &crate::services::discord::admin_host_guard::tests::Recorder,
     output: &Discord,
     readiness: &Arc<host::Readiness>,
-) {
+    old_io: &mut Option<crate::services::codex::actual_submit_tests::source_io::Watch>,
+    in_place: bool,
+) -> dedupe::binding_context::BindingContext {
     eventually(
         || readiness.submission(CANARY_CHANNEL).is_some(),
         "actual GatewayHost live actor",
     )
     .await;
     assert!(readiness.is_hosted(CANARY_CHANNEL));
-    assert!(!readiness.is_ready(CANARY_CHANNEL));
-    assert!(!readiness.accepts(CANARY_CHANNEL));
+    if in_place {
+        eventually(
+            || readiness.is_ready(CANARY_CHANNEL) && readiness.accepts(CANARY_CHANNEL),
+            "ordinary N2 full resume before the real target disappears",
+        )
+        .await;
+        assert!(dedupe::codex_verified_o_source_allowed(
+            CANARY_CHANNEL,
+            &fixture.old_source
+        ));
+        b1::target_missing(fixture, false);
+        assert_eq!(
+            dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
+            dedupe::binding_context::SpawnNonceMarker::Known(
+                fixture.context.execution_nonce.clone()
+            )
+        );
+    } else {
+        assert!(!readiness.is_ready(CANARY_CHANNEL));
+        assert!(!readiness.accepts(CANARY_CHANNEL));
+    }
     let identities = b1::restore_instructions(
         fixture,
         vec![
@@ -406,9 +563,6 @@ async fn run_fifo(
         "actual false-resumed GatewayHost must admit the initial fresh input: {admission:?}"
     );
     assert_eq!(b1::queue_identities(fixture).await, identities);
-    let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
-        &fixture.old_source.path,
-    );
     let (observed_tx, observed_rx) = mpsc::channel();
     let _observe = crate::services::discord::codex_absence::test_setup::install(
         CANARY_CHANNEL,
@@ -470,6 +624,13 @@ async fn run_fifo(
     );
     assert_eq!(snapshot.active_request_owner.map(|id| id.get()), Some(1));
     let fresh = b1::wait_context_after(fixture, &fixture.context.execution_nonce).await;
+    if old_io.is_none() {
+        *old_io = Some(
+            crate::services::codex::actual_submit_tests::source_io::Watch::start(
+                &fixture.old_source.path,
+            ),
+        );
+    }
     assert_eq!(fresh.launch_mode, "fresh");
     assert_eq!(fresh.source_policy.as_deref(), Some("verified"));
     assert!(fresh.expected_native_session_id.is_none());
@@ -621,10 +782,10 @@ async fn run_fifo(
     );
     assert_eq!(
         dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
-        dedupe::binding_context::SpawnNonceMarker::Known(fresh.execution_nonce)
+        dedupe::binding_context::SpawnNonceMarker::Known(fresh.execution_nonce.clone())
     );
     assert_eq!(
-        old_io.stats(),
+        old_io.as_ref().unwrap().stats(),
         Default::default(),
         "suspended native body and cursor must remain untouched"
     );
@@ -639,4 +800,5 @@ async fn run_fifo(
     )
     .unwrap();
     assert!(disk.is_empty());
+    fresh
 }

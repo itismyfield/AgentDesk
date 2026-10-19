@@ -2,18 +2,35 @@
 
 use super::*;
 
-pub(crate) fn initial_fresh_ready(channel: u64) -> bool {
+pub(crate) fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
     let readiness = process_readiness();
     let live = locked(&readiness.live);
-    live.get(&channel).is_some_and(|live| {
-        live.submission.is_some()
-            && owned_now(channel, &live.gate)
-            && !*live.stopping.borrow()
-            && live.resumed.has_changed().is_ok()
-    })
+    let Some(live) = live.get(&channel) else {
+        return Some("host_missing");
+    };
+    let owned = owned_now(channel, &live.gate);
+    #[cfg(test)]
+    let owned = owned || crate::services::claude_tui::source_verify::n2b_mutant("b1b-host");
+    if !owned {
+        return Some("ownership_not_owned");
+    }
+    if *live.stopping.borrow() {
+        return Some("stopping");
+    }
+    if live.resumed.has_changed().is_err() {
+        return Some("actor_closed");
+    }
+    if live.submission.is_none() {
+        return Some("writer_sources_unready");
+    }
+    None
 }
 
 pub(super) fn hold_metadata(store: &ChannelStore) -> Option<&'static str> {
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-meta") {
+        return None;
+    }
     if !crate::services::tui_prompt_dedupe::clear_relaunch::fresh_scope_eligible(
         store.init().channel,
     ) {

@@ -5,6 +5,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind::CodexTui;
 use crate::services::codex::CodexSourceMode;
 use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::CanaryFixture;
+use crate::services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::{auxiliary_tests, custody_tests};
 use crate::services::discord::router::TurnKind;
 use crate::services::discord::router::message_handler::{IntakeDeps, IntakeRequest};
 use crate::services::provider::ProviderKind;
@@ -18,6 +19,25 @@ use chrono::Utc;
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 use std::time::Duration;
+
+impl IntakeSubmission {
+    pub(in crate::services::discord) fn text_for_tests(
+        provider: ProviderKind,
+        request: IntakeRequest,
+        origin: IntakeOrigin,
+    ) -> Self {
+        Self {
+            provider,
+            request,
+            origin,
+            preserve_on_cancel: false,
+            has_nonportable_uploads: false,
+            attachments: Vec::new(),
+            preloaded_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+}
 
 fn input() -> IntakeSubmission {
     let message = serenity::MessageId::new(CANARY_CHANNEL + 7163);
@@ -81,11 +101,96 @@ async fn initial_fresh_worker_preserves_a_claim_taken_by_another_owner_pg() {
     admission_case(Case::Worker(WorkerCase::ClaimChanged)).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn initial_fresh_worker_holds_an_unproved_successor_after_claim_pg() {
+    admission_case(Case::Worker(WorkerCase::UnprovedFirst)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_fresh_worker_holds_an_unproved_successor_before_final_accept_pg() {
+    admission_case(Case::Worker(WorkerCase::UnprovedFinal)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_fresh_intake_requires_exact_absence_and_a_live_owned_writer_pg() {
+    for refusal in [
+        Refusal::PanePresent,
+        Refusal::ProbeFailed,
+        Refusal::ForeignNonce,
+        Refusal::BlankNonce,
+        Refusal::ForeignOwnership,
+        Refusal::NullOwnership,
+        Refusal::MarkerIo,
+        Refusal::InflightRow,
+        Refusal::WrongProvider,
+        Refusal::Lost,
+        Refusal::Uncertain,
+        Refusal::SubmissionMissing,
+        Refusal::Stopping,
+        Refusal::HostMissing,
+        Refusal::UnprovedSuccessor,
+        Refusal::CustodyPending,
+        Refusal::CustodyUnreadable,
+        Refusal::LegacyReceiptCustody,
+    ] {
+        admission_case(Case::Negative(refusal)).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_fresh_reason_observation_preserves_directory_modes_pg() {
+    admission_case(Case::PureReason).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_clear_reason_observation_preserves_directory_modes_pg() {
+    admission_case(Case::PureClearReason).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retained_cursor_without_checkpoint_keeps_the_actual_host_pre_live_pg() {
+    admission_case(Case::Metadata(Metadata::Missing)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retained_cursor_with_unreadable_checkpoint_keeps_the_actual_host_pre_live_pg() {
+    admission_case(Case::Metadata(Metadata::Unreadable)).await;
+}
+
 #[derive(Clone, Copy)]
 enum Case {
     Admission,
     Progress,
     Worker(WorkerCase),
+    Negative(Refusal),
+    PureReason,
+    PureClearReason,
+    Metadata(Metadata),
+}
+
+#[derive(Clone, Copy)]
+enum Metadata { Missing, Unreadable }
+
+#[derive(Clone, Copy, Debug)]
+enum Refusal {
+    PanePresent,
+    ProbeFailed,
+    ForeignNonce,
+    BlankNonce,
+    ForeignOwnership,
+    NullOwnership,
+    MarkerIo,
+    InflightRow,
+    WrongProvider,
+    Lost,
+    Uncertain,
+    SubmissionMissing,
+    Stopping,
+    HostMissing,
+    UnprovedSuccessor,
+    CustodyPending,
+    CustodyUnreadable,
+    LegacyReceiptCustody,
 }
 
 #[derive(Clone, Copy)]
@@ -94,10 +199,12 @@ enum WorkerCase {
     PaneAppeared,
     FinalPaneAppeared,
     ClaimChanged,
+    UnprovedFirst,
+    UnprovedFinal,
 }
 
 async fn admission_case(case: Case) {
-    let fixture =
+    let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1b-input-host")).await;
     let _mode = fixture.scoped_test_env("ADK_INTAKE_ROUTING_MODE", "disabled".as_ref());
     let _writer = fixture.scoped_test_env(test_override::CHILD_ENV, "1".as_ref());
@@ -110,10 +217,8 @@ async fn admission_case(case: Case) {
     let _cli = fixture.cold_cli();
     assert!(crate::services::codex::successor_hooks_ready());
     fixture.fake.enable_fixture_launch();
-    fixture.fake.mark_missing();
+    auxiliary_tests::target_missing(&fixture, true);
     crate::services::platform::tmux::invalidate_availability_cache();
-    crate::services::session_backend::remove_process_session(CANARY_TMUX);
-    crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
 
     let observation =
         crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
@@ -126,10 +231,95 @@ async fn admission_case(case: Case) {
         CANARY_CHANNEL
     ));
 
+    if matches!(
+        case,
+        Case::PureClearReason | Case::Negative(Refusal::LegacyReceiptCustody)
+    ) {
+        use crate::services::discord::commands::control::{
+            SoftClearNotifyMode, clear_channel_session_state,
+        };
+        let http = Arc::new(serenity::Http::new("Bot initial-fresh-test"));
+        let cleared = clear_channel_session_state(
+            &http,
+            &fixture.shared,
+            &ProviderKind::Codex,
+            serenity::ChannelId::new(CANARY_CHANNEL),
+            "!clear",
+            SoftClearNotifyMode::Suppress,
+        )
+        .await;
+        cleared.expect("the actual clear rail must succeed");
+        assert!(dedupe::clear_relaunch::relaunch_open(CANARY_TMUX));
+        if matches!(case, Case::Negative(Refusal::LegacyReceiptCustody)) {
+            let path = crate::config::runtime_root()
+                .unwrap()
+                .join("runtime/codex_clear_retired")
+                .join(format!("{CANARY_CHANNEL}.json"));
+            let mut mark: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            mark["origin"] = serde_json::json!("legacy_clear_boundary");
+            std::fs::write(path, serde_json::to_vec(&mark).unwrap()).unwrap();
+        }
+    }
+    if matches!(case, Case::PureReason | Case::PureClearReason) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            crate::services::tmux_common::persistent_sessions_dir().unwrap(),
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        let before = directory_snapshot(fixture.root.path());
+        for _ in 0..3 {
+            let reason = dedupe::clear_relaunch::input_reason_for_channel(CANARY_CHANNEL)
+                .expect("a genuine initial fresh reason is required");
+            let name = format!("{reason:?}");
+            assert!(name.starts_with(if matches!(case, Case::PureClearReason) {
+                "ExplicitClear("
+            } else {
+                "ExactAbsence("
+            }));
+            assert!(!dedupe::clear_relaunch::successor_unproved_for_channel(
+                CANARY_CHANNEL
+            ));
+        }
+        assert_eq!(
+            directory_snapshot(fixture.root.path()),
+            before,
+            "reason observation may not create files, change modes, or advance file sizes"
+        );
+    }
+
+    let preserved = if matches!(case, Case::Negative(_) | Case::Metadata(_)) {
+        let mut held =
+            auxiliary_tests::instruction(CANARY_CHANNEL + 7165, "restored payload held intact");
+        held.source_message_queued_generations = vec![
+            crate::services::turn_orchestrator::SourceMessageQueuedGeneration::user_instruction(
+                held.message_id,
+                held.queued_generation,
+            ),
+        ];
+        held.source_text_segments = vec![
+            crate::services::turn_orchestrator::SourceMessageTextSegment::new(
+                held.message_id,
+                held.text.clone(),
+            ),
+        ];
+        held.reply_context = Some("preserved restored reply context".into());
+        held.has_reply_boundary = true;
+        let identities = auxiliary_tests::restore_instructions(&mut fixture, vec![held]).await;
+        Some((
+            identities,
+            queue_bytes(&fixture),
+            queue_payload(&fixture).await,
+        ))
+    } else {
+        None
+    };
+
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, fixture.root.path())
         .unwrap()
         .unwrap();
-    store
+    let era = store
         .begin_era(&[CANARY_CHANNEL], Utc::now(), |channel| {
             Ok(Initialized {
                 channel,
@@ -140,6 +330,19 @@ async fn admission_case(case: Case) {
             })
         })
         .unwrap();
+    let metadata = if let Case::Metadata(kind) = case {
+        let mut channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+        let cursor = channel.attach_source(&fixture.old_source).unwrap();
+        assert!(channel.binding_checkpoint().unwrap().is_none());
+        if matches!(kind, Metadata::Unreadable) {
+            let path = fixture.root.path().join("o_store").join(CANARY_CHANNEL.to_string())
+                .join(crate::services::tui_o::store::rotation::CHECKPOINT_FILE);
+            std::fs::write(path, "{torn checkpoint").unwrap();
+            assert!(channel.binding_checkpoint().is_err());
+        }
+        Some((cursor, std::fs::read(&fixture.old_source.path).unwrap(),
+            crate::services::codex::actual_submit_tests::source_io::Watch::start(&fixture.old_source.path)))
+    } else { None };
     let io = TestHost::new([(CANARY_CHANNEL, fixture.old_source.clone())]);
     let gate = Arc::new(OwnershipGate::default());
     gate.acquired();
@@ -151,7 +354,7 @@ async fn admission_case(case: Case) {
         || HostParts {
             io: Arc::clone(&io),
             runtime_root: Some(fixture.root.path().to_owned()),
-            gate,
+            gate: Arc::clone(&gate),
             readiness: Arc::clone(&readiness),
         },
     );
@@ -160,6 +363,40 @@ async fn admission_case(case: Case) {
         1,
         "the selected channel must start its real host"
     );
+    if let Some((cursor, bytes, old_io)) = metadata {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while hosts[0].live() && readiness.submission(CANARY_CHANNEL).is_none() {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the real host must either refuse metadata or publish its actor");
+        let pre_live = readiness.submission(CANARY_CHANNEL).is_none();
+        let finished = !hosts[0].live();
+        fixture.fake.take_calls();
+        let _ = crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
+        let http = Arc::new(serenity::Http::new("Bot initial-fresh-test"));
+        let deps = IntakeDeps { http: &http, cache: None, ctx_for_chained_dispatch: None,
+            shared: &fixture.shared, token: "Bot initial-fresh-test" };
+        let admission = admit_text_intake(&deps, &input()).await;
+        hosts.pop().unwrap().stop_and_join().await.unwrap();
+        assert!(matches!(admission, IntakeAdmission::Blocked { .. }),
+            "invalid recovered metadata may not grant initial input: {admission:?}");
+        assert!(finished && pre_live, "the actual metadata guard must finish before publishing Live");
+        assert!(readiness.submission(CANARY_CHANNEL).is_none());
+        assert!(io.posts.to(CANARY_CHANNEL).is_empty());
+        let channel = store.open_channel(&era, CANARY_CHANNEL).unwrap().unwrap();
+        assert_eq!(channel.cursor(&fixture.old_source), Some(&cursor));
+        assert_eq!(std::fs::read(&fixture.old_source.path).unwrap(), bytes);
+        assert_eq!(old_io.stats(), Default::default());
+        let (identities, raw, payload) = preserved.unwrap();
+        assert_eq!(auxiliary_tests::queue_identities(&fixture).await, identities);
+        assert_eq!(queue_bytes(&fixture), raw);
+        assert_eq!(queue_payload(&fixture).await, payload);
+        assert!(crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX).is_empty());
+        assert!(!fixture.fake.take_calls().iter().any(|call| {
+            ["new-session", "kill-session", "send-keys", "paste-buffer"].iter().any(|effect| call.starts_with(effect))
+        }));
+        return;
+    }
     tokio::time::timeout(Duration::from_secs(5), async {
         while readiness.submission(CANARY_CHANNEL).is_none() {
             tokio::task::yield_now().await;
@@ -183,6 +420,87 @@ async fn admission_case(case: Case) {
         shared: &fixture.shared,
         token: "Bot initial-fresh-test",
     };
+    let mut submission = input();
+    let mut stop = None;
+    let mut row = None;
+    if let Case::Negative(refusal) = case {
+        use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
+        let nonce_path =
+            crate::services::tmux_common::session_temp_path(CANARY_TMUX, "spawn_nonce");
+        let ownership_path = crate::services::tmux_common::session_temp_path(
+            CANARY_TMUX,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        );
+        assert!(host::initial_fresh_refusal(CANARY_CHANNEL).is_none());
+        assert!(dedupe::clear_relaunch::input_reason_for_channel(CANARY_CHANNEL).is_some());
+        match refusal {
+            Refusal::PanePresent => fixture.fake.mark_present(),
+            Refusal::ProbeFailed => fixture.fake.fail_probes(),
+            Refusal::ForeignNonce => std::fs::write(&nonce_path, uuid::Uuid::new_v4().simple().to_string()).unwrap(),
+            Refusal::BlankNonce => std::fs::write(&nonce_path, "").unwrap(),
+            Refusal::ForeignOwnership => std::fs::write(&ownership_path, serde_json::to_vec(&serde_json::json!({
+                "codex_ownership": {"execution_nonce":uuid::Uuid::new_v4().simple().to_string(), "proof_seq":1,"dev":1,"ino":1}
+            })).unwrap()).unwrap(),
+            Refusal::NullOwnership => std::fs::write(&ownership_path, br#"{"codex_ownership":null}"#).unwrap(),
+            Refusal::MarkerIo => std::fs::create_dir(&ownership_path).unwrap(),
+            Refusal::InflightRow => {
+                let token = Arc::new(crate::services::discord::CancelToken::new());
+                let path = crate::services::discord::save_actual_episode_for_tests(
+                    CANARY_CHANNEL, CANARY_TMUX, CANARY_CHANNEL + 7180, &token,
+                );
+                row = Some((path.clone(), std::fs::read(path).unwrap(), token));
+                assert!(crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX).is_none());
+            }
+            Refusal::WrongProvider => submission.provider = ProviderKind::Claude,
+            Refusal::Lost => {
+                gate.lost();
+                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("ownership_not_owned"));
+            }
+            Refusal::Uncertain => {
+                gate.uncertain();
+                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("ownership_not_owned"));
+            }
+            Refusal::SubmissionMissing => {
+                readiness.drop_submission_for_tests(CANARY_CHANNEL);
+                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("writer_sources_unready"));
+            }
+            Refusal::Stopping => {
+                stop = Some(hosts.pop().unwrap().stop_and_join());
+                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("stopping"));
+            }
+            Refusal::HostMissing => {
+                hosts.pop().unwrap().stop_and_join().await.unwrap();
+                assert_eq!(host::initial_fresh_refusal(CANARY_CHANNEL), Some("host_missing"));
+            }
+            Refusal::UnprovedSuccessor => {
+                let mut context = fixture.context.clone();
+                context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+                context.created_at = Utc::now() + chrono::Duration::seconds(2);
+                let prepared = PreparedIncarnation::create(context).unwrap();
+                crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared)).unwrap();
+                assert!(dedupe::clear_relaunch::successor_unproved_for_channel(CANARY_CHANNEL));
+                assert_eq!(crate::services::platform::tmux::session_presence(CANARY_TMUX),
+                    crate::services::platform::tmux::SessionPresence::Missing);
+            }
+            Refusal::CustodyPending | Refusal::LegacyReceiptCustody => {
+                let (local, range) = custody_tests::admitted_terminal(&fixture, true).await;
+                custody_tests::retain_after_successor(&fixture, &local, &range).await;
+                assert!(crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX).is_some());
+                assert_eq!(dedupe::clear_relaunch::input_hold_reason_for_channel(CANARY_CHANNEL), "absence_custody_pending");
+            }
+            Refusal::CustodyUnreadable => {
+                let root = fixture.root.path().join("runtime/discord_terminal_delivery_custody");
+                std::fs::create_dir_all(&root).unwrap();
+                std::fs::write(root.join("malformed.json"), "{torn").unwrap();
+                assert_eq!(dedupe::clear_relaunch::input_hold_reason_for_channel(CANARY_CHANNEL), "absence_custody_pending");
+            }
+        }
+    }
+    let old_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(
+        &fixture.old_source.path,
+    );
+    fixture.fake.take_calls();
+    let _ = crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
     let async_thread = std::thread::current().id();
     let progress = matches!(case, Case::Progress).then(|| {
         let progressed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -216,12 +534,65 @@ async fn admission_case(case: Case) {
         });
         (guard, sibling, external)
     });
-    let admission = admit_text_intake(&deps, &input()).await;
+    let admission = admit_text_intake(&deps, &submission).await;
     if let Case::Worker(case) = case {
         worker_case(&fixture, case).await;
     }
     assert!(io.posts.to(CANARY_CHANNEL).is_empty());
-    hosts.pop().unwrap().stop_and_join().await.unwrap();
+    if let Some(host) = hosts.pop() {
+        host.stop_and_join().await.unwrap();
+    }
+    if let Some(stop) = stop {
+        stop.await.unwrap();
+    }
+    if let Case::Negative(refusal) = case {
+        assert!(
+            matches!(admission, IntakeAdmission::Blocked { .. }),
+            "{refusal:?}: a false-resumed actor must hold actual input: {admission:?}"
+        );
+        let (identities, raw, payload) = preserved.unwrap();
+        assert_eq!(
+            auxiliary_tests::queue_identities(&fixture).await,
+            identities,
+            "{refusal:?}"
+        );
+        assert_eq!(
+            queue_bytes(&fixture),
+            raw,
+            "{refusal:?}: persisted queue changed"
+        );
+        assert_eq!(
+            queue_payload(&fixture).await,
+            payload,
+            "{refusal:?}: restored payload changed"
+        );
+        let stats = old_io.stats();
+        assert_eq!(
+            (stats.read_calls, stats.read_bytes, stats.advance_commits),
+            (0, 0, 0),
+            "{refusal:?}: intake may not consume the historical body"
+        );
+        assert!(
+            crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX)
+                .is_empty()
+        );
+        assert!(
+            !fixture.fake.take_calls().iter().any(|call| {
+                ["new-session", "kill-session", "send-keys", "paste-buffer"]
+                    .iter()
+                    .any(|effect| call.starts_with(effect))
+            }),
+            "{refusal:?}: provider effects must remain zero"
+        );
+        assert!(
+            !fixture.root.path().join("fresh-argv").exists(),
+            "{refusal:?}"
+        );
+        if let Some((path, bytes, _token)) = row {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        return;
+    }
     if let Some((_guard, sibling, external)) = progress {
         sibling.await.unwrap();
         let (probe_thread, advanced_before_release) = external.join().unwrap();
@@ -238,6 +609,67 @@ async fn admission_case(case: Case) {
         matches!(admission, IntakeAdmission::Local(_)),
         "an existing false-resumed O actor with exact B1 absence must admit input: {admission:?}"
     );
+}
+
+fn queue_bytes(fixture: &CanaryFixture) -> Vec<u8> {
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("codex")
+        .join(&fixture.shared.token_hash)
+        .join(format!("{CANARY_CHANNEL}.json"));
+    std::fs::read(path).unwrap()
+}
+
+async fn queue_payload(fixture: &CanaryFixture) -> Vec<(std::time::Instant, serde_json::Value)> {
+    fixture
+        .shared
+        .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
+        .snapshot()
+        .await
+        .intervention_queue
+        .iter()
+        .map(|item| {
+            (
+                item.created_at,
+                serde_json::json!({
+                    "author":item.author_id.get(), "bot":item.author_is_bot,
+                    "message":item.message_id.get(), "generation":item.queued_generation,
+                    "sources":item.source_message_ids.iter().map(|id| id.get()).collect::<Vec<_>>(),
+                    "source_generations":format!("{:?}",item.source_message_queued_generations),
+                    "source_text":format!("{:?}",item.source_text_segments),
+                    "text":item.text,"mode":format!("{:?}",item.mode),
+                    "reply":item.reply_context,"reply_boundary":item.has_reply_boundary,
+                    "merge":item.merge_consecutive,"uploads":item.pending_uploads,
+                    "voice":item.voice_announcement,
+                }),
+            )
+        })
+        .collect()
+}
+
+fn directory_snapshot(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, (u32, u64)> {
+    use std::os::unix::fs::PermissionsExt;
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        entries: &mut std::collections::BTreeMap<std::path::PathBuf, (u32, u64)>,
+    ) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        entries.insert(
+            path.strip_prefix(root).unwrap().to_owned(),
+            (metadata.permissions().mode(), metadata.len()),
+        );
+        if metadata.is_dir() {
+            for child in std::fs::read_dir(path).unwrap() {
+                visit(root, &child.unwrap().path(), entries);
+            }
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
 }
 
 async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
@@ -263,6 +695,14 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         .set("test-token".into())
         .unwrap();
     registry.register("codex".into(), Arc::clone(&worker)).await;
+    let runtime = crate::services::discord::health::resolve_intake_worker_runtime(
+        &worker,
+        serenity::ChannelId::new(CANARY_CHANNEL),
+    )
+    .await
+    .expect("the real worker resolver must select the registered Codex channel owner");
+    assert!(Arc::ptr_eq(&runtime.shared, &worker));
+    assert_eq!(runtime.token, "test-token");
     sqlx::query(
         "INSERT INTO agents (id, name, provider) VALUES ('b1b-input-worker', 'Worker', 'codex')",
     )
@@ -307,8 +747,14 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, releasing) = tokio::sync::oneshot::channel();
     let mut barrier = Some((entered, releasing));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let checkpoints = Arc::clone(&seen);
     let _checkpoint = test_executor::hook(Box::new(move |point| {
-        let expected = if matches!(case, WorkerCase::FinalPaneAppeared) {
+        checkpoints.lock().unwrap().push(point);
+        let expected = if matches!(
+            case,
+            WorkerCase::FinalPaneAppeared | WorkerCase::UnprovedFinal
+        ) {
             test_executor::Checkpoint::BeforeFinalO
         } else {
             test_executor::Checkpoint::AfterClaim
@@ -345,6 +791,17 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         match case {
             WorkerCase::Ready => {}
             WorkerCase::PaneAppeared | WorkerCase::FinalPaneAppeared => fixture.fake.mark_present(),
+            WorkerCase::UnprovedFirst | WorkerCase::UnprovedFinal => {
+                let mut context = fixture.context.clone();
+                context.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+                context.created_at = Utc::now() + chrono::Duration::seconds(2);
+                let prepared = crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation::create(context).unwrap();
+                crate::services::discord::stamp_spawn_markers(CANARY_TMUX, Some(&prepared))
+                    .unwrap();
+                assert!(dedupe::clear_relaunch::successor_unproved_for_channel(
+                    CANARY_CHANNEL
+                ));
+            }
             WorkerCase::ClaimChanged => {
                 sqlx::query("UPDATE intake_outbox SET claim_owner='other-claim' WHERE id=$1")
                     .bind(id)
@@ -363,6 +820,14 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
             .fetch_one(pool)
             .await
             .unwrap();
+    let transitions: (bool, bool) = sqlx::query_as(
+        "SELECT accepted_at IS NOT NULL, spawned_at IS NOT NULL FROM intake_outbox WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let checkpoints = seen.lock().unwrap().clone();
     match case {
         WorkerCase::Ready => {
             assert_eq!(outcome, intake_worker::TickOutcome::Processed);
@@ -371,8 +836,25 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
                 "both preaccept checks must admit: {error:?}"
             );
             assert_eq!(recorder.channels(), [CANARY_CHANNEL]);
+            assert_eq!(transitions, (true, true));
+            for checkpoint in [
+                test_executor::Checkpoint::AfterClaim,
+                test_executor::Checkpoint::BeforeFinalO,
+                test_executor::Checkpoint::PreAccept,
+                test_executor::Checkpoint::Spawned,
+                test_executor::Checkpoint::FinalDb,
+                test_executor::Checkpoint::FinalDbDone,
+            ] {
+                assert!(
+                    checkpoints.contains(&checkpoint),
+                    "actual tick missed {checkpoint:?}: {checkpoints:?}"
+                );
+            }
         }
-        WorkerCase::PaneAppeared | WorkerCase::FinalPaneAppeared => {
+        WorkerCase::PaneAppeared
+        | WorkerCase::FinalPaneAppeared
+        | WorkerCase::UnprovedFirst
+        | WorkerCase::UnprovedFinal => {
             assert_eq!(outcome, intake_worker::TickOutcome::Held);
             assert_eq!(status, "pending");
             assert!(owner.is_none());
@@ -384,9 +866,19 @@ async fn worker_case(fixture: &CanaryFixture, case: WorkerCase) {
         }
     }
     if !matches!(case, WorkerCase::Ready) {
+        assert_eq!(transitions, (false, false));
         assert!(
             recorder.channels().is_empty(),
             "the provider must not execute"
+        );
+    }
+    if matches!(
+        case,
+        WorkerCase::FinalPaneAppeared | WorkerCase::UnprovedFinal
+    ) {
+        assert!(
+            checkpoints.contains(&test_executor::Checkpoint::BeforeFinalO),
+            "the race must reach the real final O check: {checkpoints:?}"
         );
     }
     let after: serde_json::Value = sqlx::query_scalar(

@@ -39,19 +39,38 @@ pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     (reason.captured().context.channel_id == Some(channel)).then_some(reason)
 }
 
+pub(crate) fn input_hold_reason_for_channel(channel: u64) -> &'static str {
+    let Some(tmux) = input_target(channel) else {
+        return "fresh_evidence_missing";
+    };
+    tc::with_tmux_source_authority(&tmux, |authority| {
+        if absent_open::custody_pending_under(authority) {
+            "absence_custody_pending"
+        } else {
+            "fresh_evidence_missing"
+        }
+    })
+}
+
 fn input_reason(
     authority: &TmuxSourceAuthority<'_>,
     observation: &InflightObs,
 ) -> Option<FreshReason> {
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-pure") {
+        let _ = open_under(authority);
+    }
     if !observation.recheck(CANARY_CHANNEL, authority.session()) {
         return None;
     }
     let captured = absent_open::candidate_under(authority)?;
     if absent_open::read_nonce(authority.session()) == SpawnNonceMarker::Absent
         && read().ok().flatten().is_some_and(|mark| {
-            mark.origin == "explicit_clear"
-                && captured.seq <= mark.retired_through_seq
-                && captured.nonce == mark.nonce
+            let explicit = mark.origin == "explicit_clear";
+            #[cfg(test)]
+            let explicit =
+                explicit || crate::services::claude_tui::source_verify::n2b_mutant("b1b-origin");
+            explicit && captured.seq <= mark.retired_through_seq && captured.nonce == mark.nonce
         })
     {
         return Some(FreshReason::ExplicitClear(captured));
@@ -195,6 +214,11 @@ pub(crate) fn with_fresh_scope(
         if !quiescent {
             return Err("unresolved_work");
         }
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-proof") {
+            install(nonce, denied);
+            return Ok(true);
+        }
         let fold = binding_events::codex::read_ownership(&context)
             .map_err(|_| "fresh_evidence_missing")?;
         let proof = fold
@@ -216,6 +240,7 @@ pub(crate) fn with_fresh_scope(
             super::super::runtime_binding_for_tmux_session_under_source_authority(authority)
                 .ok_or("fresh_evidence_missing")?;
         if snapshot.context() != &context
+            || binding.runtime_kind != crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
             || !super::super::codex_verified_source_allowed_under_source_authority(
                 authority,
                 &binding.output_path,

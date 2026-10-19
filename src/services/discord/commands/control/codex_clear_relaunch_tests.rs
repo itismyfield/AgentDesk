@@ -387,7 +387,7 @@ impl CanaryFixture {
 
     pub(in crate::services::discord) fn scoped_test_env(
         &self,
-        key: &str,
+        key: &'static str,
         value: &std::ffi::OsStr,
     ) -> crate::config::TestEnvVarGuard {
         crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(key, value)

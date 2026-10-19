@@ -874,7 +874,7 @@ async fn recovery_diagnostic(
     );
 }
 
-async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingContext, boot: bool) {
+pub(in crate::services::discord) async fn wait_recovery_custody_settled(fixture: &CanaryFixture, n2: &BindingContext, boot: bool) {
     recovery_diagnostic(fixture, n2, boot, "before_settle", None).await;
     let channel = serenity::ChannelId::new(CANARY_CHANNEL);
     let settled = tokio::time::timeout(Duration::from_secs(5), async {

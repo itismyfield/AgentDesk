@@ -145,6 +145,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::replay_policy::permit_tests
   --skip services::discord::replay_policy::policy_tests
   --skip services::discord::router::intake_dispatch::home_order_tests
+  --skip services::discord::router::intake_dispatch::initial_fresh_tests
   --skip services::discord::router::intake_dispatch::replay_admission_tests
   --skip services::discord::router::intake_dispatch::tests
   --skip services::discord::router::intake_gate::stale_turn::host_tests
@@ -165,6 +166,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::runtime_bootstrap::gateway_lease_recovery_tests
   --skip services::discord::runtime_bootstrap::intake_delivery_sweep::tests
   --skip services::discord::runtime_bootstrap::o_writer_host::activation_tests
+  --skip services::discord::runtime_bootstrap::o_writer_host::b1b_fresh_launch_tests
   --skip services::discord::runtime_bootstrap::o_writer_host::fence_tests
   --skip services::discord::runtime_bootstrap::orphan_recovery::tests
   --skip services::discord::runtime_bootstrap::queued_placeholders::scoped_recovery_tests

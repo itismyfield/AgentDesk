@@ -120,6 +120,10 @@ impl Port {
     }
 
     pub(crate) fn sources_unsuspended(&self) -> bool {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission") {
+            return true;
+        }
         self.suspension.is_empty()
     }
 
@@ -262,7 +266,11 @@ impl Receiver {
         let mut read_back = None;
         let mut deny = None;
         let mut typed_failure = None;
-        let result = if !writer.suspension.is_empty() {
+        let suspended = !writer.suspension.is_empty();
+        #[cfg(test)]
+        let suspended = suspended
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-submission-apply");
+        let result = if suspended {
             Err(StoreError::Rejected("suspended_sources".into()))
         } else if !Arc::ptr_eq(&self.run, &request.run) {
             Err(StoreError::Rejected("foreign actor command".into()))
@@ -366,6 +374,10 @@ impl Receiver {
         let _ = request.reply.send(reply);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_submission_tests.rs"]
+pub(super) mod scoped_tests;
 
 impl crate::services::tui_o::writer::host::Readiness {
     /// Actor waits precede source/Live re-entry; the callback only consumes owned evidence.

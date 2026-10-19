@@ -206,6 +206,7 @@ impl DeliveryLease for Arc<FakeLease> {
 struct Alarms {
     channel: u64,
     raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    cleared: Arc<AtomicUsize>,
     /// The reader count the writer last reported.
     readers: Arc<Mutex<Option<usize>>>,
 }
@@ -214,6 +215,11 @@ impl AlarmSink for Alarms {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
         assert_eq!(channel, self.channel);
         self.raised.lock().unwrap().push(alarm);
+    }
+
+    fn waiting_cleared(&self, channel: u64) {
+        assert_eq!(channel, self.channel);
+        self.cleared.fetch_add(1, Ordering::SeqCst);
     }
 
     fn reconcile_reader_count(&self, channel: u64, count: usize) {
@@ -295,6 +301,7 @@ impl Harness {
             alarms: Alarms {
                 channel: channel_id,
                 raised: Arc::default(),
+                cleared: Arc::default(),
                 readers: Arc::default(),
             },
         }

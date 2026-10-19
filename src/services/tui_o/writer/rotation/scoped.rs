@@ -62,6 +62,10 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     pub(super) fn check_scoped_metadata(&self, store: &ChannelStore) -> Result<(), WriterAlarm> {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-meta") {
+            return Ok(());
+        }
         if self.suspension.is_empty() {
             return Ok(());
         }

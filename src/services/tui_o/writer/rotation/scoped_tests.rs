@@ -109,8 +109,12 @@ mod contracts {
         fn bot_id(&self) -> u64 {
             1
         }
-        async fn post(&self, _: u64, _: String) -> PostOutcome {
-            panic!("no POST before source rejection")
+        fn post(
+            &self,
+            _: u64,
+            _: String,
+        ) -> impl std::future::Future<Output = PostOutcome> + Send + 'static {
+            async { panic!("no POST before source rejection") }
         }
         async fn history_after(&self, _: u64, _: u64) -> Result<Vec<SeenMessage>, String> {
             panic!("no history before source rejection")
@@ -179,6 +183,34 @@ mod contracts {
                 ino: self.old.ino + 1,
             }
         }
+    }
+
+    #[test]
+    fn suspended_resume_never_opens_an_old_native_reader() {
+        let fixture = Fixture::new(true);
+        let mut sources = fixture.sources();
+        let old = fixture.old.clone();
+        let before = fixture.store.cursor(&old).unwrap().clone();
+        let io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&old.path);
+        let mut writer = ChannelWriter::new(
+            fixture.store,
+            Arc::new(OwnershipGate::default()),
+            Arc::new(NoIo),
+            NoIo,
+            NoIo,
+        );
+        let mut deriver = UnitDeriver::new(29, ShadowProvider::Codex);
+        let mut owed = std::collections::VecDeque::new();
+        sources
+            .resume(&mut writer, &mut deriver, &mut owed)
+            .unwrap();
+        assert!(
+            sources.readers.is_empty(),
+            "a suspended source acquired a reader"
+        );
+        assert!(owed.is_empty());
+        assert_eq!(writer.store().cursor(&old), Some(&before));
+        assert_eq!(io.stats(), Default::default());
     }
 
     #[test]

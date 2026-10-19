@@ -320,6 +320,8 @@ where
         actor.read_sources();
         actor.poll_transition(sources_resumed, &unsettled);
         actor.observe_waiting(sources_resumed);
+        #[cfg(test)]
+        fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
             break;
@@ -382,6 +384,8 @@ where
 }
 
 mod fresh_resume;
+#[cfg(test)]
+pub(crate) use fresh_resume::work_for_tests;
 mod transition;
 mod transition_snapshot;
 
@@ -486,7 +490,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         });
         if ready == 0 && prepared.is_none() {
             // A fresh actor's empty queue is evidence only after its durable sources were restored.
-            if self.waiting.incident.take().is_some()
+            let incident = self.waiting.incident.take().is_some();
+            #[cfg(test)]
+            let incident = incident
+                && (self.writer.suspension.is_empty()
+                    || !crate::services::claude_tui::source_verify::n2b_mutant("b1b-own-clear"));
+            if incident
                 || (restored
                     && self.waiting.ready.is_empty()
                     && open.is_none()
@@ -562,6 +571,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     /// With nothing owed, unsealed or open, every retained segment of a source with a decided start
     /// is settled. The open segment stays unless the spool is full, so segment files do not churn.
     fn collect_settled(&mut self) {
+        #[cfg(test)]
+        if crate::services::claude_tui::source_verify::n2b_mutant("b1b-gc")
+            && !self.writer.suspension.is_empty()
+        {
+            return;
+        }
         if !self.delivery_allowed() {
             return;
         }

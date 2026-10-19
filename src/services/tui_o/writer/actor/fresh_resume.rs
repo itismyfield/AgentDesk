@@ -2,6 +2,23 @@
 
 use super::*;
 
+#[cfg(test)]
+static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (
+    AtomicUsize::new(0),
+    std::sync::atomic::AtomicBool::new(false),
+);
+
+#[cfg(test)]
+pub(super) fn note_work(owed: usize, unsealed: bool) {
+    WORK.0.store(owed, Ordering::SeqCst);
+    WORK.1.store(unsealed, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn work_for_tests() -> (usize, bool) {
+    (WORK.0.load(Ordering::SeqCst), WORK.1.load(Ordering::SeqCst))
+}
+
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     pub(super) fn rescope(&mut self) -> bool {
         if self.sources.transition_provider()
@@ -11,6 +28,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
         let selection = self.writer.suspension.clone();
         let nonce = selection.nonce();
+        #[cfg(test)]
+        let nonce = if crate::services::claude_tui::source_verify::n2b_mutant("b1b-fix") {
+            None
+        } else {
+            nonce
+        };
         #[cfg(test)]
         if nonce.is_some() && crate::services::claude_tui::source_verify::n2b_mutant("b1b-once") {
             return false;
@@ -24,8 +47,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             && !self.transitions.has_job()
             && self.sources.quiescent_for_rescope();
         #[cfg(test)]
-        let quiescent =
-            quiescent || crate::services::claude_tui::source_verify::n2b_mutant("b1b-refreeze-noq");
+        let quiescent = quiescent
+            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-refreeze-noq")
+            || crate::services::claude_tui::source_verify::n2b_mutant("b1b-fix");
         let sources: Vec<_> = self
             .writer
             .store()

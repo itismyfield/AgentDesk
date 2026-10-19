@@ -89,8 +89,7 @@ impl Hosted {
             "ordinary readiness stays true; only strong consumers close"
         );
         assert!(self.transition.is_open());
-        assert!(!self.submission.sources_unsuspended());
-        assert!(!self.transition.sources_unsuspended());
+        assert!(!self.suspension.is_empty());
     }
 }
 
@@ -228,5 +227,49 @@ async fn submission_request_rejects_suspension_with_a_live_receiver() {
     assert!(
         matches!(futures::poll!(&mut refused), std::task::Poll::Ready(Err(ref reason)) if reason == "suspended_sources"),
         "post-freeze submission request must reject before waiting for an actor reply"
+    );
+}
+
+#[test]
+fn initial_fresh_refuses_a_closed_actor_even_when_ready_stays_true() {
+    static CHANNEL: AtomicU64 = AtomicU64::new(8_701_000);
+    let channel = CHANNEL.fetch_add(1, Ordering::SeqCst);
+    let readiness = process_readiness();
+    let claim = readiness.claim(channel).unwrap();
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let (resumed, resumed_rx) = watch::channel(true);
+    let (_stopping, stopping_rx) = watch::channel(false);
+    let (_unsettled, unsettled_rx) = watch::channel(Some(0));
+    let owing = Owing::default();
+    let owed = OwedView {
+        published: owing.published.subscribe(),
+        demand: owing.demand.clone(),
+    };
+    readiness.track(channel, gate, (resumed_rx, unsettled_rx, owed, stopping_rx));
+    let (submission, _receiver) = codex_submission::Port::new(claim.generation);
+    locked(&readiness.live)
+        .get_mut(&channel)
+        .unwrap()
+        .submission = Some(submission);
+    readiness.set(channel, true);
+    assert!(readiness.accepts(channel));
+    assert_eq!(initial_fresh_refusal(channel), None);
+    drop(resumed);
+    assert!(
+        readiness.is_ready(channel),
+        "the sticky ready bit must remain set for this negative"
+    );
+    assert!(
+        *locked(&readiness.live)
+            .get(&channel)
+            .unwrap()
+            .resumed
+            .borrow()
+    );
+    assert_eq!(
+        initial_fresh_refusal(channel),
+        Some("actor_closed"),
+        "fresh admission must read the live actor sender rather than trust sticky ready"
     );
 }

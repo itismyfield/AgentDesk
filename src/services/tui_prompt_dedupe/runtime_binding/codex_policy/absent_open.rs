@@ -16,11 +16,11 @@ pub(super) fn capture_under(
     observation: &InflightObs,
 ) -> Option<Captured> {
     let captured = candidate_under(authority)?;
-    (observation.recheck(CANARY_CHANNEL, authority.session())
-        && crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(
-            &captured,
-        ))
-    .then_some(captured)
+    let clear =
+        crate::services::discord::terminal_delivery_custody::codex_absent_launch_clear(&captured);
+    #[cfg(test)]
+    let clear = clear || crate::services::claude_tui::source_verify::n2b_mutant("b1b-custody");
+    (observation.recheck(CANARY_CHANNEL, authority.session()) && clear).then_some(captured)
 }
 
 pub(super) fn custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool {
@@ -62,6 +62,10 @@ pub(super) fn candidate_under(authority: &TmuxSourceAuthority<'_>) -> Option<Cap
 }
 
 pub(super) fn scoped_context(context: &BindingContext, tmux: &str) -> bool {
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-scope") {
+        return local_context(context, tmux);
+    }
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };

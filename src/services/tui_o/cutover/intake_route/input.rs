@@ -33,6 +33,10 @@ pub(crate) async fn for_claimed_input(
     if !selected_codex_input(provider, channel) {
         return super::route(provider, channel);
     }
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-fanout") {
+        return super::route(provider, channel);
+    }
     let provider = provider.to_owned();
     blocking_route(move || {
         super::route_parsed_with(
@@ -65,6 +69,10 @@ pub(crate) fn selected_codex_input(provider: &str, channel: u64) -> bool {
 }
 
 async fn blocking_route(work: impl FnOnce() -> IntakeRoute + Send + 'static) -> IntakeRoute {
+    #[cfg(test)]
+    if crate::services::claude_tui::source_verify::n2b_mutant("b1b-async-route") {
+        return work();
+    }
     tokio::task::spawn_blocking(work)
         .await
         .unwrap_or_else(|error| IntakeRoute::Hold(format!("O input observation failed: {error}")))
@@ -99,14 +107,14 @@ fn judge_at(
         if super::accepts(channel) {
             return IntakeRoute::Gateway;
         }
-        if !host::initial_fresh_ready(channel) {
-            reason = "writer_sources_unready";
+        if let Some(refusal) = host::initial_fresh_refusal(channel) {
+            reason = refusal;
             return super::writer_unready(channel);
         }
         if clear_relaunch::input_reason_for_channel(channel).is_some() {
             IntakeRoute::Gateway
         } else {
-            reason = "fresh_evidence_missing";
+            reason = clear_relaunch::input_hold_reason_for_channel(channel);
             super::writer_unready(channel)
         }
     });

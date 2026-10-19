@@ -163,7 +163,11 @@ fn path_unchanged(source: &SourceId, later: Option<&Observation>) -> bool {
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     /// Takes requests only once the sources are restored: at most one envelope and one step a poll.
     pub(super) fn poll_transition(&mut self, resumed: bool, unsettled: &Unsettled) {
-        if !self.writer.suspension.is_empty() {
+        let suspended = !self.writer.suspension.is_empty();
+        #[cfg(test)]
+        let suspended = suspended
+            && !crate::services::claude_tui::source_verify::n2b_mutant("b1b-poll-transition");
+        if suspended {
             if let Some(receiver) = &mut self.transitions.receiver
                 && let Ok(Some(envelope)) = receiver.try_next()
             {
@@ -570,6 +574,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         drop(context.permit);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "scoped_transition_tests.rs"]
+mod scoped_tests;
 
 #[cfg(test)]
 pub(crate) mod test_hooks {

@@ -20,7 +20,7 @@ const BODY: &str = "B1 captured terminal answer retained before its successor di
 const FIRST: &str = "B1 restored FIFO first instruction";
 const SECOND: &str = "B1 restored FIFO second instruction";
 
-async fn admitted_terminal(
+pub(in crate::services::discord) async fn admitted_terminal(
     fixture: &CanaryFixture,
     empty_body: bool,
 ) -> (InflightTurnState, CodexRange) {
@@ -108,7 +108,7 @@ async fn admitted_terminal(
     (baseline, range)
 }
 
-async fn retain_after_successor(
+pub(in crate::services::discord) async fn retain_after_successor(
     fixture: &CanaryFixture,
     local: &InflightTurnState,
     range: &CodexRange,

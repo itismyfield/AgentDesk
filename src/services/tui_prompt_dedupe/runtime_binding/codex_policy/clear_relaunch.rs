@@ -12,8 +12,8 @@ mod absent_open;
 #[path = "fresh_admission.rs"]
 mod fresh_admission;
 pub(crate) use fresh_admission::{
-    fresh_scope_eligible, input_reason_for_channel, successor_unproved_for_channel,
-    with_fresh_scope,
+    fresh_scope_eligible, input_hold_reason_for_channel, input_reason_for_channel,
+    successor_unproved_for_channel, with_fresh_scope,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
