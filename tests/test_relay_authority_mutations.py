@@ -203,7 +203,7 @@ class RelayAuthorityMutationScriptTests(unittest.TestCase):
     def copy_fixture(self) -> Path:
         temp = Path(tempfile.mkdtemp(prefix="relay-authority-mutations-"))
         self.addCleanup(shutil.rmtree, temp, True)
-        for relative in (MUTATION_SCRIPT, *MUTATION_FILES):
+        for relative in (Path("Cargo.toml"), MUTATION_SCRIPT, *MUTATION_FILES):
             destination = temp / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, destination, follow_symlinks=False)
@@ -415,7 +415,8 @@ exit 101
     def test_source_provenance_allows_local_edits_but_rejects_ci_drift(self) -> None:
         root = self.copy_fixture()
         test_path = Path("tests/test_relay_authority_mutations.py")
-        for relative in (test_path, Path("scripts/check_relay_mutation_sources.py"),
+        for relative in (test_path, Path("tests/test_relay_authority_mutation_coupling.py"),
+                         Path("scripts/check_relay_mutation_sources.py"),
                          Path("scripts/ci-script-checks.sh")):
             (root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative, root / relative)
@@ -429,7 +430,8 @@ exit 101
             f"#!{sys.executable}\nimport os, sys\n"
             "if sys.argv[1:] == ['scripts/check_relay_mutation_sources.py']:\n"
             "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
-            "assert sys.argv[1:] == ['-m', 'unittest', 'tests.test_relay_authority_mutations']\n"
+            "assert sys.argv[1:] == ['-m', 'unittest', 'tests.test_relay_authority_mutations', "
+            "'tests.test_relay_authority_mutation_coupling']\n"
             f"os.execv(sys.executable, [sys.executable, {str(root / test_path)!r}, "
             "'RelayAuthorityMutationScriptTests.test_script_mode_is_executable'])\n"
         )
@@ -449,7 +451,8 @@ exit 101
             return result
 
         check(True, 0)
-        for relative in (MUTATION_SCRIPT, test_path, Path("scripts/check_relay_mutation_sources.py"),
+        for relative in (MUTATION_SCRIPT, test_path, Path("tests/test_relay_authority_mutation_coupling.py"),
+                         Path("scripts/check_relay_mutation_sources.py"),
                          Path("scripts/ci-script-checks.sh")):
             with self.subTest(path=relative):
                 original = (root / relative).read_bytes()
@@ -866,7 +869,7 @@ exit 101
 
 
 class MutationPathFilterContractTests(unittest.TestCase):
-    """The unconditional mutation job filters its setup and execution steps.
+    """The verified-skip mutation job filters its setup and execution steps.
     The filter must cover all mutated sources, judges, and fixture owners."""
 
     maxDiff = None
@@ -939,9 +942,9 @@ class MutationPathFilterContractTests(unittest.TestCase):
         job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
             MUTATION_JOB
         ]
-        # The mutation job must run independently of path-filter job results.
-        self.assertNotIn("if", job)
-        self.assertNotIn("needs", job)
+        # Only a verified docs/comment skip can suppress the mutation runner.
+        self.assertEqual(job["needs"], "changes")
+        self.assertEqual(job["if"], "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}")
         gated = {
             step["name"]: step["if"]
             for step in job["steps"]

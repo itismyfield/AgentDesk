@@ -681,6 +681,9 @@ def load_baseline(path: Path) -> tuple[dict[str, dict[str, int]], dict[str, obje
         raise RatchetError(f"cannot load baseline {path}: {exc}") from exc
     if payload.get("schema_version") != 1:
         raise RatchetError("baseline schema_version must be 1")
+    measured_sha = payload.get("measured_at_sha")
+    if not isinstance(measured_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", measured_sha):
+        raise RatchetError("baseline measured_at_sha must be 40 lowercase hex characters")
     counts = {category: _category_files(payload, category) for category in CATEGORIES}
     return counts, payload
 
@@ -761,10 +764,6 @@ def _snapshot(
     registry_subcounts: Mapping[str, int],
     measured_sha: str,
 ) -> dict[str, object]:
-    direct = registry_subcounts["direct_channel_remove"]
-    if_current = registry_subcounts["remove_if_current"]
-    cancel_current = registry_subcounts["cancel_and_remove_if_current"]
-    locked = registry_subcounts["remove_locked_helper"]
     return {
         "schema_version": 1,
         "measured_at_sha": measured_sha,
@@ -774,13 +773,6 @@ def _snapshot(
             "watcher_cancel": {"files": dict(sorted(counts["watcher_cancel"].items()))},
             "process_kill": {"files": dict(sorted(counts["process_kill"].items()))},
             "registry_remove": {
-                "comment": (
-                    f"Measured production external removals are {direct}/{if_current}/"
-                    f"{cancel_current}/{locked} (total {direct + if_current + cancel_current + locked}). "
-                    "The design's 10/2/3/2=17 counted turn_finalizer/watcher_backstop.rs:252, "
-                    "which is inside #[cfg(test)] at this SHA. health/recovery.rs remove_locked "
-                    "is classified as direct channel remove, not remove_tmux_session_locked."
-                ),
                 "files": dict(sorted(counts["registry_remove"].items())),
             },
             "identity_fence_bind": {

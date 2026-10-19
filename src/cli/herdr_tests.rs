@@ -17,7 +17,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::claude::herdr_turn::HoldRelease;
 use crate::services::session_host::PaneReading;
 use crate::services::session_host::herdr_socket_rig_tests::{
-    HerdrRig, KEY, NODE, PANE, SESSION, SHELL,
+    HerdrRig, KEY, NODE, PANE, PROVIDER, SESSION, SHELL,
 };
 
 const CHANNEL: &str = "1479671301387059400";
@@ -224,9 +224,12 @@ fn t_r3_retire_needs_a_read_that_shows_the_execution_ended_pg() {
     );
     unchanged("off-contract snapshot");
 
+    // The recorded root pid now names another process, so it is not proven gone.
     node.rig.show_panes(&[PANE]);
     node.rig.restart_shell(&node.context);
     node.rig.foreground(&[SHELL]);
+    node.rig.exists(SHELL, true);
+    node.rig.exists(PROVIDER, false);
     assert_eq!(
         node.retire(),
         Err(RetireRefusal::Unproven("root shell replaced"))
@@ -258,6 +261,33 @@ fn a_lone_recorded_root_shell_retires_its_execution_pg() {
     assert!(node.wrote_nothing());
 }
 
+// A restarted server restored the pane as another shell alone: status reads no process, and
+// retire waits until both recorded processes are proven gone, then releases only its own hold.
+#[test]
+fn retire_root_replaced_both_absent_pg() {
+    let node = Node::new("restored");
+    hold(NONCE);
+    hold(OTHER);
+    let row = node.row();
+    node.rig.restore_as_new_shell(&node.context);
+    node.rig.exists(SHELL, false);
+    node.rig.exists(PROVIDER, true);
+    let shown = node.rt.block_on(status(&node.pool)).unwrap();
+    assert_eq!(shown["executions"][0]["pane"], "root_replaced");
+    assert_eq!(node.rig.exists_reads(), 0, "status reads no process");
+    let alive = Err(RetireRefusal::Unproven("root shell replaced"));
+    assert_eq!(node.retire(), alive, "the recorded provider lives");
+    assert_eq!(node.row(), row);
+    assert!(hold_of(NONCE).exists() && hold_of(OTHER).exists());
+
+    node.rig.exists(PROVIDER, false);
+    assert_eq!(node.retire(), retired(true));
+    assert_eq!(node.state(), Some(HostedState::Retired));
+    assert!(!hold_of(NONCE).exists(), "the retired execution's hold");
+    assert!(hold_of(OTHER).exists(), "another execution's hold");
+    assert!(node.wrote_nothing());
+}
+
 // The row changed between the read and the CAS: the retire is refused and the hold stays.
 #[test]
 fn a_retire_whose_cas_fails_keeps_the_hold_pg() {
@@ -281,6 +311,7 @@ fn a_retire_whose_cas_fails_keeps_the_hold_pg() {
         &rows[0],
         record,
         &PaneReading::Missing,
+        true,
     ));
     assert!(
         matches!(refused, Err(RetireRefusal::Changed(_))),

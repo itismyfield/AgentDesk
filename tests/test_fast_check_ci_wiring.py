@@ -20,7 +20,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267"
+    "c9aa8191d7848e54e0f5400f3eb4e4732ddaa8ca68d4caf5ab0d45b7a02a17e6"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 
@@ -33,6 +33,8 @@ def load_selector():
     return module
 MIRROR_IF = "${{ !cancelled() }}"
 MIRROR_IF_LINE = f"    if: {MIRROR_IF}\n"
+RUST_REQUIRED_IF = "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}"
+RUST_REQUIRED_OUTPUT = "${{ needs.changes.outputs.rust_tests_skip != 'true' }}"
 _LINT_FILTER = (
     "needs.changes.outputs.rust_or_policy == 'true' || "
     "needs.changes.outputs.relay_contract == 'true'"
@@ -411,6 +413,53 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotIn("while IFS= read -r path; do", guard)
         self.assertNotIn("done < <(git ls-files)\n", guard)
 
+    def test_verified_skip_is_shared_by_independent_rust_jobs_and_mirrors(self) -> None:
+        jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+        verified = ("steps.comment_only.outcome == 'success' && "
+                    "steps.comment_only.outputs.comment_only == 'true' && "
+                    "steps.comment_only.outputs.rust_tests_skip == 'true'")
+        outputs = jobs["changes"]["outputs"]
+        self.assertEqual(outputs["rust_tests_skip"], "${{ " + verified + " && 'true' || 'false' }}")
+        lint_verified = verified.replace("outputs.rust_tests_skip", "outputs.rust_lint_skip")
+        for name in ("rust_or_policy", "rust_compile"):
+            self.assertEqual(outputs[name], "${{ " + lint_verified + " && 'false' || steps.filter.outputs." + name + " }}")
+        for name, needs in (("lib_test_prepare", "changes"),
+                            ("relay_authority_targets", ["changes", "lib_test_prepare"]),
+                            ("relay_authority_mutations", "changes")):
+            with self.subTest(job=name):
+                self.assertEqual(jobs[name]["needs"], needs)
+                self.assertEqual(jobs[name]["if"], RUST_REQUIRED_IF)
+                for skip in ("true", "false", "", None):
+                    self.assertEqual(eval_step_if(jobs[name]["if"], {
+                        "cancelled()": False, "needs.changes.outputs.rust_tests_skip": skip,
+                    }), skip != "true")
+        relay = jobs["relay-authority-contract"]
+        self.assertEqual(relay["needs"], ["changes", "relay_authority_targets", "relay_authority_mutations"])
+        for step in relay["steps"]:
+            if step.get("run") == "./scripts/required-check-mirror.sh":
+                self.assertEqual(step["env"]["CHANGED_PATHS_RESULT"], "${{ needs.changes.result }}")
+                self.assertEqual(step["env"]["FILTER_OUTPUT"], RUST_REQUIRED_OUTPUT)
+
+    def test_rust_comment_skip_retains_compile_and_lint_checks(self) -> None:
+        outputs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["changes"]["outputs"]
+        cases = (("rust comments", "false", "success", "true", True),
+                 ("missing lint proof", None, "success", "true", True),
+                 ("empty lint proof", "", "success", "true", True),
+                 ("failed gate", "true", "failure", "true", True),
+                 ("not comment only", "true", "success", "false", True),
+                 ("docs and YAML", "true", "success", "true", False))
+        for name in ("rust_or_policy", "rust_compile"):
+            expression = "(" + outputs[name][3:-2] + ") == 'true'"
+            for case, lint_skip, outcome, comment_only, selected in cases:
+                with self.subTest(output=name, case=case):
+                    self.assertEqual(eval_step_if(expression, {
+                        "steps.comment_only.outcome": outcome,
+                        "steps.comment_only.outputs.comment_only": comment_only,
+                        "steps.comment_only.outputs.rust_tests_skip": "true",
+                        "steps.comment_only.outputs.rust_lint_skip": lint_skip,
+                        "steps.filter.outputs." + name: "true",
+                    }), selected)
+
     def test_pr_lint_runner_is_the_ubuntu_compile_and_policy_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]
@@ -469,7 +518,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             mutations = {
                 "implicit-success": re.sub(r"(?m)^    if: .*\n", "", original, count=1),
                 "requires-producer-success": original.replace("!cancelled()", "success()", 1),
-                "missing-dependency": original.replace(", lib_test_prepare", "", 1) if job_id != "relay_authority_targets" else original.replace("    needs: lib_test_prepare\n", "", 1),
+                "missing-dependency": original.replace(", lib_test_prepare", "", 1),
                 "missing-download": original.replace(step_block(original, "Download shared lib tests"), "", 1),
                 "fallback-blocked": original.replace("        continue-on-error: true\n", "", 1),
             }
@@ -1078,11 +1127,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job_id, cap in (("relay_authority_targets", 30), ("relay_authority_mutations", 45)):
             runner = jobs[job_id]
             if job_id == "relay_authority_targets":
-                self.assertEqual(runner["if"], MIRROR_IF)
-                self.assertEqual(runner["needs"], "lib_test_prepare")
+                self.assertEqual(runner["if"], RUST_REQUIRED_IF)
+                self.assertEqual(runner["needs"], ["changes", "lib_test_prepare"])
             else:
-                self.assertNotIn("if", runner)
-                self.assertNotIn("needs", runner)
+                self.assertEqual(runner["if"], RUST_REQUIRED_IF)
+                self.assertEqual(runner["needs"], "changes")
             self.assertEqual(runner["runs-on"], "ubuntu-latest")
             self.assertEqual(runner["timeout-minutes"], cap)
             self.assertEqual(runner["env"]["CARGO_PROFILE_DEV_DEBUG"], "0")
@@ -1141,7 +1190,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "steps.mutation_paths.outputs.mutation_sources != 'false'"
             " || steps.mutation_wiring.outputs.wiring_changed != 'false'"
         )
-        self.assertNotIn("if", job)
+        self.assertEqual(job["if"], RUST_REQUIRED_IF)
+        self.assertEqual(job["needs"], "changes")
         self.assertNotIn("continue-on-error", job)
         steps = job["steps"]
         self.assertEqual(steps[0], {"uses": "actions/checkout@v4", "with": {"fetch-depth": 2}})
@@ -1188,7 +1238,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
         relay_job = yaml.safe_load(workflow)["jobs"]["relay-authority-contract"]
         self.assertEqual(relay_job["if"], MIRROR_IF)
-        self.assertEqual(relay_job["needs"], ["relay_authority_targets", "relay_authority_mutations"])
+        self.assertEqual(relay_job["needs"], ["changes", "relay_authority_targets", "relay_authority_mutations"])
         pin_steps = {
             step["name"]: step
             for step in relay_job["steps"]
@@ -1598,8 +1648,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         ]
         for job_id in ("relay_authority_targets", "relay_authority_mutations"):
             runner = job_block(workflow, job_id)
-            mutations.append((runner, runner.replace("    needs: lib_test_prepare\n", "    needs: [changes, lib_test_prepare]\n", 1) if job_id == "relay_authority_targets" else runner.replace("    runs-on:", "    needs: changes\n    runs-on:", 1), "needs closure must not include changes"))
-            mutations.append((runner, runner.replace(MIRROR_IF_LINE, "    if: always()\n", 1) if job_id == "relay_authority_targets" else runner.replace("    runs-on:", "    if: always()\n    runs-on:", 1), "must use !cancelled()" if job_id == "relay_authority_targets" else "must not define an if key"))
+            mutations.append((runner, re.sub(r"(?m)^    needs: .*\n", "", runner, count=1), "must retain"))
+            mutations.append((runner, runner.replace(f"    if: {RUST_REQUIRED_IF}\n", "    if: always()\n", 1), "must use the verified skip gate"))
         for original, changed, diagnostic in mutations:
             with self.subTest(mutation=changed.splitlines()[:6]):
                 self.assertNotEqual(original, changed)
@@ -1614,7 +1664,8 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for step in mirrors:
             for result in ("success", "failure", "cancelled", "skipped", ""):
                 with self.subTest(step=step["name"], result=result):
-                    env = {**os.environ, **step["env"], "UPSTREAM_RESULT": result}
+                    env = {**os.environ, **step["env"], "UPSTREAM_RESULT": result,
+                           "CHANGED_PATHS_RESULT": "success", "FILTER_OUTPUT": "true"}
                     process = subprocess.run(["bash", "scripts/required-check-mirror.sh"], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
                     self.assertEqual(process.returncode == 0, result == "success", process.stderr)
 
@@ -1716,7 +1767,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "scripts_guards",
             "scripts_contracts",
         ):
-            if job_id in ("scripts", "relay_authority_targets"):
+            if job_id in ("relay_authority_targets", "relay_authority_mutations", "lib_test_prepare"):
+                self.assertEqual(jobs[job_id]["if"], RUST_REQUIRED_IF)
+            elif job_id == "scripts":
                 self.assertEqual(jobs[job_id]["if"], MIRROR_IF)
             else:
                 self.assertNotIn("if", jobs[job_id])
@@ -1747,7 +1800,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
             marker = f"    name: {jobs[job_id]['name']}\n"
             with self.subTest(job=job_id, key="if"):
                 injected_if = "    if: ${{ github.event_name == 'push' }}\n"
-                mutated_job = job.replace(MIRROR_IF_LINE, injected_if, 1) if job_id in ("scripts", "relay_authority_targets") else job.replace(marker, marker + injected_if, 1)
+                mutated_job = re.sub(r"(?m)^    if: .*\n", injected_if, job, count=1) if "if" in jobs[job_id] else job.replace(marker, marker + injected_if, 1)
                 mutated = workflow.replace(job, mutated_job, 1)
                 result = self.run_hardening_fixture(mutated)
                 self.assertNotEqual(result.returncode, 0, result.stderr)

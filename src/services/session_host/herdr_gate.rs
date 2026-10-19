@@ -608,6 +608,29 @@ impl HerdrPaneView {
         };
         PaneReading::Present { root, provider }
     }
+
+    /// `confirmed_ended` of `reading` over this view's process reads.
+    pub(crate) fn ended(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
+        confirmed_ended(self.os.as_ref(), record, reading)
+    }
+}
+
+/// `record`'s execution is over: its pane is gone, or a lone shell is left that is its recorded
+/// root or another shell outliving both recorded processes; only the latter reads the OS.
+fn confirmed_ended(os: &dyn ProcessOs, record: &HostedExecution, reading: &PaneReading) -> bool {
+    let absent = |stamp: &ProcessStamp| {
+        pane_probe::recorded_process(os, stamp) == pane_probe::RecordedProcess::ProvenAbsent
+    };
+    match reading {
+        PaneReading::Missing => true,
+        PaneReading::Present {
+            root,
+            provider: PaneProvider::Exited,
+        } => record.expected.as_ref().is_some_and(|expected| {
+            expected.root == *root || (absent(&expected.root) && absent(&expected.provider_process))
+        }),
+        PaneReading::Present { .. } | PaneReading::Unreadable(_) => false,
+    }
 }
 
 fn refused(why: &str) -> HostMutation {

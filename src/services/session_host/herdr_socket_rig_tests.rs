@@ -31,21 +31,35 @@ pub(crate) const KEY: &str = "mini";
 pub(crate) const SESSION: &str = "agentdesk";
 pub(crate) const SHELL: u32 = 10;
 pub(crate) const PROVIDER: u32 = 20;
+/// The root shell a restarted server gives the pane in place of the launch's.
+pub(crate) const NEW_SHELL: u32 = 11;
 
-/// The process reads the gate sees; empty until a test names the running provider.
+/// The process reads the gate sees; empty until a test names the running provider. A pid a test
+/// set answers whether it exists as set, any other as the named OS does; every such read is counted.
 #[derive(Default)]
-struct LateOs(Mutex<Option<Arc<dyn ProcessOs>>>);
+struct LateOs {
+    os: Mutex<Option<Arc<dyn ProcessOs>>>,
+    exists: Mutex<HashMap<u32, bool>>,
+    exists_reads: AtomicUsize,
+}
 
 impl LateOs {
     fn now(&self) -> Result<Arc<dyn ProcessOs>, RestoreUnverified> {
-        let os = self.0.lock().unwrap().clone();
+        let os = self.os.lock().unwrap().clone();
         os.ok_or(RestoreUnverified::ProcessUnreadable)
+    }
+    fn set(&self, os: FakeOs) {
+        *self.os.lock().unwrap() = Some(Arc::new(os));
     }
 }
 
 impl ProcessOs for LateOs {
     fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
-        self.now()?.exists(pid)
+        self.exists_reads.fetch_add(1, Ordering::SeqCst);
+        match self.exists.lock().unwrap().get(&pid).copied() {
+            Some(exists) => Ok(exists),
+            None => self.now()?.exists(pid),
+        }
     }
     fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
         self.now()?.parent(pid)
@@ -274,19 +288,40 @@ impl HerdrRig {
         } else {
             os
         };
-        *self.os.0.lock().unwrap() = Some(Arc::new(os));
+        self.os.set(os);
     }
 
     /// The pane runs the launch at `context`, and its provider process is seen to exist or not.
     pub(crate) fn provider_seen(&self, context: &Path, alive: bool) {
         let os = Seen(FakeOs::launched(env_naming(context)), alive);
-        *self.os.0.lock().unwrap() = Some(Arc::new(os));
+        *self.os.os.lock().unwrap() = Some(Arc::new(os));
     }
 
     /// The pane's root shell was restarted after the launch recorded it; the provider is the same.
     pub(crate) fn restart_shell(&self, context: &Path) {
-        let os = FakeOs::launched(env_naming(context)).starting(SHELL, &[start(1_009)]);
-        *self.os.0.lock().unwrap() = Some(Arc::new(os));
+        self.os
+            .set(FakeOs::launched(env_naming(context)).starting(SHELL, &[start(1_009)]));
+    }
+
+    /// A restarted server restored the pane as shell `NEW_SHELL` alone.
+    pub(crate) fn restore_as_new_shell(&self, context: &Path) {
+        let os = FakeOs::launched(env_naming(context));
+        self.os.set(os.starting(NEW_SHELL, &[start(1_100)]));
+        let info = json!({"pane_id": PANE, "shell_pid": NEW_SHELL,
+            "foreground_process_group_id": NEW_SHELL,
+            "foreground_processes": [{"pid": NEW_SHELL}]});
+        let info = json!({"type": "pane_process_info", "process_info": info});
+        self.answer("pane.process_info", info);
+    }
+
+    /// Every later read of whether `pid` exists answers `exists`.
+    pub(crate) fn exists(&self, pid: u32, exists: bool) {
+        self.os.exists.lock().unwrap().insert(pid, exists);
+    }
+
+    /// How many reads of whether a pid exists the gate has made.
+    pub(crate) fn exists_reads(&self) -> usize {
+        self.os.exists_reads.load(Ordering::SeqCst)
     }
 
     /// Replies with `result` to every later `method` request.

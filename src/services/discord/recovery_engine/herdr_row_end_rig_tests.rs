@@ -822,3 +822,42 @@ fn r4_an_ended_execution_retires_and_ends_its_row_pg() {
         },
     );
 }
+
+const R5: u64 = 1_479_671_399_000_115;
+
+/// A Herdr restart left another shell alone in the pane and both recorded processes are gone: E
+/// retires the execution with the interrupt notice, never I's answer from the transcript.
+#[test]
+fn restarted_root_replaced_e_retires_pg() {
+    let path = concat!(module_path!(), "::restarted_root_replaced_e_retires_pg");
+    in_child(
+        path,
+        R5,
+        ProviderKind::Claude,
+        Owner::Legacy,
+        |rig| async move {
+            let run = Run::start(
+                &rig,
+                Setup {
+                    provider: ProviderKind::Claude,
+                    channel: R5,
+                    routed: true,
+                },
+            )
+            .await;
+            rig.restore_shell();
+            // What I would deliver, had it read this pane as its idle provider.
+            append(&run.source, &terminal(&ProviderKind::Claude, &run.row));
+            run.relay.set(|pane| pane.screen = Some(READY.into()));
+            let (taken, _reset) = run.sentinel().await;
+            run.boot().await;
+            let notice = run.interrupted();
+            assert_ended(&run, &notice, &taken).await;
+            let texts = run.texts();
+            assert!(!texts.iter().any(|t| t.contains(ANSWER)), "{texts:?}");
+            let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+            assert_eq!(run.hosted().await, Some(retired));
+            run.close().await;
+        },
+    );
+}
