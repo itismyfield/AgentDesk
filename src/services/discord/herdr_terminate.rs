@@ -87,14 +87,14 @@ impl Drop for UnsentClose {
         }
     }
 }
-struct CapturedTurn {
+pub(super) struct CapturedTurn {
     key: TurnKey,
-    token: Arc<CancelToken>,
+    pub(super) token: Arc<CancelToken>,
     /// The actor seen holding `token`; settlement is confirmed on it, never on a re-resolved one.
     mailbox: ChannelMailboxHandle,
     snapshot: SyntheticClaimSnapshot,
 }
-async fn capture_turn(
+pub(super) async fn capture_turn(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
@@ -252,7 +252,7 @@ async fn settle_and_release(
     result
 }
 
-async fn settle_captured(
+pub(super) async fn settle_captured(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     turn: Option<CapturedTurn>,
