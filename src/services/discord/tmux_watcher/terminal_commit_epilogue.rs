@@ -181,7 +181,7 @@ pub(super) async fn run_terminal_commit_epilogue(
     // re-evaluates the gate and finishes the cleanup once the pane
     // actually reports idle.
     if terminal_output_committed && !lifecycle_stage_paused {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         crate::services::discord::recovery_engine::producer_resume::record_epilogue_body(
             channel_id.get(),
             watcher_turn_nonce.as_deref(),
