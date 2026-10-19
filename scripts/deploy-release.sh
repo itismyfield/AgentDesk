@@ -3182,16 +3182,16 @@ fi
 _capture_deploy_preexisting_reader_alarms
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
-# #5245 Phase 2A-S: `$ADK_REL` remains the sole canonical watched root.
-# Every shipped runtime and restart-marker writer already agrees on this path;
-# `$ADK_REL/runtime` stores other runtime state but is not a restart-marker root.
+# `$ADK_REL` is the sole canonical restart-marker root; `$ADK_REL/runtime` is not one.
 if ! request_restart_drain_mode_or_fail \
     "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL" "deploy-release"; then
     exit 1
 fi
 RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
 # >>> BEGIN restart-durability gate (#5254)
-if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
+if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" = "1" ]; then
+    echo "⚠ [gate] release restart durability gate skipped by operator override AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1 (drain: ${AGENTDESK_RESTART_DRAIN_VERDICT})"
+elif [ "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
     if [ -z "$RESTART_REQUEST_NONCE" ]; then
         echo "✗ [gate] release restart request nonce missing" >&2
         clear_restart_drain_mode "$ADK_REL" || true
