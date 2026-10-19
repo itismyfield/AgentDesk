@@ -222,7 +222,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
         return hold("probe_failed");
     }
     if evidence.host_marker != marker {
-        return hold("identity_unresolved");
+        return hold("marker_witness_mismatch");
     }
     let key =
         adk_session::build_namespaced_session_key(reads.token_hash, reads.provider, reads.name);
@@ -232,20 +232,24 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
             .session_name
             .as_deref()
             .is_some_and(|n| n != reads.name)
-        || reads.exact != reads.canonical
     {
-        return hold("identity_unresolved");
+        return hold("key_witness_mismatch");
+    }
+    if reads.exact != reads.canonical {
+        return hold("exact_canonical_mismatch");
     }
     evidence.session_key = Some(key.clone());
     evidence.session_name = Some(reads.name.into());
     if evidence.session_record != observed_row(reads.exact) {
-        return hold("identity_unresolved");
+        return hold("record_witness_mismatch");
     }
     if let Some(row) = row {
         evidence = with_inflight_row(evidence, row);
     }
-    if evidence.name_conflict.is_some()
-        || evidence.runtime_kind_unrecognized
+    if evidence.name_conflict.is_some() {
+        return hold("inflight_name_conflict");
+    }
+    if evidence.runtime_kind_unrecognized
         || [
             &evidence.session_record,
             &evidence.inflight_locator,
@@ -259,7 +263,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
             )
         })
     {
-        return hold("identity_unresolved");
+        return hold("witness_unrecognized");
     }
     let bindings: Vec<_> = reads
         .config
@@ -312,7 +316,7 @@ fn host_scope_result(reads: HostReads<'_>) -> Scope {
             reads.name,
             boot.local_node(),
         ) {
-            return hold("identity_unresolved");
+            return hold("herdr_owner_mismatch");
         }
         return match reads.exact {
             HostedLookup::Missing if clean => Scope::HerdrFirstCreate,
@@ -404,8 +408,11 @@ fn decide_unbound(
     };
     #[cfg(test)]
     dormancy_tests::reached(candidates.channel);
-    if candidates.conflict || candidates.inflight {
-        return Verdict::Hold("identity_unresolved");
+    if candidates.conflict {
+        return Verdict::Hold("candidate_conflict");
+    }
+    if candidates.inflight {
+        return Verdict::Hold("candidate_inflight");
     }
     if scope.channel != candidates.channel
         || scope.provider != candidates.provider
@@ -414,7 +421,7 @@ fn decide_unbound(
             .as_ref()
             .is_some_and(|name| name != &scope.name)
     {
-        return Verdict::Hold("identity_unresolved");
+        return Verdict::Hold("scope_mismatch");
     }
     if candidates.current.is_none()
         && !matches!(
@@ -422,10 +429,10 @@ fn decide_unbound(
             Scope::LocalInventory | Scope::LocalNameless | Scope::Hold(_)
         )
     {
-        return Verdict::Hold("candidate_unresolved");
+        return Verdict::Hold("hosted_candidate_unresolved");
     }
     if matches!(scope.result, Scope::LocalNameless) && candidates.current.is_some() {
-        return Verdict::Hold("identity_unresolved");
+        return Verdict::Hold("nameless_with_current");
     }
     let hosted = match scope.result {
         Scope::Hold(reason) => return Verdict::Hold(reason),
@@ -528,5 +535,6 @@ mod dormancy_tests;
 mod tests;
 
 pub(super) mod herdr_bound;
+pub(super) mod hold_leaf;
 pub(super) mod live;
 mod routine_owner;

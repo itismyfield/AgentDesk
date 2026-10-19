@@ -21,6 +21,7 @@ pub(in crate::services::discord) struct MockDiscord {
     pub(in crate::services::discord) http: Arc<Http>,
     calls: Arc<Mutex<Vec<String>>>,
     requests: Arc<Mutex<Vec<String>>>,
+    successful_requests: Arc<Mutex<Vec<String>>>,
     server: tokio::task::AbortHandle,
 }
 
@@ -32,24 +33,32 @@ impl MockDiscord {
     pub(in crate::services::discord) async fn start_with(answer: Answer) -> Self {
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
         let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+        let successful_requests: Arc<Mutex<Vec<String>>> = Arc::default();
+        let recorded_successes = successful_requests.clone();
         let (recorded, recorded_requests) = (calls.clone(), requests.clone());
         let app = axum::Router::new().fallback(axum::routing::any(
             move |method: Method, uri: Uri, body: Bytes| {
                 let (recorded, answer) = (recorded.clone(), answer.clone());
                 let recorded_requests = recorded_requests.clone();
+                let recorded_successes = recorded_successes.clone();
                 async move {
                     recorded
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|poison| poison.into_inner())
                         .push(format!("{method} {}", uri.path()));
-                    recorded_requests.lock().unwrap().push(format!(
-                        "{method} {} {}",
-                        uri.path(),
-                        String::from_utf8_lossy(&body)
-                    ));
+                    let request =
+                        format!("{method} {} {}", uri.path(), String::from_utf8_lossy(&body));
+                    recorded_requests
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(request.clone());
                     let (status, body) = match answer(&method, uri.path()) {
                         Some(answer) => answer,
                         None if method == Method::DELETE => {
+                            recorded_successes
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push(request);
                             return StatusCode::NO_CONTENT.into_response();
                         }
                         None => (
@@ -57,7 +66,14 @@ impl MockDiscord {
                             message_json(900_001, 1, 1, "", "2026-10-02T00:00:00+00:00"),
                         ),
                     };
-                    (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response()
+                    let status = StatusCode::from_u16(status).unwrap();
+                    if status.is_success() {
+                        recorded_successes
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .push(request);
+                    }
+                    (status, axum::Json(body)).into_response()
                 }
             },
         ));
@@ -72,6 +88,7 @@ impl MockDiscord {
             http: Arc::new(http),
             calls,
             requests,
+            successful_requests,
             server: server.abort_handle(),
         }
     }
@@ -97,6 +114,23 @@ impl MockDiscord {
         requests
             .iter()
             .filter(|r| r.contains(&needle))
+            .cloned()
+            .collect()
+    }
+}
+
+impl MockDiscord {
+    /// Requests answered with a successful HTTP status, each with its inbound body.
+    pub(in crate::services::discord) fn successful_requests_for(
+        &self,
+        channel_id: u64,
+    ) -> Vec<String> {
+        let needle = format!("/channels/{channel_id}/");
+        self.successful_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .iter()
+            .filter(|request| request.contains(&needle))
             .cloned()
             .collect()
     }
