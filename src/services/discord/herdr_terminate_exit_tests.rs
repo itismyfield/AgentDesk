@@ -1,5 +1,5 @@
-//! A process ending right after its close, as the SIGTERM handler's `exit(0)` does, keeps the
-//! row's nonce and hold; a restarted process on the same database and root retires it on a rerun.
+//! A process ending right after its close keeps the row's nonce and hold for a restarted process
+//! to retire; a clear after a Herdr restart left only another shell retires without a close.
 
 use std::io::Write;
 use std::time::Duration;
@@ -153,5 +153,58 @@ fn child(phase: &str) {
         assert_eq!(rig.writes(), Vec::new(), "an ended pane is never closed again");
         println!("R11_OBSERVED inflight={:?}", test_turn::inflight(channel));
         pool.close().await;
+    });
+}
+
+const RESTORED_CHANNEL: u64 = 5_340_213;
+
+// A restarted Herdr restored the pane as another shell alone and both recorded processes are
+// gone: the user's clear closes nothing, retires the execution and releases its hold.
+#[test]
+fn clear_root_replaced_retires_without_close_pg() {
+    use super::super::commands::control::{SoftClearNotifyMode, clear_channel_session_state};
+    let path = concat!(
+        module_path!(),
+        "::clear_root_replaced_retires_without_close_pg"
+    );
+    if !herdr::in_child(path, RESTORED_CHANNEL) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(RESTORED_CHANNEL);
+    let install = rig.thread_installer();
+    install();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool) = super::super::host_defer_gate::tests::postgres().await;
+        let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let channel = super::ChannelId::new(RESTORED_CHANNEL);
+        super::super::host_defer_gate::tests::map_channel(&shared, channel, "p11-clear").await;
+        let key = super::super::adk_session::build_adk_session_key;
+        let key = key(&shared, channel, &provider, None).await.unwrap();
+        let bound = herdr::HostedState::Bound;
+        let _switches = rig.bind(&pool, &shared.token_hash, &key, bound).await;
+        rig.restore_shell();
+
+        let http = std::sync::Arc::new(poise::serenity_prelude::Http::new(""));
+        let notify = SoftClearNotifyMode::Suppress;
+        let clear =
+            clear_channel_session_state(&http, &shared, &provider, channel, "/clear", notify);
+        let reply = clear.await.expect("a clear always commits").reply();
+
+        let cleared = super::super::commands::SESSION_CLEARED_RESPONSE;
+        assert_eq!(reply, format!("{cleared}\n대기 메시지 0건을 비웠어요."));
+        assert!(rig.writes().is_empty(), "the restored shell is not closed");
+        let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+        assert_eq!(herdr::row(&pool, &key).await, Some(retired));
+        assert!(!herdr::held(), "the execution's hold is released");
+        pool.close().await;
+        db.drop().await;
     });
 }
