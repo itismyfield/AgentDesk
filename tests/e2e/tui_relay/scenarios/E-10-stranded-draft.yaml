@@ -2,6 +2,7 @@ id: E-10
 title: composer에 send-keys (Enter 없이) → restart → 일관된 draft 처리 (#2635)
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-tui, codex-tui]  # composer send-keys is TUI-specific
 isolation: required
 destructive: true

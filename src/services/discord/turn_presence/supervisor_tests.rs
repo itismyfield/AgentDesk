@@ -191,19 +191,24 @@ fn typing_counts(channel: u64) -> (u64, u64) {
     (count("sent_ok_total"), count("late_ok_total"))
 }
 
-/// Busy types at once, then every 8 seconds exactly, and stops when the channel reads idle.
+/// Busy types at once, refreshes at each deadline, and stops when the channel reads idle.
 #[tokio::test(start_paused = true)]
-async fn busy_types_at_once_then_every_eight_seconds_and_idle_stops_it() {
+async fn busy_types_at_once_then_at_refresh_interval_and_idle_stops_it() {
     let channel = 6_200_001;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], BUSY);
     let run = supervise(&fake);
-    wait(31).await;
-    assert_eq!(fake.typed_secs(channel), [0, 8, 16, 24]);
+    wait(TYPING_EVERY.as_secs() * 4 + 1).await;
+    let expected = (0..=4)
+        .map(|n| TYPING_EVERY.as_secs() * n)
+        .collect::<Vec<_>>();
+    assert_eq!(fake.typed_secs(channel), expected);
     fake.set(channel, IDLE);
+    wait(TICK.as_secs()).await;
+    assert_eq!(status(channel).unwrap()["activity"], "idle");
     wait(40).await;
     run.abort();
-    assert_eq!(fake.typed_secs(channel), [0, 8, 16, 24, 32]);
+    assert_eq!(fake.typed_secs(channel), expected);
     assert_eq!(typing_counts(channel), (5, 0));
 }
 
@@ -251,11 +256,12 @@ async fn a_mailbox_token_keeps_presence_from_typing() {
     let fake = Fake::new(&[channel], BUSY);
     fake.token.store(true, Ordering::SeqCst);
     let run = supervise(&fake);
-    wait(41).await;
+    wait(TYPING_EVERY.as_secs() * 5 + 1).await;
+    assert!(fake.typed_secs(channel).is_empty());
     fake.token.store(false, Ordering::SeqCst);
-    wait(10).await;
+    wait(TYPING_EVERY.as_secs()).await;
     run.abort();
-    assert_eq!(fake.typed_secs(channel), [48]);
+    assert_eq!(fake.typed_secs(channel), [TYPING_EVERY.as_secs() * 6]);
 }
 
 /// Unknown for a full minute posts one notice; it does not post again within 30 minutes, even
@@ -385,7 +391,12 @@ async fn a_slow_notice_holds_only_its_own_channel() {
     wait(30).await;
     run.abort();
     assert_eq!(fake.notice_secs(), [60]);
-    assert_eq!(fake.typed_secs(busy), [0, 8, 16, 24, 32, 40, 48, 56, 64]);
+    assert_eq!(
+        fake.typed_secs(busy),
+        (0..70)
+            .step_by(TYPING_EVERY.as_secs() as usize)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// One channel's slow send never delays another channel's typing.
@@ -399,7 +410,12 @@ async fn a_slow_send_holds_only_its_own_channel() {
     wait(20).await;
     run.abort();
     assert_eq!(fake.typed_secs(slow), [0]);
-    assert_eq!(fake.typed_secs(fast), [0, 8, 16]);
+    assert_eq!(
+        fake.typed_secs(fast),
+        (0..20)
+            .step_by(TYPING_EVERY.as_secs() as usize)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// A reading a later poll moved past publishes nothing: no transition, no typing, no wake.

@@ -1774,11 +1774,11 @@ guard_no_foreign_active_turns_or_warn() {
   return 1
 }
 
-# AGENTDESK_RESTART_REQUEST_NONCE, AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED,
-# and AGENTDESK_RESTART_DRAIN_VERDICT are intentional out-parameters: the
-# sourcing deploy script reads them after this function returns. shellcheck
-# analyses this library in isolation and cannot see that cross-file consumption,
-# so it reports SC2034 (appears unused). Silence it for this function.
+# AGENTDESK_RESTART_REQUEST_NONCE, AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED
+# and AGENTDESK_RESTART_DRAIN_VERDICT are out-parameters read by deploy-release.sh
+# (shellcheck cannot see that, hence SC2034). The operator input
+# AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1 is never written here; deploy-release
+# skips its durability gate when either that input or this function's result is 1.
 # shellcheck disable=SC2034
 request_restart_drain_mode_or_fail() {
   local scope="$1"
@@ -1798,7 +1798,7 @@ request_restart_drain_mode_or_fail() {
   local nonce entropy marker_rc terminal_path
 
   AGENTDESK_RESTART_REQUEST_NONCE=""
-  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+  AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=0
   # Honest sentinel for exits before a terminal drain observation. Protocol
   # verdicts are assigned only at the sites that prove them.
   AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: no terminal drain verdict reached"
@@ -1942,7 +1942,7 @@ request_restart_drain_mode_or_fail() {
     # through the nonce CAS so a newer actor's canonical lease survives.
     _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
     AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+    AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=1
     AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: launchd job is not running"
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
@@ -1967,9 +1967,9 @@ request_restart_drain_mode_or_fail() {
   # this phase-1 timeout disable its own downstream authority. The restart skill
   # has no phase 2, so its established permissive timeout remains unchanged.
   if [ "$source" = "deploy-release" ]; then
-    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+    AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=0
   else
-    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+    AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED=1
   fi
   AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: restart drain acknowledgement timed out"
   return 0

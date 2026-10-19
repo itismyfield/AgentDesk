@@ -99,6 +99,8 @@ pub(crate) struct Request<'a> {
     pub rollout: &'a Path,
     pub source: &'a str,
     pub author: &'a str,
+    /// The author's name as Discord shows it.
+    pub name: &'a str,
     pub nonce: &'a str,
     pub text: &'a str,
     /// The model turn the caller read as open; the paste is refused once it is not.
@@ -120,7 +122,13 @@ pub(crate) fn inject(
     ledger: &dyn Ledger,
     timing: &Timing,
 ) -> Outcome {
-    let text = frame(request.source, request.author, request.nonce, request.text);
+    let text = frame(
+        request.source,
+        request.author,
+        request.name,
+        request.nonce,
+        request.text,
+    );
     // Both names reach tmux command strings, so only plain characters are accepted.
     let plain = |value: &str, extra: &[char]| {
         !value.is_empty()

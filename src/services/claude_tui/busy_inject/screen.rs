@@ -421,10 +421,12 @@ fn may_join(c: char) -> bool {
 }
 
 /// Columns measured in Claude's composer: printable ASCII one, Hangul syllables and jamo two.
+/// The input header's `·` and `📱` take one and two, as string-width and tmux both count them; a
+/// paste whose rows differ is still proven by its whitespace-free body.
 fn measured_width(c: char) -> Option<usize> {
     match c {
-        ' '..='~' => Some(1),
-        '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' => Some(2),
+        ' '..='~' | '\u{b7}' => Some(1),
+        '\u{ac00}'..='\u{d7a3}' | '\u{3131}'..='\u{318e}' | '\u{1f4f1}' => Some(2),
         _ => None,
     }
 }

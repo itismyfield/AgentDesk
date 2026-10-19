@@ -8,9 +8,11 @@ use super::*;
 
 /// The model turn the captured `model_turn.jsonl` keeps open until its line 19.
 const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
-/// The request whose frame the captured `busy_frame.ansi` shows in the composer.
+/// The request whose frame `busy_frame_v1.ansi`, the captured `busy_frame.ansi` with the v1 header
+/// in place of the older one, shows in the composer.
 const SOURCE: &str = "discord";
-const AUTHOR: &str = "fixture";
+const AUTHOR: &str = "200";
+const NAME: &str = "fixture";
 const NONCE: &str = "c0ffee01";
 const BODY: &str = "fixture body line one\nsecond line of the injected text";
 
@@ -209,7 +211,7 @@ fn the_nonce_is_confirmed_only_by_a_later_user_record() {
 }
 
 fn frame_text() -> String {
-    frame(SOURCE, AUTHOR, NONCE, BODY)
+    frame(SOURCE, AUTHOR, NAME, NONCE, BODY)
 }
 
 /// Captured screens read as the cell showed them: the composer's state, Codex's own queue, and
@@ -224,11 +226,14 @@ fn captured_screens_read_as_shown() {
         shown.composer,
         screen::Composer::Text("person draft text".into())
     );
-    let shown = screen::read(&fixture("busy_frame.ansi"));
+    let shown = screen::read(&fixture("busy_frame_v1.ansi"));
     assert_eq!(shown.composer, screen::Composer::Text(frame_text()));
-    assert!(screen::owns(&fixture("busy_frame.ansi"), &frame_text()));
-    let other = frame(SOURCE, AUTHOR, "0ther000", BODY);
-    assert!(!screen::owns(&fixture("busy_frame.ansi"), &other));
+    assert!(screen::owns(&fixture("busy_frame_v1.ansi"), &frame_text()));
+    let other = frame(SOURCE, AUTHOR, NAME, "0ther000", BODY);
+    assert!(!screen::owns(&fixture("busy_frame_v1.ansi"), &other));
+    let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
+    let shown = screen::read(&fixture("busy_frame.ansi"));
+    assert_eq!(shown.composer, screen::Composer::Text(legacy));
     assert!(screen::read(&fixture("busy_queued.ansi")).queued);
     assert!(screen::read(&fixture("compact_queued.txt")).queued);
     for hidden in ["overlay.ansi", "review_picker.ansi", "review_custom.txt"] {
@@ -312,7 +317,7 @@ impl Fake {
         let fake = Self { dir, rollout };
         fake.answers("attach", &["0,,80,24"]);
         fake.answers("keyattach", &["0"]);
-        fake.caps(&["busy_empty.ansi", "busy_frame.ansi"]);
+        fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi"]);
         fake
     }
 
@@ -360,6 +365,7 @@ impl Fake {
             rollout: &self.rollout,
             source: SOURCE,
             author: AUTHOR,
+            name: NAME,
             nonce: NONCE,
             text,
             target_turn: T,
@@ -412,7 +418,7 @@ fn one_enter_and_the_rollout_names_the_turn_it_joined() {
 #[test]
 fn only_the_rollout_confirms_and_enter_is_never_repeated() {
     let fake = Fake::new();
-    fake.caps(&["busy_empty.ansi", "busy_frame.ansi", "busy_empty.ansi"]);
+    fake.caps(&["busy_empty.ansi", "busy_frame_v1.ansi", "busy_empty.ansi"]);
     let ledger = FakeLedger::default();
     let outcome = fake.run(&ledger);
     assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::NotObserved));
@@ -579,7 +585,7 @@ fn an_image_draft_is_refused_before_the_paste_and_never_owned() {
     let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
     assert_eq!((writes, ledger.registered.get()), (0, 0));
     let fake = Fake::new();
-    let after = with_image(&fixture("busy_frame.ansi"));
+    let after = with_image(&fixture("busy_frame_v1.ansi"));
     fake.answers("cap", &[&fixture("busy_empty.ansi"), &after]);
     let outcome = fake.run(&FakeLedger::default());
     assert_eq!(outcome, Outcome::Unconfirmed(Unconfirmed::DraftNotOwned));

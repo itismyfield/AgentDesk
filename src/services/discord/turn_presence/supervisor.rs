@@ -16,7 +16,7 @@ use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 
 const TICK: Duration = Duration::from_secs(3);
-const TYPING_EVERY: Duration = Duration::from_secs(8);
+const TYPING_EVERY: Duration = Duration::from_secs(6);
 const TYPING_RETRY: Duration = Duration::from_secs(30);
 const UNKNOWN_NOTICE_AFTER: Duration = Duration::from_secs(60);
 const NOTICE_EVERY: Duration = Duration::from_secs(30 * 60);

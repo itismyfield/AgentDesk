@@ -128,7 +128,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::ingress_shadow::shadow_tests
   --skip services::discord::placeholder_sweeper::abandon_guard::tests
   --skip services::discord::placeholder_sweeper::retirement_tests
-  --skip services::discord::queue_dispatch::codex_clear_compat::tests
+  --skip services::discord::queue_dispatch::canary_workspace::tests
   --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
   --skip services::discord::recovery_engine::herdr_row_end::tests::rig

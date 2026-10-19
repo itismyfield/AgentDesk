@@ -153,34 +153,15 @@ pub(super) fn build_system_discord_context(
     }
 }
 
-fn normalize_turn_author_name(request_owner_name: &str, request_owner: UserId) -> String {
-    let collapsed = request_owner_name
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let base = if collapsed.is_empty() {
-        format!("user {}", request_owner.get())
-    } else {
-        collapsed
-    };
-    let sanitized = base
-        .chars()
-        .map(|ch| match ch {
-            '\r' | '\n' => ' ',
-            '[' | '{' => '(',
-            ']' | '}' => ')',
-            _ => ch,
-        })
-        .collect::<String>();
-    sanitized.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 pub(super) fn wrap_user_prompt_with_author(
     request_owner_name: &str,
     request_owner: UserId,
     sanitized_prompt: String,
 ) -> String {
-    let author = normalize_turn_author_name(request_owner_name, request_owner);
+    let author = crate::services::tui_input::human_frame::author_name(
+        request_owner_name,
+        request_owner.get(),
+    );
     let prefix = format!("[User: {author} (ID: {})]", request_owner.get());
     let normalized_prompt = sanitized_prompt.replace("\r\n", "\n").replace('\r', "\n");
     if normalized_prompt.is_empty() {

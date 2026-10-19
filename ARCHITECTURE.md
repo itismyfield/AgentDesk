@@ -928,6 +928,7 @@ src/
 │   │   │   │   ├── clear_teardown/
 │   │   │   │   │   ├── clear_end_record.rs
 │   │   │   │   │   └── clear_end_record_tests.rs
+│   │   │   │   ├── clear_count_tests.rs
 │   │   │   │   ├── clear_end_tests.rs
 │   │   │   │   ├── clear_entry_tests.rs
 │   │   │   │   ├── clear_persist_failure_tests.rs
@@ -1062,6 +1063,7 @@ src/
 │   │   │   ├── relay_auto_heal/
 │   │   │   │   ├── orphan_token_tests.rs
 │   │   │   │   ├── producer_resume_pass.rs
+│   │   │   │   ├── refusal_dispatch_tests.rs
 │   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
 │   │   │   │   └── relay_probe.rs
@@ -1337,9 +1339,9 @@ src/
 │   │   │   ├── section_dedupe.rs
 │   │   │   └── session_anchors.rs
 │   │   ├── queue_dispatch/
+│   │   │   ├── canary_workspace.rs
+│   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
-│   │   │   ├── codex_clear_compat.rs
-│   │   │   ├── codex_clear_compat_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
@@ -1560,7 +1562,8 @@ src/
 │   │   │   │   ├── provider_dispatch/
 │   │   │   │   │   └── producer_error_test_support.rs
 │   │   │   │   ├── tui_followup/
-│   │   │   │   │   └── codex_observation.rs
+│   │   │   │   │   ├── codex_observation.rs
+│   │   │   │   │   └── nameless_gate.rs
 │   │   │   │   ├── attachments.rs
 │   │   │   │   ├── busy_retry.rs
 │   │   │   │   ├── codex_resume_companion_queue_tests.rs
@@ -2770,6 +2773,8 @@ src/
 │   │   ├── actor.rs
 │   │   ├── bounded_tmux.rs
 │   │   ├── bounded_tmux_tests.rs
+│   │   ├── human_frame.rs
+│   │   ├── human_frame_tests.rs
 │   │   ├── input_key.rs
 │   │   ├── input_key_tests.rs
 │   │   ├── mod.rs
