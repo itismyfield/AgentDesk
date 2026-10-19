@@ -51,15 +51,13 @@ pub(super) async fn restart(
     let archive = PathBuf::from(&context.owner_runtime_root)
         .join("runtime/binding_evidence/codex")
         .join(format!("{}.json", context.execution_nonce));
-    let proof = fs::read(&archive).ok();
+    let archived_context = fs::read(&archive).unwrap();
     assert_eq!(
-        proof.is_some(),
-        dedupe::binding_events::codex::read_ownership(context)
-            .unwrap()
-            .verified
-            .is_some(),
-        "the retained proof receipt must agree with actual hook ownership"
+        serde_json::from_slice::<BindingContext>(&archived_context).unwrap(),
+        *context,
+        "the archive retains launch context before any source proof exists"
     );
+    let ownership = dedupe::binding_events::codex::read_ownership(context).unwrap();
     assert_eq!(
         dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
         SpawnNonceMarker::Known(context.execution_nonce.clone())
@@ -140,7 +138,12 @@ pub(super) async fn restart(
     assert_eq!(fs::read(era_file).unwrap(), metadata[0]);
     assert_eq!(fs::read(init_file).unwrap(), metadata[1]);
     assert_eq!(fs::read(nonce_path).unwrap(), nonce_bytes);
-    assert_eq!(fs::read(archive).ok(), proof);
+    assert_eq!(fs::read(archive).unwrap(), archived_context);
+    assert_eq!(
+        dedupe::binding_events::codex::read_ownership(context).unwrap(),
+        ownership,
+        "writer restart must preserve the independently recorded hook ownership proof"
+    );
     assert_eq!(
         dedupe::binding_context::execution_context("codex", &context.execution_nonce).unwrap(),
         *context
@@ -149,4 +152,24 @@ pub(super) async fn restart(
         dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
         SpawnNonceMarker::Known(context.execution_nonce.clone())
     );
+}
+
+pub(super) fn assert_proof(context: &BindingContext, expected: bool) {
+    let ownership = dedupe::binding_events::codex::read_ownership(context).unwrap();
+    assert!(!ownership.conflicted && ownership.pending.is_empty());
+    assert_eq!(ownership.verified.is_some(), expected);
+    if let Some(proof) = ownership.verified {
+        assert_eq!(proof.source.session_id, NEW_NATIVE_ID);
+        assert_eq!(
+            proof.source.path,
+            context
+                .provider_root
+                .as_ref()
+                .unwrap()
+                .join(format!("rollout-{NEW_NATIVE_ID}.jsonl")),
+        );
+        assert!(dedupe::binding_events::codex::source_file_matches(
+            &proof.source
+        ));
+    }
 }

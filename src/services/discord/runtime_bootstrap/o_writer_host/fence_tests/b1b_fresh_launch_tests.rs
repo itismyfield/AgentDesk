@@ -717,7 +717,11 @@ async fn run_fifo(
     assert_eq!(fresh.source_policy.as_deref(), Some("verified"));
     assert!(fresh.expected_native_session_id.is_none());
     if matches!(before, BeforeInput::RestartAfterContext) {
+        restart_phase::assert_proof(&fresh, false);
+        assert!(!readiness.is_ready(CANARY_CHANNEL));
+        assert!(!readiness.accepts(CANARY_CHANNEL));
         restart_phase::restart(fixture, output, readiness, handles, &fresh, false).await;
+        restart_phase::assert_proof(&fresh, false);
         assert!(!readiness.is_ready(CANARY_CHANNEL));
         assert!(!readiness.accepts(CANARY_CHANNEL));
     }
@@ -737,7 +741,9 @@ async fn run_fifo(
     let path = b1::publish_named_source(fixture, &fresh, NEW_NATIVE_ID);
     let new_io = crate::services::codex::actual_submit_tests::source_io::Watch::start(&path);
     if matches!(before, BeforeInput::RestartAfterProof) {
+        restart_phase::assert_proof(&fresh, true);
         restart_phase::restart(fixture, output, readiness, handles, &fresh, false).await;
+        restart_phase::assert_proof(&fresh, true);
     }
     native_output::terminal(&path, "new-clear-turn", FIRST_REPLY);
     b1::wait_completion(&first_token).await;
@@ -781,7 +787,9 @@ async fn run_fifo(
     .await;
     first.finish();
     if matches!(before, BeforeInput::RestartAfterFirstPost) {
+        restart_phase::assert_proof(&fresh, true);
         restart_phase::restart(fixture, output, readiness, handles, &fresh, true).await;
+        restart_phase::assert_proof(&fresh, true);
     }
     crate::services::discord::turn_presence::activity::tests::companion_attach_log_watcher(
         &fixture.shared,
