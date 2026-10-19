@@ -65,6 +65,40 @@ pub(super) struct LedgerEntry {
     pub(super) watcher_backstop_deadline_pulled: bool,
     pub(super) completion_admission: CompletionAdmission,
     pub(super) finalized_at: Option<Instant>,
+    /// The exact policy close this entry owns until it finalizes; never shared with another key.
+    pub(super) pending_policy_commit: Option<Arc<super::terminal_handler::PolicyCommit>>,
+    /// Set only when this episode's own token was released by its exact nonce: a normal terminal
+    /// that removed it, or this key's policy close whose tail finished.
+    pub(super) exact_release_confirmed: bool,
+}
+
+impl LedgerEntry {
+    /// A fresh `Pending` entry, from `register_start` or a terminal that arrived first.
+    pub(super) fn registered(
+        key: TurnKey,
+        provider: ProviderKind,
+        relay_owner: RelayOwnerKind,
+        recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
+        plan: CompletionAdmissionPlan,
+        watcher_backstop_deadline: Option<Instant>,
+    ) -> Self {
+        Self {
+            recovery_lease,
+            phase: Phase::Pending,
+            relay_owner,
+            provider,
+            turn_key: key,
+            terminal_deadline: None,
+            watcher_backstop_deadline,
+            watcher_backstop_probe_at: None,
+            watcher_backstop_terminal_streak: 0,
+            watcher_backstop_deadline_pulled: false,
+            completion_admission: CompletionAdmission::new(plan),
+            finalized_at: None,
+            pending_policy_commit: None,
+            exact_release_confirmed: false,
+        }
+    }
 }
 
 pub(super) struct PendingCompletionAdmission {
@@ -102,13 +136,11 @@ pub(super) enum FinalizeMsg {
         event: TerminalEvent,
         ctx: FinalizeContext,
         evidence: TerminalEvidence,
-        input_permit: Option<super::super::input_runtime::fence::Permit>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
     PolicyClose {
         intent: Box<super::episode::PolicyCloseIntent>,
-        input_permit: Option<super::super::input_runtime::fence::Permit>,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<PolicyCloseOutcome>,
     },

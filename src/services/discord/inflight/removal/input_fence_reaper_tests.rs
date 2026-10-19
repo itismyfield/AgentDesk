@@ -1,87 +1,7 @@
-//! The boot reaper leaves an input-protected channel's population for its move or handback.
+//! Boot preparation precedes custody and reaping, including through the public once wrapper.
 
 use super::nondestructive_loader_tests::{CLAUDE, Env, STALE, row};
 use super::*;
-use crate::services::discord::input_runtime::{self, fence::Gate};
-
-#[test]
-fn c2_boot_reaper_leaves_input_protected_rows_untouched() {
-    let env = Env::new();
-    let (open, closed, legacy) = (6_325_560, 6_325_561, 6_325_562);
-    let open_path = env.seed(&row(open, None), STALE);
-    let closed_path = env.seed(&row(closed, None), STALE);
-    let legacy_path = env.seed(&row(legacy, None), STALE);
-    let (open_before, closed_before) = (
-        fs::read(&open_path).unwrap(),
-        fs::read(&closed_path).unwrap(),
-    );
-    let open_gate = Gate::protect(CLAUDE, open).unwrap();
-    let _open_health = input_runtime::fence::test_health::Clear::new(&open_gate);
-    let closed_gate = Gate::protect(CLAUDE, closed).unwrap();
-    let _closed_health = input_runtime::fence::test_health::Clear::new(&closed_gate);
-    let _closing = closed_gate.close().unwrap();
-
-    let report = reap_inflight_rows_at_boot_in_root(&env.dir(), &CLAUDE);
-
-    assert_eq!(report.protected, 2);
-    assert_eq!(
-        fs::read(&open_path).unwrap(),
-        open_before,
-        "LegacyOpen gate row kept"
-    );
-    assert_eq!(
-        fs::read(&closed_path).unwrap(),
-        closed_before,
-        "Closing gate row kept"
-    );
-    assert!(
-        !legacy_path.exists(),
-        "an unprotected stale row is reaped as before"
-    );
-    assert_eq!(report.reaped_stale, 1);
-    let tried = |channel: u64| {
-        input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={channel}")))
-    };
-    assert!(!tried(open) && !tried(closed), "no row lock was attempted");
-}
-
-#[test]
-fn c2_stale_generation_invalidate_leaves_input_protected_rows_untouched() {
-    let env = Env::new();
-    let (protected, legacy) = (6_325_563, 6_325_564);
-    let stamped = |channel: u64| {
-        let mut state = row(channel, None);
-        state.restart_generation = Some(super::nondestructive_loader_tests::G - 1);
-        state
-    };
-    let protected_path = env.seed(&stamped(protected), 0);
-    let legacy_path = env.seed(&stamped(legacy), 0);
-    let before = fs::read(&protected_path).unwrap();
-    let gate = Gate::protect(CLAUDE, protected).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
-
-    let removed = invalidate_stale_generation_in_root(
-        &env.dir(),
-        &CLAUDE,
-        super::nondestructive_loader_tests::G,
-    );
-
-    assert_eq!(
-        fs::read(&protected_path).unwrap(),
-        before,
-        "protected row kept"
-    );
-    assert!(
-        !legacy_path.exists(),
-        "an unprotected prior-generation row is removed as before"
-    );
-    assert_eq!(
-        removed,
-        vec![(legacy, Some(super::nondestructive_loader_tests::G - 1))]
-    );
-}
 
 /// Episode directories under the boot custody root, by the channel each marker names.
 fn custody_channels(env: &Env) -> Vec<u64> {
@@ -130,45 +50,6 @@ async fn c2b_boot_preparation_settles_before_the_reaper_pass_is_reserved() {
     release.send(()).unwrap();
     let late = held.await;
     assert!(late.already_ran, "the provider's pass ran once");
-}
-
-/// Boot custody leaves a protected channel's row and pending-start record unread, and still
-/// copies an unprotected sibling's row before the reaper unlinks it.
-#[tokio::test]
-async fn c2b_boot_custody_leaves_a_protected_channel_unread() {
-    let env = Env::new();
-    let (protected, legacy) = (6_325_571, 6_325_572);
-    let protected_path = env.seed(&row(protected, None), STALE);
-    let legacy_path = env.seed(&row(legacy, None), STALE);
-    let pending = crate::services::discord::runtime_store::tui_direct_pending_start_root();
-    let pending = pending.unwrap();
-    fs::create_dir_all(&pending).unwrap();
-    let record = pending.join(format!("claude_{protected}_{}.json", protected + 1));
-    fs::write(&record, b"{\"provider\":\"claude\"}").unwrap();
-    let before = (
-        fs::read(&protected_path).unwrap(),
-        fs::read(&record).unwrap(),
-    );
-    let gate = Gate::protect(CLAUDE, protected).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
-
-    let guard = BootReapOnce::default();
-    let report = reap_inflight_rows_at_boot_with_guard(&guard, &CLAUDE, None).await;
-
-    assert_eq!(
-        custody_channels(&env),
-        vec![legacy],
-        "only the sibling is copied"
-    );
-    assert_eq!(
-        (
-            fs::read(&protected_path).unwrap(),
-            fs::read(&record).unwrap()
-        ),
-        before
-    );
-    assert!(!legacy_path.exists());
-    assert_eq!((report.protected, report.reaped_stale), (1, 1));
 }
 
 const PUBLIC_BOOT_CHILD: &str = "ADK_N3BC_D_PUBLIC_BOOT_CHILD";
@@ -271,25 +152,16 @@ async fn c2b_public_boot_preparation_and_access_attempts() {
         return;
     }
     let env = Env::new();
-    let (protected, legacy) = (6_325_573, 6_325_574);
-    let protected_path = env.seed(&row(protected, None), STALE);
+    let legacy = 6_325_574;
     let legacy_path = env.seed(&row(legacy, None), STALE);
     let pending_root =
         crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
     fs::create_dir_all(&pending_root).unwrap();
     let pending_path =
         |channel| pending_root.join(format!("claude_{channel}_{}.json", channel + 1));
-    let protected_pending = pending_path(protected);
     let legacy_pending = pending_path(legacy);
     let invalid_pending = b"{\"provider\":\"claude\"}";
-    fs::write(&protected_pending, invalid_pending).unwrap();
     fs::write(&legacy_pending, invalid_pending).unwrap();
-    let before = (
-        fs::read(&protected_path).unwrap(),
-        fs::read(&protected_pending).unwrap(),
-    );
-    let gate = Gate::protect(CLAUDE, protected).unwrap();
-    let _health = input_runtime::fence::test_health::Clear::new(&gate);
     let (release, latch) = tokio::sync::oneshot::channel();
     let runtime_root = crate::services::discord::runtime_store::runtime_root().unwrap();
     let probe = Probe::new(runtime_root, latch);
@@ -339,21 +211,11 @@ async fn c2b_public_boot_preparation_and_access_attempts() {
     .await
     .expect("second public caller completes");
     assert!(!prepared.already_ran, "held caller reserved no pass");
-    assert_eq!((prepared.protected, prepared.reaped_stale), (1, 1));
+    assert_eq!(prepared.reaped_stale, 1);
     let ran = probe.counts();
     assert_eq!((ran.preparations, ran.reservations), (2, 1));
     let accesses =
         |counts: &Counts, path: &Path| counts.sources.get(path).copied().unwrap_or_default();
-    assert_eq!(
-        accesses(&ran, &protected_path),
-        [0; 3],
-        "protected row attempts"
-    );
-    assert_eq!(
-        accesses(&ran, &protected_pending),
-        [0; 3],
-        "protected pending attempts"
-    );
     let legacy_row = accesses(&ran, &legacy_path);
     let legacy_record = accesses(&ran, &legacy_pending);
     assert!(
@@ -362,13 +224,6 @@ async fn c2b_public_boot_preparation_and_access_attempts() {
     );
     assert!(legacy_record[1] > 0, "worker pending read: {ran:?}");
     assert_eq!(custody_channels(&env), vec![legacy]);
-    assert_eq!(
-        (
-            fs::read(&protected_path).unwrap(),
-            fs::read(&protected_pending).unwrap()
-        ),
-        before
-    );
     assert!(!legacy_path.exists());
     assert!(legacy_pending.exists());
     assert_eq!(fs::read(&legacy_pending).unwrap(), invalid_pending);
@@ -381,7 +236,7 @@ async fn c2b_public_boot_preparation_and_access_attempts() {
         late.already_ran,
         "public provider once gate retained the completed pass"
     );
-    assert_eq!((late.protected, late.reaped_stale), (1, 1));
+    assert_eq!(late.reaped_stale, 1);
     let settled = probe.counts();
     assert_eq!((settled.preparations, settled.reservations), (2, 1));
     assert_eq!(
@@ -389,8 +244,8 @@ async fn c2b_public_boot_preparation_and_access_attempts() {
         "late caller attempted no further accesses"
     );
     println!(
-        "{PUBLIC_BOOT_DONE} pid={} preparations=2 reservations=1 protected_row=[0,0,0] \
-         protected_pending=[0,0,0] legacy_row={legacy_row:?} legacy_pending={legacy_record:?}",
+        "{PUBLIC_BOOT_DONE} pid={} preparations=2 reservations=1 \
+         legacy_row={legacy_row:?} legacy_pending={legacy_record:?}",
         std::process::id()
     );
 }

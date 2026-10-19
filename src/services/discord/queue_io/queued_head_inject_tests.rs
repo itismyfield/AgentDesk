@@ -24,8 +24,17 @@ use crate::services::turn_orchestrator::{
 pub(super) static OFFERED_HEADS: std::sync::Mutex<Vec<MessageId>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Every attempt row the queued-head kickoff emitted, in order.
+pub(super) static ATTEMPT_ROWS: std::sync::Mutex<Vec<super::AttemptRow>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[path = "queued_head_auto_tests.rs"]
+mod auto;
+
 struct Fixture {
     _db: TestPostgresDb,
+    pool: sqlx::PgPool,
+    context: serenity::Context,
     app: Router,
     shared: Arc<SharedData>,
     pane: InjectPane,
@@ -34,6 +43,8 @@ struct Fixture {
     holder_message: MessageId,
     http: Arc<serenity::Http>,
     channel_gets: Arc<AtomicUsize>,
+    /// While set, every read of the channel itself fails; it counts the reads it refused.
+    refuse_reads: Arc<(std::sync::atomic::AtomicBool, AtomicUsize)>,
     server: tokio::task::JoinHandle<()>,
     _rest: crate::services::discord::shared_state::test_rest::Guard,
 }
@@ -46,105 +57,9 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(channel: u64, mode: &str) -> Self {
-        let db = TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        crate::db::agents::insert_agent_channels_for_tests(
-            &pool,
-            "s2b-head-agent",
-            Some(&channel.to_string()),
-            None,
-        )
-        .await;
-        let registry = Arc::new(HealthRegistry::new());
-        let shared = register_inject_runtime(&registry, &[channel], Some(pool.clone())).await;
-        shared
-            .http
-            .cached_bot_token
-            .set("s2b-test-token".into())
-            .unwrap();
-        let pane = InjectPane::new(channel, mode);
-        inject_hook::set_queued_head(channel, true);
-        let holder_message = MessageId::new(channel + 500);
-        pane.reseat_row(TurnSource::Managed, holder_message.get());
-        let holder = Arc::new(CancelToken::new());
-        let channel = ChannelId::new(channel);
-        assert!(
-            shared
-                .mailbox(channel)
-                .try_start_turn(holder.clone(), UserId::new(100), holder_message)
-                .await
-        );
-
-        let channel_gets = Arc::new(AtomicUsize::new(0));
-        let counted_gets = channel_gets.clone();
-        let rest_app = Router::new().route("/gateway", axum::routing::get(
-            |ws: axum::extract::ws::WebSocketUpgrade| async {
-                ws.on_upgrade(|mut socket| async move {
-                    while socket.recv().await.is_some() {}
-                })
-            },
-        )).fallback(move |method: Method, uri: axum::http::Uri| {
-            let counted_gets = counted_gets.clone();
-            async move {
-            assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
-            assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
-            if uri.path() == format!("/api/v10/channels/{}", channel.get()) {
-                counted_gets.fetch_add(1, Relaxed);
-            }
-            axum::Json(json!({
-                "id": channel.get().to_string(), "type": 0,
-                "name": "s2b-claude", "guild_id": "6813000",
-                "position": 0, "permission_overwrites": [], "nsfw": false,
-                "parent_id": null
-            }))
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let proxy = format!("http://{address}");
-        let http = Arc::new(
-            serenity::HttpBuilder::new("s2b-test-token")
-                .proxy(proxy.clone())
-                .ratelimiter_disabled(true)
-                .build(),
-        );
-        let server = tokio::spawn(async move { axum::serve(listener, rest_app).await.unwrap() });
-        let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
-        // A Managed row proceeds through the route's normal start veto before enqueue.
-        // Give it a ready local gateway Context, retaining the real route and actor admission.
-        let context =
-            crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::serenity_context(
-                proxy,
-                format!("ws://{address}/gateway"),
-            )
-            .await;
-        shared.http.cached_serenity_ctx.set(context).unwrap();
-        let config = crate::config::Config::default();
-        let engine = crate::engine::PolicyEngine::new(&config).unwrap();
-        let broadcast = crate::eventbus::new_broadcast();
-        let buffer = crate::eventbus::spawn_batch_flusher(broadcast.clone());
-        let app = crate::server::routes::api_router_with_pg(
-            engine,
-            config,
-            broadcast,
-            buffer,
-            Some(registry),
-            Some(pool),
-        );
-        let fixture = Self {
-            _db: db,
-            app,
-            shared,
-            pane,
-            channel,
-            holder,
-            holder_message,
-            http,
-            channel_gets,
-            server,
-            _rest: rest,
-        };
-        // The real route must enqueue H, rather than inject it on arrival. Scheduling is S3.
+        let fixture = Self::build(channel, mode).await;
+        let channel = fixture.channel;
+        // The real route must enqueue H, rather than inject it on arrival, and schedule nothing.
         let transition = fixture
             .shared
             .session_transition_lock(channel)
@@ -176,6 +91,174 @@ impl Fixture {
             "setup must not call the executor"
         );
         fixture
+    }
+
+    /// A busy Claude channel behind the real route, with nothing queued yet.
+    async fn build(channel: u64, mode: &str) -> Self {
+        Self::build_in(channel, mode, None).await
+    }
+
+    /// As `build`, for a thread of `parent` when one is named.
+    async fn build_in(channel: u64, mode: &str, parent: Option<ChannelId>) -> Self {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        crate::db::agents::insert_agent_channels_for_tests(
+            &pool,
+            "s2b-head-agent",
+            Some(&channel.to_string()),
+            None,
+        )
+        .await;
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = register_inject_runtime(&registry, &[channel], Some(pool.clone())).await;
+        // A thread's routing is checked against its parent, which the bot is allowed in.
+        let allowed = parent.map(|parent| parent.get());
+        shared
+            .settings
+            .write()
+            .await
+            .allowed_channel_ids
+            .extend(allowed);
+        shared
+            .http
+            .cached_bot_token
+            .set("s2b-test-token".into())
+            .unwrap();
+        let pane = InjectPane::new(channel, mode);
+        inject_hook::set_queued_head(channel, true);
+        let holder_message = MessageId::new(channel + 500);
+        pane.reseat_row(TurnSource::Managed, holder_message.get());
+        let holder = Arc::new(CancelToken::new());
+        let channel = ChannelId::new(channel);
+        assert!(
+            shared
+                .mailbox(channel)
+                .try_start_turn(holder.clone(), UserId::new(100), holder_message)
+                .await
+        );
+
+        let channel_gets = Arc::new(AtomicUsize::new(0));
+        let counted_gets = channel_gets.clone();
+        let refuse_reads = Arc::new((
+            std::sync::atomic::AtomicBool::new(false),
+            AtomicUsize::new(0),
+        ));
+        let refused = refuse_reads.clone();
+        let rest_app = Router::new().route("/gateway", axum::routing::get(
+            |ws: axum::extract::ws::WebSocketUpgrade| async {
+                ws.on_upgrade(|mut socket| async move {
+                    while socket.recv().await.is_some() {}
+                })
+            },
+        )).fallback(move |method: Method, uri: axum::http::Uri| {
+            let (counted_gets, refused) = (counted_gets.clone(), refused.clone());
+            async move {
+            use axum::response::IntoResponse;
+            assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
+            assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
+            let mut answer = json!({
+                "id": channel.get().to_string(), "type": 0,
+                "name": "s2b-claude", "guild_id": "6813000",
+                "position": 0, "permission_overwrites": [], "nsfw": false,
+                "parent_id": null
+            });
+            if uri.path() == format!("/api/v10/channels/{}", channel.get()) {
+                counted_gets.fetch_add(1, Relaxed);
+                if refused.0.load(Relaxed) {
+                    refused.1.fetch_add(1, Relaxed);
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                if let Some(parent) = parent {
+                    answer["type"] = json!(11);
+                    answer["parent_id"] = json!(parent.get().to_string());
+                }
+            } else if let Some(parent) = parent.filter(|p| uri.path().ends_with(&format!("/{p}"))) {
+                answer["id"] = json!(parent.get().to_string());
+            }
+            axum::Json(answer).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = format!("http://{address}");
+        let http = Arc::new(
+            serenity::HttpBuilder::new("s2b-test-token")
+                .proxy(proxy.clone())
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, rest_app).await.unwrap() });
+        let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
+        // A Managed row proceeds through the route's normal start veto before enqueue.
+        // Give it a ready local gateway Context, retaining the real route and actor admission.
+        let context =
+            crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock::serenity_context(
+                proxy,
+                format!("ws://{address}/gateway"),
+            )
+            .await;
+        shared
+            .http
+            .cached_serenity_ctx
+            .set(context.clone())
+            .unwrap();
+        let config = crate::config::Config::default();
+        let engine = crate::engine::PolicyEngine::new(&config).unwrap();
+        let broadcast = crate::eventbus::new_broadcast();
+        let buffer = crate::eventbus::spawn_batch_flusher(broadcast.clone());
+        let app = crate::server::routes::api_router_with_pg(
+            engine,
+            config,
+            broadcast,
+            buffer,
+            Some(registry),
+            Some(pool.clone()),
+        );
+        Self {
+            _db: db,
+            pool,
+            context,
+            app,
+            shared,
+            pane,
+            channel,
+            holder,
+            holder_message,
+            http,
+            channel_gets,
+            refuse_reads,
+            server,
+            _rest: rest,
+        }
+    }
+
+    /// A process restart: a new runtime with its own mailbox registry restores the queue from disk
+    /// as startup does, on the same pane, transcript and database; `busy` holds the same turn again.
+    async fn restart(&mut self, busy: bool) {
+        let registry = HealthRegistry::new();
+        let channels = [self.channel.get()];
+        let shared = register_inject_runtime(&registry, &channels, Some(self.pool.clone())).await;
+        let token = "s2b-test-token".to_string();
+        shared.http.cached_bot_token.set(token).unwrap();
+        let context = self.context.clone();
+        shared.http.cached_serenity_ctx.set(context).unwrap();
+        // Startup restores only channels the configuration binds, where the route read the allowlist.
+        let role_map = runtime_store::role_map_path().unwrap();
+        std::fs::create_dir_all(role_map.parent().unwrap()).unwrap();
+        let bound = json!({ "byChannelId": { self.channel.get().to_string():
+            { "roleId": "s2b-head-agent", "promptFile": "prompt.md", "provider": "claude" } } });
+        std::fs::write(role_map, bound.to_string()).unwrap();
+        let restore =
+            crate::services::discord::runtime_bootstrap::restore_queued_and_inflight_for_tests;
+        restore(&self.http, &shared, &ProviderKind::Claude).await;
+        let mailbox = shared.mailbox(self.channel);
+        let (holder, owner) = (self.holder.clone(), UserId::new(100));
+        if busy && mailbox.snapshot().await.cancel_token.is_none() {
+            mailbox
+                .restore_active_turn(holder, owner, self.holder_message)
+                .await;
+        }
+        self.shared = shared;
     }
 
     async fn enqueue(&self, text: &str) {
@@ -237,6 +320,12 @@ impl Fixture {
 
     fn gets(&self) -> usize {
         self.channel_gets.load(Relaxed)
+    }
+
+    /// Makes reads of the channel fail, or read again; returns how many it has refused so far.
+    fn refuse_channel_reads(&self, refuse: bool) -> usize {
+        self.refuse_reads.0.store(refuse, Relaxed);
+        self.refuse_reads.1.load(Relaxed)
     }
 
     fn disk(&self) -> Value {
@@ -441,7 +530,7 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     );
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -509,7 +598,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
         fixture.channel, before[0].message_id
     )));
     assert!(!buffer.contains("distinct tail B"));
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -598,6 +687,111 @@ async fn s2b_actual_router_kickoff_unconfirmed_preserves_head_and_tail_across_re
     assert!(take.persistence_error.is_none());
     assert_eq!(fixture.bytes(), original);
     fixture.assert_holder_kept().await;
+}
+
+/// Claude Code's paste block around `inner`, opened and closed with the given ids.
+fn paste_block(open: &str, inner: &str, close: &str) -> String {
+    format!("<pasted_content id=\"{open}\">\n{inner}\n</pasted_content id=\"{close}\">")
+}
+
+/// The pane's enqueue receipt with `content` as its prompt.
+fn enqueue_receipt(content: Value) -> String {
+    json!({"type": "queue-operation", "operation": "enqueue", "content": content}).to_string()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_settles_a_head_claude_recorded_in_a_paste_block_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let fixture = Fixture::new(6_813_430, "all").await;
+    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+    let block = paste_block("b0ac", "@BODY@", "b0ac");
+    fixture.pane.set("receipt", &enqueue_receipt(json!(block)));
+    let before = fixture.queue().await;
+    fixture.kick().await;
+    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\nstatus?"));
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let after = fixture.queue().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(format!("{:?}", after[0]), format!("{:?}", before[1]));
+
+    // The composer is empty again, so the next kick types B once in the same way.
+    std::fs::remove_file(fixture.pane.path("pasted")).unwrap();
+    fixture.kick().await;
+    assert_eq!(
+        fixture.pane.keys(),
+        ["paste-buffer", "send-keys", "paste-buffer", "send-keys"]
+    );
+    let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
+    assert!(buffer.ends_with("\ndistinct tail B"));
+    assert!(fixture.queue().await.is_empty());
+    let disk = fixture.disk();
+    assert!(disk["head_injection"].is_null(), "{disk}");
+    let terminal = disk["terminal_identities"].as_array().unwrap();
+    assert_eq!(terminal.len(), 2);
+    for (identity, head) in terminal.iter().zip(&before) {
+        assert_eq!(identity["primary"], head.message_id.get());
+        assert_eq!(identity["queued_generation"], head.queued_generation);
+        assert_eq!(identity["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(identity["sources"][0]["message_id"], head.message_id.get());
+    }
+    fixture.assert_holder_kept().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s2b_actual_router_kickoff_keeps_unknown_for_any_other_receipt_under_the_nonce_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let block = |inner: &str| paste_block("b0ac", inner, "b0ac");
+    let quoted = block("@BODY@");
+    let cases = [
+        ("suffix inside", enqueue_receipt(json!(block("@BODY@\nX")))),
+        ("changed body", enqueue_receipt(json!(block("@HEAD@\nstatus!")))),
+        ("text after", enqueue_receipt(json!(format!("{quoted}\nX")))),
+        ("trailing newline", enqueue_receipt(json!(format!("{quoted}\n")))),
+        ("leading space", enqueue_receipt(json!(format!(" {quoted}")))),
+        ("other close id", enqueue_receipt(json!(paste_block("b0ac", "@BODY@", "c1d2")))),
+        ("uppercase id", enqueue_receipt(json!(paste_block("B0AC", "@BODY@", "B0AC")))),
+        (
+            "extra attribute",
+            enqueue_receipt(json!(quoted.replacen("\">", "\" source=\"x\">", 1))),
+        ),
+        ("nested", enqueue_receipt(json!(paste_block("c1d2", &quoted, "c1d2")))),
+        (
+            "nontext",
+            enqueue_receipt(json!([{"type": "text", "text": quoted},
+                {"type": "image", "source": {"type": "base64", "data": "AA=="}}])),
+        ),
+        (
+            "assistant quote",
+            json!({"type": "assistant", "message": {"content": quoted}}).to_string(),
+        ),
+        (
+            "tool result",
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": quoted}]}})
+                .to_string(),
+        ),
+        (
+            "meta",
+            json!({"type": "user", "isMeta": true, "message": {"content": quoted}}).to_string(),
+        ),
+    ];
+    for (offset, (case, receipt)) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new(6_813_431 + offset as u64, "all").await;
+        let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
+        fixture.pane.set("receipt", &receipt);
+        let before = payloads(items(fixture.disk()));
+        fixture.kick().await;
+        assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"], "{case}");
+        assert_eq!(
+            fixture.disk()["head_injection"]["phase"],
+            "unknown",
+            "{case}"
+        );
+        fixture.assert_unknown_barrier(before).await;
+        fixture.assert_holder_kept().await;
+    }
 }
 
 async fn reached(signal: &tokio::sync::Notify) {
@@ -698,14 +892,14 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         assert_eq!(fixture.disk()["head_injection"]["phase"], phase);
         assert_eq!(fixture.pane.tmux_calls(), 0);
         if idle {
-            let transcript_path = fixture.pane.path("transcript.jsonl");
+            let transcript_path = fixture.pane.path(InjectPane::TRANSCRIPT);
             assert!(
                 crate::services::tui_turn_state::observe_claude_jsonl_turn_state(&transcript_path)
                     .is_busy()
             );
             let transcript = std::fs::read_to_string(&transcript_path).unwrap();
             fixture.pane.set(
-                "transcript.jsonl",
+                InjectPane::TRANSCRIPT,
                 &format!("{transcript}{{\"type\":\"result\"}}\n"),
             );
             fixture.pane.idle();
@@ -733,6 +927,13 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         );
         let disk = fixture.disk();
         assert!(disk.is_array() || disk["head_injection"].is_null());
+        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let row = rows.iter().rev().find(|row| row.channel_id == channel);
+        assert_eq!(
+            row.map(|row| (row.outcome, row.head_state)),
+            Some(("not_sent", "queued")),
+            "{phase}/idle={idle}: the actor committed the head back to the queue"
+        );
         let snapshot = fixture.shared.mailbox(fixture.channel).snapshot().await;
         assert!(
             snapshot
@@ -837,14 +1038,14 @@ async fn s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_
     assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
     assert!(fixture.pane.transcript_recorded_the_paste());
     fixture.pane.idle();
-    let transcript = std::fs::read_to_string(fixture.pane.path("transcript.jsonl")).unwrap();
+    let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     fixture.pane.set(
-        "transcript.jsonl",
+        InjectPane::TRANSCRIPT,
         &format!("{transcript}{{\"type\":\"result\"}}\n"),
     );
     assert_eq!(
         crate::services::tui_turn_state::observe_claude_jsonl_turn_state(
-            &fixture.pane.path("transcript.jsonl")
+            &fixture.pane.path(InjectPane::TRANSCRIPT)
         ),
         crate::services::tui_turn_state::TuiTurnState::Idle
     );
@@ -858,53 +1059,6 @@ async fn s2b_an_acknowledged_paste_can_settle_after_the_transcript_becomes_idle_
         head.message_id.get()
     );
     assert!(fixture.disk()["head_injection"].is_null());
-    fixture.assert_holder_kept().await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn s2b_closing_waits_for_the_queued_owner_and_its_inherited_permit_pg() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let fixture = Fixture::new(6_813_413, "all").await;
-    let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
-    let fence = crate::services::discord::input_runtime::fence::Gate::protect(
-        ProviderKind::Claude,
-        fixture.channel.get(),
-    )
-    .unwrap();
-    let _health = crate::services::discord::input_runtime::fence::test_health::Clear::new(&fence);
-    let head = fixture.queue().await.remove(0);
-    let (at_may, resume) = inject_hook::park_queued(fixture.channel.get(), "may_have_sent");
-    let caller = fixture.spawn_kick();
-    reached(&at_may).await;
-    assert_eq!(fixture.disk()["head_injection"]["phase"], "may_have_sent");
-    let closing = fence.close().unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), closing.drain())
-            .await
-            .is_err(),
-        "Closing must wait for the owner holding the admitted input effect"
-    );
-    assert!(fence.admit().is_err(), "Closing refuses new input effects");
-    resume.notify_one();
-    caller.await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), closing.drain())
-        .await
-        .expect("the owner must release its permit after durable settlement");
-    assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
-    assert_eq!(
-        fixture.disk()["terminal_identities"][0]["primary"],
-        head.message_id.get()
-    );
-    assert!(fixture.disk()["head_injection"].is_null());
-    let calls = fixture.pane.tmux_calls();
-    let before = fixture.bytes();
-    fixture.kick().await;
-    assert_eq!(
-        fixture.pane.tmux_calls(),
-        calls,
-        "new KICKOFF is refused while Closing"
-    );
-    assert_eq!(fixture.bytes(), before);
     fixture.assert_holder_kept().await;
 }
 
@@ -1121,7 +1275,9 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let queue = fixture.queue().await;
     let head = queue[0].clone();
-    fixture.park(&[head.message_id]);
+    let ids: Vec<MessageId> = queue.iter().map(|i| i.message_id).collect();
+    // Every input is parked: a ready one behind the parked head would be typed in its place.
+    fixture.park(&ids);
     let before = fixture.bytes();
     fixture.kick().await;
     assert!(!OFFERED_HEADS.lock().unwrap().contains(&head.message_id));
@@ -1153,7 +1309,6 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     else {
         panic!("a ready head is reserved");
     };
-    let ids: Vec<MessageId> = queue.iter().map(|i| i.message_id).collect();
     fixture.park(&ids);
     let body = fixture.deliver("C behind a reserved head").await;
     assert_eq!(body["delivery"], "queued", "{body}");

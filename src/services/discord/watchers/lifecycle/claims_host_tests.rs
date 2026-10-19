@@ -54,7 +54,8 @@ fn admitted(name: &str) {
 // admitted, whatever the host; a withhold after a committed claim leaves its watcher alone.
 #[test]
 fn a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent() {
-    let watchers = TmuxWatcherRegistry::new();
+    let watchers =
+        TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let names = [
         "p8c-legacy",
         "p8c-unverified",
@@ -134,7 +135,9 @@ fn a_herdr_claim_commits_only_under_its_admission_and_keeps_the_incumbent() {
 fn a_withhold_waits_for_a_claim_that_read_the_admission() {
     let name = "p8c-race";
     admitted(name);
-    let watchers = Arc::new(TmuxWatcherRegistry::new());
+    let watchers = Arc::new(TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    )));
     let (paused_tx, paused_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let claimer = {
@@ -200,7 +203,8 @@ fn a_claim_takes_no_source_authority() {
     });
     held_rx.recv().unwrap();
 
-    let watchers = TmuxWatcherRegistry::new();
+    let watchers =
+        TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
     let mut results = Vec::new();
     let contended = source_authority_contention_key_for_tests(|| {
         results.push(claim(

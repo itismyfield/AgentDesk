@@ -118,7 +118,7 @@ pub(crate) use composer_content::{ComposerContent, active_composer_content_in_pa
 #[allow(unused_imports)]
 pub(crate) use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
-use composer_status::{line_is_codex_fast_context_status, line_is_codex_model_first_status};
+use composer_status::line_is_codex_fast_context_status;
 
 const PROMPT_SUBMIT_INITIAL_SETTLE: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DRAFT_RECHECK_SETTLE: Duration = Duration::from_millis(250);
@@ -138,7 +138,6 @@ const COMPOSER_EDGE_BOTTOM_WINDOW: usize = 6;
 /// composer; in practice it sits in the last 1–3 visible rows.
 const FOOTER_HINT_BOTTOM_WINDOW: usize = 5;
 /// Compact Codex prompt (`› ...`) must be very near the pane bottom.
-const COMPACT_PROMPT_BOTTOM_WINDOW: usize = 4;
 /// Composer edge and footer hint must co-occur within this many lines
 /// of each other so a screenshot of the TUI in assistant prose cannot
 /// pair with a real footer further down the buffer.
@@ -1030,31 +1029,7 @@ const CODEX_INTERACTIVE_MODAL_MARKERS: &[&str] = &[
 ];
 
 fn pane_has_codex_interactive_modal_in_pane(pane: &str) -> bool {
-    // Only the header adjoining a current composer can veto it; answer prose is not a modal.
-    let recent: Vec<&str> = pane
-        .lines()
-        .rev()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(6)
-        .collect();
-    if !recent
-        .iter()
-        .take(3)
-        .any(|line| line_is_codex_model_first_status(line))
-    {
-        return false;
-    }
-    let header = recent
-        .iter()
-        .position(|line| line.starts_with('›'))
-        .and_then(|prompt| recent.get(prompt + 1));
-    header.is_some_and(|line| {
-        let lower = line.to_ascii_lowercase();
-        CODEX_INTERACTIVE_MODAL_MARKERS
-            .iter()
-            .any(|marker| lower.starts_with(marker))
-    })
+    composer_status::pane_has_interactive_modal(pane)
 }
 
 /// Whether the bottom of a pane names a Codex modal (sign-in, trust, approval, update): a screen
@@ -1520,40 +1495,7 @@ fn codex_elapsed_time_component(candidate: &str) -> bool {
 }
 
 fn pane_has_dim_legacy_codex_prompt_in_pane(pane: &str) -> bool {
-    let recent: Vec<&str> = pane
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .rev()
-        .take(PROMPT_READY_SCAN_LINES)
-        .collect();
-    pane_has_dim_legacy_codex_prompt(&recent)
-}
-
-fn pane_has_dim_legacy_codex_prompt(recent_bottom_up: &[&str]) -> bool {
-    const LEGACY_PROMPT_BOTTOM_WINDOW: usize = 4;
-    const LEGACY_STATUS_BOTTOM_WINDOW: usize = 3;
-
-    let prompt_idx = recent_bottom_up
-        .iter()
-        .take(LEGACY_PROMPT_BOTTOM_WINDOW)
-        .position(|line| line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line)));
-    let status_idx = recent_bottom_up
-        .iter()
-        .take(LEGACY_STATUS_BOTTOM_WINDOW)
-        .position(|line| line_is_codex_status_with_ansi(line));
-    let (Some(prompt_idx), Some(status_idx)) = (prompt_idx, status_idx) else {
-        return false;
-    };
-
-    status_idx < prompt_idx
-        && !recent_bottom_up[status_idx + 1..prompt_idx]
-            .iter()
-            .any(|line| {
-                line_is_codex_status_with_ansi(line)
-                    || line_is_codex_compact_prompt_marker(&strip_ansi_escape_sequences(line))
-            })
-        && line_is_dim_legacy_codex_prompt(recent_bottom_up[prompt_idx])
+    composer_status::pane_has_dim_composer(pane)
 }
 
 fn line_is_legacy_codex_prompt(line: &str) -> bool {
@@ -1562,21 +1504,6 @@ fn line_is_legacy_codex_prompt(line: &str) -> bool {
         return false;
     };
     rest.trim().is_empty()
-}
-
-fn line_is_dim_legacy_codex_prompt(line: &str) -> bool {
-    let plain = strip_ansi_escape_sequences(line);
-    let trimmed = plain.trim();
-    let Some(rest) = trimmed.strip_prefix('›') else {
-        return false;
-    };
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return true;
-    }
-    line.find('›')
-        .map(|idx| contains_dim_sgr(&line[idx + '›'.len_utf8()..]))
-        .unwrap_or(false)
 }
 
 fn recent_has_codex_active_turn(recent_bottom_up: &[&str]) -> bool {
@@ -1592,38 +1519,6 @@ fn line_is_codex_active_turn_marker(line: &str) -> bool {
     let trimmed = line.trim_start();
     (trimmed.starts_with('•') || trimmed.starts_with('◦'))
         && (trimmed.contains("esc to interrupt") || trimmed.contains("Esc to interrupt"))
-}
-
-fn line_is_codex_status_with_ansi(line: &str) -> bool {
-    line_is_codex_compact_status_line(&strip_ansi_escape_sequences(line))
-        || line_is_codex_fast_context_status(&strip_ansi_escape_sequences(line))
-}
-
-fn contains_dim_sgr(input: &str) -> bool {
-    let mut rest = input;
-    while let Some(start) = rest.find("\x1b[") {
-        rest = &rest[start + 2..];
-        let Some(end) = rest.find('m') else {
-            return false;
-        };
-        let codes = &rest[..end];
-        if codes
-            .split(';')
-            .filter_map(|code| {
-                let code = code.trim();
-                if code.is_empty() {
-                    None
-                } else {
-                    code.parse::<u16>().ok()
-                }
-            })
-            .any(|code| code == 2)
-        {
-            return true;
-        }
-        rest = &rest[end + 1..];
-    }
-    false
 }
 
 pub(crate) fn strip_ansi_escape_sequences(input: &str) -> String {
@@ -1654,16 +1549,7 @@ fn recent_has_codex_compact_prompt(recent: &[&str]) -> bool {
 }
 
 fn recent_has_codex_compact_composer(recent: &[&str]) -> bool {
-    let Some(prompt_idx) = recent
-        .iter()
-        .take(COMPACT_PROMPT_BOTTOM_WINDOW)
-        .position(|line| line_is_codex_compact_prompt_marker(line))
-    else {
-        return false;
-    };
-    prompt_idx == 1
-        && (line_is_codex_compact_status_line(recent[0])
-            || line_is_codex_fast_context_status(recent[0]))
+    composer_status::recent_has_compact_composer(recent)
 }
 
 fn pane_has_codex_prompt_draft(pane: &str) -> bool {

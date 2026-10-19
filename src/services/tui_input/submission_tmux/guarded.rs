@@ -110,9 +110,21 @@ impl Geometry {
     }
 }
 
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneIdentity {
+    session: String,
+    window: String,
+    pane: String,
+    server_pid: String,
+    pane_pid: String,
+}
+
 pub(crate) struct GuardedPane {
     session: String,
     geometry: Geometry,
+    #[cfg(unix)]
+    stash_attempted: bool,
 }
 
 pub(crate) struct GuardedObserver {
@@ -157,10 +169,30 @@ impl SubmissionTmux {
         let output = self
             .run(&["display-message", "-p", "-t", &target, SNAPSHOT])
             .map_err(|_| InputRefusal::Composer(Refusal::CaptureUnavailable))?;
+        // A complete snapshot can prove unsupported geometry; a failed read cannot.
+        let unavailable = || InputRefusal::Composer(Refusal::CaptureUnavailable);
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Err(unavailable());
+        }
+        let raw = std::str::from_utf8(&output.stdout).map_err(|_| unavailable())?;
+        let fields: Vec<_> = raw.split_ascii_whitespace().collect();
+        if fields.len() != 14
+            || identity(fields[0], '$').is_none()
+            || identity(fields[1], '@').is_none()
+            || identity(fields[2], '%').is_none()
+            || !matches!(fields[5], "manual" | "latest" | "smallest" | "largest")
+            || [3, 4, 6, 7, 8, 9, 10, 11, 12, 13]
+                .iter()
+                .any(|&index| fields[index].parse::<u32>().is_err())
+        {
+            return Err(unavailable());
+        }
         let geometry = Geometry::read(output).ok_or_else(held)?;
         Ok(GuardedPane {
             session: session.to_owned(),
             geometry,
+            #[cfg(unix)]
+            stash_attempted: false,
         })
     }
 }
@@ -186,6 +218,53 @@ impl GuardedPane {
 
     pub(crate) fn capture_draft(&self) -> Option<String> {
         capture_guarded(&self.geometry)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn capture_viewport(&self) -> Option<String> {
+        let output = SubmissionTmux
+            .run(&[
+                "display-message",
+                "-p",
+                "-t",
+                &self.geometry.pane,
+                SNAPSHOT,
+                ";",
+                "capture-pane",
+                "-p",
+                "-e",
+                "-t",
+                &self.geometry.pane,
+                "-S",
+                "0",
+            ])
+            .ok()?;
+        let capture = read_capture(output, &self.geometry)?;
+        self.geometry_matches().then_some(capture)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn identity(&self) -> PaneIdentity {
+        PaneIdentity {
+            session: self.geometry.session.clone(),
+            window: self.geometry.window.clone(),
+            pane: self.geometry.pane.clone(),
+            server_pid: self.geometry.server_pid.clone(),
+            pane_pid: self.geometry.pane_pid.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn dimensions(&self) -> (usize, usize) {
+        (self.geometry.width, self.geometry.height)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn stash(&mut self) -> EffectOutcome {
+        if std::mem::replace(&mut self.stash_attempted, true) {
+            return EffectOutcome::Held;
+        }
+        self.effect(&format!("send-keys -t {} C-s", self.geometry.pane), true)
     }
 
     pub(crate) fn payload(&self, action: &TuiInputAction) -> EffectOutcome {

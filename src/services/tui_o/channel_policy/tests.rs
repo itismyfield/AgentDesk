@@ -12,7 +12,6 @@ fn ownership_uses_flag_membership_and_tui_kind_together() {
                 (Some(RuntimeHandoffKind::CodexTui), true),
                 (Some(RuntimeHandoffKind::LegacyTmuxWrapper), false),
                 (Some(RuntimeHandoffKind::ProcessBackend), false),
-                (Some(RuntimeHandoffKind::ClaudeEAdapter), false),
                 (None, false),
             ] {
                 assert_eq!(

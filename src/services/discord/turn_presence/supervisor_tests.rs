@@ -25,8 +25,12 @@ struct Fake {
     overtaken: AtomicBool,
     token: AtomicBool,
     head: Mutex<Option<u64>>,
+    read_delay: Mutex<HashMap<u64, Duration>>,
+    mailbox_delay: Mutex<HashMap<u64, Duration>>,
     typing_delay: Mutex<HashMap<u64, Duration>>,
+    typing_errors: Mutex<HashMap<u64, String>>,
     typed: Mutex<Vec<(u64, Duration)>>,
+    succeeded: Mutex<Vec<(u64, Duration)>>,
     kicks: Mutex<Vec<(u64, Duration)>>,
     notices: Mutex<Vec<(u64, Duration, String)>>,
     notice_delay: Mutex<Option<Duration>>,
@@ -44,8 +48,12 @@ impl Fake {
             overtaken: AtomicBool::new(false),
             token: AtomicBool::new(false),
             head: Mutex::new(None),
+            read_delay: Mutex::new(HashMap::new()),
+            mailbox_delay: Mutex::new(HashMap::new()),
             typing_delay: Mutex::new(HashMap::new()),
+            typing_errors: Mutex::new(HashMap::new()),
             typed: Mutex::new(Vec::new()),
+            succeeded: Mutex::new(Vec::new()),
             kicks: Mutex::new(Vec::new()),
             notices: Mutex::new(Vec::new()),
             notice_delay: Mutex::new(None),
@@ -95,6 +103,10 @@ impl Effects for Fake {
     }
 
     async fn read(&self, channel: u64) -> Reading {
+        let delay = lock(&self.read_delay).get(&channel).copied();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let observed = lock(&self.readings)[&channel];
         if self.overtaken.load(Ordering::SeqCst) {
             return Reading::overtaken_for_tests(observed);
@@ -103,6 +115,10 @@ impl Effects for Fake {
     }
 
     async fn mailbox(&self, channel: u64) -> (bool, Option<u64>) {
+        let delay = lock(&self.mailbox_delay).remove(&channel);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let live = lock(&self.live_mailbox).clone();
         if let Some(shared) = live {
             return waiting_input(&shared, &ProviderKind::Claude, ChannelId::new(channel)).await;
@@ -116,6 +132,10 @@ impl Effects for Fake {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        if let Some(error) = lock(&self.typing_errors).get(&channel).cloned() {
+            return Err(error);
+        }
+        lock(&self.succeeded).push((channel, self.since()));
         Ok(())
     }
 
@@ -140,6 +160,9 @@ impl Effects for Fake {
         None
     }
 }
+
+#[path = "supervisor_deadline_tests.rs"]
+mod deadline_tests;
 
 /// Publishes a presence for `channel` as a running supervisor would.
 pub(crate) fn seed_presence_for_tests(channel: u64, busy: bool) {
@@ -421,7 +444,6 @@ async fn only_confirmed_channels_are_supervised_and_reported() {
         "activity_since",
         "generation",
         "kickoffs_total",
-        "n1_observation",
         "observed_at",
         "process_started_at",
         "queue_held",
@@ -432,7 +454,6 @@ async fn only_confirmed_channels_are_supervised_and_reported() {
         "unknown_notice",
     ];
     assert_eq!(keys, expected);
-    assert_eq!(json["n1_observation"]["status"], "unavailable");
     assert_eq!(
         (json["session"].as_str(), json["source_id"].as_str()),
         (Some("pane"), Some("/t.jsonl"))

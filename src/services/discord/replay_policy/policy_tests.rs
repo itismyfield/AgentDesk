@@ -95,12 +95,7 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
     assert_ne!(permit.next_nonce(), previous);
     assert_eq!(stored(&pool, id).await.0, "startup_failed_no_effect");
 
-    let activities = [
-        Activity::Output,
-        Activity::Tool,
-        Activity::Unclassified,
-        Activity::InjectedInput,
-    ];
+    let activities = [Activity::Output, Activity::Tool, Activity::Unclassified];
     let cases = activities
         .iter()
         .map(|activity| {
@@ -139,14 +134,14 @@ async fn stale_attempt_retries_only_on_committed_no_effect_evidence_pg() {
 }
 
 async fn fail_commit_of(pool: &PgPool, disposition: &str) {
-    sqlx::raw_sql(&format!(
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
         "CREATE OR REPLACE FUNCTION lose_commit() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN RAISE EXCEPTION 'commit acknowledgement lost'; END $$;
          CREATE CONSTRAINT TRIGGER lose_{disposition} AFTER UPDATE ON intake_outbox
              DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
              WHEN (NEW.replay_disposition = '{disposition}')
              EXECUTE FUNCTION lose_commit();"
-    ))
+    )))
     .execute(pool)
     .await
     .unwrap();

@@ -1,5 +1,5 @@
-//! `agentdesk channel-home`: delegated channel homes. `status` only reads; delegate, reclaim and
-//! force each write one conditional row change while `runtime.channel_home_delegation_enabled` is on.
+//! `agentdesk channel-home`: delegated channel homes. `status` only reads; delegate, reclaim, force
+//! and abort-release each write one conditional row change while the delegation switch is on.
 
 use std::future::Future;
 
@@ -13,7 +13,9 @@ use crate::db::o_channel_homes::{
 };
 
 #[derive(Args)]
-#[command(about = "Delegated channel homes: status, and the switched delegate, reclaim and force")]
+#[command(
+    about = "Delegated channel homes: status, and the switched delegate, reclaim, force and abort-release"
+)]
 pub(crate) struct ChannelHomeArgs {
     #[command(subcommand)]
     command: ChannelHomeCommand,
@@ -36,6 +38,12 @@ pub(crate) enum ChannelHomeCommand {
     Reclaim { channel: u64 },
     /// Orphan a holder whose lease has been silent past F; nothing adopts the channel after
     Force { channel: u64 },
+    /// On the gateway, drop a released or held releasing row at that epoch with no open intake
+    AbortRelease {
+        channel: u64,
+        #[arg(long)]
+        expected_epoch: i64,
+    },
 }
 
 impl ChannelHomeCommand {
@@ -88,7 +96,7 @@ where
                 ));
             }
         }
-        ChannelHomeCommand::Reclaim { .. } => {
+        ChannelHomeCommand::Reclaim { .. } | ChannelHomeCommand::AbortRelease { .. } => {
             local.ok_or_else(unset)?;
         }
         ChannelHomeCommand::Status | ChannelHomeCommand::Force { .. } => {}
@@ -104,6 +112,10 @@ where
         } => delegate(&pool, channel, &provider, local, to.trim()).await,
         ChannelHomeCommand::Reclaim { channel } => reclaim(&pool, channel, local).await,
         ChannelHomeCommand::Force { channel } => force(&pool, channel).await,
+        ChannelHomeCommand::AbortRelease {
+            channel,
+            expected_epoch,
+        } => abort_release(&pool, channel, expected_epoch, local).await,
     };
     pool.close().await;
     result
@@ -200,6 +212,65 @@ async fn force(pool: &PgPool, channel: u64) -> Result<String, String> {
         ForceOutcome::Fresh => Err("channel-home force refused: the lease renewed within F".into()),
         ForceOutcome::Stale => Err("channel-home force refused: no holder at that epoch".into()),
     }
+}
+
+async fn abort_release(
+    pool: &PgPool,
+    channel: u64,
+    epoch: i64,
+    gateway: &str,
+) -> Result<String, String> {
+    let channel = channel.to_string();
+    let write = o_channel_homes::abort_release(pool, &channel, epoch, gateway).await;
+    if let HomeWrite::Applied(home) = write.map_err(|e| e.to_string())? {
+        let aborted = json!({"state": home.state.as_str(), "epoch": home.epoch,
+            "target": home.target});
+        let next = "restart this gateway";
+        return Ok(json!({"run_on": gateway, "aborted": aborted, "next": next}).to_string());
+    }
+    // Labels the refusal only; neither read changes the row.
+    let home = o_channel_homes::read_home(pool, &channel).await;
+    let reason = match home.map_err(|e| e.to_string())? {
+        None => format!("channel {channel} has no home row"),
+        Some(home) if home.epoch != epoch => format!(
+            "row is now {} at epoch {}, not {epoch}",
+            home.state.as_str(),
+            home.epoch
+        ),
+        Some(home) => abort_refusal(pool, &home, gateway).await?,
+    };
+    Err(format!("channel-home abort-release refused: {reason}"))
+}
+
+async fn abort_refusal(pool: &PgPool, home: &ChannelHome, gateway: &str) -> Result<String, String> {
+    let state = home.state.as_str();
+    let local = Some(gateway);
+    Ok(match home.state {
+        HomeState::Worker => format!("state {state} is not released or releasing; reclaim it"),
+        HomeState::Orphaned => {
+            format!("state {state} is not released or releasing; unsupported")
+        }
+        HomeState::Reclaiming | HomeState::Reclaimed => {
+            format!("state {state} is not released or releasing")
+        }
+        HomeState::Releasing if home.holder.as_deref() != local => format!(
+            "releasing holder is {}; run on the holder",
+            home.holder.as_deref().unwrap_or("none")
+        ),
+        HomeState::Released if home.target.as_deref() == local => {
+            "released target is this node; run on the gateway".into()
+        }
+        HomeState::Releasing | HomeState::Released => {
+            let open = o_channel_homes::open_intake_by_epoch(pool, &home.channel_id, home.epoch);
+            let open = open.await.map_err(|e| e.to_string())?;
+            if open == o_channel_homes::OpenIntake::default() {
+                "the row changed".into()
+            } else {
+                let (a, b, c) = (open.current, open.other_epoch, open.unrouted);
+                format!("open intake current/other_epoch/unrouted = {a}/{b}/{c}")
+            }
+        }
+    })
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -15,6 +15,9 @@ use tokio::time::Instant;
 
 use crate::db::o_channel_homes::{self, ChannelHome, HeldHome, HomeError, HomeState, HomeWrite};
 use crate::services::tui_o::ownership::{GatewayOwnership, OwnershipGate};
+
+pub(crate) mod ingress_snapshot;
+mod intake;
 
 /// How often a holder renews its lease.
 pub(crate) const RENEW_EVERY: Duration = Duration::from_secs(5);
@@ -28,7 +31,7 @@ pub(crate) const FORCE_AFTER: Duration = Duration::from_secs(HOLD_FOR.as_secs() 
 pub(crate) enum HomeIntake {
     /// New intake, turns, placement and commands are accepted.
     Open,
-    /// Draining: only pieces already owed may still be posted.
+    /// Draining, or restoring the channel's input: only owed pieces and the restore are admitted.
     Closed,
 }
 
@@ -246,6 +249,8 @@ pub(crate) struct HomeGate {
     holder: String,
     gate: Arc<OwnershipGate>,
     local: Mutex<HomeLocal>,
+    /// A runtime's per-channel restore flag new intake waits on; `None` takes intake at once.
+    opens_after: Option<Arc<AtomicBool>>,
 }
 
 impl HomeGate {
@@ -256,6 +261,7 @@ impl HomeGate {
             holder: holder.to_string(),
             gate: Arc::new(OwnershipGate::default()),
             local: Mutex::default(),
+            opens_after: None,
         }
     }
 
@@ -304,15 +310,10 @@ impl HomeGate {
         {
             return HomeOwnership::Lost;
         }
-        let intake = if local.intake_closed == Some(held.home_epoch) {
-            HomeIntake::Closed
-        } else {
-            HomeIntake::Open
-        };
         HomeOwnership::Owned {
             home_epoch: held.home_epoch,
             gate_epoch: held.gate_epoch,
-            intake,
+            intake: self.intake_of(local, held.home_epoch),
         }
     }
 
@@ -540,7 +541,6 @@ impl HomeGate {
     }
 
     /// The installation's home epoch and permit are checked under the same local gate lock.
-    #[cfg(test)]
     pub(crate) fn admit_at_epoch(
         &self,
         provider: &str,
@@ -550,7 +550,6 @@ impl HomeGate {
         self.admit_at_epoch_checked(provider, expected, recovery, |_| {})
     }
 
-    #[cfg(test)]
     fn admit_at_epoch_checked(
         &self,
         provider: &str,
@@ -671,20 +670,6 @@ fn first_mount(homes: &Registry) -> Option<MutexGuard<'static, ()>> {
         .then(|| FIRST_MOUNT.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
-/// Runs `admit` only while `channel` has no Home; no Home can mount until it returns.
-pub(crate) fn admit_unhomed<T>(channel: u64, admit: impl FnOnce() -> T) -> Option<T> {
-    with_homes(|homes| {
-        let _first = first_mount(homes);
-        let Some(homes) = homes.get() else {
-            return Some(admit());
-        };
-        let registry = lock_homes(homes);
-        #[cfg(test)]
-        tests::before_unhomed_poll();
-        (!registry.gates.contains_key(&channel.to_string())).then(admit)
-    })
-}
-
 /// Reads the registered gates; while none was ever registered nothing is locked.
 fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
     with_homes(|homes| {
@@ -697,8 +682,7 @@ fn read_homes<R>(read: impl FnOnce(&Homes) -> R) -> Option<R> {
 /// Makes `home` its channel's gate in this process; intake for the channel then follows it.
 /// A gate it replaces is withdrawn after the swap, so its lease ends and it never reopens.
 pub(crate) fn register(home: Arc<HomeGate>) {
-    let mounted = Arc::clone(&home);
-    let changed = with_homes(|homes| {
+    with_homes(|homes| {
         let _first = first_mount(homes);
         let mut registry = lock_homes(homes.get_or_init(Mutex::default));
         if registry
@@ -706,7 +690,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             .get(&home.channel_id)
             .is_some_and(|old| Arc::ptr_eq(old, &home))
         {
-            return false;
+            return;
         }
         registry.prune();
         let mut local = home.locked();
@@ -719,7 +703,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
             })
         {
             tracing::error!(channel = %home.channel_id, "home registration refused: unrelated command counter already active");
-            return false;
+            return;
         }
         if let Some(old) = registry.gates.get(&home.channel_id) {
             old.withdraw();
@@ -735,13 +719,7 @@ pub(crate) fn register(home: Arc<HomeGate>) {
         local.commands = Arc::clone(count);
         drop(local);
         registry.gates.insert(home.channel_id.clone(), home);
-        true
     });
-    // Outside the registry lock, which a typing first poll may hold.
-    if changed {
-        let withdraw = crate::services::discord::presence_withdraw_unmounted;
-        withdraw(&mounted.channel_id, Some(&mounted), "home_mounted");
-    }
 }
 
 /// Removes the gate immediately; outstanding permits remain visible to a replacement.
@@ -753,7 +731,6 @@ pub(crate) fn unregister(channel_id: &str) -> Option<Arc<HomeGate>> {
         registry.prune();
         Some(removed)
     })?;
-    crate::services::discord::presence_withdraw_unmounted(channel_id, None, "home_unmounted");
     Some(removed)
 }
 
@@ -781,10 +758,6 @@ pub(crate) fn unregister_if_same(home: &HomeGate) -> bool {
         registry.prune();
         true
     });
-    if removed {
-        let withdraw = crate::services::discord::presence_withdraw_unmounted;
-        withdraw(&home.channel_id, None, "home_unmounted");
-    }
     removed
 }
 
@@ -995,57 +968,5 @@ pub(crate) fn command_mutant(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod b3a2_epoch_tests {
-    use super::*;
-    #[tokio::test(start_paused = true)]
-    async fn s3act_b3a2_epoch_check_and_permit_share_lock() {
-        let home = HomeGate::new("5340530", "mini");
-        home.confirm(
-            &HeldHome::for_test("5340530", "mini", 1, HomeState::Worker),
-            Instant::now(),
-        )
-        .unwrap();
-        for recovery in [false, true] {
-            let mut competed = false;
-            let permit = home
-                .admit_at_epoch_checked("claude", 1, recovery, |epoch| {
-                    assert_eq!(epoch, 1, "permit must name the checked epoch");
-                    assert_eq!(
-                        home.local
-                            .try_lock()
-                            .err()
-                            .map(|e| matches!(e, std::sync::TryLockError::WouldBlock)),
-                        Some(true),
-                        "mint callback must still hold the local lock"
-                    );
-                    competed = std::thread::scope(|scope| {
-                        scope
-                            .spawn(|| home.local.try_lock().is_err())
-                            .join()
-                            .unwrap()
-                    });
-                })
-                .unwrap();
-            assert!(
-                competed,
-                "actual competing thread must encounter the held lock"
-            );
-            assert_eq!(home.commands_in_flight(), 1);
-            drop(permit);
-            assert_eq!(home.commands_in_flight(), 0);
-        }
-        home.confirm(
-            &HeldHome::for_test("5340530", "mini", 2, HomeState::Worker),
-            Instant::now(),
-        )
-        .unwrap();
-        for recovery in [false, true] {
-            assert!(home.admit_at_epoch("claude", 1, recovery).is_none());
-        }
-        home.close_intake();
-        assert!(home.admit_at_epoch("claude", 2, false).is_none());
-        assert!(home.admit_at_epoch("claude", 2, true).is_some());
-        home.close();
-        assert!(home.admit_at_epoch("claude", 2, true).is_none());
-    }
-}
+#[path = "channel_home/epoch_tests.rs"]
+mod b3a2_epoch_tests;

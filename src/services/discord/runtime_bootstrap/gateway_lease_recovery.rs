@@ -484,6 +484,12 @@ pub(super) async fn attempt_clean_standby_promotion(
         runtime.restart.intake_worker_lifecycle.fence_admission();
         runtime.restart.legacy_promotion_fence();
     }
+    #[cfg(test)]
+    if crate::services::cluster::channel_home_boot::s3c_mutant("promotion_preflight_stops_writer") {
+        use crate::services::cluster::home_supervisor::StopReason;
+        let homes = super::o_writer_host::lifecycles(None);
+        super::shutdown::end_homes(homes, StopReason::CommittedRestart).await;
+    }
     for runtime in &runtimes {
         runtime
             .restart

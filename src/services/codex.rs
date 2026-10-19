@@ -19,9 +19,9 @@ mod herdr_guard_tests;
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::emit_codex_tui_post_tail_handoff;
-#[cfg(unix)]
-pub(crate) use tui_session_launch::{CodexTuiLaunchRefused, tui_preflight};
+pub(crate) use tui_session_launch::{
+    CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, tui_preflight, verified_warm_preflight,
+};
 #[cfg(unix)]
 use tui_session_launch::{prepare_codex_tui_incarnation, publish_codex_tui_launch_script};
 
@@ -1085,10 +1085,7 @@ fn execute_command_simple_inner(
 
     let mut command = Command::new(&codex_bin);
     crate::services::platform::apply_binary_resolution(&mut command, &resolution);
-    // #2249 / #2250: put Codex in its own process group so kill_pid_tree(child_pid)
-    // can SIGTERM/SIGKILL the whole descendant tree on cancel/timeout. Without
-    // this, kill(-pid, ...) targets PGID = our own process group and the kill
-    // falls back to the immediate child PID only — wrappers / grandchildren leak.
+    // Own a process group so cancellation also terminates wrappers and grandchildren.
     crate::services::process::configure_child_process_group(&mut command);
     let mut child = command
         .args(&args)
@@ -1447,6 +1444,11 @@ fn execute_streaming_direct(
     if let Some(provider) = report_provider {
         command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
     }
+    let overlay = crate::services::discord::org_schema::spawn_auth_overlay(
+        ProviderKind::Codex,
+        report_channel_id,
+    )?;
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
     crate::services::process::configure_child_process_group(&mut command);
 
     let mut child = command
@@ -1455,7 +1457,6 @@ fn execute_streaming_direct(
 
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "codex-direct-stream");
-    // Race condition fix: if /stop arrived before PID was stored, kill now
     if cancel_requested(cancel_token.as_deref()) {
         kill_child_tree(&mut child);
         let _ = child.wait();
@@ -1540,9 +1541,8 @@ fn execute_streaming_remote_direct(
     Err("Remote SSH execution is not available in AgentDesk".to_string())
 }
 
-/// Tear down a pre-existing tmux session before relaunching a Codex Direct TUI
-/// on the same name. Records the termination audit + exit reason and kills the
-/// session. No-op when the session does not exist.
+/// Tear down an existing tmux session before relaunching Codex Direct TUI,
+/// recording its termination and exit reason. Missing sessions are a no-op.
 #[cfg(unix)]
 fn cleanup_existing_codex_tui_session(
     tmux_session_name: &str,
@@ -1599,52 +1599,6 @@ pub(crate) fn wire_cancel_token_to_tmux_session(
         if let Some(pid) = crate::services::platform::tmux::pane_pid(tmux_session_name) {
             token.store_child_pid(pid);
         }
-    }
-}
-
-/// Dispatch the rollout tail for the Direct TUI launch: a resume tails the
-/// selected session's rollout from its committed offset, otherwise we tail the
-/// latest rollout for the cwd. Mirrors the inline resume-vs-fresh branch.
-///
-/// `resume` carries the validated `(rollout_path, start_offset,
-/// selected_session_id)` for the resume branch; `None` selects the fresh tail.
-/// The resume-metadata validation lives in the orchestrator so a missing
-/// rollout-path / session-id short-circuits the launch *before* any tail
-/// dispatch (no tmux leak-kill), matching the pre-refactor inline ordering.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn dispatch_codex_tui_rollout_tail(
-    resume: Option<(&std::path::Path, u64, &str)>,
-    working_dir: &str,
-    rollout_modified_since: std::time::SystemTime,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    tmux_session_name: &str,
-    prompt: &str,
-) -> Result<crate::services::codex_tui::rollout_tail::CodexTuiTailResult, String> {
-    if let Some((rollout_path, start_offset, selected_session_id)) = resume {
-        crate::services::codex_tui::rollout_tail::tail_resumed_rollout_for_session_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            selected_session_id,
-            rollout_path,
-            start_offset,
-            rollout_modified_since,
-            sender,
-            cancel_token,
-            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
-    } else {
-        crate::services::codex_tui::rollout_tail::tail_latest_rollout_for_cwd_with_handoff_for_tmux(
-            std::path::Path::new(working_dir),
-            rollout_modified_since,
-            sender,
-            cancel_token,
-            || crate::services::tmux_diagnostics::tmux_session_pane_liveness(tmux_session_name),
-            tmux_session_name,
-            Some(prompt),
-        )
     }
 }
 
@@ -1889,6 +1843,11 @@ fn execute_streaming_local_tui_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
+    // Before the spawn marker: the marker is restart evidence that these checks passed.
+    let validated_tail = crate::services::codex_tui::tail_launch::validate_selection(
+        &prepared.context,
+        &session_selection,
+    )?;
     prepared.finish_spawn(crate::services::discord::stamp_spawn_markers(
         tmux_session_name,
         Some(&prepared),
@@ -1902,27 +1861,12 @@ fn execute_streaming_local_tui_tmux(
     // without re-acquiring it. The tail call itself moves its clone into
     // the rollout-tail thread; this clone stays in the launch frame.
     let cancel_token_for_post_tail = cancel_token.clone();
-    // Resume-metadata validation runs HERE — after the cancel-token clone and
-    // immediately before the tail dispatch, matching the pre-refactor inline
-    // ordering. A missing rollout-path / session-id short-circuits the whole
-    // launch with Err *without* the tail-error tmux leak-kill, exactly as the
-    // original did (the validations were `?` above the tail_result assignment).
-    let resume_params = if session_selection.resume {
-        let rollout_path = session_selection
-            .rollout_path
-            .as_deref()
-            .ok_or_else(|| "Codex TUI resume selected without rollout path".to_string())?;
-        let start_offset = session_selection.rollout_start_offset.unwrap_or(0);
-        let selected_session_id = session_selection
-            .selected_session_id
-            .as_deref()
-            .ok_or_else(|| "Codex TUI resume selected without session id".to_string())?;
-        Some((rollout_path, start_offset, selected_session_id))
-    } else {
-        None
-    };
-    let tail_result = dispatch_codex_tui_rollout_tail(
-        resume_params,
+    crate::services::codex_tui::tail_launch::record_resume_proof(
+        &prepared.context,
+        &validated_tail,
+    )?;
+    let tail_result = crate::services::codex_tui::tail_launch::dispatch(
+        validated_tail,
         working_dir,
         rollout_modified_since,
         sender.clone(),

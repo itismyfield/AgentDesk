@@ -1,4 +1,3 @@
-use crate::services::discord::input_runtime::intake::skills::hold_text_skill;
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{CreateAttachment, CreateMessage};
 use std::sync::Arc;
@@ -74,49 +73,6 @@ fn schedule_text_stop_pending_queue_drain(
             );
         },
     ));
-}
-
-async fn fetch_escalation_settings_via_api()
--> Result<crate::config::EscalationSettingsResponse, String> {
-    let body = crate::services::discord::internal_api::get_escalation_settings().await?;
-    serde_json::from_value(body).map_err(|err| err.to_string())
-}
-
-async fn save_escalation_settings_via_api(
-    settings: &crate::config::EscalationSettings,
-) -> Result<crate::config::EscalationSettingsResponse, String> {
-    let body =
-        crate::services::discord::internal_api::put_escalation_settings(settings.clone()).await?;
-    serde_json::from_value(body).map_err(|err| err.to_string())
-}
-
-fn parse_discord_user_id(raw: &str) -> Option<u64> {
-    raw.trim()
-        .trim_start_matches("<@")
-        .trim_end_matches('>')
-        .trim_start_matches('!')
-        .parse::<u64>()
-        .ok()
-}
-
-fn format_escalation_settings_summary(settings: &crate::config::EscalationSettings) -> String {
-    let mode = match settings.mode {
-        crate::config::EscalationMode::Pm => "pm",
-        crate::config::EscalationMode::User => "user",
-        crate::config::EscalationMode::Scheduled => "scheduled",
-    };
-    let owner = settings
-        .owner_user_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "(없음)".to_string());
-    let pm_channel = settings
-        .pm_channel_id
-        .clone()
-        .unwrap_or_else(|| "(없음)".to_string());
-    format!(
-        "모드: `{}`\n소유자 ID: `{}`\nPM 채널 ID: `{}`\n일정: `{}` / `{}`",
-        mode, owner, pm_channel, settings.schedule.pm_hours, settings.schedule.timezone
-    )
 }
 
 pub(in crate::services::discord) async fn handle_text_command(
@@ -453,7 +409,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
 
         TextCommandId::Clear => {
             let cleared = async {
-                super::clear_channel_session_state(
+                let report = super::clear_channel_session_state(
                     &ctx.http,
                     &data.shared,
                     &data.provider,
@@ -462,7 +418,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                     super::SoftClearNotifyMode::Suppress,
                 )
                 .await?;
-                let _ = msg.reply(&ctx.http, super::SESSION_CLEARED_RESPONSE).await;
+                let _ = msg.reply(&ctx.http, report.reply()).await;
                 anyhow::Ok(())
             };
             // A failed clear answers with its reason, as `/clear` does: an error returned from
@@ -564,158 +520,10 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        TextCommandId::Escalation => {
-            let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
-            log_command_received!(channel_id.get(), msg.author.name, "!escalation", action = %rest);
-
-            if !check_owner(msg.author.id, &data.shared).await {
-                let _ = msg
-                    .reply(&ctx.http, "소유자만 에스컬레이션 설정을 변경할 수 있어요.")
-                    .await;
-                return Ok(true);
-            }
-
-            let mut settings = match fetch_escalation_settings_via_api().await {
-                Ok(response) => response.current,
-                Err(err) => {
-                    let _ = msg
-                        .reply(
-                            &ctx.http,
-                            super::owner_error_response(
-                                "에스컬레이션 설정을 불러오지 못했어요.",
-                                &err,
-                            ),
-                        )
-                        .await;
-                    return Ok(true);
-                }
-            };
-
-            if rest.is_empty() || rest.eq_ignore_ascii_case("status") {
-                let _ = msg
-                    .reply(
-                        &ctx.http,
-                        format!(
-                            "**에스컬레이션 설정**\n{}",
-                            format_escalation_settings_summary(&settings)
-                        ),
-                    )
-                    .await;
-                return Ok(true);
-            }
-
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let subcommand = parts.next().unwrap_or("").trim().to_ascii_lowercase();
-            let value = parts.next().unwrap_or("").trim();
-
-            let usage = "사용법: `!escalation status|pm|user|scheduled|schedule <HH:MM-HH:MM>|timezone <IANA>|owner <user_id>|pm-channel <channel_id>`";
-            let update_error = match subcommand.as_str() {
-                "pm" => {
-                    settings.mode = crate::config::EscalationMode::Pm;
-                    None
-                }
-                "user" => {
-                    settings.mode = crate::config::EscalationMode::User;
-                    None
-                }
-                "scheduled" => {
-                    settings.mode = crate::config::EscalationMode::Scheduled;
-                    None
-                }
-                "schedule" => {
-                    if value.is_empty() {
-                        Some("일정 값을 입력해 주세요.")
-                    } else {
-                        settings.mode = crate::config::EscalationMode::Scheduled;
-                        settings.schedule.pm_hours = value.to_string();
-                        None
-                    }
-                }
-                "timezone" => {
-                    if value.is_empty() {
-                        Some("시간대 값을 입력해 주세요.")
-                    } else {
-                        settings.schedule.timezone = value.to_string();
-                        None
-                    }
-                }
-                "owner" => match parse_discord_user_id(value) {
-                    Some(user_id) => {
-                        settings.owner_user_id = Some(user_id);
-                        None
-                    }
-                    None => Some("소유자는 Discord 사용자 숫자 ID 또는 멘션으로 입력해 주세요."),
-                },
-                "clear-owner" => {
-                    settings.owner_user_id = None;
-                    None
-                }
-                "pm-channel" => {
-                    if value.is_empty() {
-                        Some("PM 채널 값을 입력해 주세요.")
-                    } else {
-                        settings.pm_channel_id = Some(value.to_string());
-                        None
-                    }
-                }
-                "clear-pm-channel" => {
-                    settings.pm_channel_id = None;
-                    None
-                }
-                _ => Some(usage),
-            };
-
-            if let Some(err) = update_error {
-                let _ = msg.reply(&ctx.http, err).await;
-                return Ok(true);
-            }
-
-            match save_escalation_settings_via_api(&settings).await {
-                Ok(response) => {
-                    let _ = msg
-                        .reply(
-                            &ctx.http,
-                            format!(
-                                "**에스컬레이션 설정을 변경했어요**\n{}",
-                                format_escalation_settings_summary(&response.current)
-                            ),
-                        )
-                        .await;
-                }
-                Err(err) => {
-                    let _ = msg
-                        .reply(
-                            &ctx.http,
-                            super::owner_error_response(
-                                "에스컬레이션 설정을 저장하지 못했어요.",
-                                &err,
-                            ),
-                        )
-                        .await;
-                }
-            }
-            return Ok(true);
-        }
-
         TextCommandId::Help => {
             log_command_received!(channel_id.get(), msg.author.name, "!help");
-
-            let provider_name = data.provider.display_name();
-            let claude_tui_settings = if matches!(
-                &data.provider,
-                &crate::services::provider::ProviderKind::Claude
-            ) {
-                "\
-`/effort <level>` — Claude live TUI native effort (`low`…`max`)
-`/compact` — Claude live TUI compact
-`/cost` — Claude live TUI cost view
-`/context` — Claude live TUI context view"
-            } else {
-                "Claude TUI-only passthrough commands are hidden for non-Claude providers."
-            };
             let help = super::command_policy::text_command_help(
-                provider_name,
-                claude_tui_settings,
+                data.provider.display_name(),
                 &super::risk_tier_summary_for_help(super::high_risk_enabled_via_env()),
             );
             send_long_message_raw(&ctx.http, channel_id, &help, &data.shared).await?;
@@ -1402,10 +1210,6 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
                 _ => {}
             }
 
-            if Box::pin(hold_text_skill(ctx, msg, data, &skill, args_str)).await? {
-                return Ok(true);
-            }
-
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
             let skill_exists = {
@@ -1694,6 +1498,7 @@ mod home_command_tests {
             provider: crate::services::provider::ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
         let mut msg = serenity::Message::default();
         msg.id = serenity::MessageId::new(channel.get() + 2);

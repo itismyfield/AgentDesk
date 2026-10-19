@@ -645,7 +645,7 @@ pub fn execute_command_streaming(
     fast_mode_enabled: Option<bool>,
     compact_percent: Option<u64>,
     compact_lower_bound_tokens: u64,
-    cache_ttl_minutes: Option<u32>,
+    _cache_ttl_minutes: Option<u32>,
     dispatch_type: Option<&str>,
 ) -> Result<(), String> {
     debug_log("========================================");
@@ -675,32 +675,6 @@ pub fn execute_command_streaming(
                 == crate::services::provider_hosting::ProviderSessionDriver::TuiHosting,
     )?;
 
-    // Phase 1 of the claude-e rollout: route to the per-turn adapter
-    // when the operator picked `runtime: claude-e` and the binary is
-    // present. The adapter ignores tmux/remote — those routes stay on
-    // their existing drivers.
-    if session_selection.driver == crate::services::provider_hosting::ProviderSessionDriver::ClaudeE
-    {
-        debug_log("Routing to claude_e::execute_streaming (runtime=claude-e)");
-        // A managed turn routed away from the TUI fences before this driver writes the prompt.
-        crate::services::claude_tui::submission_fence::before_first_payload()?;
-        return crate::services::claude_e::execute_streaming(
-            prompt,
-            session_id,
-            working_dir,
-            sender,
-            system_prompt,
-            cancel_token,
-            report_channel_id,
-            report_provider,
-            model_override,
-            fast_mode_enabled,
-            compact_percent,
-            compact_lower_bound_tokens,
-            cache_ttl_minutes,
-            dispatch_type,
-        );
-    }
     let default_system_prompt = r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
 
 SECURITY RULES (MUST FOLLOW):
@@ -937,9 +911,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
 
     let spawn_start = std::time::Instant::now();
-    // Binary resolution (PATH) + gateway launch env applied by-construction.
-    // Resolve the launch env once so the same gateway decision drives both the
-    // #4591 auto-compact-window computation and the #4559 gateway guard.
+    // Use one resolved launch environment for the compact window and gateway guard.
     let auto_compact_window = launch_auto_compact_window_for_session(
         &format!(
             "claude-direct-{}",
@@ -968,12 +940,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
         if let Some(provider) = report_provider {
             command.env(RESTART_REPORT_PROVIDER_ENV, provider.as_str());
         }
-        // Compact-window overlay (#4591): pin the freshly resolved immutable
-        // threshold on top of the chokepoint's by-construction gateway env (or
-        // clear any stale inherited value when there is none).
+        // Pin the resolved compact window over the gateway environment.
         apply_auto_compact_window_to_command(command, auto_compact_window);
+        crate::services::process::configure_child_process_group(command);
     }
     let mut command = builder.into_command();
+    let overlay = crate::services::discord::org_schema::spawn_auth_overlay(
+        ProviderKind::Claude,
+        report_channel_id,
+    )?;
+    crate::services::provider_auth_profile::apply_overlay_to_command(&mut command, &overlay);
 
     let mut child = command.spawn().map_err(|e| {
         debug_log(&format!(
@@ -989,11 +965,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
         child.id()
     ));
 
-    // Store child PID in cancel token so the caller can kill it externally
     register_child_pid(cancel_token.as_deref(), child.id());
     let _cancel_watchdog = spawn_cancel_watchdog(cancel_token.clone(), "claude-direct-stream");
 
-    // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
         debug_log(&format!(
             "Writing prompt to stdin ({} bytes)...",
@@ -1006,7 +980,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
             write_start.elapsed(),
             write_result.is_ok()
         ));
-        // stdin is dropped here, which closes it - this signals end of input to claude
         debug_log("stdin handle dropped (closed)");
     } else {
         debug_log("WARNING: Could not get stdin handle!");

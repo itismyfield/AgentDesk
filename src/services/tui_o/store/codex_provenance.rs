@@ -10,6 +10,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 };
 
 mod mutation;
+pub(crate) mod projection;
+pub(crate) use mutation::DurableDenyRecorded;
 pub(crate) mod submit_floor;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
@@ -32,6 +34,14 @@ pub(crate) struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor:
 impl ValidatedCodexProvenance {
     pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {
         &self.0.spans
+    }
+
+    pub(crate) fn denies(&self) -> &[CodexEpisodeDeny] {
+        &self.0.denies
+    }
+
+    pub(crate) fn floors(&self) -> &[submit_floor::SubmitFloor] {
+        self.1.as_ref().map_or(&[], |read| read.floors.as_slice())
     }
 
     #[cfg(test)]
@@ -229,3 +239,7 @@ impl Drop for ActualCloseFault {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "codex_provenance/p5a2_projection_tests.rs"]
+mod p5a2_tests;

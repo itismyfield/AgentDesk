@@ -1,3 +1,4 @@
+use super::consume_once as consume;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
 use crate::services::discord;
@@ -718,12 +719,23 @@ impl Close {
         channel: u64,
         shape: impl FnOnce(&mut InflightTurnState),
     ) -> Self {
+        Self::open_with(generation, channel, shape, |_| {}).await
+    }
+
+    /// Opens with `setup` applied to the shared data before anything else holds it.
+    async fn open_with(
+        generation: u64,
+        channel: u64,
+        shape: impl FnOnce(&mut InflightTurnState),
+        setup: impl FnOnce(&mut SharedData),
+    ) -> Self {
         let legacy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
         let provider = ProviderKind::Claude;
         let mut shared = discord::make_shared_data_for_tests_with_storage(None);
         let writable = Arc::get_mut(&mut shared).unwrap();
         writable.provider = provider.clone();
         writable.restart.current_generation = generation;
+        setup(writable);
         let (actor, owner) = prepared(provider.clone(), channel);
         let mut row = InflightTurnState::new(
             provider.clone(),
@@ -827,15 +839,21 @@ impl Close {
     }
 }
 
-#[path = "before_start_stop_disk_gate_tests.rs"]
-mod disk_gate;
-
 #[path = "before_start_stop_clear_order_tests.rs"]
 mod clear_order;
+#[path = "before_start_stop_disk_gate_tests.rs"]
+mod disk_gate;
 
 #[path = "before_start_stop_policy_tests.rs"]
 mod policy;
 
+#[path = "before_start_stop_reconcile_tests.rs"]
+mod reconcile;
+
+#[path = "before_start_stop_retry_tests.rs"]
+mod retry;
+#[path = "before_start_stop_tail_tests.rs"]
+mod tail;
 /// A notice that records being polled and otherwise shows the notice.
 async fn recorded(
     polled: &std::sync::atomic::AtomicBool,
@@ -846,7 +864,6 @@ async fn recorded(
 
 /// A change applied to a row.
 type Shape = fn(&mut InflightTurnState);
-
 /// Nothing is shown or released before the receipt is durable: a failed write keeps the turn held
 /// and its row as it was; the notice runs with the receipt on disk and no inflight lock held.
 #[tokio::test(flavor = "current_thread")]
@@ -1013,11 +1030,11 @@ const CRASH_FILTER: &str = "coldstop_restart_finishes_a_close_that_crashed_midwa
 
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_policy_clear_requires_exact_acked_snapshot() {
-    use crate::services::turn_orchestrator::policy_close::{PolicyClear, test_hooks};
+    use crate::services::turn_orchestrator::policy_close::PolicyClear;
     use discord::inflight::{GuardedClearOutcome, InflightTurnIdentity};
     let clear = |row: &InflightTurnState, generation| {
         let receipt = row.clone().into_policy_receipt(generation);
-        test_hooks::with_authority(None, |legacy| receipt.try_clear(legacy))
+        receipt.try_clear()
     };
     let close = Close::open(925, |_| {}).await;
     let generation = close.shared.restart.current_generation;
@@ -1095,7 +1112,8 @@ fn run_crash_phase(phase: &str, marker: &str, env: &[(&str, &std::ffi::OsStr)]) 
 
 /// A close dying before its clear is finished by the next restart from the receipt alone (no Herdr
 /// marker): after its receipt, its ACK, or just before its policy submission. One dying inside the
-/// mailbox step right after the clear leaves nothing. Either way the stop shows once in total.
+/// mailbox step right after the clear, or after its commit before the tail, leaves nothing but its
+/// queued input, restored once. Either way the stop shows once in total.
 #[tokio::test(flavor = "current_thread")]
 async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
     if let Ok(phase) = std::env::var(CRASH_PHASE) {
@@ -1106,6 +1124,7 @@ async fn coldstop_restart_finishes_a_close_that_crashed_midway() {
         "after_notice_ack",
         "before_submit",
         "after_policy_clear",
+        "after_policy_commit",
     ] {
         let root = tempfile::tempdir().unwrap();
         let close = [
@@ -1146,6 +1165,19 @@ async fn crash_phase(phase: &str) {
     let generation = crate::services::discord::runtime_store::allocate_process_generation();
     if phase == "CLOSE" {
         let close = Close::open_in(generation, CRASH_CHANNEL, |_| {}).await;
+        // A commit sealed before its tail: the queued input is on disk, the ticket only in memory.
+        if std::env::var(test_hooks::STOP_AT).as_deref() == Ok("after_policy_commit") {
+            let channel = ChannelId::new(CRASH_CHANNEL);
+            let provider = close.shared.provider.clone();
+            discord::mailbox_enqueue_intervention(&close.shared, &provider, channel, queued_b())
+                .await;
+            crate::services::turn_orchestrator::policy_close::test_hooks::arm(Box::new(|stage| {
+                if stage == crate::services::turn_orchestrator::policy_close::test_hooks::Stage::BeforeFinalize {
+                    println!("COLDSTOP_B_STOP after_policy_commit pid={}", std::process::id());
+                    std::process::exit(0);
+                }
+            }));
+        }
         // The clear runs inside the close's mailbox step; this process dies right after it.
         if std::env::var(test_hooks::STOP_AT).as_deref() == Ok("after_policy_clear") {
             crate::services::turn_orchestrator::policy_close::test_hooks::arm(Box::new(|stage| {
@@ -1181,8 +1213,9 @@ async fn crash_phase(phase: &str) {
     writable.restart.current_generation = generation;
     let row =
         discord::inflight::load_inflight_state_read_only(&ProviderKind::Claude, CRASH_CHANNEL);
+    let committed = std::env::var(CRASH_STEP).as_deref() == Ok("after_policy_commit");
     // A close that cleared its receipt before dying leaves restart nothing to finish.
-    if std::env::var(CRASH_STEP).as_deref() == Ok("after_policy_clear") {
+    if committed || std::env::var(CRASH_STEP).as_deref() == Ok("after_policy_clear") {
         assert!(row.is_none(), "the receipt cleared before the crash");
     } else {
         let row = row.expect("the crashed close left its row");
@@ -1208,5 +1241,155 @@ async fn crash_phase(phase: &str) {
             .is_none(),
         "restart finished the close"
     );
+    if committed {
+        restore_queued_b_once(&shared).await;
+    }
     println!("COLDSTOP_B_PHASE RESTORE pid={}", std::process::id());
+}
+
+/// The input queued behind the crashed close; only the durable queue carries it across.
+fn queued_b() -> crate::services::turn_orchestrator::Intervention {
+    crate::services::turn_orchestrator::Intervention {
+        author_id: UserId::new(3),
+        author_is_bot: false,
+        message_id: MessageId::new(CRASH_CHANNEL + 50),
+        queued_generation: crate::services::discord::runtime_store::process_generation(),
+        source_message_ids: vec![MessageId::new(CRASH_CHANNEL + 50)],
+        source_message_queued_generations: Vec::new(),
+        source_text_segments: Vec::new(),
+        text: "queued behind the close".into(),
+        mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+        created_at: std::time::Instant::now(),
+        reply_context: None,
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+        voice_announcement: None,
+    }
+}
+
+/// The new process restores B once into a free slot, with no routing, voice or ticket left over,
+/// and the restart's queue kickoff runs it exactly once through its intake claim.
+async fn restore_queued_b_once(shared: &Arc<SharedData>) {
+    let channel = ChannelId::new(CRASH_CHANNEL);
+    let (queues, overrides) = crate::services::turn_orchestrator::load_pending_queues(
+        &ProviderKind::Claude,
+        &shared.token_hash,
+    );
+    let texts = |items: &[crate::services::turn_orchestrator::Intervention]| {
+        items
+            .iter()
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(&queues[&channel]), ["queued behind the close"]);
+    assert!(overrides.is_empty());
+    let persistence = discord::queue_persistence_context(shared, &ProviderKind::Claude, channel);
+    for _ in 0..2 {
+        let mailbox = shared.mailbox(channel);
+        mailbox
+            .try_hydrate_pending_queue_from_disk(persistence.clone())
+            .await
+            .unwrap();
+        let snapshot = mailbox.snapshot().await;
+        assert!(snapshot.cancel_token.is_none(), "no stale slot");
+        assert_eq!(
+            texts(&snapshot.intervention_queue),
+            ["queued behind the close"]
+        );
+    }
+    assert!(shared.dispatch.role_overrides.get(&channel).is_none());
+    assert!(
+        !shared
+            .dispatch
+            .thread_parents
+            .iter()
+            .any(|edge| *edge.value() == channel)
+    );
+    assert!(shared.voice_barge_in.deferred_for_test(channel).is_none());
+    run_restored_b_once(shared, channel, &persistence).await;
+}
+
+/// The restart's real kickoff takes B under a dispatch lease and runs it through intake: one
+/// claim, one provider effect, an empty queue; hydrating and kicking again adds neither.
+async fn run_restored_b_once(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    persistence: &crate::services::turn_orchestrator::QueuePersistenceContext,
+) {
+    let answer = move |_: &axum::http::Method, path: &str| {
+        let channel_path = format!("/channels/{CRASH_CHANNEL}");
+        path.ends_with(&channel_path).then(|| {
+            let id = CRASH_CHANNEL.to_string();
+            serde_json::json!({"id": id, "type": 0, "name": "coldstop-b", "position": 0})
+        })
+    };
+    let api =
+        crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(answer))
+            .await;
+    let workspace = tempfile::tempdir().unwrap();
+    crate::services::discord::host_defer_gate::tests::map_channel(shared, channel, "").await;
+    if let Some(session) = shared.core.lock().await.sessions.get_mut(&channel) {
+        session.channel_name = None;
+        session.current_path = Some(workspace.path().display().to_string());
+    }
+    let root = std::path::PathBuf::from(std::env::var_os(CRASH_ROOT).unwrap());
+    let config = crate::runtime_layout::config_file_path(&root);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "server: {}\ndata: {dir: data}\n").unwrap();
+    let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &config,
+    );
+    let deps = crate::services::discord::router::IntakeDeps {
+        http: &api.http,
+        cache: None,
+        ctx_for_chained_dispatch: None,
+        shared,
+        token: "",
+    };
+    let b = MessageId::new(CRASH_CHANNEL + 50);
+    let hold = crate::services::discord::router::message_handler::hold_input_effect_for_tests;
+    let (at, release) = hold(CRASH_CHANNEL);
+    let steps = async {
+        let entered = tokio::time::timeout(std::time::Duration::from_secs(15), at).await;
+        assert!(matches!(entered, Ok(Ok(_))), "the restart runs B");
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert_eq!(
+            snapshot.active_user_message_id,
+            Some(b),
+            "B holds the claim"
+        );
+        assert!(snapshot.intervention_queue.is_empty());
+        release.send(()).unwrap();
+    };
+    let kick = discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel);
+    let (_, ()) = tokio::join!(kick, steps);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_some()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    assert!(ended.await.is_ok(), "B ends");
+    let mailbox = shared.mailbox(channel);
+    let again = mailbox
+        .try_hydrate_pending_queue_from_disk(persistence.clone())
+        .await;
+    assert_eq!(
+        again.unwrap().absorbed,
+        0,
+        "the disk queue no longer holds B"
+    );
+    assert!(mailbox.snapshot().await.intervention_queue.is_empty());
+    let (at, _release) = hold(CRASH_CHANNEL);
+    let kick = discord::kickoff_idle_queue_channel(&deps, &ProviderKind::Claude, channel);
+    assert!(!kick.await.started);
+    let rerun = tokio::time::timeout(std::time::Duration::from_secs(1), at).await;
+    assert!(!matches!(rerun, Ok(Ok(_))), "B runs once");
 }

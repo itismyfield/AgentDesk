@@ -2,6 +2,7 @@ use super::super::meeting;
 use super::super::{Context, Error, check_auth};
 use crate::services::provider::ProviderKind;
 
+/// /meeting <action> [agenda] — Start, stop, or check a round-table meeting
 #[poise::command(slash_command, rename = "meeting")]
 pub(in crate::services::discord) async fn cmd_meeting(
     ctx: Context<'_>,

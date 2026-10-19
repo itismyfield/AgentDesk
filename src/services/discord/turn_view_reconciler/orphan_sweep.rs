@@ -89,13 +89,6 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
                     && record.anchor_message_id == anchor_message_id
             })
     };
-    let retired = |channel_id: u64| {
-        crate::services::discord::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "orphan_tui_anchor_sweep",
-        )
-    };
     sweep_orphan_tui_anchors_with_probes(
         &shared.turn_view_reconciler,
         shared,
@@ -104,7 +97,6 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
         &has_live_inflight,
         &has_valid_marker,
         &holds_before_removal,
-        &retired,
         "orphan_tui_anchor_sweep",
     )
     .await
@@ -158,14 +150,10 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     has_live_inflight: &(dyn Fn(u64) -> bool + Send + Sync),
     has_valid_marker: &(dyn Fn(u64, u64) -> bool + Send + Sync),
     holds_before_removal: &(dyn Fn(u64, u64) -> bool + Send + Sync),
-    retired: &(dyn Fn(u64) -> bool + Send + Sync),
     source: &'static str,
 ) -> usize {
     let mut cleared = 0usize;
     for candidate in reconciler.persisted_pending_tui_anchors(shared, now) {
-        if retired(candidate.channel_id) {
-            continue;
-        }
         if !orphan_tui_anchor_should_clear(
             candidate.attached_age,
             min_age,
@@ -180,7 +168,6 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
                 ChannelId::new(candidate.channel_id),
                 MessageId::new(candidate.message_id),
                 holds_before_removal,
-                retired,
                 source,
             )
             .await
@@ -204,31 +191,6 @@ fn is_pending_tui_anchor(record: &PersistedTargetState, provider: &str) -> bool 
         && TurnViewTargetKind::from_str(&record.kind)
             == Some(TurnViewTargetKind::TuiDirectBotAnchor)
         && TurnViewState::from_str(&record.applied) == Some(TurnViewState::Pending)
-}
-
-/// Persisted `⏳` anchors of one channel; unlike the sweep's enumeration, a failed read is
-/// reported instead of skipped.
-pub(in crate::services::discord) fn pending_anchor_presence(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> crate::services::discord::health::transcript_turn::Presence {
-    let dir = crate::services::discord::runtime_store::discord_turn_view_reconciler_root()
-        .map(|root| root.join(TurnViewTargetKind::TuiDirectBotAnchor.as_str()));
-    crate::services::discord::health::transcript_turn::Presence::of_dir(dir, |path| {
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            return Ok(0);
-        }
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error),
-        };
-        Ok(usize::from(
-            serde_json::from_str::<PersistedTargetState>(&text).is_ok_and(|record| {
-                record.channel_id == channel_id && is_pending_tui_anchor(&record, provider.as_str())
-            }),
-        ))
-    })
 }
 
 impl TurnViewReconciler {
@@ -300,16 +262,11 @@ impl TurnViewReconciler {
         channel_id: ChannelId,
         message_id: MessageId,
         holds_before_removal: &(dyn Fn(u64, u64) -> bool + Send + Sync),
-        retired: &(dyn Fn(u64) -> bool + Send + Sync),
         source: &'static str,
     ) -> bool {
         let target = TurnViewTarget::tui_direct_bot_anchor(channel_id, message_id);
         let target_lock = self.target_lock(target);
         let _guard = target_lock.lock().await;
-        // Re-judged after the lock wait and before the loader that may delete the record.
-        if retired(channel_id.get()) {
-            return false;
-        }
         let current = self
             .targets
             .get(&target)
@@ -528,7 +485,6 @@ mod tests {
             &no_inflight,
             &no_marker,
             &no_hold,
-            &|_| false,
             "test_orphan_sweep",
         )
         .await;
@@ -564,7 +520,6 @@ mod tests {
                 &inflight,
                 &has_marker,
                 &no_hold,
-                &|_| false,
                 "test_orphan_sweep",
             )
             .await;
@@ -600,7 +555,6 @@ mod tests {
             &no_inflight,
             &no_marker,
             &no_hold,
-            &|_| false,
             "test_orphan_sweep",
         )
         .await;
@@ -639,7 +593,6 @@ mod tests {
             &no_inflight,
             &no_marker,
             &hold_appeared,
-            &|_| false,
             "test_orphan_sweep",
         )
         .await;
@@ -662,42 +615,29 @@ mod tests {
         write_pending_anchor(shared, channel_id, message_id);
         let path = TurnViewReconciler::persisted_target_path(anchor_target(channel_id, message_id))
             .expect("persisted path");
-        crate::services::discord::health::legacy_supervision::test_support::age_file(&path, 1_000);
+        crate::services::discord::health::test_support::age_file(&path, 1_000);
     }
 
     fn anchor_fingerprint(channel_id: u64, message_id: u64) -> Option<(Vec<u8>, SystemTime)> {
         let path = TurnViewReconciler::persisted_target_path(anchor_target(channel_id, message_id));
-        crate::services::discord::health::legacy_supervision::test_support::fingerprint(
-            &path.unwrap(),
-        )
+        crate::services::discord::health::test_support::fingerprint(&path.unwrap())
     }
 
-    /// The production sweep leaves a retired channel's aged ⏳ and record alone while
-    /// still clearing a Legacy channel's.
     #[tokio::test]
-    async fn production_sweep_skips_retired_channel_anchor() {
-        use crate::services::discord::health::legacy_supervision::RetiredForTest;
+    async fn production_sweep_clears_aged_legacy_anchor() {
         let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
-        let (retired, legacy) = (6_325_408_001, 6_325_408_002);
-        aged_pending_anchor(&shared, retired, 18_001);
-        aged_pending_anchor(&shared, legacy, 18_002);
-        let _retired = RetiredForTest::new(shared.provider.as_str(), retired);
-        let before = anchor_fingerprint(retired, 18_001);
-
-        let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
-
-        assert_eq!(cleared, 1);
+        aged_pending_anchor(&shared, 6_325_408_002, 18_002);
+        assert_eq!(
+            sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await,
+            1
+        );
         assert!(hourglass_removed(&shared.turn_view_reconciler, 18_002));
-        assert!(!hourglass_removed(&shared.turn_view_reconciler, 18_001));
-        assert!(before.is_some() && anchor_fingerprint(retired, 18_001) == before);
     }
 
-    /// A channel retired while the removal waits on the target lock keeps its record:
-    /// the loader that may rewrite or delete it runs only after the re-judge.
+    /// A real inflight hold appearing during the target-lock wait preserves the anchor.
     #[tokio::test]
-    async fn retire_during_target_lock_wait_blocks_removal() {
-        use crate::services::discord::health::legacy_supervision::RetiredForTest;
+    async fn inflight_during_target_lock_wait_blocks_removal() {
         let _root = scoped_runtime_root();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = 6_325_408_003;
@@ -713,34 +653,25 @@ mod tests {
             futures::poll!(&mut sweep).is_pending(),
             "sweep parks on the target lock"
         );
-        let _retired = RetiredForTest::new(shared.provider.as_str(), channel);
+        let state = crate::services::discord::inflight::InflightTurnState::new(
+            shared.provider.clone(),
+            channel,
+            None,
+            1,
+            18_003,
+            18_004,
+            "live prompt".into(),
+            None,
+            Some("live-legacy-hold".into()),
+            None,
+            None,
+            0,
+        );
+        crate::services::discord::inflight::save_inflight_state(&state).unwrap();
         drop(held);
 
         assert_eq!(sweep.await, 0);
         assert!(!hourglass_removed(&shared.turn_view_reconciler, 18_003));
         assert!(before.is_some() && anchor_fingerprint(channel, 18_003) == before);
-    }
-
-    /// Health counts one channel's pending ⏳ records and reports an unreadable record as
-    /// unknown, where the sweep's enumeration would skip it.
-    #[test]
-    fn pending_anchor_presence_counts_one_channel_and_reports_unreadable_records() {
-        use crate::services::discord::health::transcript_turn::Presence;
-        let _root = scoped_runtime_root();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let (channel, other) = (6_325_408_101, 6_325_408_102);
-        let presence = || pending_anchor_presence(&shared.provider, channel);
-        assert_eq!(presence(), Presence::Absent);
-        write_pending_anchor(&shared, channel, 18_101);
-        write_pending_anchor(&shared, channel, 18_102);
-        write_pending_anchor(&shared, other, 18_103);
-        assert_eq!(presence(), Presence::Present(2));
-        let path = TurnViewReconciler::persisted_target_path(anchor_target(channel, 18_104));
-        std::fs::create_dir(path.unwrap()).unwrap();
-        assert!(
-            matches!(presence(), Presence::Unknown(_)),
-            "{:?}",
-            presence()
-        );
     }
 }

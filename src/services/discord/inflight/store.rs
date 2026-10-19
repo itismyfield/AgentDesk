@@ -96,8 +96,7 @@ pub(in crate::services::discord) fn inflight_state_path(
 }
 
 pub(crate) struct InflightStateFileLock {
-    file: Option<fs::File>,
-    _population: Option<crate::services::discord::input_runtime::fence::PopulationWriter>,
+    file: fs::File,
     state_path: PathBuf,
 }
 
@@ -111,9 +110,7 @@ impl Drop for InflightStateFileLock {
     fn drop(&mut self) {
         // Ignore explicit-unlock failure: closing the handle immediately after
         // this remains the advisory lock's release fallback.
-        if let Some(file) = &self.file {
-            let _ = file.unlock();
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -144,20 +141,10 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
     #[cfg(test)]
     boot_observation::attempt(path, boot_observation::Attempt::Lock);
-    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| format!("input fence: {failure:?}"))?
-    {
-        return Ok(InflightStateFileLock {
-            file: None,
-            _population: Some(population),
-            state_path: path.to_owned(),
-        });
-    }
     let file = open_inflight_lock_file(path)?;
     file.lock().map_err(|e| e.to_string())?;
     Ok(InflightStateFileLock {
-        file: Some(file),
-        _population: None,
+        file,
         state_path: path.to_path_buf(),
     })
 }
@@ -167,11 +154,9 @@ pub(crate) fn try_lock_inflight_state_path(path: &Path) -> Result<InflightStateF
     try_lock_inflight_state_path_typed(path).map_err(TryLockRefusal::detail)
 }
 
-/// Why a non-blocking acquire took no lock: another open handle holds it, an input fence now
-/// protects the row, or anything else.
+/// Why a non-blocking acquire took no lock: another open handle holds it, or anything else.
 pub(crate) enum TryLockRefusal {
     Contended,
-    Fenced,
     Failed(String),
 }
 
@@ -179,7 +164,6 @@ impl TryLockRefusal {
     fn detail(self) -> String {
         match self {
             Self::Contended => fs::TryLockError::WouldBlock.to_string(),
-            Self::Fenced => "input fence: Busy".to_owned(),
             Self::Failed(detail) => detail,
         }
     }
@@ -189,15 +173,6 @@ impl TryLockRefusal {
 pub(crate) fn try_lock_inflight_state_path_typed(
     path: &Path,
 ) -> Result<InflightStateFileLock, TryLockRefusal> {
-    if let Some(population) = crate::services::discord::input_runtime::fence::inflight_writer(path)
-        .map_err(|failure| TryLockRefusal::Failed(format!("input fence: {failure:?}")))?
-    {
-        return Ok(InflightStateFileLock {
-            file: None,
-            _population: Some(population),
-            state_path: path.to_owned(),
-        });
-    }
     let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
     match file.try_lock() {
         Ok(()) => {}
@@ -205,63 +180,9 @@ pub(crate) fn try_lock_inflight_state_path_typed(
         Err(error) => return Err(TryLockRefusal::Failed(error.to_string())),
     }
     Ok(InflightStateFileLock {
-        file: Some(file),
-        _population: None,
+        file,
         state_path: path.to_path_buf(),
     })
-}
-
-/// The typed try-lock of a step that found no input fence: a gate found now, before or after the
-/// sidecar lock, is `Fenced`, never a wait in the protected writer.
-pub(crate) fn try_lock_unfenced_inflight_state_path(
-    path: &Path,
-) -> Result<InflightStateFileLock, TryLockRefusal> {
-    let fenced = || {
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.parse().ok())
-            .and_then(crate::services::discord::input_runtime::fence::channel_gate)
-            .is_some()
-    };
-    if fenced() {
-        return Err(TryLockRefusal::Fenced);
-    }
-    let file = open_inflight_lock_file(path).map_err(TryLockRefusal::Failed)?;
-    match file.try_lock() {
-        Ok(()) if fenced() => Err(TryLockRefusal::Fenced),
-        Ok(()) => Ok(InflightStateFileLock {
-            file: Some(file),
-            _population: None,
-            state_path: path.to_path_buf(),
-        }),
-        Err(fs::TryLockError::WouldBlock) => Err(TryLockRefusal::Contended),
-        Err(error) => Err(TryLockRefusal::Failed(error.to_string())),
-    }
-}
-
-pub(in crate::services::discord) struct BorrowedInflightRow<'a> {
-    path: PathBuf,
-    _guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-}
-impl<'a> BorrowedInflightRow<'a> {
-    pub(in crate::services::discord) fn new(
-        guard: &'a crate::services::discord::input_runtime::fence::ClosedPopulationGuard,
-        root: &Path,
-        provider: &ProviderKind,
-        channel: u64,
-    ) -> std::io::Result<Self> {
-        guard.borrowed(root, provider, channel, || Ok(()))?;
-        Ok(Self {
-            path: root
-                .join("discord_inflight")
-                .join(provider.as_str())
-                .join(format!("{channel}.json")),
-            _guard: guard,
-        })
-    }
-    pub(super) fn state_path(&self) -> &Path {
-        &self.path
-    }
 }
 
 fn open_inflight_lock_file(path: &Path) -> Result<fs::File, String> {

@@ -51,13 +51,13 @@ mod tests {
         );
         std::fs::write(
             &path,
-            "server: {}\nescalation: {schedule: {timezone: invalid}}\n",
+            "server: {}\nproviders: {claude: {runtime: claude-e}}\n",
         )
         .unwrap();
         assert!(
             from_path("dev-cc", &path)
                 .unwrap_err()
-                .contains("schedule.timezone")
+                .contains("runtime 'claude-e' was removed")
         );
     }
 }

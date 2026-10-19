@@ -42,7 +42,7 @@ itself**, never from comments. There are no ``// sym:`` labels anymore.
   block's gate must be one of ``_ALLOWED_ANCHOR_CFGS`` (``#[cfg(test)]`` or
   ``#[cfg(all(test, unix))]``) and every attribute INSIDE the block must be
   ``#[test]`` (``_ALLOWED_ITEM_ATTRS``). ``unix`` is allowed because the only
-  required PR Rust compile is ``check_fast`` (ubuntu-latest), where ``cfg(unix)``
+  required PR Rust compile is the ``lint`` clippy (ubuntu-latest), where ``cfg(unix)``
   is true, so that required job compiles the block. Anything else fails loudly —
   a windows/non-ubuntu gate (compiled by no required job), a malformed cfg, or an
   item-level ``#[cfg(feature = "never")]`` that would drop one reference while
@@ -95,6 +95,64 @@ DISCORD_ROOT = REPO_ROOT / "src" / "services" / "discord"
 
 DEFAULT_DOC = REPO_ROOT / "docs" / "relay-state-contract.md"
 H2_DOC = REPO_ROOT / "docs" / "contracts" / "h2-tmux-boundary-ratchet.md"
+
+# A follow-up PR cannot reliably know about an obligation embedded in prose.
+# Detect the three semantic ingredients within one sentence regardless of word
+# order: a specific target, an edit verb, and same-change scope, plus either an
+# issue reference or an explicit commitment. Predictions and historical
+# references without a commitment remain valid.
+_PROMISE_TARGET = re.compile(r"\bthis\s+(?:bullet|paragraph|section)\b", re.IGNORECASE)
+_EDIT_VERB = r"(?:updat\w*|correct\w*|revis\w*|refresh\w*|chang\w*|amend\w*|edit\w*|modif\w*|rewrit\w*|replac\w*)"
+_PROMISE_EDIT = re.compile(rf"\b{_EDIT_VERB}\b", re.IGNORECASE)
+_PROMISE_SCOPE = re.compile(
+    r"\b(?:(?:in|within|for)\s+)?(?:the\s+)?(?:same|this)\s+(?:PR|change)\b",
+    re.IGNORECASE,
+)
+_PROMISE_COMMITMENT = re.compile(
+    r"\b(?:will|must|shall|owns?|is\s+required\s+to|has\s+to|going\s+to|"
+    r"(?:scheduled|expected|planned)\s+to|plans?\s+to|responsible\s+for|"
+    r"(?:is\s+)?committed\s+to)\b",
+    re.IGNORECASE,
+)
+_ISSUE_FORWARD_ACTION = re.compile(
+    r"#\d+\s+(?:updates|corrects|revises|refreshes|changes|amends|edits|"
+    r"modifies|rewrites|replaces)\b",
+    re.IGNORECASE,
+)
+_PROMISE_PROHIBITION = re.compile(
+    rf"\b(?:will|must|shall|may|should)\s+avoid\s+{_EDIT_VERB}\b|"
+    rf"\b(?:will|must|shall|may|should)\s+refrain\s+from\s+{_EDIT_VERB}\b|"
+    rf"\bresponsible\s+for\s+ensuring\b.{{0,60}}\bdoes\s+not\s+need\s+(?:to\s+)?{_EDIT_VERB}\b|"
+    rf"\bresponsible\s+for\s+ensuring\b.{{0,60}}\bdoes\s+not\s+have\s+to\s+{_EDIT_VERB}\b|"
+    rf"\bresponsible\s+for\s+not\s+{_EDIT_VERB}\b|"
+    rf"\bresponsible\s+for\s+ensuring\b.{{0,60}}\b(?:is|will\s+be)\s+not\s+{_EDIT_VERB}\b|"
+    rf"\bresponsible\s+for\s+ensuring\b.{{0,60}}\b(?:does\s+not|doesn't|will\s+not|won't)\s+(?:be\s+)?{_EDIT_VERB}\b|"
+    r"\bno\s+(?:lane|one|issue)\s+(?:will|must|shall|may|should)\s+"
+    rf"(?:(?:not|never)\s+)?(?:be\s+)?{_EDIT_VERB}\b|"
+    r"\bno\s+(?:lane|one|issue)\s+(?:is|was)\s+(?:allowed|permitted|required|"
+    rf"supposed|expected|scheduled)\s+to\s+{_EDIT_VERB}\b|"
+    rf"\b(?:will|must|shall|may|should)\s+not\s+(?:be\s+)?{_EDIT_VERB}\b|"
+    rf"\bnot\s+(?:scheduled|expected)\s+to\s+(?:be\s+)?{_EDIT_VERB}\b|"
+    rf"\b(?:cannot|can't)\s+(?:be\s+)?{_EDIT_VERB}\b|"
+    rf"\b(?:forbidden|prohibited)\s+to\s+{_EDIT_VERB}\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_SHARED_COMMITMENT = re.compile(
+    r"\bno\s+(?:lane|one|issue)\s+(?:will|must|shall|may|should)\b|"
+    r"\bno\s+(?:lane|one|issue)\s+(?:is|was)\s+(?:expected|scheduled)\s+to\b|"
+    r"\bno\s+(?:lane|one|issue)\s+(?:is|was)\s+planned\s+to\b|"
+    r"\bno\s+(?:lane|one|issue)\s+(?:is|was)\s+required\s+to\b|"
+    r"\bno\s+(?:lane|one|issue)\s+has\s+to\b|"
+    r"\b(?:is|was|are|were)\s+not\s+(?:expected|scheduled)\s+to\b|"
+    r"\b(?:will|must|shall|may|should)\s+not\b|\b(?:cannot|can't)\b",
+    re.IGNORECASE,
+)
+_PROMISE_HEDGE = re.compile(
+    r"\b(?:possible|possibly|perhaps|maybe|might|may|could)\b[^,.;!?]{0,40}"
+    r"\bthis\s+(?:bullet|paragraph|section)\b[^,.;!?]{0,40}\b(?:will|would|shall)\b|"
+    r"\b(?:will|would|shall)\s+(?:likely|probably|possibly|maybe)\b",
+    re.IGNORECASE,
+)
 
 # Rust files hosting a `#[cfg(test)] mod relay_state_contract_refs` block, mapped
 # to the module path (from `src/services/discord/`) of the FILE that hosts the
@@ -173,8 +231,8 @@ _ATTR_START_RE = re.compile(r"^\s*#!?\[")
 # strip() — no grammar, no parser. A converged lesson of this PR (#4268) is that
 # every added cfg parser sprouts a new bypass within a round (regex, then
 # recursive-descent, then an evaluator), while removing interpretation holds.
-# `unix` is allowed because the only REQUIRED PR Rust compile is `check_fast`
-# (ci-pr.yml matrix `os: [ubuntu-latest]`), where `cfg(unix)` is true, so that
+# `unix` is allowed because the only REQUIRED PR Rust compile is the `lint`
+# clippy (ci-pr.yml `runs-on: ubuntu-latest`), where `cfg(unix)` is true, so that
 # required job compiles the block and a vanished symbol fails it. A windows-only
 # or non-ubuntu gate would compile in NO required job (the windows lane is
 # advisory and skipped for relay-only changes), silently disabling the proof. If
@@ -672,6 +730,70 @@ def check_h2_contract(doc: Path = H2_DOC) -> list[str]:
     return errors
 
 
+def forward_promise_errors(markdown: str) -> list[str]:
+    """Reject explicit same-change promises to edit this contract's prose."""
+    errors: list[str] = []
+    for paragraph_number, paragraph in enumerate(re.split(r"\n\s*\n", markdown), start=1):
+        normalized = " ".join(paragraph.split())
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        has_promise = False
+        boundary = re.compile(
+            r"\s*;\s*|\s+\b(and|but|or|while|unless|although|however)\b\s+",
+            re.IGNORECASE,
+        )
+        for sentence in sentences:
+            clauses: list[tuple[str, str | None]] = []
+            previous = 0
+            incoming: str | None = None
+            for match in boundary.finditer(sentence):
+                clauses.append((sentence[previous:match.start()], incoming))
+                incoming = match.group(1)
+                previous = match.end()
+            clauses.append((sentence[previous:], incoming))
+
+            preceding_and_commitment = False
+            for clause, connector in clauses:
+                own_commitment = bool(
+                    _PROMISE_COMMITMENT.search(clause)
+                    or _ISSUE_FORWARD_ACTION.search(clause)
+                )
+                effective_commitment = own_commitment or (
+                    connector and connector.casefold() in {"and", "but"} and preceding_and_commitment
+                )
+                if (
+                    _PROMISE_TARGET.search(clause)
+                    and _PROMISE_EDIT.search(clause)
+                    and _PROMISE_SCOPE.search(clause)
+                    and effective_commitment
+                    and not _PROMISE_PROHIBITION.search(clause)
+                    and not _PROMISE_HEDGE.search(clause)
+                ):
+                    has_promise = True
+                    break
+                preceding_and_commitment = bool(effective_commitment) and not (
+                    _NEGATIVE_SHARED_COMMITMENT.search(clause)
+                    or (
+                        _PROMISE_PROHIBITION.search(clause)
+                        and _PROMISE_TARGET.search(clause)
+                    )
+                )
+            if has_promise:
+                break
+        if has_promise:
+            errors.append(
+                f"contract paragraph {paragraph_number} has a same-change update promise"
+            )
+    return errors
+
+
+def check_forward_promises(doc: Path = DEFAULT_DOC) -> list[str]:
+    try:
+        text = doc.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"contract forward-promise source unavailable: {exc}"]
+    return forward_promise_errors(text)
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Contract symbol-ref sync gate (#4268).")
     parser.add_argument("--doc", type=Path, default=DEFAULT_DOC, help="Contract doc path.")
@@ -683,9 +805,19 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     report = build_report(doc=args.doc)
     print(format_report(report))
+    promise_errors = check_forward_promises(args.doc)
+    print(
+        "forward-promise check: " + "\n".join(promise_errors)
+        if promise_errors
+        else "forward-promise check passed"
+    )
     h2_errors = check_h2_contract(doc=args.h2_doc)
     print("warning: " + "\n".join(h2_errors) if h2_errors else "H2 contract symbol-ref check passed (Python imports in sync)")
-    return int(bool(report.errors) or any("reference unavailable:" in error for error in h2_errors))
+    return int(
+        bool(report.errors)
+        or bool(promise_errors)
+        or any("reference unavailable:" in error for error in h2_errors)
+    )
 
 
 if __name__ == "__main__":

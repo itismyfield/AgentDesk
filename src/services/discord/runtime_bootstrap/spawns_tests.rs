@@ -7,8 +7,7 @@
 use super::*;
 
 #[tokio::test]
-async fn c2_deferred_marking_skips_old_format_held_rows_before_backfill() {
-    use crate::services::discord::input_runtime::{self, fence};
+async fn deferred_marking_backfills_old_rows_and_marks_siblings() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -40,22 +39,17 @@ async fn c2_deferred_marking_skips_old_format_held_rows_before_backfill() {
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     old.as_object_mut().unwrap().remove("finalizer_turn_id");
     std::fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let gate = fence::Gate::protect(provider.clone(), held).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
-    let _closing = gate.close().unwrap();
     assert!(deferred_restart_marked(&provider).await);
     let legacy_row = inflight::load_inflight_state(&provider, legacy).unwrap();
     assert_eq!(
         legacy_row.restart_mode,
         Some(crate::services::discord::InflightRestartMode::DrainRestart)
     );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={held}"))),
-        "deferred marking must not attempt a compatibility writer"
+    let marked: InflightTurnState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(marked.finalizer_turn_id, held + 1);
+    assert_eq!(
+        marked.restart_mode,
+        Some(crate::services::discord::InflightRestartMode::DrainRestart)
     );
 }
 
@@ -103,11 +97,10 @@ async fn wait_for_deferred(mut done: impl FnMut() -> bool) {
     panic!("deferred restart poller never reached the expected state");
 }
 
-/// The actual poller marks a protected open row from async code and still consumes its slot
+/// The actual poller marks an open row from async code and still consumes its slot
 /// when the scan could not read every row, as a short scan always did.
 #[tokio::test(start_paused = true)]
 async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
-    use crate::services::discord::input_runtime::{self, fence};
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let temp = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -127,8 +120,6 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
         [0xff, 0xfe],
     )
     .unwrap();
-    let gate = fence::Gate::protect(provider.clone(), open).unwrap();
-    let _health = fence::test_health::Clear::new(&gate);
     std::fs::write(
         temp.path().join("restart_pending"),
         "nonce=c2b-incomplete\n",
@@ -151,16 +142,7 @@ async fn c2b_deferred_poller_marks_rows_and_proceeds_past_an_incomplete_scan() {
     assert_eq!(event["incomplete"], true);
     assert_eq!(event["failed"], serde_json::json!([]));
     assert!(deferred_row_marked(&plain_path));
-    assert!(
-        deferred_row_marked(&open_path),
-        "protected open row left unmarked"
-    );
-    assert!(
-        !input_runtime::health_reasons()
-            .iter()
-            .any(|reason| reason.contains(&format!("channel={open}"))),
-        "the protected open row saw a refused writer"
-    );
+    assert!(deferred_row_marked(&open_path), "open row left unmarked");
 }
 
 /// With no protected channel, the actual poller marks the readable row and consumes its slot past
@@ -1196,65 +1178,4 @@ fn t5_sweeper_is_spawned_after_the_boot_drain() {
     ] {
         assert!(body.contains(required), "missing retry wiring: {required}");
     }
-}
-
-/// The prepare fence closes Presence while the drain is awaited; only the rollback reopens it,
-/// fresh, and a superseded handoff keeps it closed.
-#[cfg(unix)]
-#[tokio::test]
-async fn b2b1_deferred_restart_fences_presence_and_only_rollback_reopens_it_fresh() {
-    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
-    let shared = crate::services::discord::make_shared_data_for_tests();
-    let probe = Probe::install(&shared);
-    let channel = 6_325_614;
-    let ticket = probe.arm(channel);
-    let root = tempfile::tempdir().expect("runtime root");
-    let nonce = "b2b1-prepare";
-    std::fs::write(
-        root.path().join("restart_pending"),
-        format!("nonce={nonce}\n"),
-    )
-    .expect("restart request");
-    let tick = shared
-        .restart
-        .intake_worker_lifecycle
-        .try_begin_tick()
-        .expect("admitted tick");
-    let shared_for_prepare = shared.clone();
-    let root_for_prepare = root.path().to_path_buf();
-    let prepare = tokio::spawn(async move {
-        prepare_deferred_restart(&shared_for_prepare, &root_for_prepare, nonce.to_owned()).await
-    });
-    while !shared.restart.shutting_down.load(Ordering::Acquire) {
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        !Probe::current(&ticket),
-        "fenced while the drain is awaited"
-    );
-    assert!(!probe.open(channel));
-    std::fs::write(
-        root.path().join("restart_cancelled"),
-        format!("nonce={nonce}\n"),
-    )
-    .expect("publish cancellation");
-    std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
-    drop(tick);
-    assert!(prepare.await.expect("prepare join").is_none());
-    assert!(
-        !Probe::current(&ticket),
-        "the rollback restores no earlier approval"
-    );
-    assert!(probe.open(channel), "the rollback reopens Presence fresh");
-
-    let handed = crate::services::discord::make_shared_data_for_tests();
-    handed.restart.shutdown_remaining.store(2, Ordering::SeqCst);
-    let probe = Probe::install(&handed);
-    let permit = begin_deferred_restart(&handed).expect("owns provider bookkeeping");
-    assert!(!finish_deferred_restart(&handed, permit));
-    handoff_superseded_restart(&handed);
-    assert!(
-        !probe.open(channel),
-        "a superseded handoff keeps Presence closed"
-    );
 }

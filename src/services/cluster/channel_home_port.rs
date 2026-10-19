@@ -1,16 +1,22 @@
 //! The drain's reads of a delegated channel in this process: the channel's turn, what the O actor
-//! last published that it owes and the writer's running POSTs. It keeps no state.
+//! last published that it owes and the writer's running POSTs, or that O never held the channel
+//! here. It keeps no state.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
+#[cfg(test)]
+use super::channel_home_boot;
 use super::channel_home_drain::{DrainPort, Owed, ResetRefused};
+use crate::services::tui_o::store;
 use crate::services::tui_o::writer::actor::POLL_INTERVAL;
+use crate::services::tui_o::writer::binding::{BindingEvents, BindingLog};
 use crate::services::tui_o::writer::deliver;
 use crate::services::tui_o::writer::host::{OwedView, Readiness};
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
@@ -18,10 +24,15 @@ use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 /// An owed read waits this long for the actor's next poll; none by then reads as unknown.
 const FRESH_WITHIN: Duration = Duration::from_secs(5 * POLL_INTERVAL.as_secs());
 
+/// Whether the channel still has persisted input on disk; `None` when it cannot be read.
+pub(crate) type PersistedInput = Arc<dyn Fn() -> Option<bool> + Send + Sync>;
+
 pub(crate) struct ChannelHomePort {
     channel: u64,
     readiness: Arc<Readiness>,
     restored: Arc<AtomicBool>,
+    persisted: Option<PersistedInput>,
+    store_root: Option<PathBuf>,
 }
 
 impl ChannelHomePort {
@@ -32,18 +43,60 @@ impl ChannelHomePort {
             channel,
             readiness,
             restored,
+            persisted: None,
+            store_root: None,
         }
+    }
+
+    /// Also reads the channel's persisted queue and marker, so a missing actor is not empty.
+    pub(crate) fn persisted_by(mut self, persisted: PersistedInput) -> Self {
+        self.persisted = Some(persisted);
+        self
+    }
+
+    /// Reads a missing actor or POST count as nothing owed when `runtime_root` (the writer host's
+    /// own) holds no store of the channel and this node's P5 log no event of it.
+    pub(crate) fn stored_under(mut self, runtime_root: Option<PathBuf>) -> Self {
+        self.store_root = runtime_root;
+        self
+    }
+
+    /// Whether O never held the channel here. Read after the actor or count was found missing:
+    /// a store is laid out before either exists, and none is laid out once the final close ran.
+    fn never_held(&self, skip_store: bool) -> bool {
+        let Some(root) = &self.store_root else {
+            return false;
+        };
+        let unbound = || {
+            #[cfg(test)]
+            if channel_home_boot::writer_mutant("binding_ignored") {
+                return true;
+            }
+            let events = BindingLog.binding_events_since(self.channel, 0);
+            #[cfg(test)]
+            if channel_home_boot::writer_mutant("p5_err_as_empty") {
+                return events.unwrap_or_default().is_empty();
+            }
+            events.is_ok_and(|events| events.is_empty())
+        };
+        (skip_store || store::no_channel_store(root, self.channel)) && unbound()
     }
 }
 
 impl DrainPort for ChannelHomePort {
-    /// A turn running or queued in the channel's mailbox, or one only its inflight row still names;
-    /// unknown until this process restored its persisted turns, since a mailbox may still be missing.
+    /// A turn running or queued in the channel's mailbox, persisted input, or one only its inflight
+    /// row still names; unknown until this process restored its persisted turns.
     fn turn_running(&self) -> impl Future<Output = Option<bool>> + Send {
         let channel = (self.channel != 0).then(|| ChannelId::new(self.channel));
         let restored = self.restored.load(Ordering::Acquire);
+        let persisted = self.persisted.clone();
         async move {
             let channel = channel.filter(|_| restored)?;
+            if let Some(persisted) = persisted
+                && persisted()?
+            {
+                return Some(true);
+            }
             let queued = match ChannelMailboxRegistry::global_handle(channel) {
                 Some(mailbox) => {
                     let mailbox = mailbox.try_snapshot().await.ok()?;
@@ -58,10 +111,19 @@ impl DrainPort for ChannelHomePort {
     }
 
     /// What the actor publishes from a poll begun after the read asked, so a check after the final
-    /// close sees a poll that ran after it; an ended, halted or silent actor is `None`.
+    /// close sees a poll that ran after it; an ended, halted or silent actor is `None`. With no
+    /// actor, nothing is owed only where O never held the channel here.
     fn owed(&self) -> impl Future<Output = Option<Owed>> + Send {
         let view = self.readiness.undelivered(self.channel);
+        #[cfg(test)]
+        let skip_store = channel_home_boot::writer_mutant("owed_ignores_store");
+        #[cfg(not(test))]
+        let skip_store = false;
+        let never_held = view.is_none() && self.never_held(skip_store);
         async move {
+            if never_held {
+                return Some(Owed::default());
+            }
             let OwedView {
                 mut published,
                 demand,
@@ -92,8 +154,15 @@ impl DrainPort for ChannelHomePort {
         }
     }
 
+    /// A count only a writer of the channel makes; without one, zero only where O never held it.
     fn posts_in_flight(&self) -> impl Future<Output = Option<usize>> + Send {
-        std::future::ready(deliver::posts_in_flight(self.channel))
+        let count = deliver::posts_in_flight(self.channel);
+        #[cfg(test)]
+        if count.is_none() && channel_home_boot::writer_mutant("posts_ignore_store") {
+            return std::future::ready(Some(0));
+        }
+        let count = count.or_else(|| self.never_held(false).then_some(0));
+        std::future::ready(count)
     }
 
     /// The gateway's session reset is reachable only from the Discord runtime, which supplies it
@@ -161,146 +230,6 @@ impl From<&str> for RestoreFailure {
 impl From<RestoreFailure> for String {
     fn from(reason: RestoreFailure) -> Self {
         reason.to_string()
-    }
-}
-
-#[cfg(all(test, unix))]
-pub(crate) mod scoped_restore {
-    use super::RestoreFailure;
-    use crate::db::o_channel_homes::{ChannelHome, HomeState};
-    use crate::services::agent_protocol::NativeTerminalKind;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    };
-
-    /// Installation identity, distinct from a live output or intake permit.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct RestoreScope {
-        pub(crate) channel: u64,
-        pub(crate) provider: String,
-        pub(crate) epoch: i64,
-        pub(crate) state: HomeState,
-        pub(crate) holder: Option<String>,
-        pub(crate) target: Option<String>,
-        pub(crate) local: String,
-    }
-    impl RestoreScope {
-        pub(crate) fn new(row: &ChannelHome, provider: &str, local: &str) -> Result<Self, String> {
-            let channel = row
-                .channel_id
-                .parse::<u64>()
-                .ok()
-                .filter(|id| *id != 0)
-                .ok_or("invalid restore channel")?;
-            let held = row.holder.as_deref() == Some(local)
-                && matches!(
-                    row.state,
-                    HomeState::Worker | HomeState::Releasing | HomeState::Reclaiming
-                );
-            let preparing =
-                row.state == HomeState::Released && row.target.as_deref() == Some(local);
-            if local.is_empty()
-                || row.epoch <= 0
-                || row.provider != provider
-                || !(held || preparing)
-            {
-                return Err("restore home identity is not local".into());
-            }
-            Ok(Self {
-                channel,
-                provider: provider.into(),
-                epoch: row.epoch,
-                state: row.state,
-                holder: row.holder.clone(),
-                target: row.target.clone(),
-                local: local.into(),
-            })
-        }
-        pub(crate) fn matches(&self, row: &ChannelHome) -> bool {
-            row.channel_id == self.channel.to_string()
-                && row.provider == self.provider
-                && row.epoch == self.epoch
-                && row.state == self.state
-                && row.holder == self.holder
-                && row.target == self.target
-        }
-        pub(crate) fn held_locally(&self) -> bool {
-            self.state != HomeState::Released && self.holder.as_deref() == Some(self.local.as_str())
-        }
-    }
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) enum RestoreStatus {
-        Pending,
-        Restoring,
-        Restored,
-        Blocked(RestoreFailure),
-    }
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) enum InflightObservation {
-        Empty,
-        Active,
-        ReplayHeld {
-            receipt: Option<i64>,
-            reasons: Vec<String>,
-            delivery: Option<Result<(), String>>,
-        },
-        HerdrHeld,
-        Admitted {
-            kind: NativeTerminalKind,
-        },
-        Retained {
-            kind: NativeTerminalKind,
-            reason: String,
-        },
-        Settled {
-            kind: NativeTerminalKind,
-        },
-        Deferred(String),
-        /// A before-start policy receipt row kept byte for byte; never a native terminal.
-        PolicyReceiptHeld {
-            reason: RestoreFailure,
-        },
-        /// Only a guarded clear of the receipt's exact row, after any notice was shown and acked.
-        PolicyReceiptSettled,
-    }
-    /// Only installation metadata; mailbox and canonical rows remain the busy authorities.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(crate) struct RestoreWitness {
-        pub(crate) scope: Option<RestoreScope>,
-        pub(crate) generation: u64,
-        pub(crate) status: RestoreStatus,
-        pub(crate) inflight: Option<InflightObservation>,
-    }
-    impl Default for RestoreWitness {
-        fn default() -> Self {
-            Self {
-                scope: None,
-                generation: 0,
-                status: RestoreStatus::Pending,
-                inflight: None,
-            }
-        }
-    }
-    pub(crate) struct RestoreContext {
-        pub(crate) scope: RestoreScope,
-        pub(crate) generation: u64,
-        pub(crate) current: Arc<AtomicU64>,
-    }
-    impl RestoreContext {
-        pub(crate) fn check(&self) -> Result<(), String> {
-            if self.generation == 0
-                || (self.current.load(Ordering::Acquire) != self.generation
-                    && !mutant("old-generation"))
-            {
-                Err("restore runtime generation changed".into())
-            } else {
-                Ok(())
-            }
-        }
-    }
-    pub(crate) fn mutant(name: &str) -> bool {
-        std::env::var("ADK_S3ACT_B2_MUTANT").ok().as_deref() == Some(name)
     }
 }
 

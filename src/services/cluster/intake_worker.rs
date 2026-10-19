@@ -8,14 +8,11 @@
 //! `services::discord::execute_intake_turn_core` to actually run the
 //! Discord turn.
 //!
-//! Phase 4 wires `start_intake_worker` into the worker-node bootstrap
-//! flow. Until then the loop is callable but never started in production.
+//! Runtime bootstrap starts the loop in observe/enforce mode when PostgreSQL is available.
 //!
 //! Critical invariants enforced here:
-//!   - Workers MUST abort the turn before spawning when
-//!     `mark_accepted` returns `Ok(false)` — that means the leader's
-//!     stale-claim sweep already reset the row, and double-execution
-//!     is the only way to double-emit a Discord turn.
+//!   - Workers MUST abort before spawning when `mark_accepted` returns `Ok(false)`:
+//!     the claim, channel home, replay authority, or stamped owner generation no longer admits it.
 //!   - Once a row reaches `accepted`, auto-retry is forbidden
 //!     (round-2 P0 #2). Post-accept failures call `mark_failed_post_accept`
 //!     and the operator alert path takes over.
@@ -286,7 +283,6 @@ pub(crate) async fn run_intake_worker_tick(
     }
 
     let mut held = intake_route::held_channels(provider);
-    held.extend(crate::services::discord::input_runtime::fence::held_channels(provider));
     held.sort_unstable();
     held.dedup();
     let claimed =
@@ -312,22 +308,6 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Cancelled);
     }
 
-    let input_provider = crate::services::provider::ProviderKind::from_str_or_unsupported(provider);
-    let input_channel = row.channel_id.parse::<u64>().ok();
-    let input_permit = match input_channel {
-        Some(channel) => match crate::services::discord::input_runtime::fence::effect::admit(
-            &input_provider,
-            channel,
-        ) {
-            Ok(permit) => permit,
-            Err(_) => {
-                release_cancelled_claim(pool, &row, claim_owner).await?;
-                return Ok(TickOutcome::Held);
-            }
-        },
-        None => None,
-    };
-    crate::services::discord::input_runtime::fence::effect::scope(input_permit, async {
     // Round-2 P0 #2: pre-accept failure (cwd validation, payload
     // conversion) is retryable; post-accept failure is operator-only.
     let request = match intake_request_from_row(&row) {
@@ -427,19 +407,12 @@ pub(crate) async fn run_intake_worker_tick(
 
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
-    if input_channel.is_some_and(|channel| {
-        crate::services::discord::input_runtime::fence::lookup(&input_provider, channel)
-            .is_some_and(|gate| gate.mode() != crate::services::discord::input_runtime::fence::Mode::LegacyOpen)
-    }) {
-        release_cancelled_claim(pool, &row, claim_owner).await?;
-        return Ok(TickOutcome::Held);
-    }
 
     // Transition: claimed → accepted. If the sweep beat us to it,
     // ABORT (do not spawn) — Ok(false) means we lost ownership.
     let advanced = mark_accepted(pool, row.id, claim_owner).await?;
     if !advanced {
-        // Still claimed here means the home moved since the last check: the row waits in pending.
+        // Rearm only if the claim and stamped owner still admit the rollback.
         if return_claimed_to_pending(pool, row.id, claim_owner).await? {
             tracing::warn!(
                 row_id = row.id,
@@ -452,7 +425,7 @@ pub(crate) async fn run_intake_worker_tick(
             row_id = row.id,
             channel_id = row.channel_id,
             user_msg_id = row.user_msg_id,
-            "[intake_worker] lost claim before accept (stale-claim sweep won the race) — aborting before spawn"
+            "[intake_worker] claim or authority refused accept — aborting before spawn"
         );
         return Ok(TickOutcome::LostClaimBeforeAccept);
     }
@@ -466,7 +439,7 @@ pub(crate) async fn run_intake_worker_tick(
         // and bail without invoking the executor.
         tracing::warn!(
             row_id = row.id,
-            "[intake_worker] failed to advance accepted → spawned (operator force-fail?) — aborting"
+            "[intake_worker] claim or owner authority refused accepted → spawned — aborting"
         );
         return Ok(TickOutcome::Processed);
     }
@@ -499,7 +472,10 @@ pub(crate) async fn run_intake_worker_tick(
             Ok(TickOutcome::Processed)
         }
         Ok(IntakeExecution::Deferred | IntakeExecution::ConsumedProtected) => {
-            tracing::warn!(row_id = row.id, "worker delivery retains its original custody without execution settlement");
+            tracing::warn!(
+                row_id = row.id,
+                "worker delivery retains its original custody without execution settlement"
+            );
             Ok(TickOutcome::Held)
         }
         Err(error) => {
@@ -516,7 +492,7 @@ pub(crate) async fn run_intake_worker_tick(
                     row_id = row.id,
                     channel_id = row.channel_id,
                     user_msg_id = row.user_msg_id,
-                    "[intake_worker] mark_failed_post_accept = false (row no longer in 'accepted'/'spawned'; operator force-fail or DB divergence)"
+                    "[intake_worker] mark_failed_post_accept = false (claim, state, or owner authority changed)"
                 );
             }
             Ok(TickOutcome::Processed)
@@ -525,7 +501,6 @@ pub(crate) async fn run_intake_worker_tick(
     #[cfg(test)]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDbDone).await;
     outcome
-    }).await
 }
 
 async fn release_cancelled_claim(
@@ -1062,9 +1037,8 @@ mod drain_tests;
 pub(crate) mod test_executor;
 
 #[cfg(test)]
-#[path = "intake_worker/input_effect_tests.rs"]
-mod input_effect_tests;
-
-#[cfg(test)]
 #[path = "intake_worker/replay_hold_tests.rs"]
 mod replay_hold_tests;
+
+#[cfg(test)]
+mod owner_fence_pg_tests;

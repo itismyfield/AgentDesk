@@ -1273,21 +1273,8 @@ pub(crate) fn verified_warm(request: VerifiedWarmRequest<'_>) -> Result<(), Stri
 
 #[cfg(unix)]
 fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
-    use crate::services::discord::codex_episode_snapshot;
     use crate::services::tmux_common as tc;
-    use crate::services::tui_o::store::codex_provenance::submit_floor::PreparedLaunch;
-    use crate::services::tui_o::writer::{actor::codex_submission::Operation, host};
-    use crate::services::tui_prompt_dedupe::codex_verified::{VerifiedSourceSnapshot, provenance};
-    use provenance::dormant::construction::{
-        EpisodeEvidenceSnapshot, submit_warm, submitted_episode,
-    };
-    let runtime =
-        tokio::runtime::Handle::try_current().map_err(|_| "verified worker runtime unavailable")?;
-    let row: crate::services::discord::CodexEpisodeOwnerSnapshot = await_verified(
-        &runtime,
-        request.token.as_ref(),
-        codex_episode_snapshot(request.channel, request.tmux, &request.token),
-    )?;
+    use crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot;
     let source = tc::with_tmux_source_authority(request.tmux, VerifiedSourceSnapshot::capture)
         .map_err(|error| error.to_string())?;
     if request.tmux != super::canary::CANARY_TMUX
@@ -1304,96 +1291,58 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     {
         return Err("verified warm incarnation mismatch".into());
     }
-    let ready = host::process_readiness();
-    let port = ready
-        .submission(request.channel)
-        .ok_or("verified actor unavailable")?;
-    let launch = PreparedLaunch {
-        context: source.context().clone(),
-        episode: row.episode().clone(),
-    };
-    let reply = await_verified(
-        &runtime,
-        request.token.as_ref(),
-        port.request(Operation::Capture(Box::new((
-            launch,
-            source.execution().clone(),
-        )))),
-    )?;
-    #[cfg(test)]
-    actual_boundary("prepare_ack");
-    await_verified(&runtime, request.token.as_ref(), row.recheck())?;
-    let prepared = ready.prepared_reply(request.channel, reply)?;
-    let evidence = EpisodeEvidenceSnapshot::capture(
-        std::sync::Arc::clone(row.token()),
-        row.episode().clone(),
-    )?;
+    crate::services::codex::verified_warm_preflight(request.options, source.context())
+        .map_err(|reason| format!("verified warm ineligible: {reason:?}"))?;
+    let start = std::fs::metadata(&source.execution().source.path)
+        .map_err(|error| error.to_string())?
+        .len();
     let guard = |send: &mut dyn FnMut() -> host_input::InputRun| {
         let refused = || host_input::InputRun::Refused(host_input::InputRefusal::Conflict);
-        if await_verified(&runtime, request.token.as_ref(), row.recheck()).is_err() {
+        let Ok(eligibility) =
+            crate::services::codex::verified_warm_preflight(request.options, source.context())
+        else {
             return refused();
-        }
+        };
         tc::with_tmux_source_authority(request.tmux, |authority| {
             if source.recheck(authority).is_err()
-                || prepared.floor().verify_before_prepare().is_err()
+                || eligibility.recheck().is_err()
                 || cancel_requested(Some(request.token.as_ref()))
             {
                 return refused();
             }
-            ready
-                .with_current_prepared(request.channel, &prepared, send)
-                .unwrap_or_else(|_| refused())
+            send()
         })
     };
-    let receipt = submit_warm(&evidence, &request.token, source.context(), || {
-        super::host_input::submit_verified_followup(
-            request.tmux,
-            request.prompt,
-            request.token.as_ref(),
-            &guard,
-        )
-    })?;
-    #[cfg(test)]
-    actual_boundary("submitted");
-    let submitted = submitted_episode(&evidence, &request.token, source.context(), &receipt)?;
-    let span = loop {
-        if cancel_requested(Some(request.token.as_ref())) {
-            return Ok(());
-        }
-        await_verified(&runtime, request.token.as_ref(), row.recheck())?;
-        let span = tc::with_tmux_source_authority(request.tmux, |authority| {
-            source
-                .recheck(authority)
-                .map_err(|_| "verified source changed")?;
-            super::rollout_tail::submitted_native_span(&submitted, prepared.floor())
-        })?;
-        if let Some(span) = span {
-            break span;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    #[cfg(test)]
-    actual_boundary("before_close");
-    let reply = await_verified(
-        &runtime,
+    let submitted = super::host_input::submit_verified_followup(
+        request.tmux,
+        request.prompt,
         request.token.as_ref(),
-        port.request(Operation::Close(Box::new(span.clone()))),
+        &guard,
+    );
+    if !matches!(
+        submitted,
+        super::input::CodexFollowupPromptSubmitOutcome::Submitted
+    ) {
+        return Err(format!("verified prompt submission: {submitted:?}"));
+    }
+    let sender = request.sender.clone();
+    let token = std::sync::Arc::clone(&request.token);
+    let tail = super::rollout_tail::tail_warm_followup_rollout_for_tmux(
+        &source.execution().source.path,
+        start,
+        request.session_id,
+        request.sender,
+        Some(request.token),
+        || crate::services::session_host::legacy_collapse::tmux_live_pane_bool(request.tmux),
+        request.tmux,
+        request.prompt,
     )?;
-    #[cfg(test)]
-    actual_boundary("close_ack");
-    await_verified(&runtime, request.token.as_ref(), row.recheck())?;
-    tc::with_tmux_source_authority(request.tmux, |authority| {
-        source
-            .recheck(authority)
-            .map_err(|_| "verified source changed")?;
-        ready.with_closed_reply(request.channel, reply, |closed| {
-            if closed.span() != &span {
-                return Err("closed episode mismatch");
-            }
-            provenance::admission::issue_closed(closed, &request.token).map(|_| ())
-        })?
-    })?;
-    super::rollout_tail::tail_closed_episode(&span, request.prompt, request.sender, request.token)
+    crate::services::codex::emit_codex_tui_post_tail_handoff(
+        tail,
+        sender,
+        Some(token),
+        request.tmux,
+    )
 }
 
 #[cfg(test)]
@@ -1410,23 +1359,4 @@ pub(crate) fn actual_boundary(stage: &str) {
             hook(stage);
         }
     });
-}
-
-#[cfg(unix)]
-fn await_verified<T, E: ToString>(
-    runtime: &tokio::runtime::Handle,
-    token: &CancelToken,
-    work: impl std::future::Future<Output = Result<T, E>>,
-) -> Result<T, String> {
-    runtime.block_on(async {
-        tokio::pin!(work);
-        loop {
-            tokio::select! {
-                result=&mut work => return result.map_err(|error|error.to_string()),
-                ()=tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if cancel_requested(Some(token)) {return Err("verified actor observation cancelled".into());}
-                }
-            }
-        }
-    })
 }

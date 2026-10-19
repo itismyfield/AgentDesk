@@ -3,7 +3,6 @@ use serenity::{CreateAttachment, MessageId};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::db::session_transcripts;
 use crate::services::provider::{CancelToken, ProviderKind};
 
 use super::super::admin_host_guard::ManagedReset;
@@ -11,8 +10,11 @@ use super::super::catch_up::retry_state::clear_channel_discarding_catch_up_backl
 use super::super::formatting::{send_long_message_ctx, truncate_str};
 use super::super::queue_io::mailbox_cancel_queued_primary_message;
 use super::super::settings::save_bot_settings;
-use super::super::turn_bridge::stop_active_turn;
+use super::super::turn_bridge::stop_active_turn_with_outcome;
 use super::super::{Context, Error, SharedData, check_auth, saturating_decrement_global_active};
+mod clear_report;
+mod clear_teardown;
+pub(in crate::services::discord) use clear_report::ClearReport;
 pub(in crate::services::discord) mod home_fence;
 mod managed_reset;
 #[cfg(all(test, unix))]
@@ -21,8 +23,6 @@ pub(in crate::services::discord) use managed_reset::reset_managed_process_sessio
 pub(in crate::services::discord) use managed_reset::{
     verified_codex_reset_refusal, verified_codex_reset_refusal_for_target,
 };
-#[allow(dead_code)]
-pub(in crate::services::discord) mod input_clear;
 pub(in crate::services::discord) mod native;
 pub(in crate::services::discord) use native::native_clear_admits;
 
@@ -190,6 +190,12 @@ fn build_fallback_session_key_for_clear(
 }
 
 #[cfg(test)]
+mod clear_wait_tests;
+#[cfg(test)]
+pub(in crate::services::discord) mod codex_clear_relaunch_tests;
+#[cfg(test)]
+mod codex_clear_retirement_tests;
+#[cfg(test)]
 #[cfg(unix)]
 mod codex_verified_clear_tests;
 
@@ -287,7 +293,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state(
     channel_id: serenity::ChannelId,
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ClearReport> {
     clear_channel_session_state_with_session_key(
         http,
         shared,
@@ -308,14 +314,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
-) -> anyhow::Result<()> {
-    let refusal = managed_reset::refusal_for_session_key;
-    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
-        anyhow::bail!(reason);
-    }
-    if shared.pg_pool.is_none() {
-        anyhow::bail!("postgres pool is required to persist a channel clear boundary");
-    }
+) -> anyhow::Result<ClearReport> {
     clear_channel_session_state_fenced(
         http,
         shared,
@@ -330,18 +329,22 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
 
 /// Keep all stop sites converging on `stop_active_turn` so the
 /// abort-key-then-SIGKILL ordering can never regress to the legacy pattern.
+/// False when the released turn's host refused the stop, so it may still run.
 async fn stop_released_turn(
     provider: &ProviderKind,
     token: Option<Arc<CancelToken>>,
     clear_source: &str,
-) {
-    if let Some(token) = token {
-        let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
-        stop_active_turn(provider, &token, policy, clear_source).await;
-    }
+) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    let policy = super::super::turn_bridge::TmuxCleanupPolicy::PreserveSession;
+    let stop = stop_active_turn_with_outcome(provider, &token, policy, clear_source).await;
+    // Only a legacy settlement says the stop reached the turn's host.
+    stop.may_clear_inflight()
 }
 
-/// Without a pool (tests) this skips only the transcript clear boundary.
+/// Only a channel another node holds is refused; past that the clear always commits.
 async fn clear_channel_session_state_fenced(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -350,7 +353,7 @@ async fn clear_channel_session_state_fenced(
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ClearReport> {
     let permit = home_fence::admit(channel_id, provider.as_str())?;
     #[cfg(test)]
     let permit = if home_fence::mutant("control_permit_removed") {
@@ -374,6 +377,8 @@ async fn clear_channel_session_state_fenced(
     .await
 }
 
+/// Discards the channel's queue, stops its turn, forgets its provider session and ends the
+/// session's process; anything it could not confirm is one warning line, never a refusal.
 async fn clear_channel_session_state_body(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -382,30 +387,20 @@ async fn clear_channel_session_state_body(
     clear_source: &str,
     notify_mode: SoftClearNotifyMode,
     explicit_session_key: Option<&str>,
-) -> anyhow::Result<()> {
-    let refusal = managed_reset::refusal_for_session_key;
-    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
-        anyhow::bail!(reason);
-    }
+) -> anyhow::Result<ClearReport> {
     home_fence::pause("clear").await;
-    // Judged before the clear changes anything: main's tmux reset, a host's own clear or a refusal.
-    let hosted = native::target(http, shared, provider, channel_id, explicit_session_key).await?;
-    let boundary = match shared.pg_pool.as_ref() {
-        Some(pool) => Some(session_transcripts::begin_channel_clear_boundary_tx(pool).await?),
-        None => None,
-    };
-    // Intake and kickoff stay off the mailbox until a failed clear has stopped
-    // its released turn and re-armed the restored backlog.
-    let transition_guard = shared
-        .acquire_session_transition(channel_id)
-        .await
-        .map_err(|_| anyhow::anyhow!("세션 전환 중이라 초기화하지 못했어요"))?;
-    if let Some(reason) = refusal(shared, provider, channel_id, explicit_session_key).await {
-        anyhow::bail!(reason);
+    let mut report = ClearReport::default();
+    // A pane effect holding the transition is waited out for the usual window, then overtaken.
+    let transition = shared.session_transition_lock(channel_id);
+    let wait = super::super::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT;
+    let transition_guard = tokio::time::timeout(wait, transition.lock_owned()).await;
+    if transition_guard.is_err() {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            "clear proceeds past a held session transition"
+        );
+        report.transition_busy = true;
     }
-    let hosted = native::replan(shared, provider, channel_id, explicit_session_key, hosted).await?;
-    // From here the clear changes the turn, so no earlier approval survives success or failure.
-    super::super::turn_presence::entrypoints::withdraw(shared, channel_id.get(), "clear");
     let tmux_name = {
         let data = shared.core.lock().await;
         data.sessions
@@ -414,96 +409,69 @@ async fn clear_channel_session_state_body(
             .map(|ch_name| provider.build_tmux_session_name(ch_name))
     };
 
+    // The clear commits here, in memory: no write below can restore what it discarded.
     let cleared = clear_channel_discarding_catch_up_backlog(shared, provider, channel_id).await;
     if cleared.removed_token.is_some() {
         saturating_decrement_global_active(shared);
     }
-    // A failed persist restored the backlog: keep its session and transcript,
-    // stop the released turn and re-arm the backlog instead of reporting a clear.
-    if let Some(error) = cleared.persistence_error {
-        drop(boundary); // rolls the uncommitted boundary back
-        stop_released_turn(provider, cleared.removed_token, clear_source).await;
-        super::super::schedule_deferred_idle_queue_kickoff(
-            shared.clone(),
-            provider.clone(),
-            channel_id,
-            "clear_persist_failed",
-        );
-        anyhow::bail!(
-            "세션을 초기화하지 못했어요: 대기열 저장에 실패해 세션과 대기열을 유지했어요 ({error})"
-        );
-    }
-    let channel_key = channel_id.get().to_string();
-    let tmux = tmux_name.as_deref();
-    let native = native::select(
-        hosted,
-        http,
-        shared,
-        provider,
-        channel_id,
-        tmux,
-        explicit_session_key,
-    );
-    let native = native.await;
-    // A failed boundary keeps the old transcript fence, so the session must
-    // survive it too; only the released turn is stopped, still under the guard.
-    let native = match native::finish_boundary(boundary, &channel_key, native).await {
-        Err(error) => {
-            stop_released_turn(provider, cleared.removed_token, clear_source).await;
-            anyhow::bail!(
-                "세션을 초기화하지 못했어요: 대기열은 비웠지만 대화 경계 저장에 실패해 세션을 유지했어요 ({error})"
-            );
-        }
-        Ok(Some(armed)) => Some((armed, transition_guard)),
-        Ok(None) => {
-            drop(transition_guard);
-            None
-        }
-    };
+    report.retried = cleared.persistence.retried;
+    report.failed = cleared.persistence.failed;
+    clear_teardown::write_boundary(shared, channel_id, &mut report).await;
 
     native::clear_session_memory(shared, channel_id).await;
+    native::clear_process_reset_pending(shared, channel_id).await;
 
-    if native.is_none() {
-        native::clear_process_reset_pending(shared, channel_id).await;
+    if !stop_released_turn(provider, cleared.removed_token, clear_source).await {
+        report.stop_unconfirmed = true;
     }
-
-    stop_released_turn(provider, cleared.removed_token, clear_source).await;
 
     let resolved_session_key =
         resolve_session_key_for_clear(http, shared, channel_id, provider).await;
     let session_key = choose_clear_session_key(explicit_session_key, resolved_session_key);
-    if let Some(session_key) = session_key.as_deref() {
-        super::super::adk_session::clear_provider_session_id(session_key, shared.api_port).await;
-        super::super::adk_session::post_adk_session_status(
-            Some(session_key),
-            None,
-            None,
-            "idle",
-            provider,
-            None,
-            Some(0),
-            None,
-            None,
-            None,
-            Some(channel_id),
-            None,
-            shared.api_port,
-        )
-        .await;
+    match session_key.as_deref() {
+        Some(session_key) => {
+            clear_teardown::forget_selector(shared, session_key, &mut report).await;
+            super::super::adk_session::post_adk_session_status(
+                Some(session_key),
+                None,
+                None,
+                "idle",
+                provider,
+                None,
+                Some(0),
+                None,
+                None,
+                None,
+                Some(channel_id),
+                None,
+                shared.api_port,
+            )
+            .await;
+        }
+        None => report.fail(
+            "session_selector",
+            "no session key resolved for the channel",
+        ),
     }
 
-    match (native, managed_session_clear_behavior(provider)) {
-        (Some((armed, guard)), _) => native::complete(shared, channel_id, armed, guard).await?,
-        (None, ManagedSessionClearBehavior::ResetManagedProcess) => {
-            if let Some(name) = tmux_name {
-                reset_managed_process_session(&name);
-            }
-        }
-        (None, ManagedSessionClearBehavior::Noop) => {}
-    }
+    let session = (tmux_name.as_deref(), session_key.as_deref());
+    let transition = transition_guard.ok();
+    clear_teardown::end_session(
+        shared,
+        provider,
+        channel_id,
+        session,
+        transition,
+        &mut report,
+    )
+    .await;
 
     if let Some((reason_code, content)) = soft_clear_lifecycle_notify_row(clear_source, notify_mode)
     {
+        let content = match report.warning() {
+            Some(warning) => format!("{content}\n{warning}"),
+            None => content,
+        };
         // Notify bot message for clear paths that have no direct provider reply.
         crate::services::message_outbox::enqueue_lifecycle_notification_best_effort(
             shared.pg_pool.as_ref(),
@@ -514,7 +482,7 @@ async fn clear_channel_session_state_body(
         );
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// /stop — Cancel in-progress AI request
@@ -611,7 +579,7 @@ pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
         .map(MessageId::new)
 }
 
-/// /cancel-queued — Remove one queued message without affecting active work.
+/// /cancel-queued <message_id> — Remove one queued message (`/queue` shows IDs)
 ///
 /// The target is an exact Discord message id. The mailbox actor serializes the
 /// removal against dispatch, so a queued-to-active race is reported as stale
@@ -694,7 +662,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         log_command_received!(ctx.channel_id().get(), user_name, "/clear");
 
         let http = ctx.serenity_context().http.clone();
-        clear_channel_session_state(
+        let report = clear_channel_session_state(
             &http,
             &ctx.data().shared,
             &ctx.data().provider,
@@ -704,7 +672,7 @@ pub(in crate::services::discord) async fn cmd_clear(ctx: Context<'_>) -> Result<
         )
         .await?;
 
-        ctx.say(super::SESSION_CLEARED_RESPONSE).await?;
+        ctx.say(report.reply()).await?;
         log_info_event!(
             "discord_session_cleared",
             channel_id = ctx.channel_id().get(),
@@ -799,644 +767,12 @@ mod soft_clear_notify_tests {
     }
 }
 
-/// An intentional clear whose queue persist fails keeps the session, the
-/// transcript and the restored backlog, and never reports a clear.
 #[cfg(test)]
-mod clear_persist_failure_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use poise::serenity_prelude as serenity;
-    use serenity::{ChannelId, MessageId, UserId};
-
-    use super::{
-        SoftClearNotifyMode, clear_channel_session_state, clear_channel_session_state_fenced,
-    };
-    use crate::services::discord::{DiscordSession, SharedData, make_shared_data_for_tests};
-    use crate::services::provider::{CancelToken, ProviderKind};
-    use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
-    use crate::services::turn_orchestrator::{
-        Intervention, InterventionMode, QueuePersistenceContext,
-    };
-
-    pub(super) const SESSION_ID: &str = "provider-session-6233";
-    const CHANNEL_NAME: &str = "adk-6233-clear-persist";
-
-    fn queued(message_id: u64) -> Intervention {
-        Intervention {
-            author_id: UserId::new(1),
-            author_is_bot: false,
-            message_id: MessageId::new(message_id),
-            queued_generation: crate::services::discord::runtime_store::process_generation(),
-            source_message_ids: vec![MessageId::new(message_id)],
-            source_message_queued_generations: Vec::new(),
-            source_text_segments: Vec::new(),
-            text: "restored backlog".to_string(),
-            mode: InterventionMode::Soft,
-            created_at: std::time::Instant::now(),
-            reply_context: None,
-            has_reply_boundary: false,
-            merge_consecutive: false,
-            pending_uploads: Vec::new(),
-            voice_announcement: None,
-        }
-    }
-
-    pub(super) async fn seed_session(shared: &Arc<SharedData>, channel_id: ChannelId) {
-        shared.core.lock().await.sessions.insert(
-            channel_id,
-            DiscordSession {
-                session_id: Some(SESSION_ID.to_string()),
-                memento_context_loaded: false,
-                memento_reflected: false,
-                current_path: None,
-                history: Vec::new(),
-                pending_uploads: Vec::new(),
-                cleared: false,
-                remote_profile_name: None,
-                channel_id: Some(channel_id.get()),
-                // A resolvable channel name keeps session-key lookup off Discord.
-                channel_name: Some(CHANNEL_NAME.to_string()),
-                category_name: None,
-                last_active: tokio::time::Instant::now(),
-                worktree: None,
-                born_generation: shared.restart.current_generation,
-            },
-        );
-    }
-
-    pub(super) async fn seed_backlog(
-        shared: &Arc<SharedData>,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-    ) {
-        let persistence = QueuePersistenceContext::new(provider, &shared.token_hash, None);
-        let enqueued = shared
-            .mailbox(channel_id)
-            .enqueue(queued(channel_id.get() + 1), persistence)
-            .await;
-        assert!(enqueued.enqueued, "the backlog is queued and persisted");
-    }
-
-    fn paused_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(true)
-            .build()
-            .expect("test runtime")
-    }
-
-    async fn clear(
-        shared: &Arc<SharedData>,
-        provider: &ProviderKind,
-        channel_id: ChannelId,
-    ) -> anyhow::Result<()> {
-        let http = Arc::new(serenity::Http::new(""));
-        clear_channel_session_state_fenced(
-            &http,
-            shared,
-            provider,
-            channel_id,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-            None,
-        )
-        .await
-    }
-
-    pub(super) async fn session_state(
-        shared: &SharedData,
-        channel_id: ChannelId,
-    ) -> (Option<String>, bool) {
-        let data = shared.core.lock().await;
-        let session = data.sessions.get(&channel_id).expect("session kept");
-        (session.session_id.clone(), session.cleared)
-    }
-
-    pub(super) async fn queue_len(shared: &SharedData, channel_id: ChannelId) -> usize {
-        shared
-            .mailbox(channel_id)
-            .snapshot()
-            .await
-            .intervention_queue
-            .len()
-    }
-
-    fn global_active(shared: &SharedData) -> usize {
-        shared.restart.global_active.load(Ordering::SeqCst)
-    }
-
-    #[test]
-    fn failed_clear_persist_is_not_reported_as_cleared_and_keeps_the_session() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Gemini;
-        let channel_id = ChannelId::new(6_233_101);
-        paused_runtime().block_on(async {
-            let shared = make_shared_data_for_tests();
-            seed_session(&shared, channel_id).await;
-            seed_backlog(&shared, &provider, channel_id).await;
-            // Arm after the backlog save so checked preflight stays readable and the clear's save fails.
-            fail_queue_saves(channel_id, 1);
-            let armed_faults = queue_save_faults(channel_id, false);
-
-            let result = clear(&shared, &provider, channel_id).await;
-
-            assert!(
-                result.is_err(),
-                "a clear whose queue persist failed must not return the success the caller replies with"
-            );
-            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
-            assert_eq!(
-                queue_save_faults(channel_id, true),
-                0,
-                "the clear's save consumes the armed fault"
-            );
-            assert_eq!(queue_len(&shared, channel_id).await, 1, "the failed persist restores the backlog");
-            assert_eq!(
-                session_state(&shared, channel_id).await,
-                (Some(SESSION_ID.to_string()), false),
-                "the restored backlog must not resume in a provider session this clear reset"
-            );
-            assert!(
-                shared.restart.deferred_hook_channels.contains_key(&channel_id),
-                "the restored backlog is re-armed through the idle-queue kickoff"
-            );
-        });
-    }
-
-    #[test]
-    fn failed_clear_holds_the_transition_through_the_stop_and_one_restored_turn_runs() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Gemini;
-        let channel_id = ChannelId::new(6_233_103);
-        paused_runtime().block_on(async {
-            let shared = make_shared_data_for_tests();
-            seed_session(&shared, channel_id).await;
-            // A tmux-bound token parks the stop in its hard-stop grace; the name
-            // is absent, so nothing is signalled or killed.
-            let token = Arc::new(CancelToken::new());
-            token.bind_unmanaged_session_name(&format!("adk-6233-absent-{}", std::process::id()));
-            assert!(
-                crate::services::discord::mailbox_try_start_turn(
-                    &shared,
-                    channel_id,
-                    token.clone(),
-                    UserId::new(1),
-                    MessageId::new(6_233_100),
-                )
-                .await,
-                "the turn being cleared holds the mailbox"
-            );
-            // Another channel's turn keeps one more count, so a missing or a
-            // doubled decrement is visible.
-            crate::services::discord::increment_global_active(&shared, "other channel turn");
-            crate::services::discord::increment_global_active(&shared, "cleared turn");
-            seed_backlog(&shared, &provider, channel_id).await;
-            fail_queue_saves(channel_id, 1);
-            let armed_faults = queue_save_faults(channel_id, false);
-
-            let starts = Arc::new(AtomicUsize::new(0));
-            let hook_starts = starts.clone();
-            let _hook = crate::services::discord::queue_io::set_idle_queue_kick_hook_for_tests(
-                Arc::new(move |shared, provider, channel, _reason| {
-                    let hook_starts = hook_starts.clone();
-                    Box::pin(async move {
-                        if channel != channel_id {
-                            return None;
-                        }
-                        let taken = crate::services::discord::idle_queue_take_next_soft_if_ready(
-                            &shared, &provider, channel,
-                        )
-                        .await;
-                        let started = taken.intervention.is_some();
-                        if started {
-                            hook_starts.fetch_add(1, Ordering::SeqCst);
-                        }
-                        Some(crate::services::discord::IdleQueueKickoffChannelOutcome { started })
-                    })
-                }),
-            );
-
-            let clear_task = tokio::spawn({
-                let shared = shared.clone();
-                let provider = provider.clone();
-                async move { clear(&shared, &provider, channel_id).await }
-            });
-            let mut spins = 0;
-            while !token.cancelled.load(Ordering::SeqCst) {
-                assert!(
-                    spins < 100_000,
-                    "the failed clear reaches the released turn's stop"
-                );
-                spins += 1;
-                tokio::task::yield_now().await;
-            }
-            assert!(
-                !clear_task.is_finished(),
-                "the stop is parked in its hard-stop grace"
-            );
-            assert!(
-                shared
-                    .session_transition_lock(channel_id)
-                    .try_lock_owned()
-                    .is_err(),
-                "kickoff must not claim the mailbox while the failed clear stops its released turn"
-            );
-            assert!(
-                crate::services::discord::try_intake_runtime_transition_after_redirect(
-                    &shared,
-                    channel_id,
-                    (None, false, String::new()),
-                )
-                .await
-                .is_err(),
-                "intake must defer while the failed clear stops its released turn"
-            );
-
-            let result = clear_task.await.expect("clear task");
-            assert!(
-                result.is_err(),
-                "the failed clear is not reported as cleared"
-            );
-            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
-            assert_eq!(
-                queue_save_faults(channel_id, true),
-                0,
-                "the clear's save consumes the fault before the finalizer runs"
-            );
-            assert_eq!(
-                global_active(&shared),
-                1,
-                "the released turn is counted down exactly once"
-            );
-
-            // The one-shot fault is consumed; the late finalizer finds no anchor
-            // and its re-kick coalesces with the one the clear armed.
-            let finish =
-                crate::services::discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
-            assert!(
-                finish.removed_token.is_none(),
-                "the clear already released the anchor"
-            );
-            crate::services::discord::schedule_deferred_idle_queue_kickoff(
-                shared.clone(),
-                provider.clone(),
-                channel_id,
-                "released_turn_finalizer",
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-
-            assert_eq!(
-                starts.load(Ordering::SeqCst),
-                1,
-                "exactly one restored turn runs"
-            );
-            assert_eq!(
-                queue_len(&shared, channel_id).await,
-                0,
-                "the restored backlog is drained"
-            );
-            assert_eq!(
-                session_state(&shared, channel_id).await,
-                (Some(SESSION_ID.to_string()), false),
-                "the restored turn runs on the preserved session"
-            );
-            assert_eq!(
-                global_active(&shared),
-                1,
-                "the late finalizer does not count down again"
-            );
-        });
-    }
-
-    #[test]
-    fn persisted_clear_still_resets_the_session_and_arms_no_kick() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Gemini;
-        let channel_id = ChannelId::new(6_233_102);
-        paused_runtime().block_on(async {
-            let shared = make_shared_data_for_tests();
-            seed_session(&shared, channel_id).await;
-            seed_backlog(&shared, &provider, channel_id).await;
-
-            assert!(
-                clear(&shared, &provider, channel_id).await.is_ok(),
-                "a persisted clear still succeeds"
-            );
-            assert_eq!(
-                queue_len(&shared, channel_id).await,
-                0,
-                "the backlog is discarded"
-            );
-            assert_eq!(
-                session_state(&shared, channel_id).await,
-                (None, true),
-                "the provider session is reset"
-            );
-            assert!(
-                !shared
-                    .restart
-                    .deferred_hook_channels
-                    .contains_key(&channel_id),
-                "an empty cleared queue arms no kickoff"
-            );
-            assert!(
-                shared
-                    .session_transition_lock(channel_id)
-                    .try_lock_owned()
-                    .is_ok(),
-                "a persisted clear releases the transition"
-            );
-        });
-    }
-
-    #[test]
-    fn persisted_clear_still_resets_the_managed_process() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(6_233_104);
-        let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
-        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        crate::services::session_backend::insert_process_session(
-            session_name.clone(),
-            crate::services::session_backend::SessionHandle::TestProcess {
-                pid: 6_233_104,
-                alive: alive.clone(),
-            },
-        );
-        paused_runtime().block_on(async {
-            let shared = make_shared_data_for_tests();
-            seed_session(&shared, channel_id).await;
-            seed_backlog(&shared, &provider, channel_id).await;
-
-            assert!(
-                clear(&shared, &provider, channel_id).await.is_ok(),
-                "a persisted clear still succeeds"
-            );
-            assert_eq!(
-                session_state(&shared, channel_id).await,
-                (None, true),
-                "the provider session is reset"
-            );
-        });
-        assert!(
-            !alive.load(Ordering::SeqCst),
-            "the managed process is terminated"
-        );
-        assert!(
-            crate::services::session_backend::remove_process_session(&session_name).is_none(),
-            "the managed process session is removed"
-        );
-    }
-
-    /// Each caller propagates a failed clear before it replies or deletes the
-    /// recap card, so no caller reports a clear that did not happen.
-    #[test]
-    fn clear_callers_propagate_a_failed_clear_before_their_success_effect() {
-        let callers = [
-            (
-                include_str!("control.rs"),
-                "async fn cmd_clear(",
-                "clear_channel_session_state(",
-                "SESSION_CLEARED_RESPONSE",
-            ),
-            (
-                include_str!("text_commands.rs"),
-                "TextCommandId::Clear =>",
-                "clear_channel_session_state(",
-                "SESSION_CLEARED_RESPONSE",
-            ),
-            (
-                include_str!("../idle_recap_interaction.rs"),
-                "async fn handle_idle_recap_clear_interaction(",
-                "clear_channel_session_state_with_session_key(",
-                "delete_previous_card(",
-            ),
-        ];
-        for (source, handler, call, success) in callers {
-            let body = &source[source.find(handler).expect(handler)..];
-            let call_at = body.find(call).expect(call);
-            let success_at = call_at + body[call_at..].find(success).expect(success);
-            let between = &body[call_at..success_at];
-            let awaited = between.find(".await").expect("the clear is awaited");
-            assert!(
-                between[awaited..].starts_with(".await?;"),
-                "{handler} must propagate the clear's error before {success}"
-            );
-        }
-    }
-
-    pub(super) async fn boundary_rows(pool: &sqlx::PgPool, channel_id: ChannelId) -> Vec<i64> {
-        sqlx::query_scalar(
-            "SELECT clear_generation::BIGINT FROM channel_session_clear_boundaries WHERE channel_id = $1",
-        )
-        .bind(channel_id.get().to_string())
-        .fetch_all(pool)
-        .await
-        .expect("read clear boundaries")
-    }
-
-    #[test]
-    fn clear_commits_its_transcript_boundary_only_after_the_queue_persists_pg() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Gemini;
-        let channel_id = ChannelId::new(6_233_105);
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
-            let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-                "agentdesk_clear_boundary_6233",
-                "clear transcript boundary",
-            )
-            .await;
-            let pool = db.connect_and_migrate_with_max_connections(4).await;
-            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
-                pool.clone(),
-            ));
-            seed_session(&shared, channel_id).await;
-            seed_backlog(&shared, &provider, channel_id).await;
-            fail_queue_saves(channel_id, 1);
-            let armed_faults = queue_save_faults(channel_id, false);
-            let http = Arc::new(serenity::Http::new(""));
-
-            // `/clear` and `!clear` both call this entry.
-            let failed = clear_channel_session_state(
-                &http,
-                &shared,
-                &provider,
-                channel_id,
-                "/clear",
-                SoftClearNotifyMode::Suppress,
-            )
-            .await;
-            assert!(
-                failed.is_err(),
-                "the failed clear is propagated to its caller"
-            );
-            assert_eq!(armed_faults, 1, "one fault is armed after the backlog save");
-            assert_eq!(
-                queue_save_faults(channel_id, true),
-                0,
-                "the failed clear consumes the fault before the successful retry"
-            );
-            assert!(
-                boundary_rows(&pool, channel_id).await.is_empty(),
-                "a failed clear leaves the transcript history of the kept session"
-            );
-
-            let persisted = clear_channel_session_state(
-                &http,
-                &shared,
-                &provider,
-                channel_id,
-                "/clear",
-                SoftClearNotifyMode::Suppress,
-            )
-            .await;
-            assert!(
-                persisted.is_ok(),
-                "a persisted clear succeeds: {persisted:?}"
-            );
-            assert_eq!(
-                boundary_rows(&pool, channel_id).await,
-                [1],
-                "a persisted clear commits its boundary"
-            );
-
-            pool.close().await;
-            db.drop().await;
-        });
-    }
-
-    async fn soft_clear_notifications(pool: &sqlx::PgPool, channel_id: ChannelId) -> i64 {
-        sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE target = $1 AND reason_code = $2",
-        )
-        .bind(format!("channel:{}", channel_id.get()))
-        .bind(super::SOFT_CLEAR_REASON_CODE)
-        .fetch_one(pool)
-        .await
-        .expect("read soft-clear notifications")
-    }
-
-    async fn reject_boundary_writes(pool: &sqlx::PgPool, reject: bool) {
-        let statements: &[&str] = if reject {
-            &[
-                "CREATE FUNCTION reject_clear_boundary() RETURNS trigger AS $$
-                 BEGIN RAISE EXCEPTION 'injected clear boundary failure'; END;
-                 $$ LANGUAGE plpgsql",
-                "CREATE TRIGGER reject_clear_boundary_trigger
-                 BEFORE INSERT OR UPDATE ON channel_session_clear_boundaries
-                 FOR EACH ROW EXECUTE FUNCTION reject_clear_boundary()",
-            ]
-        } else {
-            &["DROP TRIGGER reject_clear_boundary_trigger ON channel_session_clear_boundaries"]
-        };
-        for statement in statements {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("toggle the clear boundary trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        }
-    }
-
-    #[test]
-    fn clear_whose_boundary_commit_fails_keeps_the_session_and_process_pg() {
-        let root = tempfile::tempdir().expect("scratch runtime root");
-        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let provider = ProviderKind::Claude;
-        let channel_id = ChannelId::new(6_233_106);
-        let session_name = provider.build_tmux_session_name(CHANNEL_NAME);
-        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        crate::services::session_backend::insert_process_session(
-            session_name.clone(),
-            crate::services::session_backend::SessionHandle::TestProcess {
-                pid: 6_233_106,
-                alive: alive.clone(),
-            },
-        );
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
-            let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-                "agentdesk_clear_boundary_reject_6233",
-                "rejected clear transcript boundary",
-            )
-            .await;
-            let pool = db.connect_and_migrate_with_max_connections(4).await;
-            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
-                pool.clone(),
-            ));
-            seed_session(&shared, channel_id).await;
-            seed_backlog(&shared, &provider, channel_id).await;
-            reject_boundary_writes(&pool, true).await;
-            let http = Arc::new(serenity::Http::new(""));
-            let clear = || {
-                clear_channel_session_state(
-                    &http,
-                    &shared,
-                    &provider,
-                    channel_id,
-                    "/clear",
-                    SoftClearNotifyMode::Enqueue,
-                )
-            };
-
-            let failed = clear()
-                .await
-                .expect_err("a failed boundary fails the clear");
-            assert_eq!(
-                queue_len(&shared, channel_id).await,
-                0,
-                "the persisted empty queue stays"
-            );
-            assert_eq!(
-                session_state(&shared, channel_id).await,
-                (Some(SESSION_ID.to_string()), false),
-                "the session behind the old transcript fence is kept"
-            );
-            assert!(alive.load(Ordering::SeqCst), "the managed process is kept");
-            assert!(
-                boundary_rows(&pool, channel_id).await.is_empty(),
-                "no boundary is recorded"
-            );
-            assert_eq!(
-                soft_clear_notifications(&pool, channel_id).await,
-                0,
-                "no soft-clear notification is sent"
-            );
-            assert!(
-                failed.to_string().contains("대기열은 비웠지만"),
-                "the error reports the partially applied clear: {failed}"
-            );
-
-            reject_boundary_writes(&pool, false).await;
-            clear().await.expect("the retried clear succeeds");
-            assert_eq!(boundary_rows(&pool, channel_id).await, [1]);
-            assert_eq!(session_state(&shared, channel_id).await, (None, true));
-            assert_eq!(soft_clear_notifications(&pool, channel_id).await, 1);
-
-            pool.close().await;
-            db.drop().await;
-        });
-        assert!(
-            !alive.load(Ordering::SeqCst),
-            "the retried clear resets the managed process"
-        );
-        crate::services::session_backend::remove_process_session(&session_name);
-    }
-}
+mod clear_end_tests;
+#[cfg(test)]
+mod clear_entry_tests;
+#[cfg(test)]
+mod clear_persist_failure_tests;
 
 /// /down <file> — Download file from server
 #[poise::command(slash_command, rename = "down")]

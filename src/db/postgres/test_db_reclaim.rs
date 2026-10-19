@@ -7,7 +7,7 @@ use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe as SafeSql, PgPool};
 
 use crate::services::process::{ProcessIdentity, ProcessIdentityProbe};
 
@@ -432,7 +432,7 @@ impl ReclaimBackend for PgBackend<'_> {
         // No FORCE: a database that gained a session fails the DROP instead of losing it.
         super::run_test_postgres_sqlx_op(
             &format!("{} reclaim postgres test db {name}", self.label),
-            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\"")).execute(self.pool),
+            sqlx::query(SafeSql(format!("DROP DATABASE IF EXISTS \"{name}\""))).execute(self.pool),
         )
         .await
         .map(|_| ())
@@ -539,12 +539,11 @@ pub(super) async fn mark_test_database(
     label: &str,
 ) -> Result<(), String> {
     let marker = marker_text(created_at_unix, own_owner());
+    let quoted_name = database_name.replace('"', "\"\"");
+    let sql = format!("COMMENT ON DATABASE \"{quoted_name}\" IS '{marker}'");
     super::run_test_postgres_sqlx_op(
         &format!("{label} mark postgres test db {database_name}"),
-        sqlx::query(&format!(
-            "COMMENT ON DATABASE \"{database_name}\" IS '{marker}'"
-        ))
-        .execute(admin_pool),
+        sqlx::query(SafeSql(sql)).execute(admin_pool),
     )
     .await
     .map(|_| ())
@@ -567,21 +566,21 @@ pub(super) async fn create_marked(
 ) -> Result<(), String> {
     let created_at = server_now_unix(admin_pool).await?;
     let pending = pending_database_name(created_at);
+    let sql = format!("CREATE DATABASE \"{pending}\"");
     super::run_test_postgres_sqlx_op(
         &format!("{label} create postgres test db {database_name}"),
-        sqlx::query(&format!("CREATE DATABASE \"{pending}\"")).execute(admin_pool),
+        sqlx::query(SafeSql(sql)).execute(admin_pool),
     )
     .await?;
     pause_at("after_create", &pending);
     let finished = async {
         mark_test_database(admin_pool, &pending, created_at, label).await?;
         pause_at("after_comment", &pending);
+        let quoted_name = database_name.replace('"', "\"\"");
+        let sql = format!("ALTER DATABASE \"{pending}\" RENAME TO \"{quoted_name}\"");
         super::run_test_postgres_sqlx_op(
             &format!("{label} rename postgres test db {database_name}"),
-            sqlx::query(&format!(
-                "ALTER DATABASE \"{pending}\" RENAME TO \"{database_name}\""
-            ))
-            .execute(admin_pool),
+            sqlx::query(SafeSql(sql)).execute(admin_pool),
         )
         .await
         .map(|_| ())
@@ -589,9 +588,10 @@ pub(super) async fn create_marked(
     .await;
     if finished.is_err() {
         // Only the pending name is ours; a RENAME collision must not touch `database_name`.
+        let sql = format!("DROP DATABASE IF EXISTS \"{pending}\"");
         let dropped = super::run_test_postgres_sqlx_op(
             &format!("{label} drop pending postgres test db {pending}"),
-            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{pending}\"")).execute(admin_pool),
+            sqlx::query(SafeSql(sql)).execute(admin_pool),
         )
         .await;
         if let Err(error) = dropped {
@@ -1474,7 +1474,7 @@ mod tests {
         }
 
         async fn sql(&self, statement: &str) {
-            sqlx::query(statement)
+            sqlx::query(SafeSql(statement))
                 .execute(&self.admin)
                 .await
                 .unwrap_or_else(|error| panic!("{statement}: {error}"));

@@ -54,7 +54,7 @@ use self::idle_transcript_scan::{
     claude_idle_prompt_observation_should_tail_response, claude_idle_safe_reanchor_offset,
     codex_idle_prompt_observation_should_tail_response,
     scan_claude_idle_transcript_for_last_prompt, scan_claude_idle_transcript_for_prompt,
-    scan_codex_idle_rollout_for_latest_prompt_matching, scan_codex_idle_rollout_for_prompt,
+    scan_codex_idle_rollout_for_latest_prompt_matching,
 };
 
 #[cfg(unix)]
@@ -124,20 +124,16 @@ use self::relay_ownership::{
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 pub(in crate::services::discord) mod synthetic_start;
 #[cfg(unix)]
-pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
-    DormantSyntheticClaim, capture_dormant_partial,
-};
+pub(in crate::services::discord) use synthetic_start::bridge_handoff::capture_dormant_partial;
 pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
     preserve_admitted_source, preserve_stamped_source,
 };
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
+use self::synthetic_start::build_tui_direct_synthetic_inflight_state;
+#[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
 pub(in crate::services::discord) use self::synthetic_start::tui_direct_watcher_synthetic_inflight_matches;
-use self::synthetic_start::{
-    build_tui_direct_synthetic_inflight_state, restore_pending_starts,
-    tui_direct_synthetic_inflight_active_for_prompt,
-};
 #[cfg(unix)]
 #[allow(unused_imports)]
 use self::synthetic_start::{
@@ -152,6 +148,9 @@ use self::synthetic_start::{
 use self::synthetic_start::{
     release_stale_ownerless_tui_direct_mailbox_if_current, tui_direct_watcher_can_own_output,
 };
+use self::synthetic_start::{
+    restore_pending_starts, tui_direct_synthetic_inflight_active_for_prompt,
+};
 
 #[cfg(unix)]
 pub(in crate::services::discord) mod background_child_completion;
@@ -161,36 +160,33 @@ mod claude_idle_bridge;
 mod claude_idle_runtime;
 #[cfg(unix)]
 mod claude_idle_tail;
+#[cfg(unix)]
+mod claude_source;
 mod headless;
+#[cfg(unix)]
+mod source_tick;
 // #5188: session-rotation settle pass (pure planner always compiled + tested).
 mod session_rotation_settle;
-#[cfg(unix)]
-#[allow(unused_imports)]
+#[cfg(all(unix, test))]
 use self::claude_idle_bridge::build_tui_direct_bridge_inflight_state;
 #[cfg(unix)]
 use self::claude_idle_bridge::{
     buffer_idle_prefix, idle_stream_message_is_content, idle_tail_tool_opens,
     stream_tui_idle_response_through_bridge,
-    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_bridge::{
     compose_tui_idle_response, forward_idle_stream_into_bridge,
     tui_idle_tail_should_commit_runtime_binding_offset,
+    tui_idle_tail_stream_should_commit_runtime_binding_offset,
 };
 #[cfg(unix)]
 pub(super) use self::claude_idle_runtime::resolve_rehydrated_claude_tmux_channel_id;
 #[cfg(unix)]
 use self::claude_idle_runtime::{
     DEAD_ORPHANED_PANE_PROBE_DELAY, DEAD_ORPHANED_PANE_PROBE_SAMPLES,
-    advance_claude_tmux_runtime_binding_offset, claude_continuation_binding_supersedes_launch,
-    claude_tui_rehydrate_start_offset, claude_tui_runtime_binding_matches_launch,
-    resolve_idle_relay_transcript, resolve_rehydrated_tmux_channel_id,
-    resolved_claude_idle_relay_transcript_path, spawn_claude_idle_transcript_relay,
-};
-#[cfg(unix)]
-pub(in crate::services::discord) use self::claude_idle_runtime::{
-    claude_tui_launch_context, other_session_claimed_transcripts,
+    advance_claude_tmux_runtime_binding_offset, claude_tui_rehydrate_start_offset,
+    resolve_rehydrated_tmux_channel_id, spawn_claude_idle_transcript_relay,
 };
 #[cfg(all(unix, test))]
 use self::claude_idle_runtime::{
@@ -205,6 +201,15 @@ use self::claude_idle_tail::{
     maybe_spawn_claude_idle_response_tail, spawn_claude_idle_response_tail_once,
 };
 #[cfg(unix)]
+use self::claude_source::{
+    claude_continuation_binding_supersedes_launch, claude_tui_runtime_binding_matches_launch,
+    resolve_idle_relay_transcript, resolved_claude_idle_relay_transcript_path,
+};
+#[cfg(unix)]
+pub(in crate::services::discord) use self::claude_source::{
+    claude_tui_launch_context, other_session_claimed_transcripts,
+};
+#[cfg(unix)]
 use self::session_rotation_settle::settle_claude_session_rotations;
 
 const SSH_DIRECT_PROMPT_PREVIEW_LIMIT: usize = 1500;
@@ -212,11 +217,6 @@ const CODEX_IDLE_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CLAUDE_IDLE_INFLIGHT_DRAIN_POLL: Duration = Duration::from_millis(100);
-/// #2843: when the background idle relay loop discovers that a session's
-/// transcript path changed, scan this many bytes back from EOF (not from EOF
-/// itself) so a prompt already written to the freshly-resolved transcript is
-/// still observed and its response relayed.
-const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
 const TUI_DIRECT_SYNTHETIC_CLAIM_WAIT: Duration = Duration::from_secs(2);
 const TUI_DIRECT_SYNTHETIC_CLAIM_POLL: Duration = Duration::from_millis(100);
 pub(in crate::services::discord) const TUI_DIRECT_SYNTHETIC_OWNER_USER_ID: u64 = 1;
@@ -676,7 +676,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
             "SSH-direct TUI prompt notified; runtime relay attached synthetic ownership when possible"
         );
     }
-
     // #3041 P1-4 codex: SUCCESS PATH reached — the card/anchor (or system-continuation
     // note) was posted and the bridge legitimately retains the in-flight turn. DISARM
     // the early-return guard so the lease PERSISTS for this turn (otherwise the
@@ -684,7 +683,6 @@ async fn relay_observed_prompt(shared: &Arc<SharedData>, prompt: ObservedTuiProm
     // bridge-tail block's own `TuiDirectExternalInputLeaseGuard` (bridge-owner leases)
     // or simply left set (Unassigned / session-bound-owned leases the sink delivers).
     observed_lease_early_return_guard.disarm();
-
     #[cfg(unix)]
     {
         // #3154 P1-3: when the synthetic turn-start was deferred, the detached
@@ -749,18 +747,8 @@ fn owner_channel_for_prompt(
     )
 }
 
-/// Resolve the owner channel for a tmux session.
-///
-/// #3018: the authoritative `tmux_watchers` registry (which holds the 1:1
-/// `by_tmux_session`/`tmux_session_by_channel`/`owner_channel_by_tmux_session`
-/// invariant) is the SINGLE source of truth. The `tui_prompt_dedupe` cache is a
-/// best-effort, expiry-based mirror only — it must NEVER act as a reverse
-/// authority for resolution, because when the two disagree it produces
-/// wrong-channel routing or silent relay skips at the call sites.
-///
-/// When the registry misses but the dedupe cache still holds a mapping we have
-/// observable drift: we emit an explicit warn and return `None` so the drift is
-/// surfaced rather than silently papered over by routing to the stale mirror.
+/// Tmux and poll owners require the watcher registry. Herdr prompts may use a dedupe
+/// candidate approved by the boot configuration because their watcher can be absent.
 fn owner_channel_for_tmux_session(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -772,8 +760,14 @@ fn owner_channel_for_tmux_session(
         .owner_channel_for_tmux_session(tmux_session_name);
     let dedupe_owner =
         crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(tmux_session_name);
-    let resolved =
-        resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner);
+    let resolved = match (emission_kind, registry_owner, dedupe_owner) {
+        (RelayEmissionKind::ObservedPrompt, None, Some(channel))
+            if crate::config::session_hosts::herdr_endpoint(channel).is_some() =>
+        {
+            Some(ChannelId::new(channel))
+        }
+        _ => resolve_owner_channel_authoritatively(tmux_session_name, registry_owner, dedupe_owner),
+    };
     if resolved.is_none() && registry_owner.is_none() && dedupe_owner.is_some() {
         let emission_count = matches!(emission_kind, RelayEmissionKind::ObservedPrompt) as u64;
         super::idle_relay_drift::on_idle_relay_drift(

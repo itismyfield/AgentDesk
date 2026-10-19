@@ -44,7 +44,7 @@ timeouts.onTick30s = function(ev) {
   agentdesk.log.debug("[tick30s] total " + (Date.now() - start) + "ms");
 };
 
-// 1min tier: [A] [C] [D] [E] (non-critical timeouts)
+// 1min tier: [A] [C] [E] [N] (non-critical timeouts)
 // [K] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick1min = function(ev) {
   var start = Date.now();
@@ -53,8 +53,6 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min][A] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_C(); } catch(e) { agentdesk.log.warn("[tick1min] C error: " + e); }
   agentdesk.log.debug("[tick1min][C] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_D(); } catch(e) { agentdesk.log.warn("[tick1min] D error: " + e); }
-  agentdesk.log.debug("[tick1min][D] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_E(); } catch(e) { agentdesk.log.warn("[tick1min] E error: " + e); }
   agentdesk.log.debug("[tick1min][E] " + (Date.now() - t) + "ms");
   t = Date.now(); try { timeouts._section_N(); } catch(e) { agentdesk.log.warn("[tick1min] N error: " + e); }

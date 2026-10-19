@@ -582,6 +582,7 @@ mod tests {
         };
 
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: key.provider.clone(),
             attached: true,
             tmux_session: key.tmux_session_name.clone(),
@@ -821,7 +822,6 @@ mod tests {
                 reason: VouchDenial::Stale
             }
         );
-
         let mut mismatch = inflight.clone();
         mismatch.user_msg_id += 1;
         assert_eq!(
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn publish_precedes_relay_dead_reattach_in_health_tick() {
-        let recovery = include_str!("recovery.rs");
+        let recovery = include_str!("recovery/watchdog_pass.rs");
         let publish = recovery
             .find("observe_and_publish_from_tick(")
             .expect("health tick must publish a liveness verdict");

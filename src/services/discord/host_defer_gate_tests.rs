@@ -231,10 +231,10 @@ async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
     db.drop().await;
 }
 
-// On a Herdr-configured channel only a retired row promotes; a live execution, the same row on
-// an unconfigured channel, or an unreadable row still holds the queue.
+// A Herdr-configured channel leaves every row, live or retired, named or not, to its turn host;
+// the same row on an unconfigured channel, or an unreadable one there, still holds the queue.
 #[tokio::test]
-async fn the_promote_gate_releases_only_a_retired_row_on_a_herdr_channel_pg() {
+async fn the_promote_gate_leaves_a_herdr_channel_to_its_turn_host_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
     use crate::db::dispatched_sessions::hosted_execution::tests::record;
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -244,23 +244,28 @@ async fn the_promote_gate_releases_only_a_retired_row_on_a_herdr_channel_pg() {
     let provider = ProviderKind::Claude;
     let gate = crate::services::discord::router::hosted_tui_promote_readiness_blocked;
     let channel_of = |n: u64| ChannelId::new(1_479_671_301_387_063_000 + n);
-    let configured: Vec<_> = (0..3).map(|n| (channel_of(n).get(), "mac-mini")).collect();
+    let configured: Vec<_> = (0..6).map(|n| (channel_of(n).get(), "mac-mini")).collect();
     let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
-    // (state, configured, held)
+    // (state, configured, channel session, held)
     let cases = [
-        (Some(HostedState::Retired), true, false),
-        (Some(HostedState::Bound), true, true),
-        (None, true, true),
-        (Some(HostedState::Retired), false, true),
+        (Some(HostedState::Retired), true, true, false),
+        (Some(HostedState::Bound), true, true, false),
+        (None, true, true, false),
+        (Some(HostedState::Retired), true, false, false),
+        (Some(HostedState::Bound), true, false, false),
+        (None, true, false, false),
+        (Some(HostedState::Retired), false, true, true),
     ];
-    for (n, (state, on_herdr, held)) in cases.into_iter().enumerate() {
+    for (n, (state, on_herdr, mapped, held)) in cases.into_iter().enumerate() {
         let channel = if on_herdr {
             channel_of(n as u64)
         } else {
             channel_of(10)
         };
         let channel_name = format!("p11-q-promote-{n}");
-        map_channel(&shared, channel, &channel_name).await;
+        if mapped {
+            map_channel(&shared, channel, &channel_name).await;
+        }
         let name = provider.build_tmux_session_name(&channel_name);
         let mut row_owner = owner(&channel.get().to_string());
         row_owner.discord_token_hash = shared.token_hash.clone();
@@ -282,12 +287,16 @@ async fn the_promote_gate_releases_only_a_retired_row_on_a_herdr_channel_pg() {
         assert_eq!(
             gate(&shared, &provider, channel).await,
             held,
-            "{state:?} configured={on_herdr}"
+            "{state:?} configured={on_herdr} mapped={mapped}"
         );
     }
     pool.close().await;
     assert!(
-        gate(&shared, &provider, channel_of(0)).await,
+        !gate(&shared, &provider, channel_of(1)).await,
+        "a Herdr channel reads no row here"
+    );
+    assert!(
+        gate(&shared, &provider, channel_of(10)).await,
         "an unreadable row never reads as retired"
     );
     db.drop().await;

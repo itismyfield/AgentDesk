@@ -102,7 +102,7 @@ pub(crate) async fn admit_queued_intake(
             turn_kind: super::super::TurnKind::Foreground,
             preserve_on_cancel: intervention.preserve_on_cancel(),
         },
-        origin: IntakeOrigin::QueuedDrain,
+        origin: IntakeOrigin::QueuedDrain(intervention.queued_route()),
         preserve_on_cancel: intervention.preserve_on_cancel(),
         has_nonportable_uploads: intervention
             .pending_uploads
@@ -112,7 +112,8 @@ pub(crate) async fn admit_queued_intake(
         preloaded_uploads: intervention.pending_uploads.clone(),
         voice_announcement: None,
     };
-    let local_permit = match admit_text_intake(deps, &submission).await {
+    let admission = admit_text_intake(deps, &submission).await;
+    let local_permit = match admission {
         IntakeAdmission::ConsumedToHold => {
             tracing::warn!(
                 provider = submission.provider.as_str(),
@@ -151,6 +152,7 @@ pub(crate) async fn admit_queued_intake(
             return QueuedAdmissionDisposition::RejectedNonPortableAttachment;
         }
         IntakeAdmission::DeferredOpenRoute { .. }
+        | IntakeAdmission::DeferredTurnMode(_)
         | IntakeAdmission::ReplayDeferred(_)
         | IntakeAdmission::Blocked { .. } => {
             let Some(dispatch_lease) = dispatch_lease else {

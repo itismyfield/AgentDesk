@@ -99,6 +99,8 @@ class Repo:
         self.id_exceptions: list[str] = []
         self.extra_ids: set[str] = set()
         self.removed: list[str] = []
+        self.pg_tests = ["pgmod::uses_pg_db"]
+        self.filter_tail = ""
 
     def write(self, root: Path) -> None:
         for rel in ("src", "scripts/ci", ".github/workflows"):
@@ -120,10 +122,13 @@ class Repo:
                 ids | self.extra_ids if self.manifest is None else self.manifest
             ), "utf-8"
         )
-        (root / coverage.PG_MANIFEST_REL).write_text("[tests]\npgmod::uses_pg_db\n", "utf-8")
+        (root / coverage.PG_MANIFEST_REL).write_text(
+            "[tests]\n" + "".join(f"{test}\n" for test in self.pg_tests), "utf-8"
+        )
         (root / coverage.NON_PG_FILTER_REL).write_text(
             FILTER_SKIPS + "NON_PG_FILTER_REPLAY=(\n"
-            + "".join(f"  {entry}\n" for entry in sorted(self.replay)) + ")\n", "utf-8"
+            + "".join(f"  {entry}\n" for entry in sorted(self.replay)) + ")\n"
+            + self.filter_tail, "utf-8"
         )
         (root / "justfile").write_text(
             "test-non-pg:\n" + "".join(f"    {line}\n" for line in self.just), "utf-8"
@@ -204,6 +209,15 @@ def findings(output: str, kind: str) -> list[str]:
     return [line for line in output.splitlines() if kind in line]
 
 
+def guarded_repo() -> Repo:
+    """`delta` is an existing id the justfile filters and one required job alone selects."""
+    repo = Repo()
+    repo.modules["delta"] = NAME_SKIPPED
+    repo.just.append("cargo test --lib delta")
+    repo.pr["delta_job"], repo.mirrors["delta_job"] = ["cargo test --lib delta"], None
+    return repo
+
+
 class RequiredPrParityTests(unittest.TestCase):
     def assert_clean(self, repo: Repo) -> None:
         result, output = repo.check()
@@ -245,6 +259,124 @@ class RequiredPrParityTests(unittest.TestCase):
         self.assertIn("OK: all_coverage", output)
         self.assertIn("required-pr-uncovered", output)
         self.assertIn("  + delta (e.g. delta::reads_pg_env)", output)
+
+    def test_skippable_step_or_conditional_mirror_is_no_required_run_for_an_existing_id(
+        self,
+    ) -> None:
+        repo = guarded_repo()
+        self.assert_clean(repo)
+        conditional = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        cases = {
+            "if: false": lambda r: r.step_keys.update(delta_job="        if: false\n"),
+            "continue-on-error: true": lambda r: r.step_keys.update(
+                delta_job="        continue-on-error: true\n"),
+            "job continue-on-error: true": lambda r: r.keys.update(
+                delta_job="    continue-on-error: true\n"),
+            "mirror if: false": lambda r: r.mirror_text.update(delta_job=conditional),
+            "mirror job continue-on-error: true": lambda r: r.mirror_text.update(
+                delta_job=mirror("delta_job").replace(
+                    "    runs-on:", "    continue-on-error: true\n    runs-on:")),
+        }
+        for case, change in cases.items():
+            with self.subTest(case=case):
+                result, output = guarded_repo().delta(change)
+                self.assertRegex(output, r"OK: new_required_test_ids: base=\w+ added=0 ")
+                self.assertIn("OK: all_coverage", output)
+                self.assertRegex(output, r"FAIL: required_pr_coverage: required-pr-uncovered: "
+                                         r".*\n  \+ delta \(e\.g\. delta::reads_pg_env\)\n")
+                missing = findings(output, "FAIL: pr_filter_parity: pr-parity-missing: ")
+                self.assertEqual(len(missing), 1, output)
+                self.assertIn("justfile:3: [test-non-pg] lib `delta`", missing[0])
+                self.assertIn("delta::reads_pg_env", missing[0])
+                unproven = findings(output, "pr-context-unproven")
+                self.assertEqual(len(unproven), case.startswith("mirror"), output)
+                if unproven:
+                    self.assertIn("FAIL: required_pr_coverage: pr-context-unproven: "
+                                  ".github/workflows/ci-pr.yml:delta_job_required_context: "
+                                  "every proven mirror of delta_job may skip or swallow",
+                                  unproven[0])
+                self.assertEqual(result, 1)
+
+    def test_running_step_and_unconditional_mirror_keep_required_evidence(self) -> None:
+        live = mirror("delta_job").replace("delta_job_required_context:", "delta_job_live:")
+        conditional = mirror("delta_job").replace(
+            "    runs-on:", "    if: ${{ github.event_name == 'push' }}\n    runs-on:")
+        cases = {
+            "if: true": lambda r: r.step_keys.update(delta_job="        if: true\n"),
+            "if: !cancelled()": lambda r: r.step_keys.update(
+                delta_job="        if: ${{ !cancelled() }}\n"),
+            "continue-on-error: false": lambda r: r.step_keys.update(
+                delta_job="        continue-on-error: false\n"),
+            "job continue-on-error: false": lambda r: r.keys.update(
+                delta_job="    continue-on-error: false\n"),
+            "mirror if: !cancelled()": lambda r: r.mirror_text.update(delta_job=mirror(
+                "delta_job").replace("    runs-on:", "    if: ${{ !cancelled() }}\n    runs-on:")),
+            "a live mirror beside a conditional one": lambda r: r.mirror_text.update(
+                delta_job=conditional + live),
+            # A job that selects no test loses nothing when only conditional mirrors report it.
+            "conditional mirror of a job without tests": lambda r: (
+                r.pr.update(compile=["echo compile"]),
+                r.mirrors.update(compile=None),
+                r.mirror_text.update(compile=mirror("compile").replace(
+                    "      - env:", "      - if: false\n        env:")),
+            ),
+        }
+        for case, change in cases.items():
+            with self.subTest(case=case):
+                repo = guarded_repo()
+                change(repo)
+                self.assert_clean(repo)
+
+    def test_run_body_guard_text_keeps_required_step_and_mirror_evidence(self) -> None:
+        for guard in ("if: false", "continue-on-error: true"):
+            for owner in ("test step", "mirror step"):
+                with self.subTest(guard=guard, owner=owner):
+                    repo = guarded_repo()
+                    commands = ["cat <<'YAML'", guard, "YAML"]
+                    if owner == "test step":
+                        repo.pr["delta_job"] = [*commands, "cargo test --lib delta"]
+                    else:
+                        body = "\n".join(f"          {line}" for line in [
+                            *commands, "./scripts/required-check-mirror.sh",
+                        ])
+                        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+                            "run: ./scripts/required-check-mirror.sh", f"run: |\n{body}")
+                    self.assert_clean(repo)
+
+    def test_conditional_mirror_of_listing_only_job_has_no_required_run_to_lose(self) -> None:
+        for mode in ("--list", "--ignored"):
+            with self.subTest(mode=mode):
+                repo = Repo()
+                repo.pr["listing"] = [f"cargo test --lib gamma -- {mode}"]
+                repo.mirrors["listing"] = None
+                repo.mirror_text["listing"] = mirror("listing").replace(
+                    "      - env:", "      - if: false\n        env:")
+                self.assert_clean(repo)
+
+    def test_conditional_mirror_still_reports_job_that_lists_and_runs_tests(self) -> None:
+        repo = guarded_repo()
+        repo.pr["delta_job"].insert(0, "cargo test --lib delta -- --list")
+        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        result, output = repo.check()
+        self.assertEqual(result, 1, output)
+        unproven = findings(output, "pr-context-unproven")
+        self.assertEqual(len(unproven), 1, output)
+        self.assertIn("every proven mirror of delta_job may skip or swallow", unproven[0])
+        self.assertIn("  + delta (e.g. delta::reads_pg_env)", output)
+        self.assertEqual(len(findings(output, "pr-parity-missing")), 1, output)
+
+    def test_unreadable_command_in_a_conditionally_mirrored_job_stays_unresolved(self) -> None:
+        repo = guarded_repo()
+        repo.pr["delta_job"].append('cargo test --lib "$FILTER"')
+        repo.mirror_text["delta_job"] = mirror("delta_job").replace(
+            "      - env:", "      - if: false\n        env:")
+        result, output = repo.check()
+        unresolved = findings(output, "source-command-unresolved")
+        self.assertEqual(len(unresolved), 1, output)
+        self.assertIn("cargo test --lib '$FILTER'", unresolved[0])
+        self.assertEqual(result, 1)
 
     def test_exception_for_a_removed_filter_is_stale(self) -> None:
         repo = Repo()
@@ -456,6 +588,51 @@ def add_required(repo: Repo, command: str = "cargo test --lib delta") -> None:
     repo.baselines = ([], [])
 
 
+SHARD_PLAN = (
+    "  pg_shards:\n    needs: changes\n    if: needs.changes.outputs.pg_db == 'true'\n"
+    "    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.plan.outputs.matrix }}\n"
+    "    steps:\n      - uses: actions/checkout@v4\n      - id: plan\n        shell: bash\n"
+    "        run: |\n"
+    "          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\n"
+    '          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"\n'
+)
+SHARD_KEYS = (
+    "    name: PostgreSQL tests (shard ${{ matrix.shard }})\n"
+    "    needs: [changes, pg_shards]\n    if: needs.changes.outputs.pg_db == 'true'\n"
+    "    strategy:\n      fail-fast: false\n"
+    "      matrix: ${{ fromJSON(needs.pg_shards.outputs.matrix) }}\n"
+    "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n"
+)
+
+
+def sharded_repo(name: str = "test_fast", keys: str = SHARD_KEYS) -> Repo:
+    """main's PG lane: one required job fans out over the pg_shards plan's matrix."""
+    pgm = coverage._parity_module()._sibling("check_pg_test_lane_membership.py")
+    repo = Repo()
+    repo.pr["targeted"].remove(PG_LANE)
+    repo.pr[name], repo.mirrors[name], repo.keys[name] = [PG_LANE], None, keys
+    repo.filters = {"pg_db": ["src/**"], "docs": ["docs/**"]}
+    # An empty shard would run `--exact` with no names, so give every shard a PG test.
+    covered = {pgm.pg_test_shard(f"pgmod::{name}") for name in repo.modules["pgmod"]}
+    for index in range(100):
+        name = f"uses_pg_fill_{index}"
+        if len(covered) < pgm.PG_SHARD_COUNT and pgm.pg_test_shard(f"pgmod::{name}") not in covered:
+            covered.add(pgm.pg_test_shard(f"pgmod::{name}"))
+            repo.modules["pgmod"] = (*repo.modules["pgmod"], name)
+            repo.pg_tests.append(f"pgmod::{name}")
+    repo.trailer = SHARD_PLAN
+    repo.filter_tail = "\n".join((pgm.NON_PG_SELECTION_END, *pgm.PG_INCLUDE_DERIVATION, ""))
+    # The shard contract reads the coverage parser from the checkout it judges.
+    rel = "scripts/check_test_lane_coverage.py"
+    repo.files[rel] = (REPO_ROOT / rel).read_text("utf-8")
+    return repo
+
+
+def add_pg_test(repo: Repo) -> None:
+    repo.modules["pgmod"] = (*repo.modules["pgmod"], "uses_pg_pool")
+    repo.pg_tests.append("pgmod::uses_pg_pool")
+
+
 class NewRequiredIdTests(unittest.TestCase):
     """Each lib id a change adds must run in a required PR job, judged against the
     committed reference the way the contracts shard runs the coverage CLI."""
@@ -609,7 +786,11 @@ class NewRequiredIdTests(unittest.TestCase):
                 result, output = debt_repo().delta(change)
                 context = new_findings(output, "new-id-context-unproven")
                 self.assertEqual(len(context), 1, output)
-                self.assertIn("every mirror reporting it runs under an `if:`", context[0])
+                self.assertIn("targeted's mirror targeted_required_context is unproven",
+                              context[0])
+                self.assertIn("pr-context-unproven: .github/workflows/ci-pr.yml:targeted_"
+                              "required_context: every proven mirror of targeted may skip",
+                              output)
                 self.assertNotIn("delta::reads_pg_env -> ", output)
                 self.assertEqual(result, 1)
 
@@ -659,6 +840,49 @@ class NewRequiredIdTests(unittest.TestCase):
         path = new_findings(output, "new-id-path-unproven")
         self.assertEqual(len(path), 1, output)
         self.assertIn("targeted: it needs the gated job docs_only", path[0])
+        self.assertEqual(result, 1)
+
+    def test_new_pg_id_maps_through_the_proven_pg_shard_matrix(self) -> None:
+        result, output = sharded_repo().delta(add_pg_test)
+        self.assertIn("added=1 mapped=1 excepted=0", output)
+        self.assertRegex(
+            output, r"  pgmod::uses_pg_pool -> test_fast \(\.github/workflows/ci-pr\.yml:\d+\) / "
+            r"mirror test_fast_required_context / .* / path src/lib\.rs",
+        )
+        self.assertEqual(result, 0, output)
+
+    def test_pg_shard_matrix_left_unproven_keeps_the_new_id_unmodeled(self) -> None:
+        def plan(old: str, new: str) -> Repo:
+            repo = sharded_repo()
+            repo.trailer = SHARD_PLAN.replace(old, new)
+            return repo
+
+        cases = {
+            "fail-fast": sharded_repo(keys=SHARD_KEYS.replace("false", "true")),
+            "matrix source": sharded_repo(keys=SHARD_KEYS.replace(
+                "needs.pg_shards.outputs.matrix", "vars.PG_MATRIX")),
+            "plan step": plan("$(python3 scripts/check_pg_test_lane_membership.py "
+                              "--pg-shard-matrix)", "'{\"shard\":[0]}'"),
+            "plan output": plan("steps.plan.outputs.matrix", "steps.other.outputs.matrix"),
+            "partition": sharded_repo(keys=SHARD_KEYS.replace("${{ matrix.shard }}\n", "'0'\n")),
+            "undeclared job": sharded_repo("pg_matrix", SHARD_KEYS.replace(
+                "    env:\n      PG_INCLUDE_SHARD: ${{ matrix.shard }}\n", "")),
+        }
+        for case, repo in cases.items():
+            with self.subTest(case=case):
+                result, output = repo.delta(add_pg_test)
+                runmode = new_findings(output, "new-id-runmode-unproven")
+                self.assertEqual(len(runmode), 1, output)
+                self.assertIn("a matrix job runs shards this gate does not model", runmode[0])
+                self.assertEqual(result, 1)
+
+    def test_pg_shard_job_whose_plan_wakes_on_other_paths_is_path_unproven(self) -> None:
+        repo = sharded_repo()
+        repo.trailer = SHARD_PLAN.replace("outputs.pg_db", "outputs.docs")
+        result, output = repo.delta(add_pg_test)
+        path = new_findings(output, "new-id-path-unproven")
+        self.assertEqual(len(path), 1, output)
+        self.assertIn("test_fast: it needs the gated job pg_shards", path[0])
         self.assertEqual(result, 1)
 
     def test_listing_or_ignored_only_commands_prove_no_run(self) -> None:

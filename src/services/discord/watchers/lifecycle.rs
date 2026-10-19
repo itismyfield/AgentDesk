@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 
 #[path = "lifecycle/activity.rs"]
 mod activity;
@@ -65,12 +64,10 @@ mod restore_support;
 pub(super) use self::restore_support::*;
 #[path = "lifecycle/tests.rs"]
 mod tests;
-pub(super) use self::tests::*;
 
 #[path = "lifecycle/ready_failure.rs"]
 mod ready_failure;
 pub(in crate::services::discord) use self::ready_failure::fail_dispatch_for_ready_for_input_stall;
-pub(super) use self::ready_failure::*;
 
 #[path = "lifecycle/recovery_markers.rs"]
 mod recovery_markers;
@@ -95,26 +92,23 @@ pub(in crate::services::discord) use self::claims::{
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
 };
 
-#[path = "lifecycle/o_only_install.rs"]
-mod o_only_install;
 #[cfg(test)]
-pub(in crate::services::discord) use o_only_install::tests::InstallFixture;
-#[cfg(test)]
-pub(in crate::services::discord) use o_only_install::tests::pause_host as n4d2_pause_install_after_host;
-pub use o_only_install::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
+pub(in crate::services::discord) use watcher_install_fixture::InstallFixture;
 
-#[path = "lifecycle/o_only_restore.rs"]
-mod o_only_restore;
-pub use o_only_restore::{RetiredOWatcherRestore, restore_retired_o_watchers};
+#[cfg(all(test, unix))]
+#[path = "lifecycle/restore_legacy_tests.rs"]
+mod restore_legacy_tests;
+
+#[cfg(all(test, unix))]
+#[path = "lifecycle/resume_companion_restore_tests.rs"]
+mod resume_companion_restore_tests;
 
 #[cfg(test)]
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;
 #[cfg(test)]
-#[path = "lifecycle/n4d2_entry_test.rs"]
-pub(in crate::services::discord) mod n4d2_entry_support;
+#[path = "lifecycle/watcher_install_fixture.rs"]
+pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]
 mod restore;
@@ -126,4 +120,3 @@ pub(in crate::services::discord) use self::restore_mapping::session_belongs_to_c
 
 #[path = "lifecycle/restore_tests.rs"]
 mod restore_tests;
-pub(super) use self::restore_tests::*;

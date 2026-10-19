@@ -11,10 +11,10 @@
 //! explicit-root seams keep `pub(super)` for the parent's test re-imports.
 
 mod abandon;
+#[cfg(unix)]
+mod herdr_row_end;
 mod identity;
-pub(in crate::services::discord) use identity::{
-    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
-};
+pub(in crate::services::discord) use identity::operator_disposition_remove_pinned;
 mod reconcile_gate;
 #[cfg(unix)]
 pub(in crate::services::discord) use identity::clear_admitted_restart_terminal;
@@ -51,6 +51,9 @@ pub(crate) fn clear_inflight_state(provider: &ProviderKind, channel_id: u64) -> 
         return false;
     };
     if receipt_protected_path(&path) && !receipt_mutant("clear") {
+        return false;
+    }
+    if handoff_before_discard_locked(&_lock).is_err() {
         return false;
     }
     log_inflight_remove_for_path(provider, channel_id, "clear_inflight_state", &path);
@@ -599,9 +602,8 @@ fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
         "clear_inflight_state_if_matches_identity_generation",
         &path,
     );
-    match fs::remove_file(&path) {
-        Ok(()) => GuardedClearOutcome::Cleared,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
+    match remove_row(&path) {
+        Ok(outcome) => outcome,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -613,6 +615,17 @@ fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
             );
             GuardedClearOutcome::IoError
         }
+    }
+}
+
+/// Removes a locked row's file; a peer's earlier removal is `Missing`.
+fn remove_row(path: &std::path::Path) -> std::io::Result<GuardedClearOutcome> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(GuardedClearOutcome::Cleared),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(GuardedClearOutcome::Missing)
+        }
+        Err(error) => Err(error),
     }
 }
 

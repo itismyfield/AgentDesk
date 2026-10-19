@@ -2,7 +2,7 @@ use super::{ActivationRows, activation_rows, fenced_activation_rows};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::intake_outbox::{FailedPreAcceptSweepOutcome, sweep_failed_pre_accept_once};
 use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_returning_id_with_ttl};
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 use std::time::Duration;
 
 async fn intake(pool: &PgPool, channel: &str, status: &str) -> Result<i64, sqlx::Error> {
@@ -275,24 +275,28 @@ async fn intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg(
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let role = format!("adk_fence_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOINHERIT"))
-        .execute(&pool)
-        .await?;
-    sqlx::query(&format!("GRANT USAGE ON SCHEMA public TO {role}"))
-        .execute(&pool)
-        .await?;
-    sqlx::query(&format!(
-        "GRANT SELECT, INSERT, UPDATE ON intake_outbox TO {role}"
-    ))
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE ROLE {role} NOLOGIN NOSUPERUSER NOINHERIT"
+    )))
     .execute(&pool)
     .await?;
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
+        "GRANT USAGE ON SCHEMA public TO {role}"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "GRANT SELECT, INSERT, UPDATE ON intake_outbox TO {role}"
+    )))
+    .execute(&pool)
+    .await?;
+    sqlx::query(AssertSqlSafe(format!(
         "GRANT SELECT ON sessions, message_outbox TO {role}"
-    ))
+    )))
     .execute(&pool)
     .await?;
     let app_pool = independent_pool(&pg_db).await;
-    sqlx::query(&format!("SET ROLE {role}"))
+    sqlx::query(AssertSqlSafe(format!("SET ROLE {role}")))
         .execute(&app_pool)
         .await?;
     let identity: (String, bool) = sqlx::query_as(
@@ -305,9 +309,9 @@ async fn intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg(
     assert_eq!(rows, ActivationRows::default());
     assert_eq!(queued, 0);
     hold.release().await?;
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "REVOKE INSERT, UPDATE ON intake_outbox FROM {role}"
-    ))
+    )))
     .execute(&pool)
     .await?;
     let result = fenced_activation_rows(&app_pool, "7", "gateway").await;
@@ -320,10 +324,10 @@ async fn intake_fence_uses_app_role_update_privilege_and_rejects_select_only_pg(
         }
     }
     app_pool.close().await;
-    sqlx::query(&format!("DROP OWNED BY {role}"))
+    sqlx::query(AssertSqlSafe(format!("DROP OWNED BY {role}")))
         .execute(&pool)
         .await?;
-    sqlx::query(&format!("DROP ROLE {role}"))
+    sqlx::query(AssertSqlSafe(format!("DROP ROLE {role}")))
         .execute(&pool)
         .await?;
     pool.close().await;

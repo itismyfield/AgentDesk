@@ -117,8 +117,7 @@ pub(super) fn bind_status_panel_in_root(
     guard: &StatusPanelBindGuard,
 ) -> StatusPanelBindOutcome {
     let path = inflight_state_path(root, provider, channel_id);
-    if crate::services::discord::input_runtime::fence::lookup(provider, channel_id).is_none()
-        && let Some(parent) = path.parent()
+    if let Some(parent) = path.parent()
         && fs::create_dir_all(parent).is_err()
     {
         return StatusPanelBindOutcome::IoError;
@@ -261,6 +260,56 @@ pub(super) fn clear_status_panel_if_current_in_root(
     .is_ok()
 }
 
+/// Clears `status_message_id` only while the row still names `msg_id` for the same
+/// turn identity and panel generation, so a late releaser cannot unbind a re-adoption.
+#[cfg(test)]
+pub(in crate::services::discord) fn clear_status_panel_if_owned_generation(
+    provider: &ProviderKind,
+    channel_id: u64,
+    msg_id: u64,
+    identity: &InflightTurnIdentity,
+    generation: u64,
+) -> bool {
+    let Some(root) = inflight_runtime_root() else {
+        return false;
+    };
+    clear_status_panel_if_owned_generation_in_root(
+        &root, provider, channel_id, msg_id, identity, generation,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn clear_status_panel_if_owned_generation_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    msg_id: u64,
+    identity: &InflightTurnIdentity,
+    generation: u64,
+) -> bool {
+    let path = inflight_state_path(root, provider, channel_id);
+    let Ok(_lock) = lock_inflight_state_path(&path) else {
+        return false;
+    };
+    let Some(mut state) = load_inflight_state_unlocked(&path) else {
+        return false;
+    };
+    if state.status_message_id != Some(msg_id)
+        || !identity.matches_state(&state)
+        || state.status_panel_generation != generation
+    {
+        return false;
+    }
+    state.status_message_id = None;
+    persist_under_lock(
+        root,
+        &path,
+        &state,
+        "src/services/discord/inflight.rs:clear_status_panel_if_owned_generation_in_root",
+    )
+    .is_ok()
+}
+
 /// #3351: compare-and-clear for the persisted relay-placeholder id, mirroring
 /// `clear_status_panel_if_current` (#3077): exact `msg_id` only, placeholderless
 /// turns (`current_msg_id == user_msg_id`) untouched, optional tmux-session guard.
@@ -326,5 +375,110 @@ fn status_panel_id_is_real(id: Option<u64>) -> bool {
     match id {
         Some(value) => !super::super::is_synthetic_headless_message_id_raw(value),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::clear_status_panel_if_owned_generation_in_root as clear_if_owned;
+    use crate::services::discord::inflight::{
+        InflightTurnIdentity, InflightTurnState, load_inflight_states_from_root,
+        save_inflight_state_in_root,
+    };
+    use crate::services::provider::ProviderKind;
+
+    const CHANNEL: u64 = 5_708_301;
+    const PANEL: u64 = 5_555;
+
+    fn turn(user_msg_id: u64, generation: u64) -> InflightTurnState {
+        let mut state: InflightTurnState = serde_json::from_value(serde_json::json!({
+            "version": 9,
+            "provider": "claude",
+            "channel_id": CHANNEL,
+            "channel_name": "adk-claude",
+            "request_owner_user_id": user_msg_id,
+            "user_msg_id": user_msg_id,
+            "current_msg_id": user_msg_id + 1,
+            "current_msg_len": 0,
+            "user_text": "hello",
+            "source": "text",
+            "session_id": "session-1",
+            "tmux_session_name": "AgentDesk-claude-a",
+            "output_path": "/tmp/out.jsonl",
+            "input_fifo_path": "/tmp/in.fifo",
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00"
+        }))
+        .expect("inflight fixture");
+        state.status_message_id = Some(PANEL);
+        state.status_panel_generation = generation;
+        state.turn_start_offset = Some(user_msg_id * 10);
+        state
+    }
+
+    fn row(root: &Path) -> InflightTurnState {
+        load_inflight_states_from_root(root, &ProviderKind::Claude)
+            .into_iter()
+            .find(|state| state.channel_id == CHANNEL)
+            .expect("inflight row")
+    }
+
+    #[test]
+    fn owned_generation_clear_refuses_a_readopted_or_replaced_binding() {
+        let temp = tempfile::tempdir().expect("inflight root");
+        let root = temp.path();
+        let provider = ProviderKind::Claude;
+        let releaser = turn(10, 4);
+        let identity = InflightTurnIdentity::from_state(&releaser);
+
+        // The same turn re-adopted the same panel under a newer generation.
+        save_inflight_state_in_root(root, &turn(10, 5)).expect("re-adopted row");
+        assert!(!clear_if_owned(
+            root, &provider, CHANNEL, PANEL, &identity, 4
+        ));
+        assert_eq!(row(root).status_message_id, Some(PANEL));
+
+        // A different turn owns the same panel id and generation.
+        let successor = turn(11, 5);
+        save_inflight_state_in_root(root, &successor).expect("successor row");
+        assert!(!clear_if_owned(
+            root, &provider, CHANNEL, PANEL, &identity, 5
+        ));
+        assert_eq!(row(root).status_message_id, Some(PANEL));
+
+        let owner = InflightTurnIdentity::from_state(&successor);
+        assert!(!clear_if_owned(
+            root,
+            &provider,
+            CHANNEL,
+            PANEL + 1,
+            &owner,
+            5
+        ));
+        assert!(!clear_if_owned(
+            root,
+            &provider,
+            CHANNEL + 1,
+            PANEL,
+            &owner,
+            5
+        ));
+        assert!(clear_if_owned(root, &provider, CHANNEL, PANEL, &owner, 5));
+        let released = row(root);
+        assert_eq!(released.status_message_id, None);
+        assert_eq!(
+            (
+                released.user_msg_id,
+                released.current_msg_id,
+                released.status_panel_generation,
+            ),
+            (11, 12, 5),
+            "only the panel pointer is released"
+        );
     }
 }

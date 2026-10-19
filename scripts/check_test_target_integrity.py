@@ -15,9 +15,8 @@ empty is flagged; module declarations only say where a missed filter points.
 Other crates, `--doc`, and emptiness that the lib's doctests or unknown
 `#[ignore]` marks could change are reported as unjudged. A name sweep over a
 target class whose matches are live tests in unselected targets is reported,
-not failed. Default mode remains
-diagnostic (rc=0); CI uses `--enforce`, and opt-in `--run-list-check` runs
-`cargo test ... -- --list` (compiles) to flag lanes selecting 0 tests.
+not failed. Default diagnostics return rc=0; CI uses `--enforce`.
+`--run-list-check` compiles with `cargo test ... -- --list` to flag zero tests.
 Legitimately-empty lanes (platform `#[cfg]`) are excused via
 scripts/test_target_integrity_allowlist.txt (normalized command per line).
 
@@ -131,7 +130,6 @@ LIB_INVENTORY_STATIC_ONLY_BASE = frozenset({
     "cli::discord_thread_create::tests::windows_lock_uses_global_current_sid_named_mutex",
     "cli::discord_thread_create_lock::windows::tests::wait_status_accepts_normal_and_abandoned_but_reports_errors",
     "services::discord::outbound::delivery_record::tests::non_unix_generation_is_absent_so_durable_frontier_is_neither_written_nor_trusted",
-    "services::discord::placeholder_sweeper::abandon_guard::tests::claude_e_process_cleanup_is_fail_closed_without_unix_probe",
     "services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing",
 })
 LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
@@ -938,6 +936,9 @@ def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
     while index < len(words):
         while index < len(words) and SHELL_ASSIGNMENT.fullmatch(words[index]):
             index += 1
+        if words[index:index + 3] == ["run_prepared_lib_test", "cargo", "test"]:
+            index += 1
+            continue
         if words[index:index + 2] == ["cargo", "test"]:
             # A second command on the line would ride along as cargo argv, unjudged.
             if any(SHELL_CONTROL.search(word) for word in syntax[index:]):
@@ -970,6 +971,9 @@ def _direct_cargo_test(words: list[str], syntax: list[str]) -> list[str] | None:
                     words[index].startswith("--adjustment=")
                     or NICE_LEGACY_ADJUSTMENT.fullmatch(words[index])):
                 index += 1
+            continue
+        if words[index:index + 4] == ["python3", "scripts/ci/lib-test-artifact.py", "run", "--"]:
+            index += 4
             continue
         if words[index:index + 2] in (
                 ["python", "scripts/ci-timeout.py"],
@@ -1868,9 +1872,7 @@ def expected_lib_static_only(platform_name: str) -> frozenset[str] | None:
         LIB_INVENTORY_STATIC_ONLY_BASE | platform_only
 
 
-LIB_INVENTORY_BUILD_ENV = {"CARGO_PROFILE_DEV_DEBUG": "0",
-                           "CARGO_PROFILE_TEST_DEBUG": "0"}
-
+LIB_INVENTORY_BUILD_ENV = {"CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0"}
 
 def compare_lib_inventory(repo_root: Path, runner=None) -> InventoryComparison:
     """Compare static full lib test IDs with compiled libtest `--list` IDs."""
@@ -1881,13 +1883,12 @@ def compare_lib_inventory(repo_root: Path, runner=None) -> InventoryComparison:
     runner = runner or subprocess.run
     argv = ["cargo", "test", "--manifest-path", str(repo_root / "Cargo.toml"),
             "--lib", "--", "--list"]
-    # #6184: this build only prints test names, which debuginfo never changes.
-    # Hosted 16 GB runners killed the full-debuginfo build (rc 143) while the
-    # same lib-test unit built debuginfo-free (#4245 lanes) was never killed.
     env = {**os.environ, **LIB_INVENTORY_BUILD_ENV}
+    shared = (_membership("ci/lib-test-artifact.py").validated_inventory(repo_root)
+              if os.environ.get("ADK_LIB_TEST_ARTIFACT") else None)
     try:
-        proc = runner(argv, cwd=repo_root, capture_output=True, text=True,
-                      env=env)
+        proc = (subprocess.CompletedProcess(argv, 0, shared, "") if shared is not None
+                else runner(argv, cwd=repo_root, capture_output=True, text=True, env=env))
     except OSError as error:
         return InventoryComparison(frozenset(), frozenset(), static_ids,
                                    frozenset(), module_errors,
@@ -2011,11 +2012,9 @@ def evidence_verification_errors(rendered: str) -> list[str]:
 
 
 @cache
-def _membership():
-    """The PG lane checker, owner of the shared source/use contract; loaded on use
-    so importers that copy this file alone keep working."""
-    path = Path(__file__).with_name("check_pg_test_lane_membership.py")
-    spec = importlib.util.spec_from_file_location("pg_lane_membership_contract", path)
+def _membership(filename="check_pg_test_lane_membership.py"):
+    path = Path(__file__).parent / filename
+    spec = importlib.util.spec_from_file_location(Path(filename).stem.replace("-", "_"), path)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot import the source/use contract: {path}")
     module = importlib.util.module_from_spec(spec)
@@ -2078,7 +2077,7 @@ def pg_include_findings(words: list[str], spec: CommandSpec, shards: tuple[str, 
             f"no provable derived selection: {selections}"))]
     if shards is None:
         return [("pg-include-shard-unresolved", (
-            "this workflow names PG_INCLUDE_SHARD, so it cannot be proved unset, 0 or 1 "
+            "this workflow names PG_INCLUDE_SHARD, so it cannot be proved unset or a valid shard "
             "at the canonical source point"))]
     at = words.index(PG_INCLUDE_TOKEN)
     findings: list[tuple[str, str]] = []

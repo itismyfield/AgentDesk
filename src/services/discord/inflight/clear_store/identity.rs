@@ -1,14 +1,9 @@
 use super::*;
-use crate::services::discord::input_runtime::fence::Failure;
-use crate::services::turn_orchestrator::policy_close::{
-    PolicyAuthority, PolicyClear, PolicyReceipt,
-};
+use crate::services::turn_orchestrator::policy_close::{PolicyClear, PolicyReceipt};
 
 #[path = "operator_disposition.rs"]
 mod operator_disposition;
-pub(in crate::services::discord) use operator_disposition::{
-    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
-};
+pub(in crate::services::discord) use operator_disposition::operator_disposition_remove_pinned;
 
 pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_in_root(
     root: &std::path::Path,
@@ -383,11 +378,16 @@ impl InflightTurnState {
         provider: &ProviderKind,
         clearable: impl FnOnce(&InflightTurnState) -> bool,
     ) -> GuardedClearOutcome {
-        let Some(fresh) = fs::read_to_string(path)
-            .ok()
-            .and_then(|data| serde_json::from_str::<InflightTurnState>(&data).ok())
-        else {
-            return GuardedClearOutcome::Missing;
+        // Only a row that is not there is Missing; one that cannot be read or parsed stays held.
+        let data = match fs::read_to_string(path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return GuardedClearOutcome::Missing;
+            }
+            Err(_) => return GuardedClearOutcome::IoError,
+        };
+        let Ok(fresh) = serde_json::from_str::<InflightTurnState>(&data) else {
+            return GuardedClearOutcome::IoError;
         };
         if !clearable(&fresh) {
             return GuardedClearOutcome::UserMsgMismatch;
@@ -421,37 +421,23 @@ impl PolicyReceipt for AckedPolicyReceipt {
         self.acked.channel_id
     }
 
-    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue. A
-    /// protected step clears under its own held scope, which must name exactly this row.
-    fn try_clear(&self, authority: &PolicyAuthority<'_>) -> PolicyClear {
+    /// Never waits on the row lock: the mailbox step calling it must keep serving its queue.
+    fn try_clear(&self) -> PolicyClear {
         let acked = &self.acked;
         let (Some(root), Some(provider)) = (inflight_runtime_root(), acked.provider_kind()) else {
-            return PolicyClear::Missing;
+            return PolicyClear::Io;
         };
         let path = inflight_state_path(&root, &provider, acked.channel_id);
-        let clear = || {
-            acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
-                crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
-                    && acked.before_start_policy_receipt_clearable(fresh, self.generation)
-            })
+        use super::super::store::{TryLockRefusal, try_lock_inflight_state_path_typed};
+        let _lock = match try_lock_inflight_state_path_typed(&path) {
+            Ok(lock) => lock,
+            Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
+            Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
         };
-        let outcome = if authority.is_protected() {
-            let Some(population) = root.parent() else {
-                return PolicyClear::InputFence(Failure::Persistence);
-            };
-            match authority.borrowed(population, &provider, acked.channel_id, || Ok(clear())) {
-                Ok(outcome) => outcome,
-                Err(_) => return PolicyClear::InputFence(Failure::StalePermit),
-            }
-        } else {
-            use super::super::store::{TryLockRefusal, try_lock_unfenced_inflight_state_path};
-            match try_lock_unfenced_inflight_state_path(&path) {
-                Ok(_lock) => clear(),
-                Err(TryLockRefusal::Contended) => return PolicyClear::LockBusy,
-                Err(TryLockRefusal::Fenced) => return PolicyClear::InputFence(Failure::Busy),
-                Err(TryLockRefusal::Failed(_)) => return PolicyClear::Io,
-            }
-        };
+        let outcome = acked.clear_before_start_receipt_locked(&path, &provider, |fresh| {
+            crate::services::provider::cancel_token_claude_interrupt::herdr_stop_settlement_available()
+                && acked.before_start_policy_receipt_clearable(fresh, self.generation)
+        });
         match outcome {
             GuardedClearOutcome::Cleared => PolicyClear::Cleared,
             GuardedClearOutcome::Missing => PolicyClear::Missing,

@@ -32,11 +32,6 @@ validate_pr_debug_envs() {
     return
   fi
 
-  # Parse the workflow as YAML instead of slicing it as text. That keeps
-  # quoted job IDs, flow mappings, escaped keys, and sibling job mappings from
-  # satisfying a different job's requirement. The execution contract below
-  # resolves the shell/env precedence chain for each protected Script checks
-  # step before comparing the complete calculated surface.
   if ! ruby - "$pr_workflow" "$REQUIRED_CHECK_MIRROR_SHA256" <<'RUBY'
 require "yaml"
 require "json"
@@ -71,9 +66,6 @@ def normalize_required_check_pin(value)
   end
 end
 
-# Preserve scalar lexemes exactly as GitHub's YAML 1.2-facing workflow surface
-# sees them. Psych's YAML 1.1 resolver turns `yes` into true and `012` into 10;
-# comparing those resolved Ruby values would accept a different Actions value.
 def raw_yaml_node(node)
   case node
   when Psych::Nodes::Mapping
@@ -92,8 +84,6 @@ def raw_yaml_node(node)
   end
 end
 
-# Pin a top-level job's exact source bytes so scalar tags and styles remain part
-# of the contract instead of disappearing during Psych value resolution.
 def raw_job_source(path, key_node)
   lines = File.binread(path).lines
   start_line = key_node.start_line
@@ -315,12 +305,6 @@ unless trigger_events == ["pull_request"]
   exit 1
 end
 
-# The Script checks execution job is intentionally high-churn: concurrent lanes
-# regularly add gates to its step inventory. Protect only the job and aggregate
-# step fields that can silently disable execution, rather than whole-job hashing
-# that would force unrelated hash re-pins for every new check. Its required
-# branch-protection context is published by the separate result mirror below.
-# Each job runs one ci-script-checks.sh shard; only `scripts` provisions cargo.
 script_check_shard_jobs = {
   "scripts" => "cargo",
   "scripts_guards" => "guards",
@@ -331,8 +315,8 @@ unless script_checks_job.is_a?(Hash)
   warn "#{path}: Script checks runner job (scripts) must be a YAML mapping"
   exit 1
 end
-if script_checks_job.key?("if")
-  warn "#{path}: Script checks runner job must not define a job-level if condition"
+unless script_checks_job["if"] == "${{ !cancelled() }}"
+  warn "#{path}: Script checks runner job must use !cancelled() for producer-failure fallback"
   exit 1
 end
 if script_checks_job["continue-on-error"]
@@ -340,8 +324,8 @@ if script_checks_job["continue-on-error"]
   exit 1
 end
 script_checks_needs = script_checks_job["needs"]
-unless script_checks_needs == "changes" || script_checks_needs == ["changes"]
-  warn "#{path}: Script checks runner job must retain exact needs: changes"
+unless script_checks_needs == %w[changes lib_test_prepare]
+  warn "#{path}: Script checks runner job must retain exact needs: [changes, lib_test_prepare]"
   exit 1
 end
 
@@ -351,10 +335,9 @@ unless changes_job.is_a?(Hash)
   exit 1
 end
 
-# Publishers must always mirror failures; execution jobs must run unconditionally.
-# Pin the complete needs closure and forbid failure-masking job keys.
 expected_unconditional_closure = %w[
   changes
+  lib_test_prepare
   relay-authority-contract
   relay_authority_targets
   relay_authority_mutations
@@ -376,6 +359,11 @@ until frontier.empty?
     exit 1
   end
   case job_id
+  when "scripts", "relay_authority_targets"
+    unless job["if"] == "${{ !cancelled() }}"
+      warn "#{path}: required consumer #{job_id} must use !cancelled() for producer-failure fallback"
+      exit 1
+    end
   when "scripts_required_context"
     unless job.key?("if") && job["if"] == "${{ !cancelled() }}"
       warn "#{path}: Script checks publisher must carry `if: ${{ !cancelled() }}` so upstream failure still runs the fail-closed mirror"
@@ -420,7 +408,6 @@ unless unconditional_closure.sort == expected_unconditional_closure
   exit 1
 end
 
-# The independent backstop must never inherit the path-filter job's status.
 relay_closure = []
 frontier = ["relay-authority-contract"]
 until frontier.empty?
@@ -435,11 +422,6 @@ if relay_closure.include?("changes")
   exit 1
 end
 
-# The required Script checks context is an unconditional result mirror. It
-# reads `changes` and every shard result and delegates the fail-closed
-# skipped/failure policy to required-check-mirror.sh. The mirror is a single fixed node, so its
-# complete job and step surface is pinned below; no alternate execution surface
-# is permitted to hide behind the result policy.
 script_checks_context_job = jobs["scripts_required_context"]
 unless script_checks_context_job.is_a?(Hash)
   warn "#{path}: Script checks required-context mirror job must be a YAML mapping"
@@ -575,14 +557,6 @@ unless script_check_commands == ["./scripts/ci-script-checks.sh"]
 end
 
 # #5308: the external step runs the writer-wiring checker, its unittest, and
-# this hardening guard. The checker pins the aggregate's hardening and fast
-# wiring-unittest invocations; the aggregate hardening invocation validates the
-# external step shape, and the aggregate fast wiring unittest exercises that
-# validation. Removing only the external step or only either aggregate observer
-# therefore leaves another observer statically invoked. This static invocation
-# chain ends when one diff removes the external step together with both
-# aggregate observer invocations; branch-protection configuration is not part
-# of this contract.
 writer_wiring_steps = Array(script_checks_job["steps"]).select do |step|
   step.is_a?(Hash) && step["name"] == "Protect writer gate aggregate wiring (#5308)"
 end
@@ -614,9 +588,6 @@ unless writer_wiring_commands == expected_writer_wiring_commands
   exit 1
 end
 
-# This is one calculated contract, not one assertion per environment key. The
-# expected workflow environment is copied from the parsed CI PR workflow so a
-# mutation at any contributing scope changes the observed execution surface.
 expected_workflow_env = {
   "CARGO_TERM_COLOR" => "always",
   "RUSTC_WRAPPER" => "sccache",
@@ -634,7 +605,7 @@ script_check_execution = effective_execution(
 expected_script_check_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [9, 10],
+    "protected_indices" => [11, 12],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -663,6 +634,9 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
+    "CARGO_PROFILE_DEV_DEBUG" => "0",
+    "CARGO_PROFILE_TEST_DEBUG" => "0",
   },
   "runtime_env_writes" => [],
   "runtime_path_writes" => [],
@@ -677,10 +651,13 @@ expected_script_check_execution = {
     "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
     "SCRIPT_CHECK_SHARD" => "cargo",
+    "ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact",
+    "CARGO_PROFILE_DEV_DEBUG" => "0",
+    "CARGO_PROFILE_TEST_DEBUG" => "0",
   ),
 }
 unless script_check_execution["protected_step_inventory"] == expected_script_check_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(script_check_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(script_check_execution, expected_script_check_execution)
@@ -701,17 +678,15 @@ unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if"
   exit 1
 end
 
-# Other shards run the same aggregate without the writer-gate pair, so each pins its whole
-# raw job (checkout provenance, pre-aggregate steps, action refs, timeout).
 script_check_shard_jobs.each do |job_id, shard|
   next if job_id == "scripts"
 
-  expected_shard_step_env = expected_script_check_execution["step_env"].merge("SCRIPT_CHECK_SHARD" => shard)
+  expected_shard_step_env = expected_script_check_execution["step_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge("SCRIPT_CHECK_SHARD" => shard)
   expected_raw_shard_job = {
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
     "runs-on" => "ubuntu-latest",
-    "timeout-minutes" => "30",
+    "timeout-minutes" => "45",
     "steps" => [
       {"uses" => "actions/checkout@v4", "with" => {"fetch-depth" => "0"}},
       {"name" => "Setup Python for script checks", "uses" => "actions/setup-python@v5", "with" => {"python-version" => "3.11"}},
@@ -721,7 +696,7 @@ script_check_shard_jobs.each do |job_id, shard|
     ],
   }
   unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
-    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 30, no permissions/env/defaults/if/continue-on-error)"
+    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, no permissions/env/defaults/if/continue-on-error)"
     exit 1
   end
   shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)
@@ -729,7 +704,7 @@ script_check_shard_jobs.each do |job_id, shard|
   expected_shard_execution = expected_script_check_execution.reject { |key, _| key == "protected_step_inventory" }
   expected_shard_execution = expected_shard_execution.merge(
     "step_env" => expected_shard_step_env,
-    "effective_env" => expected_shard_execution["effective_env"].merge("SCRIPT_CHECK_SHARD" => shard),
+    "effective_env" => expected_shard_execution["effective_env"].reject { |key, _| %w[ADK_LIB_TEST_ARTIFACT CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].include?(key) }.merge("SCRIPT_CHECK_SHARD" => shard),
   )
   unless canonical_yaml(shard_execution) == canonical_yaml(expected_shard_execution)
     expected = JSON.generate(canonical_yaml(expected_shard_execution))
@@ -748,7 +723,7 @@ writer_wiring_execution = effective_execution(
 expected_writer_wiring_execution = {
   "runs-on" => "ubuntu-latest",
   "protected_step_inventory" => {
-    "protected_indices" => [9, 10],
+    "protected_indices" => [11, 12],
     "steps_between_protected" => [],
   },
   "shell_candidates" => {
@@ -772,7 +747,7 @@ expected_writer_wiring_execution = {
   "effective_env" => expected_workflow_env,
 }
 unless writer_wiring_execution["protected_step_inventory"] == expected_writer_wiring_execution["protected_step_inventory"]
-  warn "#{path}: Script checks protected step inventory changed; expected indices [9, 10] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
+  warn "#{path}: Script checks protected step inventory changed; expected indices [11, 12] with no interstitial steps, found #{JSON.generate(writer_wiring_execution["protected_step_inventory"])}"
   exit 1
 end
 unless execution_contract(writer_wiring_execution, expected_writer_wiring_execution)
@@ -782,10 +757,6 @@ unless execution_contract(writer_wiring_execution, expected_writer_wiring_execut
   exit 1
 end
 
-# The aggregate job is intentionally excluded from the high-churn cargo-job
-# `targets` hash below, but its inventory verifier has a hard prerequisite:
-# cargo must be available before ci-script-checks.sh starts. Pin the setup shape
-# here so removing the toolchain/cache silently cannot recreate D2.
 script_steps = Array(script_checks_job["steps"])
 setup_specs = {
   "Install Rust toolchain for lib inventory" => {
@@ -827,27 +798,42 @@ setup_specs.each do |name, spec|
   end
 end
 
+# Same-run sharing is optional, but the producer and original execution surfaces are mandatory.
+artifact_env = {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"}
+producer = jobs["lib_test_prepare"]
+expected_upload = {"name" => "Upload shared lib tests", "uses" => "actions/upload-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-artifact.tar.gz", "if-no-files-found" => "error", "retention-days" => 1}}
+expected_prepare = {"name" => "Prepare and verify lib tests", "timeout-minutes" => 45, "shell" => "bash", "env" => artifact_env.merge("BASH_ENV" => "/dev/null"), "run" => "python3 scripts/ci/lib-test-artifact.py prepare --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/ci/lib-test-artifact.py validate --directory \"$ADK_LIB_TEST_ARTIFACT\"\npython3 scripts/check_test_target_integrity.py --verify-lib-inventory\ntar -C \"$ADK_LIB_TEST_ARTIFACT\" -czf \"$RUNNER_TEMP/lib-test-artifact.tar.gz\" .\n"}
+unless producer.is_a?(Hash) && producer["runs-on"] == "ubuntu-latest" && producer["timeout-minutes"] == 60 && producer["env"] == {"CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"} && %w[if needs continue-on-error].none? { |key| producer.key?(key) } && Array(producer["steps"]).first == {"uses" => "actions/checkout@v4"} && Array(producer["steps"]).count { |step| step["uses"] == "dtolnay/rust-toolchain@master" && step["with"] == {"toolchain" => "1.94.1"} && !step.key?("if") && !step.key?("continue-on-error") } == 1 && Array(producer["steps"]).count(expected_prepare) == 1 && Array(producer["steps"]).count(expected_upload) == 1
+  warn "#{path}: lib_test_prepare must retain its independent build, inventory verification and upload contract"
+  exit 1
+end
+consumers = %w[test_fast pg15_owner_proof high-risk-recovery library_sweep scripts relay_authority_targets]
+expected_download = {"name" => "Download shared lib tests", "continue-on-error" => true, "uses" => "actions/download-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-download"}}
+expected_restore = {"name" => "Restore shared lib tests", "continue-on-error" => true, "shell" => "bash", "run" => "mkdir -p \"$RUNNER_TEMP/lib-test-artifact\"\nif [ -f \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\" ]; then\n  tar -C \"$RUNNER_TEMP/lib-test-artifact\" -xzf \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\"\nfi\n"}
+consumers.each do |job_id|
+  job = jobs[job_id]
+  unless job.is_a?(Hash) && Array(job["needs"]).include?("lib_test_prepare") && job["if"].to_s.start_with?("${{ !cancelled()") && Array(job["steps"]).select { |step| step.is_a?(Hash) && [expected_download["name"], expected_restore["name"]].include?(step["name"]) } == [expected_download, expected_restore]
+    warn "#{path}: #{job_id} must retain same-run download and producer-failure fallback wiring"
+    exit 1
+  end
+end
+jobs.each do |job_id, job|
+  Array(job["steps"]).each do |step|
+    next unless step.is_a?(Hash) && step["uses"].to_s.start_with?("actions/upload-artifact")
+    unless job_id == "scripts" || (job_id == "lib_test_prepare" && step == expected_upload) || (job_id == "lint" && step["name"] == "Upload Clippy observation")
+      warn "#{path}: artifact uploads must stay in approved jobs"
+      exit 1
+    end
+  end
+end
+
 targets = {
-  # The independent explicit step-inventory layer was removed. What remains
-  # splits into two mechanisms of very different strength, and conflating them
-  # has produced a wrong claim in this comment five rounds running.
-  #
-  #   1. The whole-job semantic hash only *detects* structural change. Re-pinning
-  #      it in the same diff accepts anything. Measured on test_fast: adding an
-  #      unregistered step, deleting "Start PostgreSQL service", and swapping two
-  #      cache steps each fail against the stale pin (rc=1) and pass after a
-  #      re-pin (rc=0), with no expected-step edit needed. Treat the hash as a
-  #      review trigger, not a guarantee.
-  #   2. The hash is compared in exactly one place. Every other assertion in
-  #      this file is independent of it and survives a re-pin.
-  #
-  # This comment does not enumerate what mechanism 2 covers. Five rounds of
-  # trying produced an incomplete or wrong list every time. To find out whether
-  # a specific tamper is caught, apply it, re-pin the hash, and run this
-  # script -- that answer does not go stale.
-  #
-  # This registry does not discover new jobs automatically, and there is no
-  # invocation-floor replacement in the selection-evidence verifier.
+  "lib_test_prepare" => {
+    "label" => "shared lib producer", "name" => "Prepare shared lib tests",
+    "needs" => nil, "if" => nil, "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 60, "job_sha256" => "fba9e04978f13ca39f05b3efdc90871f82ac3d2d3cc49c02af2a36aee84eb07d",
+    "cargo_steps" => {"Prepare and verify lib tests" => {"commands" => expected_prepare["run"].lines.map(&:strip), "timeout_minutes" => 45, "env" => expected_prepare["env"]}},
+  },
   "check_fast_cross_os" => {
     "label" => "cross-OS job",
     "name" => 'Fast check + non-PG tests (${{ matrix.os }})',
@@ -868,18 +854,15 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    # The bounded Windows owner runner; broad runtime remains nightly.
-    # Re-pinned after raising the writer-namespace step budget from 30 to 45 minutes.
-    "job_sha256" => "315ad84a0f81d05183968a40b1be5b0c8d739be1fa111a47b0a2eb50798c3c34",
+    "job_sha256" => "e2c2439d9eeeaf058608a9fbd26a44f5ce4d966a4c91e92123cbb1be2ba58cca",
     "cargo_steps" => {
       "Writer namespace exact Windows targets" => {
         "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
-        "timeout_minutes" => 45,
+        "timeout_minutes" => 60,
         "if_condition" => "runner.os == 'Windows'",
       },
     },
   },
-  # Publishes the required cross-OS context from both runner results.
   "check_fast_cross_os_required_context" => {
     "label" => "cross-OS required-context mirror",
     "name" => "Fast check cross OS required context (ubuntu-latest)",
@@ -909,112 +892,80 @@ targets = {
   "test_fast" => {
     "label" => "PostgreSQL job",
     "name" => "PostgreSQL tests (shard ${{ matrix.shard }})",
-    "needs" => ["changes", "pg_shards"],
-    "if" => "needs.changes.outputs.pg_db == 'true'",
+    "needs" => ["changes", "pg_shards", "lib_test_prepare"],
+    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    # #4979 S2 re-pins after adding the AGENTDESK_REQUIRE_PG=1 job env so a PG
-    # connection failure in this PG-backed lane hard-fails instead of
-    # soft-skipping green; the command inventory itself is unchanged.
-    # Re-pinned after dropping the telemetry-only intake step: NON_PG skipped all
-    # five of its IDs, which the library sweep's replay runs instead.
-    # #5025 and #4985 retain their production bridge and footer-marker coverage
-    # in the same job block, so the pin covers the merged command inventory.
-    # #5230 re-pins after replacing repeated PostgreSQL skip literals with the
-    # shared non-pg-test-filter source; job names, conditions, and timeouts are
-    # unchanged, and the exact commands below pin each source/use pair.
-    # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    # Re-pinned after raising the `just test-postgres` step budget from 40 to 60 minutes.
-    "job_sha256" => "1c5a371cc59e8bdb3c7e70f46b75912340cd9bfc1dcfaf7f610fcea8c275d19b",
+    "job_sha256" => "cbbadf7bad4f8c631281b6a686f614e1c75a18c9388720c12a87a3fbd3840e47",
     "cargo_steps" => {
-      "Observe curated lane selections" => {
-        "commands" => [
-          "set -o pipefail",
-          "bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
-        ],
-        "timeout_minutes" => 20,
-      },
-      "Require observer summary" => {
-        "commands" => [
-          "set -euo pipefail",
-          "python3 scripts/check_test_target_integrity.py --verify-selection-evidence \"$RUNNER_TEMP/selection-evidence-test-fast.log\"",
-        ],
-        "timeout_minutes" => 1,
-        "if_condition" => "always()",
-      },
       "Footer-only marker regressions" => {
         "commands" => [
           "source scripts/ci/non-pg-test-filter.sh",
-          'cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"',
-          'cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"',
+          'python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"',
+          'python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"',
         ],
         "timeout_minutes" => 10,
       },
       "Trusted session forwarding tests" => {
         "commands" => [
           "source scripts/ci/non-pg-test-filter.sh",
-          'env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"',
+          'env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"',
         ],
         "timeout_minutes" => 10,
       },
       "Terminal delivery evidence regressions" => {
         "commands" => [
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib inflight::terminal_delivery_evidence_loss::tests",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn",
         ],
         "timeout_minutes" => 10,
       },
-      "just test-postgres-shard" => {
-        "commands" => ["just test-postgres-shard"],
-        "timeout_minutes" => 60,
+      "PostgreSQL shard tests" => {
+        "commands" => ["python3 scripts/ci/test-selection.py run --lane pg"],
+        "timeout_minutes" => 75,
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
-  # #5185: the PR-side whole-library sweep. Registering it here pins its step
-  # inventory, so removing the adjudicator and leaving a bare `cargo test --lib`
-  # -- which exits 0 on a zero-match filter -- is a diff that fails this script
-  # rather than one that quietly restores the false green the job exists to
-  # close. Read the two-layer caveat above before treating the hash as a
-  # guarantee: it detects change, it does not prevent it.
+  "pg15_owner_proof" => {
+    "label" => "PostgreSQL 15 owner proof job",
+    "name" => "PostgreSQL 15 owner proof",
+    "needs" => ["changes", "pg_shards", "lib_test_prepare"],
+    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
+    "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 50,
+    "job_sha256" => "76ea7647252d90c94f50c18bb062cdbfc90649309c634c268195eecf64faec0b",
+    "cargo_steps" => {
+      "PostgreSQL 15 exact owner proof" => {
+        "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
+        "timeout_minutes" => 40,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact", "BASH_ENV" => "/dev/null"},
+      },
+    },
+  },
   "library_sweep" => {
     "label" => "PR library sweep job",
     "name" => "Library test sweep",
-    "needs" => "changes",
-    "if" => "needs.changes.outputs.rust_tests == 'true'",
+    "needs" => %w[changes lib_test_prepare pg_shards],
+    "if" => "${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
     "runs_on" => "ubuntu-latest",
-    # #5185 re-pins after giving this lane the PostgreSQL service its own
-    # selection requires: the canonical filters are substring matches over
-    # ids, and 55 PG-dependent tests carry none of those substrings, so the
-    # job selected a database it never provisioned.
-    # The re-pin is a review trigger only; the property is enforced without a
-    # hash by `[rule5]` in scripts/check_pg_test_lane_membership.py.
-    # #5230 re-pins after sourcing the shared filter and replaying its 15
-    # source-verified non-PG false positives after the adjudicated sweep.
-    # #6104 re-pins after renaming the replay call; its list is now generated
-    # from the PG manifest instead of hand-kept.
-    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
-    # Re-pinned for the two Codex legacy lock child summaries.
-    "job_sha256" => "0c861374748187c524880e21dab92cb028c0adb6e0658b773c59601e649851f7",
+    "job_sha256" => "41d97b438d2749d8e86a89daf0f97d36b61e1ed61ed43a134e56b241dabdf3ac",
     "cargo_steps" => {
       "Library sweep (selection-set gated)" => {
-        "commands" => [
-          "source scripts/ci/non-pg-test-filter.sh",
-          'python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"',
-          "run_non_pg_filter_replay",
-        ],
-        "timeout_minutes" => 45,
+        "commands" => ["python3 scripts/ci/test-selection.py run --lane sweep"],
+        "timeout_minutes" => 60,
+        "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
       },
     },
   },
   "relay_authority_targets" => {
     "label" => "relay-authority targets job",
     "name" => "Relay authority targets",
-    "needs" => nil,
-    "if" => nil,
+    "needs" => "lib_test_prepare",
+    "if" => "${{ !cancelled() }}",
     "runs_on" => "ubuntu-latest",
-    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
-    "job_sha256" => "8a0325441633cb188248a717980fa25b56be515b92d9e45de48f630453948617",
+    "job_sha256" => "2f2ab2c49a1c8fee6faaccb452a8fdc86a0ce7da73be478b07edb9ba6a31c285",
     "job_timeout_minutes" => 30,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -1023,17 +974,17 @@ targets = {
       },
       "Run named relay-authority contract targets" => {
         "commands" => [
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
-          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1",
         ],
         "timeout_minutes" => 30,
       },
@@ -1045,7 +996,6 @@ targets = {
     "needs" => nil,
     "if" => nil,
     "runs_on" => "ubuntu-latest",
-    # Re-pinned after adding the ensure-swap step ahead of the first cargo step.
     "job_sha256" => "cab07156ce825daeba30cc83dfb2c963cb3ca949d814d7b0b949a57433a7911c",
     "job_timeout_minutes" => 45,
     "cargo_steps" => {
@@ -1124,30 +1074,47 @@ targets = {
   },
   "high-risk-recovery" => {
     "label" => "High-risk recovery job",
-    # Runner label only; high_risk_recovery_required_context publishes the required context.
     "name" => "High-risk recovery runner",
-    "needs" => "changes",
-    "if" => "needs.changes.outputs.high_risk_recovery == 'true'",
+    "needs" => %w[changes lib_test_prepare],
+    "if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
     "runs_on" => "ubuntu-latest",
-    # Pin the accepted-turn regressions and removal of the retired timeout test.
-    # All remaining commands and execution settings retain their reviewed values.
-    # Re-pinned after adding the ensure-swap step and running the observer under mem-measure.
-    "job_sha256" => "73362980d7fa0040f95fa5cb604d0c418c19ffd0f1dae88504623075aa1824c8",
+    "job_sha256" => "54c7aa6278835c21b0af00d7e37fec97340aeb37fe163ec689beb45d1eaaecd9",
     "cargo_steps" => {
-      "Observe curated lane selections" => {
-        "commands" => [
-          "set -o pipefail",
-          "bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
-        ],
-        "timeout_minutes" => 20,
+      "High-risk recovery lane" => {
+        "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
       },
-      "Require observer summary" => {
-        "commands" => [
-          "set -euo pipefail",
-          "python3 scripts/check_test_target_integrity.py --verify-selection-evidence \"$RUNNER_TEMP/selection-evidence-high-risk.log\"",
-        ],
-        "timeout_minutes" => 1,
-        "if_condition" => "always()",
+      "Operational alert intake admission regressions" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
+      },
+      "Accepted turn lifetime regressions" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_turn_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib child_exit_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::process_group_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
+      },
+      "Cancel-preserved queue observation regression" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
+      },
+      "Local model durable queue wake regression" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
+      },
+      "Transition-busy requeue spin regressions" => {
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io:: -- --test-threads=1"],
+        "timeout_minutes" => nil,
+        "shell" => nil,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
       },
     },
   },
@@ -1235,7 +1202,7 @@ targets.each do |job_id, spec|
         errors << "#{label} #{name.inspect} must use a shell run block"
         next
       end
-      unless step["shell"] == "bash"
+      unless step["shell"] == step_spec.fetch("shell", "bash")
         errors << "#{label} #{name.inspect} must use explicit bash"
       end
       unless step["if"] == step_spec.fetch("if_condition", nil)
@@ -1254,10 +1221,12 @@ targets.each do |job_id, spec|
       unless raw_step.is_a?(Hash) && raw_step["timeout-minutes"] == expected_raw_timeout
         errors << "#{label} #{name.inspect} must retain exact raw timeout policy"
       end
-      unless step_env == step_spec.fetch("env", protected_step_env)
+      expected_env = step_spec.fetch("env", protected_step_env)
+      expected_env = expected_env.merge("ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact") if %w[test_fast library_sweep relay_authority_targets high-risk-recovery].include?(job_id)
+      unless step_env == expected_env
         errors << "#{label} #{name.inspect} must pin exact step env and disable BASH_ENV"
       end
-      lines = run.lines.map(&:strip).reject(&:empty?)
+      lines = run.lines.map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
       unless lines == step_spec.fetch("commands")
         errors << "#{label} #{name.inspect} must retain the exact cargo/test command list"
       end
@@ -1286,8 +1255,6 @@ RUBY
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
 main_workflow=".github/workflows/ci-main.yml"
-# Main pushes run every ci-script-checks.sh shard in its own job; each keeps the
-# main-only selector env, and only the cargo shard uploads giant-file evidence.
 validate_main_script_check_shards() {
   if ! ruby - "$main_workflow" <<'RUBY'
 require "yaml"
@@ -1355,8 +1322,6 @@ RUBY
 }
 validate_main_script_check_shards
 
-# Main's full sweep runs with the PR sweep's PostgreSQL and debuginfo-free env;
-# no step of it or of lint may be skipped or fail open, except always() cleanup.
 validate_main_full_sweep() {
   if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
@@ -1430,6 +1395,7 @@ if job.is_a?(Hash) && pr_sweep.is_a?(Hash)
     %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG].each do |key|
       errors << "full_non_pg #{sweep_name} must keep #{key}=0" unless (step["env"] || {})[key] == "0"
     end
+    errors << "full_non_pg #{sweep_name} must keep timeout-minutes: 60" unless step["timeout-minutes"] == 60
   end
 else
   errors << "#{pr_path} job library_sweep is missing" unless pr_sweep.is_a?(Hash)
@@ -1443,7 +1409,6 @@ RUBY
 }
 validate_main_full_sweep
 
-# Both PG matrices must use the shared planner and fail when any shard fails.
 validate_main_pg_shards() {
   if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
@@ -1460,7 +1425,9 @@ plan = {
     { "id" => "plan", "shell" => "bash", "run" => "matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)\necho \"matrix=$matrix\" >> \"$GITHUB_OUTPUT\"\n" },
   ],
 }
-plan.merge!("needs" => "changes", "if" => "needs.changes.outputs.pg_db == 'true'") if pr
+plan.merge!("needs" => "changes", "outputs" => { "force_full" => "${{ steps.plan.outputs.force_full }}" }.merge(plan["outputs"], "plan" => "${{ steps.plan.outputs.plan }}"),
+            "steps" => [plan["steps"][0], { "id" => "plan", "shell" => "bash", "env" => { "ADK_CI_SELECT" => "${{ vars.ADK_CI_SELECT }}" }, "run" => "python3 scripts/ci/test-selection.py plan" }]) if pr
+recipe, recipe_step = pr ? ["python3 scripts/ci/test-selection.py run --lane pg", "PostgreSQL shard tests"] : ["just test-postgres-shard"] * 2
 job = document.dig("jobs", job_id)
 unless job.is_a?(Hash)
   warn "#{main_path}: job postgres is missing"
@@ -1469,8 +1436,8 @@ end
 errors << "#{main_path}: pg_shards must emit the canonical matrix" unless document.dig("jobs", "pg_shards") == plan
 errors << "job postgres must be named per shard" unless job["name"] == "PostgreSQL tests (shard ${{ matrix.shard }})"
 errors << "job postgres must run on ubuntu-latest" unless job["runs-on"] == "ubuntu-latest"
-errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards"] : "pg_shards")
-errors << "PG job must retain its path condition" unless (pr ? job["if"] == "needs.changes.outputs.pg_db == 'true'" : !job.key?("if"))
+errors << "PG job must retain its exact needs" unless job["needs"] == (pr ? ["changes", "pg_shards", "lib_test_prepare"] : "pg_shards")
+errors << "PG job must retain its path condition" unless (pr ? job["if"] == "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}" : !job.key?("if"))
 errors << "PG job must not set continue-on-error" if job.key?("continue-on-error")
 errors << "PG job must use the canonical matrix without fail-fast" unless job["strategy"] == { "fail-fast" => false, "matrix" => "${{ fromJSON(needs.pg_shards.outputs.matrix) }}" }
 env = job["env"] || {}
@@ -1480,15 +1447,14 @@ diagnostics = {
   "PostgreSQL lane resource diagnostics" => "${{ inputs.resource_diagnostics == true }}",
   "Show PostgreSQL lane resource diagnostics" => "always() && inputs.resource_diagnostics == true",
 }
-diagnostics["Require observer summary"] = "always()" if pr
+
 cleanup = ->(step) { step["name"] == "sccache stats" || step["run"] == "./scripts/ci/postgres-service.sh stop" }
-# A step is a test step by what it runs, so a diagnostics name cannot lend it a condition.
-runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test)/) }
+runs_tests = ->(step) { step["run"].to_s.match?(/\b(?:cargo\s+test|just\s+test|test-selection\.py\s+run)/) }
 start_run = "./scripts/ci/postgres-service.sh start"
 steps = Array(job["steps"]).select { |step| step.is_a?(Hash) }
 steps.each do |step|
   label = "job postgres step #{(step["name"] || step["uses"] || step["run"]).to_s.inspect}"
-  errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error")
+  errors << "#{label} must not set continue-on-error" if step.key?("continue-on-error") && !(pr && %w[Download Restore].any? { |prefix| step["name"] == "#{prefix} shared lib tests" } && step["continue-on-error"] == true)
   next unless step.key?("if")
   allowed = if runs_tests.(step) || step["run"] == start_run then nil
             elsif diagnostics.key?(step["name"]) then diagnostics[step["name"]]
@@ -1500,10 +1466,10 @@ index = ->(pred) { steps.index(&pred) }
 start = index.(->(step) { step["run"] == start_run })
 tests = steps.each_index.select { |i| runs_tests.(steps[i]) }
 stop = index.(->(step) { step["run"] == "./scripts/ci/postgres-service.sh stop" })
-errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == "just test-postgres-shard" } == 1
-test_step = steps.find { |step| step["run"].to_s.strip == "just test-postgres-shard" } || {}
-errors << "PG shard step must keep its exact name" unless test_step["name"] == "just test-postgres-shard"
-errors << "job postgres test step must keep timeout-minutes: 60" unless test_step["timeout-minutes"] == 60
+errors << "PG job must run the shard recipe exactly once" unless steps.count { |step| step["run"].to_s.strip == recipe } == 1
+test_step = steps.find { |step| step["run"].to_s.strip == recipe } || {}
+errors << "PG shard step must keep its exact name" unless test_step["name"] == recipe_step
+errors << "job postgres test step must keep timeout-minutes: 75" unless test_step["timeout-minutes"] == 75
 errors << "job postgres must not set a job timeout-minutes" if job.key?("timeout-minutes")
 errors << "PG job must start PostgreSQL, run tests, then stop it" unless start && stop && !tests.empty? && tests.all? { |i| start < i && i < stop }
 errors << "main PG job must have exactly one test step" unless pr || tests.length == 1
@@ -1517,8 +1483,6 @@ RUBY
 }
 validate_main_pg_shards
 
-# The main-only Windows warm job must save the cache keys the PR Windows jobs
-# restore: same workflow/job env, setup steps, rust-cache inputs and compile.
 validate_main_windows_cache_warm() {
   if ! ruby - "$main_workflow" "$pr_workflow" <<'RUBY'
 require "yaml"
@@ -1902,7 +1866,7 @@ specs = [
     "context" => "High-risk recovery",
     "runner" => "high-risk-recovery",
     "runner_name" => "High-risk recovery runner",
-    "runner_if" => "needs.changes.outputs.high_risk_recovery == 'true'",
+    "runner_if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
     "step" => "Mirror high-risk recovery result across path-filter skips",
     "filter_name" => "high_risk_recovery",
     "filter_output" => "${{ needs.changes.outputs.high_risk_recovery }}",
@@ -1986,7 +1950,7 @@ specs.each do |spec|
   else
     {
       "name" => spec.fetch("runner_name"),
-      "needs" => "changes",
+      "needs" => runner_id == "high-risk-recovery" ? %w[changes lib_test_prepare] : "changes",
       "if" => spec.fetch("runner_if"),
     }.each do |field, expected|
       errors << "#{context} runner job #{runner_id} must retain exact #{field}" unless runner[field] == expected
@@ -2049,16 +2013,15 @@ done < <(workflow_files)
 validate_required_context_uniqueness
 validate_path_filter_required_mirrors
 
-if [ -f "$trusted_workflow" ]; then
-  if grep -Eq '^[[:space:]]+pull_request(_target)?:' "$trusted_workflow"; then
-    error "$trusted_workflow must not have a pull_request or pull_request_target trigger"
-  fi
-  grep -Eq '^[[:space:]]+push:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a trusted push trigger"
-  grep -Eq '^[[:space:]]+workflow_dispatch:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a workflow_dispatch trigger"
-  grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a merge_group trigger"
+# Trusted macOS runs on a timer or by hand only and no run cancels another:
+# a per-push run outlasts the gap between main pushes and never finishes.
+if [ -f "$trusted_workflow" ] && ! ruby -ryaml -e '
+  doc = YAML.safe_load(File.read(ARGV[0])); trigger = doc[true] || doc["on"]; group = doc["concurrency"] || {}
+  crons = trigger.is_a?(Hash) ? Array(trigger["schedule"]) : []
+  exit(trigger.is_a?(Hash) && trigger.keys.sort == %w[schedule workflow_dispatch] && crons.any? &&
+    crons.all? { |entry| entry.is_a?(Hash) && entry["cron"].is_a?(String) } &&
+    group["cancel-in-progress"] == false && group["group"].to_s.include?("github.event_name"))' "$trusted_workflow"; then
+  error "$trusted_workflow must trigger only on schedule and workflow_dispatch, and no run may cancel another"
 fi
 
 # Superseded PR heads must release hosted runners immediately. Required

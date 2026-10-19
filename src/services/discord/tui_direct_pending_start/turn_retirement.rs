@@ -8,6 +8,9 @@ use crate::services::tui_o::shadow::tap::TuiOConfig;
 use crate::services::tui_o::turn_mode::TurnConfig;
 use std::path::{Path, PathBuf};
 
+#[path = "turn_retirement/codex.rs"]
+pub(in crate::services::discord) mod codex;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(in crate::services::discord) struct Retirement {
     pub removed: usize,
@@ -176,48 +179,32 @@ pub(in crate::services::discord) fn confirm_turn_channels(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
 ) -> Vec<u64> {
-    let mut boundaries = Vec::new();
-    let retire = |channel| {
-        let boundary = crate::services::tui_o::n1_observation::confirmation_boundary(channel);
-        if boundaries.len() < 256 {
-            boundaries.push((channel, boundary));
-        }
-        match retire_channel(provider, channel) {
-            Ok(Retirement {
+    // A Codex turn Legacy still runs, or a takeover turn still open, keeps its Legacy identity.
+    if *provider == ProviderKind::Codex {
+        return codex::confirm_codex_channels(config, owned);
+    }
+    let retire = |channel| match retire_channel(provider, channel) {
+        Ok(Retirement {
+            removed,
+            retry_pending: false,
+        }) => {
+            tracing::info!(
+                channel,
                 removed,
-                retry_pending: false,
-            }) => {
-                tracing::info!(
-                    channel,
-                    removed,
-                    "[tui_o] turn mode confirmed after retirement"
-                );
-                true
-            }
-            outcome => {
-                tracing::error!(
-                    channel,
-                    ?outcome,
-                    "[tui_o] turn mode refused; Legacy keeps turns"
-                );
-                false
-            }
+                "[tui_o] turn mode confirmed after retirement"
+            );
+            true
+        }
+        outcome => {
+            tracing::error!(
+                channel,
+                ?outcome,
+                "[tui_o] turn mode refused; Legacy keeps turns"
+            );
+            false
         }
     };
-    let confirmed = crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire);
-    for &(channel, actual) in &confirmed {
-        let before = boundaries
-            .iter()
-            .find(|(c, _)| *c == channel)
-            .and_then(|(_, b)| *b);
-        crate::services::tui_o::n1_observation::mode_confirmed(
-            provider.as_str(),
-            channel,
-            before,
-            actual,
-        );
-    }
-    confirmed.into_iter().map(|(channel, _)| channel).collect()
+    crate::services::tui_o::turn_mode::confirm_selected(config, owned, retire)
 }
 
 /// Boot confirmation over the channels whose O adoption this provider's boot policy committed.

@@ -8,6 +8,8 @@ use crate::services::turn_orchestrator::{
 };
 use tokio::time::Instant;
 
+mod promote_hold;
+
 const QUEUE_PARK_ERROR_SECS: u64 = 600;
 const HEALTH_SOURCE_DISPLAY_LIMIT: usize = 100;
 
@@ -29,6 +31,7 @@ struct LedgerState {
     sources: BTreeMap<ChannelId, BTreeMap<u64, TrackedSource>>,
     revisions: BTreeMap<ChannelId, u64>,
     unavailable: BTreeMap<ChannelId, MailboxObservationFailure>,
+    promote_holds: BTreeMap<(ChannelId, &'static str), &'static str>,
 }
 
 impl LedgerState {
@@ -138,13 +141,6 @@ fn classify(
         ("live_turn_active".to_string(), "active_turn_completion")
     } else if residue {
         ("residual_held".to_string(), "turn_finalizer_reconcile")
-    } else if super::health::legacy_supervision::is_retired(provider.as_str(), channel.get()) {
-        result.recovery_state = Some("no_periodic_caller");
-        ("legacy_retired".to_string(), "none")
-    } else if super::input_runtime::fence::lookup(provider, channel.get())
-        .is_some_and(|gate| gate.mode() != super::input_runtime::fence::Mode::LegacyOpen)
-    {
-        ("fenced".to_string(), "none")
     } else if cancelled(snapshot) {
         let evidence = super::zombie_foreground_release::collect_zombie_foreground_evidence(
             provider,
@@ -185,6 +181,8 @@ fn classify(
         channel.get(),
     ) {
         ("pending_synthetic_start".to_string(), "none")
+    } else if let Some(hold) = shared.queue_park_ledger.promote_hold(channel, snapshot) {
+        hold
     } else {
         ("idle_no_start".to_string(), "none")
     };

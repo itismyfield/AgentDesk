@@ -268,7 +268,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     );
     #[cfg(all(test, unix))]
     let probe_channel = bridge.channel_id;
-    let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", super::input_runtime::fence::effect::detached(super::input_runtime::fence::effect::current(), async move {
+    let _bridge_task = super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
         let _original_registration = original_registration;
         #[cfg(test)]
         #[cfg(unix)]
@@ -967,7 +967,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 accumulated_output_tokens,
                 accumulated_memory_input_tokens,
                 accumulated_memory_output_tokens,
-                transport_error,
+                transport_error, provider_failure: terminal_outcome_delivery_output.provider_failure,
                 api_friction_reports,
                 cancelled,
                 restart_followup_pending,
@@ -979,7 +979,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         .await;
 
         // completion_tx is sent automatically by CompletionGuard on drop
-    }.instrument(bridge_span)));
+    }.instrument(bridge_span));
     #[cfg(test)]
     #[cfg(unix)]
     cancel_backstop_test_support::record(probe_channel, _bridge_task.abort_handle());

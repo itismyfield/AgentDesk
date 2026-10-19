@@ -47,14 +47,21 @@ pub(super) struct StreamingTurn<'a> {
 }
 
 #[cfg(test)]
-pub(super) struct InputEffectProbe {
+pub(in crate::services::discord) struct InputEffectProbe {
     pub channel: u64,
-    pub entered: tokio::sync::oneshot::Sender<(bool, bool)>,
+    /// Receives the thread the provider ran on, so a caller can tell it left the async task.
+    pub entered: tokio::sync::oneshot::Sender<std::thread::ThreadId>,
     pub release: std::sync::mpsc::Receiver<()>,
     pub terminal_before_release: bool,
 }
 #[cfg(test)]
-pub(super) static INPUT_EFFECT_PROBE: std::sync::Mutex<Option<InputEffectProbe>> =
+pub(in crate::services::discord) static INPUT_EFFECT_PROBE: std::sync::Mutex<
+    Option<InputEffectProbe>,
+> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(super) type InputEffectObserver = Box<dyn FnOnce(String) + Send>;
+#[cfg(test)]
+pub(super) static INPUT_EFFECT_OBSERVER: std::sync::Mutex<Option<(u64, InputEffectObserver)>> =
     std::sync::Mutex::new(None);
 #[cfg(test)]
 pub(super) struct SubmittedPrompt {
@@ -82,14 +89,25 @@ fn input_effect_probe(
             None
         }
     }?;
-    use crate::services::discord::input_runtime::fence;
-    let named = fence::effect::current()
-        .is_some_and(|permit| permit.validate(turn.provider, turn.channel_id).is_ok());
-    let _ = probe.entered.send((named, fence::require_worker().is_ok()));
+    let observer = {
+        let mut slot = INPUT_EFFECT_OBSERVER.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|(channel, _)| *channel == turn.channel_id)
+        {
+            slot.take().map(|(_, observer)| observer)
+        } else {
+            None
+        }
+    };
+    if let Some(observer) = observer {
+        observer(turn.provider.as_str().to_owned());
+    }
+    let _ = probe.entered.send(std::thread::current().id());
     let terminal = || {
         sender
             .send(StreamMessage::Done {
-                result: "NO_REPLY".into(),
+                result: tests::take_result(turn.channel_id),
                 session_id: Some("input-effect-provider".into()),
             })
             .map_err(|error| error.to_string())
@@ -105,34 +123,14 @@ fn input_effect_probe(
     }
 }
 
-#[cfg(test)]
-pub(super) static INPUT_EFFECT_COMPLETION_PROBE: std::sync::Mutex<
-    Option<(u64, tokio::sync::oneshot::Sender<()>)>,
-> = std::sync::Mutex::new(None);
-#[cfg(test)]
-pub(super) fn observe_input_effect_completion(channel: u64, task: tokio::task::JoinHandle<()>) {
-    let probe = {
-        let mut slot = INPUT_EFFECT_COMPLETION_PROBE.lock().unwrap();
-        if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
-            slot.take()
-        } else {
-            None
-        }
-    };
-    if let Some((_, completed)) = probe {
-        tokio::spawn(async move {
-            task.await.unwrap();
-            let _ = completed.send(());
-        });
-    }
-}
-
 /// Stands in for the Claude driver inside the submission scope, on the real provider thread.
 #[cfg(test)]
-pub(super) type ClaudeLegacyProbe = Box<dyn FnOnce() -> Result<(), String> + Send>;
+pub(in crate::services::discord) type ClaudeLegacyProbe =
+    Box<dyn FnOnce() -> Result<(), String> + Send>;
 #[cfg(test)]
-pub(super) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<Option<(u64, ClaudeLegacyProbe)>> =
-    std::sync::Mutex::new(None);
+pub(in crate::services::discord) static CLAUDE_LEGACY_PROBE: std::sync::Mutex<
+    Option<(u64, ClaudeLegacyProbe)>,
+> = std::sync::Mutex::new(None);
 #[cfg(test)]
 fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
     let mut slot = CLAUDE_LEGACY_PROBE.lock().unwrap();
@@ -158,6 +156,12 @@ pub(super) fn producer_error(
         Some(SubmissionFailure::PreSubmitPersistenceRefused(refused)) => {
             tracing::warn!(channel_id, %refused, "provider held the prompt before submit");
             return None;
+        }
+        Some(SubmissionFailure::IdleStashObserved) => {
+            tracing::warn!(
+                channel_id,
+                "provider failed after an observed idle-stash delivery"
+            );
         }
         Some(SubmissionFailure::SubmissionIndeterminate) => {
             tracing::warn!(channel_id, "provider failed after the submission fence");
@@ -650,12 +654,58 @@ mod codex_herdr_tests;
 #[path = "provider_dispatch_submission_tests.rs"]
 mod submission_tests;
 
+#[cfg(all(test, unix))]
+#[path = "provider_dispatch_idle_stash_tests.rs"]
+mod idle_stash_tests;
+
 #[cfg(test)]
 pub(super) mod producer_error_test_support;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    static INPUT_RESULT: std::sync::Mutex<Option<(u64, String)>> = std::sync::Mutex::new(None);
+
+    pub(in crate::services::discord::router::message_handler) struct ResultReset(u64);
+
+    impl Drop for ResultReset {
+        fn drop(&mut self) {
+            let mut result = INPUT_RESULT.lock().unwrap_or_else(|p| p.into_inner());
+            if result
+                .as_ref()
+                .is_some_and(|(channel, _)| *channel == self.0)
+            {
+                result.take();
+            }
+        }
+    }
+
+    pub(in crate::services::discord::router::message_handler) fn set_result(
+        channel: u64,
+        result: String,
+    ) -> ResultReset {
+        assert!(
+            INPUT_RESULT
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .replace((channel, result))
+                .is_none()
+        );
+        ResultReset(channel)
+    }
+
+    pub(super) fn take_result(channel: u64) -> String {
+        let mut result = INPUT_RESULT.lock().unwrap_or_else(|p| p.into_inner());
+        if result
+            .as_ref()
+            .is_some_and(|(probed, _)| *probed == channel)
+        {
+            result.take().unwrap().1
+        } else {
+            "NO_REPLY".into()
+        }
+    }
 
     #[test]
     fn agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation() {

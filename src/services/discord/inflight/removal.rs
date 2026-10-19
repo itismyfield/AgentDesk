@@ -283,15 +283,10 @@ pub(super) fn invalidate_stale_generation_in_root(
     provider: &ProviderKind,
     current_generation: u64,
 ) -> Vec<(u64, Option<u64>)> {
-    let states = load_inflight_states_from_root_excluding(root, provider, |channel| {
-        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    });
+    let states = load_inflight_states_from_root_excluding(root, provider, |_| false);
     let mut removed = Vec::new();
     for state in states {
-        // An input-protected channel's row waits for its move or handback.
-        let protected =
-            crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id);
-        if state.restart_mode.is_some() || protected.is_some() {
+        if state.restart_mode.is_some() {
             continue;
         }
         if state.rebind_origin {
@@ -685,8 +680,6 @@ fn classify_inflight_row_for_restore(
 pub(in crate::services::discord) struct InflightProbeLoad {
     pub(in crate::services::discord) states: Vec<InflightTurnState>,
     pub(in crate::services::discord) complete: bool,
-    #[cfg(test)]
-    pub(in crate::services::discord) failure: Option<RestoreFailure>,
 }
 
 #[cfg(test)]
@@ -703,18 +696,12 @@ pub(in crate::services::discord) fn load_inflight_probe_scoped(
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
-            failure: Some(RestoreFailure::retryable("restore root/scope unavailable")),
         };
     };
-    if channel == 0
-        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    {
+    if channel == 0 {
         return InflightProbeLoad {
             states: Vec::new(),
             complete: false,
-            failure: Some(RestoreFailure::Rejected(
-                "restore scope/input unavailable".into(),
-            )),
         };
     }
     let mut loaded = if scoped_restore_mutant("scope") {
@@ -753,12 +740,7 @@ pub(super) fn load_inflight_probe_from_root_excluding(
     provider: &ProviderKind,
     exclude_channel: impl Fn(u64) -> bool,
 ) -> InflightProbeLoad {
-    let load = load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel);
-    #[cfg(test)]
-    if let Some(hook) = super::AFTER_EXCLUDING_SCAN.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
-    load
+    load_inflight_states_for_probe_from_root_excluding(root, provider, exclude_channel)
 }
 
 /// Rows the loader's verdict would retire are hidden, never unlinked or
@@ -793,16 +775,11 @@ fn load_inflight_probe_with_scope(
             return InflightProbeLoad {
                 states: Vec::new(),
                 complete: error.kind() == std::io::ErrorKind::NotFound,
-                #[cfg(test)]
-                failure: (error.kind() != std::io::ErrorKind::NotFound)
-                    .then(|| RestoreFailure::retryable(error)),
             };
         }
     };
     let mut states = Vec::new();
     let mut complete = true;
-    #[cfg(test)]
-    let mut failure = None;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let allocation = crate::services::discord::runtime_store::process_generation_binding();
     for entry in entries {
@@ -843,19 +820,11 @@ fn load_inflight_probe_with_scope(
                     })
                 };
                 complete &= backfilled.is_ok();
-                #[cfg(test)]
-                if scope.is_some() {
-                    failure = backfilled.as_ref().err().cloned();
-                }
                 backfilled.unwrap_or(state)
             }
             RowVerdict::Keep(state, false) | RowVerdict::KeepGateRefused(state, _) => state,
             RowVerdict::Skip(incomplete) => {
                 complete &= !incomplete;
-                #[cfg(test)]
-                if incomplete && scope.is_some() {
-                    failure = Some(RestoreFailure::retryable("scoped row read/lock incomplete"));
-                }
                 continue;
             }
             RowVerdict::HideStale(..)
@@ -894,12 +863,7 @@ fn load_inflight_probe_with_scope(
         }
         states.push(state);
     }
-    InflightProbeLoad {
-        states,
-        complete,
-        #[cfg(test)]
-        failure,
-    }
+    InflightProbeLoad { states, complete }
 }
 
 mod boot_custody;
@@ -1551,10 +1515,6 @@ mod nondestructive_loader_tests {
         let before = paths.each_ref().map(|path| snapshot(path));
 
         assert!(super::super::load_inflight_states(&CLAUDE).is_empty());
-        assert_eq!(
-            super::super::latest_request_owner_user_id_for_channel(5_996_001),
-            None
-        );
         assert!(!crate::services::discord::has_fresh_inflight_for_channel(
             5_996_001
         ));

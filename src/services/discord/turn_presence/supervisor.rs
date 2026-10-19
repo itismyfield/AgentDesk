@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude::ChannelId;
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::Instant;
 
 use super::activity::{Activity, Reading, reading_now};
@@ -57,6 +57,7 @@ fn registered(provider: &ProviderKind) -> Vec<u64> {
 
 /// Spawns the provider's supervisor; call once its bot token is set so no send precedes HTTP.
 pub(in crate::services::discord) fn spawn(shared: Arc<SharedData>, provider: ProviderKind) {
+    super::activity::initialize_tail();
     LazyLock::force(&PROCESS_STARTED);
     let effects = Arc::new(LiveEffects { shared, provider });
     tokio::spawn(Supervisor::new(effects).run());
@@ -68,11 +69,7 @@ pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
         return None;
     }
     let presence = lock(&PRESENCE).get(&channel).cloned()?;
-    let mut status = { lock(&presence).json() };
-    status["n1_observation"] =
-        serde_json::to_value(crate::services::tui_o::n1_observation::snapshot(channel))
-            .unwrap_or_else(|_| serde_json::json!({"status": "unavailable"}));
-    Some(status)
+    Some(lock(&presence).json())
 }
 
 #[derive(Debug)]
@@ -201,17 +198,53 @@ impl<E: Effects> Supervisor<E> {
     }
 
     async fn run(mut self) {
-        let mut next_tick = Instant::now();
+        let mut workers = JoinSet::new();
+        loop {
+            for channel in self.effects.channels() {
+                if self.channels.contains_key(&channel) {
+                    continue;
+                }
+                let presence = self.presence(channel);
+                let worker = Self {
+                    effects: self.effects.clone(),
+                    channels: HashMap::from([(channel, presence)]),
+                };
+                workers.spawn(worker.run_channel());
+            }
+            while let Some(result) = workers.try_join_next() {
+                if let Err(error) = result {
+                    tracing::error!(%error, "[turn_presence] channel supervisor failed");
+                }
+            }
+            tokio::time::sleep(TICK).await;
+        }
+    }
+
+    async fn run_channel(self) {
+        // Each channel observes independently; slow reads cannot hold another channel's Idle.
+        tokio::select! {
+            biased;
+            () = self.observe() => {},
+            () = self.refresh_typing() => {},
+        }
+    }
+
+    async fn observe(&self) {
         loop {
             let now = Instant::now();
-            if now >= next_tick {
-                self.tick(now).await;
-                next_tick = now + TICK;
-            }
+            self.tick(now).await;
+            tokio::time::sleep_until(now + TICK).await;
+        }
+    }
+
+    async fn refresh_typing(&self) {
+        loop {
             self.send_due(Instant::now()).await;
+            let now = Instant::now();
+            let next_poll = now + TICK;
             let deadline = self
                 .earliest_deadline()
-                .map_or(next_tick, |d| d.min(next_tick));
+                .map_or(next_poll, |d| d.min(next_poll));
             tokio::time::sleep_until(deadline).await;
         }
     }
@@ -235,16 +268,20 @@ impl<E: Effects> Supervisor<E> {
         self.channels.values().filter_map(due).min()
     }
 
-    async fn tick(&mut self, now: Instant) {
+    async fn tick(&self, now: Instant) {
         for channel in self.effects.channels() {
-            let presence = self.presence(channel);
+            let Some(presence) = self.channels.get(&channel).cloned() else {
+                continue;
+            };
             let reading = self.effects.read(channel).await;
             let (token, head) = self.effects.mailbox(channel).await;
             // A judgment a later read or rebuild already moved past is never published.
-            let published = reading.publish_if_current(|| {
-                let mut presence = lock(&presence);
-                apply(&mut presence, channel, now, &reading, token, head)
-            });
+            let published = reading
+                .publish_if_current(|| {
+                    let mut presence = lock(&presence);
+                    apply(&mut presence, channel, now, &reading, token, head)
+                })
+                .await;
             let Some(actions) = published else {
                 tracing::debug!(channel, "[turn_presence] superseded reading not published");
                 continue;
@@ -257,26 +294,36 @@ impl<E: Effects> Supervisor<E> {
     }
 
     /// Re-sends typing at each due deadline; a mailbox token's own turn types for itself.
-    async fn send_due(&mut self, now: Instant) {
+    async fn send_due(&self, now: Instant) {
         let channels: Vec<_> = self.channels.iter().map(|(c, p)| (*c, p.clone())).collect();
         for (channel, presence) in channels {
-            let due = {
+            let generation = {
                 let presence = lock(&presence);
-                presence.activity == Activity::Busy
+                (presence.activity == Activity::Busy
                     && presence.sending.is_none()
-                    && presence.next_typing_at.is_some_and(|at| at <= now)
+                    && presence.next_typing_at.is_some_and(|at| at <= now))
+                .then_some(presence.generation)
             };
-            if !due {
+            let Some(generation) = generation else {
                 continue;
-            }
+            };
             let (token, _) = self.effects.mailbox(channel).await;
-            let mut guard = lock(&presence);
-            if token {
-                guard.next_typing_at = Some(now + TYPING_EVERY);
-                continue;
+            let now = Instant::now();
+            {
+                let mut guard = lock(&presence);
+                // The observation loop can publish Idle or replace the generation during I/O.
+                if guard.activity != Activity::Busy
+                    || guard.generation != generation
+                    || guard.sending.is_some()
+                    || guard.next_typing_at.is_none_or(|at| at > now)
+                {
+                    continue;
+                }
+                if token {
+                    guard.next_typing_at = Some(now + TYPING_EVERY);
+                    continue;
+                }
             }
-            let generation = guard.generation;
-            drop(guard);
             self.start_typing(channel, &presence, generation, now);
         }
     }
@@ -290,6 +337,12 @@ impl<E: Effects> Supervisor<E> {
     ) {
         let (effects, state) = (self.effects.clone(), presence.clone());
         let mut guard = lock(presence);
+        if guard.activity != Activity::Busy
+            || guard.generation != generation
+            || guard.sending.is_some()
+        {
+            return;
+        }
         guard.next_typing_at = None;
         let task = tokio::spawn(async move {
             let sent = effects.typing(channel).await;
@@ -328,11 +381,12 @@ impl<E: Effects> Supervisor<E> {
             Action::Notice(text) => {
                 tracing::warn!(channel, "[turn_presence] unknown_notice channel={channel}");
                 let effects = self.effects.clone();
-                tokio::spawn(async move {
+                let notice = async move {
                     if let Err(error) = effects.notice(channel, text).await {
                         tracing::warn!(channel, %error, "[turn_presence] notice failed");
                     }
-                });
+                };
+                tokio::spawn(notice);
             }
         }
     }

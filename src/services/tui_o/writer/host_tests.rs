@@ -109,7 +109,7 @@ impl<W> RepostHook<W> for CountedTurn {
     }
 
     fn original(&mut self, _: u64, _: PieceRecord) -> Turned<'_, OriginalGate> {
-        Box::pin(std::future::ready(OriginalGate::Send))
+        Box::pin(std::future::ready(OriginalGate::SendLocal))
     }
 
     fn receipts(
@@ -271,12 +271,18 @@ fn host(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -
     hosted(harness, io, pg, ready).len()
 }
 
-fn hosted(
+type Hosts = Vec<tokio::task::JoinHandle<()>>;
+
+fn hosted(harness: &Harness, io: &Arc<TestIo>, pg: bool, ready: &Arc<Readiness>) -> Hosts {
+    hosted_as(ShadowProvider::Claude, harness, io, (pg, ready))
+}
+
+fn hosted_as(
+    provider: ShadowProvider,
     harness: &Harness,
     io: &Arc<TestIo>,
-    pg: bool,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+    (pg, ready): (bool, &Arc<Readiness>),
+) -> Hosts {
     p5::set_test_root(Some(harness._runtime.path()));
     let parts = || HostParts {
         io: Arc::clone(io),
@@ -284,7 +290,7 @@ fn hosted(
         gate: Arc::clone(&harness.gate),
         readiness: Arc::clone(ready),
     };
-    start(ShadowProvider::Claude, pg, parts)
+    start(provider, pg, parts)
 }
 
 fn empty_init(channel: u64) -> Initialized {
@@ -635,19 +641,8 @@ fn abort(tasks: Vec<tokio::task::JoinHandle<()>>) {
     tasks.iter().for_each(tokio::task::JoinHandle::abort);
 }
 
-fn start_host(
-    harness: &Harness,
-    io: &Arc<TestIo>,
-    ready: &Arc<Readiness>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    p5::set_test_root(Some(harness._runtime.path()));
-    let parts = || HostParts {
-        io: Arc::clone(io),
-        runtime_root: Some(root(harness)),
-        gate: Arc::clone(&harness.gate),
-        readiness: Arc::clone(ready),
-    };
-    start(ShadowProvider::Claude, true, parts)
+fn start_host(harness: &Harness, io: &Arc<TestIo>, ready: &Arc<Readiness>) -> Hosts {
+    hosted(harness, io, true, ready)
 }
 
 #[tokio::test(start_paused = true)]
@@ -1006,8 +1001,8 @@ async fn a_closed_turn_legacy_has_not_delivered_is_given_up_only_after_the_stall
 
 /// A Claude pane logging channel `CHANNEL` through the real hook judgment, launched on `a_path`.
 #[cfg(unix)]
-struct ProducerPane {
-    tmux: &'static str,
+pub(super) struct ProducerPane {
+    pub(super) tmux: &'static str,
     a: String,
     base: DateTime<Utc>,
     _root: tempfile::TempDir,
@@ -1019,7 +1014,7 @@ struct ProducerPane {
 
 #[cfg(unix)]
 impl ProducerPane {
-    fn launch(a: &str, a_path: &Path) -> Self {
+    pub(super) fn launch(a: &str, a_path: &Path) -> Self {
         use crate::services::tui_prompt_dedupe as dedupe;
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1087,7 +1082,7 @@ impl Drop for ProducerPane {
 }
 
 #[cfg(unix)]
-fn session_row(session: &str) -> Vec<u8> {
+pub(super) fn session_row(session: &str) -> Vec<u8> {
     let row = serde_json::json!({"type": "mode", "sessionId": session});
     let mut line = serde_json::to_vec(&row).unwrap();
     line.push(b'\n');
@@ -1268,6 +1263,9 @@ mod rotation_unsettled;
 
 #[path = "host_home_tests.rs"]
 mod home;
+
+#[path = "host_first_init_tests.rs"]
+mod first_init;
 
 #[path = "host_managed_tests.rs"]
 mod managed;

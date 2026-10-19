@@ -1,7 +1,6 @@
 //! Transcript identity rules: which records carry output units, how each unit is keyed,
 //! and which records open or close a turn. Changing a rule here requires `IDENTITY_VERSION`.
 
-use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use super::{ShadowProvider, UnitKind};
@@ -47,49 +46,81 @@ pub fn row_key(record: &Value) -> Option<String> {
     str_at(record, "uuid").map(str::to_owned)
 }
 
-pub fn native_time(record: &Value) -> Option<DateTime<Utc>> {
-    str_at(record, "timestamp")?.parse().ok()
-}
-
 fn claude(record: &Value) -> Vec<RecordFact> {
     // Strict E wins over any other reading of the row, e.g. an interrupt marker user row.
     if envelope_is_turn_end_terminator(&ClaudeKind, record) {
         return vec![RecordFact::Idle(None)];
     }
     match str_at(record, "type") {
-        Some("assistant") => [Some(RecordFact::Assistant), claude_block(record)]
-            .into_iter()
-            .flatten()
+        Some("assistant") => std::iter::once(RecordFact::Assistant)
+            .chain(claude_blocks(record))
             .collect(),
         Some("user") => claude_user(record),
         _ => Vec::new(),
     }
 }
 
-/// One content block per assistant row, keyed by `(message.id, apiBlockIndex)`.
-fn claude_block(record: &Value) -> Option<RecordFact> {
+/// Each block is keyed `(message.id, apiBlockIndex + position)`, so a one-block row keeps its key;
+/// any unplaceable block blocks the whole row.
+fn claude_blocks(record: &Value) -> Vec<RecordFact> {
     let message = record.get("message").unwrap_or(&Value::Null);
-    let blocks = message.get("content").and_then(Value::as_array);
-    let Some([block]) = blocks.map(Vec::as_slice) else {
-        return Some(blocked("assistant row without exactly one content block"));
+    let content = message.get("content").and_then(Value::as_array);
+    #[cfg(test)]
+    if V3_RULE.get() && content.map(Vec::len) != Some(1) {
+        return vec![blocked("assistant row without exactly one content block")];
+    }
+    let blocks = match content {
+        Some(blocks) if !blocks.is_empty() => blocks,
+        _ => return vec![blocked("assistant row without content blocks")],
     };
     // Locally synthesized rows such as API errors have no block index; the row uuid keys them.
     let api_error = record.get("isApiErrorMessage") == Some(&Value::Bool(true));
     let synthetic = api_error || str_at(message, "model") == Some("<synthetic>");
     let resumed = synthetic && !api_error;
-    let (kind, content) = match str_at(block, "type") {
-        Some("thinking" | "redacted_thinking") => return None,
-        Some("text") => (UnitKind::Body, claude_text(resumed, block)),
-        Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
-        other => return Some(blocked(&format!("unsupported assistant block {other:?}"))),
-    };
     let index = record.get("apiBlockIndex").and_then(Value::as_u64);
-    let native_key = match (str_at(message, "id"), index, row_key(record)) {
-        (Some(id), Some(index), _) => format!("{id}:{index}"),
-        (_, None, Some(uuid)) if synthetic => uuid,
-        _ => return Some(blocked("assistant row without a supported identity")),
-    };
-    Some(RecordFact::Unit(native_key, kind, content))
+    let mut facts = Vec::new();
+    for (position, block) in (0u64..).zip(blocks) {
+        let (kind, content) = match str_at(block, "type") {
+            Some("thinking" | "redacted_thinking") => continue,
+            Some("text") => (UnitKind::Body, claude_text(resumed, block)),
+            Some("tool_use") => (UnitKind::Tool, tool_call(block, &["input"])),
+            other => return vec![blocked(&format!("unsupported assistant block {other:?}"))],
+        };
+        let at = index.map(|index| index.checked_add(position));
+        let native_key = match (str_at(message, "id"), at, row_key(record)) {
+            (Some(id), Some(Some(at)), _) => format!("{id}:{at}"),
+            // A uuid keys only one unit, so a synthetic row with several blocks stays unplaced.
+            (_, None, Some(uuid)) if synthetic && blocks.len() == 1 => uuid,
+            _ => return vec![blocked("assistant row without a supported identity")],
+        };
+        facts.push(RecordFact::Unit(native_key, kind, content));
+    }
+    facts
+}
+
+#[cfg(test)]
+thread_local! {
+    static V3_RULE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, this thread classifies Claude rows by the v3 rule, which blocked every assistant
+/// row not holding exactly one block, so tests can build the store a v3 writer stopped on.
+#[cfg(test)]
+pub(crate) struct V3Rule(());
+
+#[cfg(test)]
+impl V3Rule {
+    pub(crate) fn hold() -> Self {
+        V3_RULE.set(true);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for V3Rule {
+    fn drop(&mut self) {
+        V3_RULE.set(false);
+    }
 }
 
 /// A cold resume writes a synthetic non-error row holding only TUI chrome; Legacy strips it, so it
@@ -127,7 +158,7 @@ fn claude_user(record: &Value) -> Vec<RecordFact> {
     }
 }
 
-/// Each `tool_result` is its own unit keyed by `tool_use_id`; only error results are posted.
+/// Each `tool_result` keeps its native key and historical seal; the writer excludes its body.
 fn claude_tool_result(item: &Value) -> RecordFact {
     let Some(id) = str_at(item, "tool_use_id").filter(|id| !id.is_empty()) else {
         return blocked("tool_result without tool_use_id");
@@ -309,6 +340,70 @@ mod tests {
             let facts = classify(ShadowProvider::Claude, &record);
             assert_eq!(facts, [RecordFact::Assistant, unit], "{record}");
         }
+    }
+
+    /// A row holding a whole message keys each block from its `apiBlockIndex`, exactly as one-block
+    /// rows of that message would; thinking yields nothing and an unplaceable block blocks the row.
+    #[test]
+    fn claude_multi_block_row_keys_each_block_like_one_block_rows() {
+        use super::{RecordFact, UnitContent, classify};
+        use crate::services::tui_o::shadow::UnitKind::{Body, Tool};
+        let thinking = json!({"type": "thinking", "thinking": "t", "signature": "s"});
+        let tool = json!({"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"c": 1}});
+        let text = |text: &str| json!({"type": "text", "text": text});
+        let row = |index: Value, content: Vec<Value>| {
+            json!({"type": "assistant", "uuid": "u", "apiBlockIndex": index,
+                "message": {"id": "m", "model": "claude-opus", "content": content}})
+        };
+        let units = |record: &Value| -> Vec<(String, _, UnitContent)> {
+            let facts = classify(ShadowProvider::Claude, record);
+            assert_eq!(facts.first(), Some(&RecordFact::Assistant), "{record}");
+            let unit = |fact: &RecordFact| match fact {
+                RecordFact::Unit(key, kind, content) => (key.clone(), *kind, content.clone()),
+                other => panic!("{record}: {other:?}"),
+            };
+            facts[1..].iter().map(unit).collect()
+        };
+        let call = UnitContent::Payload(r#"Bash: {"c":1}"#.into());
+        let body = |text: &str| UnitContent::Payload(text.into());
+        let incident = row(
+            json!(0),
+            vec![thinking.clone(), thinking.clone(), tool.clone()],
+        );
+        assert_eq!(units(&incident), [("m:2".into(), Tool, call.clone())]);
+        assert_eq!(units(&row(json!(2), vec![tool.clone()])), units(&incident));
+        assert_eq!(units(&row(json!(0), vec![thinking.clone()])), []);
+        assert_eq!(
+            units(&row(json!(3), vec![text("a")])),
+            [("m:3".into(), Body, body("a"))]
+        );
+        let mixed = row(json!(1), vec![text("a"), thinking.clone(), tool, text("b")]);
+        let expected = [
+            ("m:1".into(), Body, body("a")),
+            ("m:3".into(), Tool, call),
+            ("m:4".into(), Body, body("b")),
+        ];
+        assert_eq!(units(&mixed), expected);
+
+        let blocked = |record: Value, reason: &str| {
+            let facts = classify(ShadowProvider::Claude, &record);
+            let expected = [RecordFact::Assistant, RecordFact::Blocked(reason.into())];
+            assert_eq!(facts, expected, "{record}");
+        };
+        let unknown = vec![text("a"), json!({"type": "image"})];
+        blocked(
+            row(json!(0), unknown),
+            r#"unsupported assistant block Some("image")"#,
+        );
+        blocked(
+            row(json!(0), vec![]),
+            "assistant row without content blocks",
+        );
+        let unindexed = row(Value::Null, vec![text("a"), text("b")]);
+        blocked(unindexed, "assistant row without a supported identity");
+        let mut synthetic = row(Value::Null, vec![text("a"), text("b")]);
+        synthetic["isApiErrorMessage"] = true.into();
+        blocked(synthetic, "assistant row without a supported identity");
     }
 
     #[test]

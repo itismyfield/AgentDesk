@@ -796,55 +796,189 @@ fn literal_end(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
-/// Source with every `#[cfg(test)]` item removed, plus the `mod x;` files it gated:
-/// a `#[path]` value (relative to the file's directory) or the bare module name.
+/// Top-level comma-separated arguments of a `cfg` list, skipping literals.
+fn cfg_args(args: &str) -> Vec<String> {
+    let chars: Vec<char> = args.chars().collect();
+    let (mut parts, mut from, mut depth, mut k) = (Vec::new(), 0, 0usize, 0);
+    while k < chars.len() {
+        if let Some(end) = literal_end(&chars, k) {
+            k = end;
+            continue;
+        }
+        match chars[k] {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(chars[from..k].iter().collect());
+                from = k + 1;
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    parts.push(chars[from..].iter().collect());
+    parts
+}
+
+/// A `cfg` predicate that holds only in test builds: `test`, or `all(..)` with such an
+/// argument. `any(..)` and `not(..)` can hold without `test`, so they stay production.
+fn cfg_requires_test(predicate: &str) -> bool {
+    let predicate = predicate.trim();
+    let all = predicate
+        .strip_prefix("all")
+        .map(str::trim_start)
+        .and_then(|rest| rest.strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'));
+    predicate == "test"
+        || all.is_some_and(|args| cfg_args(args).iter().any(|a| cfg_requires_test(a)))
+}
+
+/// Index just past the `]` of the attribute opening at `i`; `None` if it never closes.
+fn attribute_end(chars: &[char], i: usize) -> Option<usize> {
+    let (mut k, mut brackets) = (i + 2, 1usize);
+    while k < chars.len() {
+        if let Some(end) = literal_end(chars, k) {
+            k = end;
+            continue;
+        }
+        match chars[k] {
+            '[' => brackets += 1,
+            ']' if brackets == 1 => return Some(k + 1),
+            ']' => brackets -= 1,
+            _ => {}
+        }
+        k += 1;
+    }
+    None
+}
+
+/// Index of the next token at or after `k`, past whitespace and comments.
+fn skip_trivia(chars: &[char], mut k: usize) -> usize {
+    while k < chars.len() {
+        if chars[k].is_whitespace() {
+            k += 1;
+        } else if chars[k] == '/'
+            && let Some(end) = literal_end(chars, k)
+        {
+            k = end;
+        } else {
+            break;
+        }
+    }
+    k
+}
+
+/// Whether the item at `k` is a declaration or statement, which only `;` or its closing `}`
+/// ends; fields, variants, arms and arguments also end at a top-level `,`.
+fn item_head(chars: &[char], k: usize) -> bool {
+    let word = |k: usize| {
+        let k = skip_trivia(chars, k);
+        let end = (k..chars.len())
+            .find(|e| !(chars[*e].is_alphanumeric() || chars[*e] == '_'))
+            .unwrap_or(chars.len());
+        (chars[k..end].iter().collect::<String>(), end)
+    };
+    let (mut head, end) = word(k);
+    if head == "pub" {
+        let mut k = skip_trivia(chars, end);
+        if chars.get(k) == Some(&'(') {
+            k = (k..chars.len())
+                .find(|e| chars[*e] == ')')
+                .map_or(chars.len(), |e| e + 1);
+        }
+        head = word(k).0;
+    }
+    const HEADS: &[&str] = &[
+        "fn", "mod", "impl", "trait", "struct", "enum", "const", "static", "type", "use", "extern",
+        "async", "unsafe", "let",
+    ];
+    HEADS.contains(&head.as_str())
+}
+
+/// Source with every item whose attributes hold a `cfg` requiring `test` removed, plus the
+/// `mod x;` files it gated: a `#[path]` value (relative to the file's directory) or the bare name.
 fn production_text(text: &str) -> (String, Vec<(String, Option<String>)>) {
-    const GATE: &str = "#[cfg(test)]";
     let chars: Vec<char> = text.chars().collect();
-    let gate: Vec<char> = GATE.chars().collect();
     let (mut out, mut test_mods, mut i) = (String::new(), Vec::new(), 0);
     while i < chars.len() {
         if let Some(end) = literal_end(&chars, i) {
             out.extend(&chars[i..end.min(chars.len())]);
             i = end;
-        } else if chars[i..].starts_with(&gate) {
-            // An item ends at `;`/`,` or its closing `}`; an enclosing closer ends it unconsumed.
-            let (mut k, mut depth) = (i + gate.len(), 0usize);
-            while k < chars.len() {
-                if let Some(end) = literal_end(&chars, k) {
-                    k = end;
-                    continue;
-                }
-                match chars[k] {
-                    '{' | '(' | '[' => depth += 1,
-                    '}' | ')' | ']' if depth == 0 => break,
-                    '}' if depth == 1 => {
-                        k += 1;
-                        break;
-                    }
-                    '}' | ')' | ']' => depth -= 1,
-                    ';' | ',' if depth == 0 => {
-                        let head: String = chars[i + gate.len()..k].iter().collect();
-                        let words: Vec<&str> = head.split_whitespace().collect();
-                        if let [.., "mod", name] = words.as_slice() {
-                            let path = head
-                                .split_once("#[path = \"")
-                                .and_then(|(_, rest)| rest.split_once('"'));
-                            test_mods
-                                .push((name.to_string(), path.map(|(file, _)| file.to_string())));
-                        }
-                        k += 1;
-                        break;
-                    }
-                    _ => {}
-                }
-                k += 1;
-            }
-            i = k;
-        } else {
+            continue;
+        }
+        if !chars[i..].starts_with(&['#', '[']) {
             out.push(chars[i]);
             i += 1;
+            continue;
         }
+        // The whole run of outer attributes belongs to the item after it.
+        let (mut run_end, mut gated) = (i, false);
+        while chars[run_end..].starts_with(&['#', '['])
+            && let Some(end) = attribute_end(&chars, run_end)
+        {
+            let attribute: String = chars[run_end + 2..end - 1].iter().collect();
+            let predicate = attribute
+                .trim()
+                .strip_prefix("cfg")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix('('))
+                .and_then(|rest| rest.trim_end().strip_suffix(')'));
+            gated |= predicate.is_some_and(cfg_requires_test);
+            run_end = end;
+            let next = skip_trivia(&chars, end);
+            if !chars[next..].starts_with(&['#', '[']) {
+                break;
+            }
+            run_end = next;
+        }
+        if run_end == i {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if !gated {
+            out.extend(&chars[i..run_end]);
+            i = run_end;
+            continue;
+        }
+        // An item ends at `;` (or `,` unless it is a declaration) or its closing `}`;
+        // an enclosing closer ends it unconsumed.
+        let item = item_head(&chars, run_end);
+        let (mut k, mut depth) = (run_end, 0usize);
+        while k < chars.len() {
+            if let Some(end) = literal_end(&chars, k) {
+                k = end;
+                continue;
+            }
+            match chars[k] {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' if depth == 0 => break,
+                '}' if depth == 1 => {
+                    k += 1;
+                    break;
+                }
+                '}' | ')' | ']' => depth -= 1,
+                ';' if depth == 0 => {
+                    let head: String = chars[i..k].iter().collect();
+                    let words: Vec<&str> = head.split_whitespace().collect();
+                    if let [.., "mod", name] = words.as_slice() {
+                        let path = head
+                            .split_once("#[path = \"")
+                            .and_then(|(_, rest)| rest.split_once('"'));
+                        test_mods.push((name.to_string(), path.map(|(file, _)| file.to_string())));
+                    }
+                    k += 1;
+                    break;
+                }
+                ',' if depth == 0 && !item => {
+                    k += 1;
+                    break;
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        i = k;
     }
     (out, test_mods)
 }
@@ -1043,6 +1177,39 @@ fn production_sources() -> BTreeMap<String, String> {
         "fn a() { b(\"}\"); }\n#[cfg(test)]\nmod t { const S: &str = \"{\"; }\nfn c() {}",
     );
     assert!(probe.contains("fn a()") && probe.contains("fn c()") && !probe.contains("mod t"));
+    let (probe, _) = production_text(concat!(
+        "#[cfg(all(test, unix))]\nmod t { fn all_gated() {} }\n",
+        "#[cfg(any(test, unix))] fn keep() {}\n#[cfg(not(test))] fn prod_only() {}\n",
+        "#[cfg(windows)]\n#[cfg(test)]\nfn both() {}\n",
+        "#[cfg(test)]\nfn h() -> Result<A, B> { guarded(); }\nfn prod() {}\n",
+        "struct S { a: u8, #[cfg(test)] b: u8, c: u8 }",
+    ));
+    // `all(test, ..)`, a gate after another attribute and a declaration head that holds a
+    // top-level `,` strip their item; `any`/`not` stay production and a field ends at `,`.
+    for (needle, kept) in [
+        ("all_gated", false),
+        ("fn keep()", true),
+        ("fn prod_only()", true),
+        ("windows", false),
+        ("both", false),
+        ("guarded", false),
+        ("fn prod()", true),
+        ("b: u8", false),
+        ("c: u8 }", true),
+    ] {
+        assert_eq!(probe.contains(needle), kept, "{needle} in {probe}");
+    }
+    for gated in [
+        "#[cfg(all(test, unix))]\n#[path = \"p_tests.rs\"]\nmod p;",
+        "#[path = \"p_tests.rs\"]\n#[cfg(test)]\nmod p;",
+    ] {
+        let mods = production_text(gated).1;
+        assert_eq!(
+            mods,
+            [("p".to_string(), Some("p_tests.rs".to_string()))],
+            "{gated}"
+        );
+    }
     let mut modules: BTreeMap<_, _> = [
         (
             "src/root.rs",
@@ -1720,10 +1887,11 @@ fn herdr_variant_violations(sources: &BTreeMap<String, String>, owners: &[&str])
 }
 
 const GUARD_ADAPTER: &str = "src/services/discord/inflight/host_recovery_guard.rs";
+const UNBOUND_OBSERVER: &str = "src/services/discord/turn_presence/activity/unbound.rs";
+const UNBOUND_ADAPTER: &str = "src/services/discord/turn_presence/activity/unbound/live.rs";
 const SESSION_RECORD: &str = "src/services/session_host/session_record.rs";
 /// The timeouts policy repair facade: the one production caller of the target guard.
 const POLICY_REPAIR: &str = "src/engine/ops/timeouts_ops/host_repair.rs";
-
 // Dormant guard: only the boot registry builds a Herdr host. Owners may name Herdr
 // items but never construct one; everything else may not name them.
 #[test]
@@ -1748,6 +1916,7 @@ fn herdr_items_have_no_production_caller() {
         // The input gate (its own `.host_kind` check) and the boot registry, the one place a
         // Herdr host is built.
         (INPUT_GATE, 1),
+        ("src/services/session_host/herdr_gate/legacy_return.rs", 0),
         (REGISTRY, 0),
         // Claude input: a Herdr target exists only through the registry and its gate.
         ("src/services/claude_tui/host_input.rs", 4),
@@ -1758,6 +1927,7 @@ fn herdr_items_have_no_production_caller() {
         ("src/services/discord/inflight/host_locator.rs", 1),
         ("src/services/provider/session_probe.rs", 2),
         (GUARD_ADAPTER, 1),
+        (UNBOUND_OBSERVER, 1),
         (SESSION_RECORD, 1),
         (POLICY_REPAIR, 2),
         // Dormant Herdr launch: names the host for the pane location and its marker.
@@ -1775,6 +1945,8 @@ fn herdr_items_have_no_production_caller() {
         (WATCH_HOST, 1),
         // Restart reader and reconnect pass: read the stored pane through its gate, never a host.
         ("src/services/discord/recovery_engine/herdr_reader.rs", 0),
+        // Operator transition context: checks the row sits on a registered endpoint, never a host.
+        ("src/services/discord/health/o_transition.rs", 0),
     ];
     const NEEDLES: &[&str] = &[
         "HerdrHost",
@@ -1827,7 +1999,10 @@ fn herdr_items_have_no_production_caller() {
                 "src/services/termination_audit/host_terminate.rs",
             ],
         ),
-        ("HostKind::from_persisted", &[LOCATOR, MARKER]),
+        (
+            "HostKind::from_persisted",
+            &[LOCATOR, MARKER, UNBOUND_ADAPTER],
+        ),
         (
             "HostKindMarker",
             &[
@@ -1843,6 +2018,8 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                UNBOUND_OBSERVER,
+                UNBOUND_ADAPTER,
             ],
         ),
         (
@@ -1876,6 +2053,7 @@ fn herdr_items_have_no_production_caller() {
                 WATCH_HOST,
                 INPUT_GATE,
                 ESCAPE_DELIVERY, // Dormant executor's marker read; test-only caller until settlement activation.
+                UNBOUND_OBSERVER,
             ],
         ),
         ("record_tmux_host_marker", &[MARKER, CLAUDE_LAUNCH]),
@@ -1956,6 +2134,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, 0),
                 (GUARD_ADAPTER, 1),
                 (POLICY_REPAIR, 1),
+                (UNBOUND_OBSERVER, 1),
             ],
         ),
         ("resolve_target_host", &[(RESOLVE, 1)]),
@@ -1986,9 +2165,23 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 ("src/services/discord/host_teardown_gate.rs", 1),
             ],
         ),
-        ("with_inflight_row", &[(GUARD_ADAPTER, 1)]),
+        (
+            "with_inflight_row",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                (UNBOUND_OBSERVER, 1),
+            ],
+        ),
         ("locator_witness", &[(GUARD_ADAPTER, 1)]),
-        ("marker_witness", &[(GUARD_ADAPTER, 1)]),
+        (
+            "marker_witness",
+            &[
+                (GUARD_ADAPTER, 1),
+                ("src/services/discord/inflight.rs", 0),
+                (UNBOUND_OBSERVER, 1),
+            ],
+        ),
         (
             "session_record_witness",
             &[
@@ -1996,6 +2189,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, 0),
                 (GUARD_ADAPTER, 1),
                 (POLICY_REPAIR, 1),
+                (UNBOUND_OBSERVER, 1),
             ],
         ),
         ("with_host_marker", &[(RESOLVE, 0), (POLICY_REPAIR, 1)]),
@@ -2017,6 +2211,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, ANY),
                 (GUARD_ADAPTER, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2026,6 +2221,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (ROOT, ANY),
                 (GUARD_ADAPTER, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2036,6 +2232,7 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
                 (GUARD_ADAPTER, ANY),
                 (SESSION_RECORD, ANY),
                 (POLICY_REPAIR, ANY),
+                (UNBOUND_OBSERVER, ANY),
             ],
         ),
         (
@@ -2061,6 +2258,101 @@ fn session_target_guard_stays_behind_the_keyed_gate() {
         violations.is_empty(),
         "session target guard production caller: {violations:?}"
     );
+}
+
+#[test]
+fn u_observer_callers_confined() {
+    const U: &str = "src/services/discord/turn_presence/activity/unbound.rs";
+    const I: &str = "src/services/platform/tmux/session_inventory.rs";
+    let sources = production_sources();
+    let items: &[(&str, Owners)] = &[
+        ("probe_session_inventory", &[(I, 0)]),
+        ("observe_candidates", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("unbound_candidates", &[(U, 1)]),
+        ("host_scope", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("decide_unbound", &[(U, 0), (UNBOUND_ADAPTER, 1)]),
+        ("observe_inventory", &[(I, 0), (UNBOUND_ADAPTER, 1)]),
+    ];
+    let violations = guarded_item_violations(&sources, items);
+    assert!(
+        violations.is_empty(),
+        "observer escaped its activity adapter: {violations:?}"
+    );
+    let adapter = code_tokens(&sources[UNBOUND_ADAPTER]);
+    for (item, count) in [
+        ("observe_candidates", 1),
+        ("host_scope", 1),
+        ("decide_unbound", 1),
+        ("observe_inventory", 1),
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, count, "adapter lost {item}");
+        let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(count));
+        let admitted = [(UNBOUND_ADAPTER.into(), body)].into_iter().collect();
+        assert!(guarded_item_violations(&admitted, items).is_empty());
+        for (path, calls) in [
+            ("src/services/unlisted.rs", 1),
+            (UNBOUND_ADAPTER, count + 1),
+        ] {
+            let body = format!("fn run() {{ {} }}", format!("{item}();").repeat(calls));
+            let extra = [(path.into(), body)].into_iter().collect();
+            assert!(
+                !guarded_item_violations(&extra, items).is_empty(),
+                "caller budget missed {path}: {item} x{calls}"
+            );
+        }
+    }
+    assert_eq!(item_uses(&adapter, "collect_pair").0, 2);
+    for item in [
+        "clear_legacy_session",
+        "guard_first_state_change",
+        "probe_for_policy",
+        "teardown_for_lookup",
+        "keyed_teardown",
+        "resolve_session_target",
+    ] {
+        assert_eq!(item_uses(&adapter, item).0, 0, "adapter acquired {item}");
+    }
+    let code = code_tokens(include_str!("../discord/turn_presence/activity/unbound.rs"));
+    for (item, count) in [
+        ("SessionTargetEvidence", 6),
+        ("SessionTargetInput", 2),
+        ("HostWitness", 11),
+        ("HostKindMarker", 3),
+    ] {
+        assert_eq!(item_uses(&code, item).0, count, "{item}");
+    }
+    for item in [
+        "resolve_session_target",
+        "with_inflight_row",
+        "marker_witness",
+        "session_record_witness",
+    ] {
+        let (calls, aliases) = item_uses(&code, item);
+        assert_eq!(calls, 1, "{item}");
+        assert!(aliases.is_empty(), "{item}: {aliases:?}");
+    }
+    for item in [
+        "clear_legacy_session",
+        "guard_first_state_change",
+        "probe_for_policy",
+        "teardown_for_lookup",
+        "keyed_teardown",
+    ] {
+        assert_eq!(item_uses(&code, item).0, 0, "observer acquired {item}");
+    }
+    for body in [
+        "probe_session_inventory();",
+        "let p = probe_session_inventory;",
+        "use crate::services::platform::tmux::session_inventory::probe_session_inventory as p; fn live() { p(); }",
+    ] {
+        let extra = [("src/services/unlisted.rs".into(), body.into())]
+            .into_iter()
+            .collect();
+        assert!(
+            !guarded_item_violations(&extra, items).is_empty(),
+            "caller/alias audit missed {body}"
+        );
+    }
 }
 
 // The caller scans above run on today's tree, which has none of these shapes; this
@@ -2333,7 +2625,7 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
     const MISSING: &str = "a Missing row path keeps it name-only";
     const ENTRY: &str = "forwarded by the guarded entry";
     const NATIVE: &str = "behind the native clear's keyed clearance or managed-reset refusal";
-    const LEDGER: &str = "behind the ledger clear's managed-reset refusal and keyed clearance";
+    const CLEAR: &str = "a user clear of a channel with no Herdr endpoint";
     const CALLS: &[(&str, Listed)] = &[
         (
             "record_termination_for_tmux",
@@ -2398,20 +2690,30 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             ],
         ),
         (
+            "end_managed_process_session",
+            &[
+                (
+                    "src/services/discord/commands/control/managed_reset.rs",
+                    1,
+                    ENTRY,
+                ),
+                (
+                    "src/services/discord/commands/control/clear_teardown.rs",
+                    1,
+                    CLEAR,
+                ),
+            ],
+        ),
+        (
             "reset_managed_process_session",
             &[
-                ("src/services/discord/commands/control.rs", 1, MISSING),
+                ("src/services/discord/commands/control.rs", 0, ENTRY),
                 (
                     "src/services/discord/commands/control/provider_reset.rs",
                     1,
                     MISSING,
                 ),
                 ("src/services/discord/commands/control/native.rs", 1, NATIVE),
-                (
-                    "src/services/discord/commands/control/input_clear.rs",
-                    1,
-                    LEDGER,
-                ),
                 ("src/services/discord/commands/mod.rs", 0, ENTRY),
                 ("src/services/discord/health/recovery.rs", 1, MISSING),
                 ("src/services/discord/admin_host_guard.rs", 1, MISSING),
@@ -3190,9 +3492,22 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
         sources,
         &[
             ("terminate_registered_herdr", &[(TERMINATE_ROUTE, 1)]),
-            ("terminate_explicit_herdr", &[(TERMINATE_SERVICE, 1)]),
+            (
+                "terminate_explicit_herdr",
+                &[
+                    (TERMINATE_SERVICE, 1),
+                    ("src/services/discord/commands/control/clear_teardown.rs", 1),
+                ],
+            ),
             ("host_terminated", &[(TERMINATE_SERVICE, 1)]),
-            ("retire_pg", &[(HERDR_CLI, 1), (TERMINATE_SERVICE, 1)]),
+            (
+                "retire_pg",
+                &[
+                    (HERDR_CLI, 1),
+                    (TERMINATE_SERVICE, 1),
+                    ("src/services/herdr_launch.rs", 1),
+                ],
+            ),
             (
                 "post_json_local_at",
                 &[(HERDR_CLI, 1), ("src/cli/client.rs", 0)],
@@ -3239,14 +3554,8 @@ fn terminate_entry_violations(sources: &BTreeMap<String, String>) -> Vec<String>
 
 #[test]
 fn act_terminate_entry_census() {
-    // The finalizer's terminated-host tests are gated `cfg(all(test, unix))`; that is test code.
-    let sources: BTreeMap<String, String> = production_sources()
-        .into_iter()
-        .map(|(path, text)| {
-            let text = text.replace("#[cfg(all(test, unix))]", "#[cfg(test)]");
-            (path, production_text(&text).0)
-        })
-        .collect();
+    // The finalizer's terminated-host tests sit behind `cfg(all(test, unix))`, which the scan strips.
+    let sources = production_sources();
     let violations = terminate_entry_violations(&sources);
     assert!(violations.is_empty(), "{violations:?}");
     assert!(close_owner_violations(&sources).is_empty());

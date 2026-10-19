@@ -48,12 +48,10 @@ pub(crate) fn wait_for_binding(
     }
 }
 
-pub(crate) fn hold(cancel: Option<&CancelToken>) -> Result<(), String> {
-    let mut polling = HoldPoll::new(super::canary::CANARY_TMUX);
-    while !cancel_requested(cancel) {
-        polling.pause(None);
-    }
-    Err("cancelled waiting for verified Codex turn anchor".into())
+pub(super) enum PinState {
+    Current,
+    Held,
+    Advanced(dedupe::TuiRuntimeBinding),
 }
 
 pub(super) struct SourcePin {
@@ -61,6 +59,31 @@ pub(super) struct SourcePin {
     path: PathBuf,
     session_id: Option<String>,
     nonce: SpawnNonceMarker,
+    identity: SourceFileIdentity,
+}
+
+pub(super) struct OpenedSource {
+    pub file: File,
+    pub pin: SourcePin,
+    pub path: PathBuf,
+    pub offset: u64,
+    pub session_id: Option<String>,
+}
+
+impl Clone for SourcePin {
+    fn clone(&self) -> Self {
+        Self {
+            tmux: self.tmux.clone(),
+            path: self.path.clone(),
+            session_id: self.session_id.clone(),
+            nonce: match &self.nonce {
+                SpawnNonceMarker::Known(nonce) => SpawnNonceMarker::Known(nonce.clone()),
+                SpawnNonceMarker::Absent => SpawnNonceMarker::Absent,
+                SpawnNonceMarker::Unreadable => SpawnNonceMarker::Unreadable,
+            },
+            identity: self.identity,
+        }
+    }
 }
 
 impl SourcePin {
@@ -71,50 +94,62 @@ impl SourcePin {
             path: path.to_owned(),
             session_id: session_id.map(str::to_owned),
             nonce: binding_context::observe_spawn_nonce_marker(tmux),
+            identity: File::open(path)
+                .ok()
+                .map(|file| SourceFileIdentity::from_open_file(&file))
+                .unwrap_or(SourceFileIdentity::Unavailable),
         })
     }
 
     fn allowed(&self, identity: Option<SourceFileIdentity>) -> bool {
         tc::with_tmux_source_authority(&self.tmux, |authority| {
-            let SpawnNonceMarker::Known(nonce) = &self.nonce else {
-                return false;
-            };
-            if binding_context::observe_spawn_nonce_marker(&self.tmux) != self.nonce
-                || !dedupe::codex_verified_source_allowed_under_source_authority(
-                    authority,
-                    &self.path.display().to_string(),
-                    self.session_id.as_deref(),
-                )
+            self.allowed_under(authority, identity)
+        })
+    }
+
+    fn allowed_under(
+        &self,
+        authority: &tc::TmuxSourceAuthority<'_>,
+        identity: Option<SourceFileIdentity>,
+    ) -> bool {
+        let SpawnNonceMarker::Known(nonce) = &self.nonce else {
+            return false;
+        };
+        if binding_context::observe_spawn_nonce_marker(&self.tmux) != self.nonce
+            || !dedupe::codex_verified_source_allowed_under_source_authority(
+                authority,
+                &self.path.display().to_string(),
+                self.session_id.as_deref(),
+            )
+        {
+            return false;
+        }
+        let Ok(context) = binding_context::execution_context("codex", nonce) else {
+            return false;
+        };
+        if context.channel_id != Some(super::canary::CANARY_CHANNEL) {
+            return false;
+        }
+        let Ok(fold) = dedupe::binding_events::codex::read_ownership(&context) else {
+            return false;
+        };
+        let Some(proof) = fold.verified else {
+            return false;
+        };
+        identity.is_none_or(|identity| {
+            #[cfg(unix)]
             {
-                return false;
+                identity
+                    == SourceFileIdentity::Unix {
+                        dev: proof.source.dev,
+                        ino: proof.source.ino,
+                    }
             }
-            let Ok(context) = binding_context::execution_context("codex", nonce) else {
-                return false;
-            };
-            if context.channel_id != Some(super::canary::CANARY_CHANNEL) {
-                return false;
+            #[cfg(not(unix))]
+            {
+                let _ = (identity, proof);
+                false
             }
-            let Ok(fold) = dedupe::binding_events::codex::read_ownership(&context) else {
-                return false;
-            };
-            let Some(proof) = fold.verified else {
-                return false;
-            };
-            identity.is_none_or(|identity| {
-                #[cfg(unix)]
-                {
-                    identity
-                        == SourceFileIdentity::Unix {
-                            dev: proof.source.dev,
-                            ino: proof.source.ino,
-                        }
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = (identity, proof);
-                    false
-                }
-            })
         })
     }
 
@@ -147,33 +182,85 @@ impl SourcePin {
         })
     }
 
+    pub(super) fn state(&self, identity: SourceFileIdentity) -> PinState {
+        tc::with_tmux_source_authority(&self.tmux, |authority| {
+            if self.allowed_under(authority, Some(identity)) {
+                return PinState::Current;
+            }
+            let SpawnNonceMarker::Known(nonce) = &self.nonce else {
+                return PinState::Held;
+            };
+            if binding_context::observe_spawn_nonce_marker(&self.tmux) != self.nonce
+                || !binding_context::execution_context("codex", nonce)
+                    .is_ok_and(|context| context.channel_id == Some(super::canary::CANARY_CHANNEL))
+            {
+                return PinState::Held;
+            }
+            match dedupe::runtime_binding_for_tmux_session_under_source_authority(authority) {
+                Some(binding)
+                    if binding.runtime_kind
+                        == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui =>
+                {
+                    PinState::Advanced(binding)
+                }
+                Some(_) => PinState::Held,
+                None => PinState::Held,
+            }
+        })
+    }
+
     pub(super) fn wait(&self, cancel: Option<&CancelToken>, identity: SourceFileIdentity) -> bool {
         let mut polling = HoldPoll::new(&self.tmux);
         loop {
             if cancel_requested(cancel) {
                 return false;
             }
-            if self.allowed(Some(identity)) {
-                return true;
+            match self.state(identity) {
+                PinState::Current => return true,
+                PinState::Advanced(_) => return false,
+                PinState::Held => polling.pause(self.identity_hold_reason(Some(identity))),
             }
-            polling.pause(self.identity_hold_reason(Some(identity)));
         }
     }
 
-    pub(super) fn open(&self, cancel: Option<&CancelToken>, start: u64) -> Option<File> {
-        let mut polling = HoldPoll::new(&self.tmux);
+    pub(super) fn open(
+        mut self,
+        cancel: Option<&CancelToken>,
+        mut start: u64,
+    ) -> Option<OpenedSource> {
+        let tmux = self.tmux.clone();
+        let mut polling = HoldPoll::new(&tmux);
         loop {
             if cancel_requested(cancel) {
                 return None;
             }
-            if self.allowed(None)
-                && let Ok(file) = File::open(&self.path)
-                && file
-                    .metadata()
-                    .is_ok_and(|metadata| metadata.len() >= start)
-                && self.allowed(Some(SourceFileIdentity::from_open_file(&file)))
-            {
-                return Some(file);
+            match self.state(self.identity) {
+                PinState::Advanced(binding) => {
+                    start = binding.last_offset;
+                    self = Self::new(
+                        Some(&self.tmux),
+                        Path::new(&binding.output_path),
+                        binding.session_id.as_deref(),
+                    )?;
+                    continue;
+                }
+                PinState::Current => {
+                    if let Ok(file) = File::open(&self.path)
+                        && file
+                            .metadata()
+                            .is_ok_and(|metadata| metadata.len() >= start)
+                        && self.allowed(Some(SourceFileIdentity::from_open_file(&file)))
+                    {
+                        return Some(OpenedSource {
+                            file,
+                            path: self.path.clone(),
+                            session_id: self.session_id.clone(),
+                            offset: start,
+                            pin: self,
+                        });
+                    }
+                }
+                PinState::Held => {}
             }
             polling.pause(self.identity_hold_reason(None));
         }

@@ -5,29 +5,40 @@ use super::super::*;
 #[path = "cancel_backstop_race_support_tests.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
+/// The authority one kickoff runs with: the idle start, or only the busy-TUI paste of the first
+/// ready input, named by the automatic entry point that asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum KickoffLane {
+    Idle,
+    QueuedOnly(&'static str),
+}
+
 pub(in crate::services::discord) async fn kickoff_idle_queue_channel(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> IdleQueueKickoffChannelOutcome {
-    let permit = match input_runtime::fence::lookup(provider, channel_id.get())
-        .map(|gate| gate.admit())
-        .transpose()
-    {
-        Ok(permit) => permit,
-        Err(_) => return IdleQueueKickoffChannelOutcome::default(),
-    };
-    input_runtime::fence::effect::scope(
-        permit,
-        Box::pin(kickoff_admitted_queue_channel(deps, provider, channel_id)),
-    )
-    .await
+    kickoff_queue_channel(deps, provider, channel_id, KickoffLane::Idle).await
 }
 
-async fn kickoff_admitted_queue_channel(
+pub(in crate::services::discord) async fn kickoff_queue_channel(
     deps: &router::IntakeDeps<'_>,
     provider: &ProviderKind,
     channel_id: ChannelId,
+    lane: KickoffLane,
+) -> IdleQueueKickoffChannelOutcome {
+    // Boxed so the futures of callers that await a kickoff stay small.
+    Box::pin(kickoff_queue_channel_inner(
+        deps, provider, channel_id, lane,
+    ))
+    .await
+}
+
+async fn kickoff_queue_channel_inner(
+    deps: &router::IntakeDeps<'_>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    lane: KickoffLane,
 ) -> IdleQueueKickoffChannelOutcome {
     let shared = deps.shared;
     let settings_snapshot = shared.settings.read().await.clone();
@@ -52,7 +63,15 @@ async fn kickoff_admitted_queue_channel(
 
     let queued_gate =
         Some(router::queued_head_inject_covers as fn(ChannelId, Option<ChannelId>) -> bool);
-    if queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate).await {
+    let trigger = match lane {
+        KickoffLane::Idle => "idle_kickoff",
+        KickoffLane::QueuedOnly(reason) => reason,
+    };
+    let held =
+        queue_io::queued_head_inject::try_busy(deps, provider, channel_id, queued_gate, trigger)
+            .await;
+    // The queued-only lane ends here whatever the paste answered: it never owns an idle start.
+    if held || lane != KickoffLane::Idle {
         return IdleQueueKickoffChannelOutcome::default();
     }
     let fresh_snapshot = mailbox_snapshot(shared, channel_id).await;
@@ -60,6 +79,13 @@ async fn kickoff_admitted_queue_channel(
     {
         turn_finalizer::handle_idle_queue_guard_skip(shared, provider, channel_id, &fresh_snapshot)
             .await;
+        return IdleQueueKickoffChannelOutcome::default();
+    }
+
+    #[cfg(unix)]
+    if !queue_dispatch::codex_clear_compat::admit(shared, provider, channel_id, &fresh_snapshot)
+        .await
+    {
         return IdleQueueKickoffChannelOutcome::default();
     }
 
@@ -258,11 +284,27 @@ pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
     let shared = deps.shared;
     // Collect channels with queued items that are idle (no active turn). Dequeue only
     // after the routing guard passes so a rejected channel stays preserved on disk/in memory.
+    // A busy channel whose first ready input may be pasted joins on the queued-only lane.
     let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
-    let mut channels_to_kick: Vec<ChannelId> = Vec::new();
+    let mut channels_to_kick: Vec<(ChannelId, KickoffLane)> = Vec::new();
     for (channel_id, snapshot) in mailbox_snapshots {
         if idle_queue_channel_has_kickable_backlog(shared, provider, channel_id, &snapshot).await {
-            channels_to_kick.push(channel_id);
+            channels_to_kick.push((channel_id, KickoffLane::Idle));
+            continue;
+        }
+        use queue_io::auto_queue_eligibility::{QueuedReach, queued_reach};
+        let reason = "full_reconcile_queued_head";
+        match queued_reach(Some(deps.http), shared, provider, channel_id, &snapshot).await {
+            QueuedReach::Ready => {
+                channels_to_kick.push((channel_id, KickoffLane::QueuedOnly(reason)))
+            }
+            QueuedReach::Wait => {
+                super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
+                    shared, provider, channel_id, reason,
+                )
+                .await;
+            }
+            QueuedReach::Closed | QueuedReach::NoCandidate => {}
         }
     }
 
@@ -277,13 +319,19 @@ pub(in crate::services::discord) async fn kickoff_idle_queues_with_deps(
     );
 
     let mut started_count = 0usize;
-    for channel_id in channels_to_kick {
-        let outcome = kickoff_idle_queue_channel(deps, provider, channel_id).await;
+    for (channel_id, lane) in channels_to_kick {
+        let outcome = kickoff_queue_channel(deps, provider, channel_id, lane).await;
         if outcome.started {
             started_count += 1;
-        } else if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
-            // Boot and full reconcile have no later no-start arm; a held direct turn needs one.
-            let reason = "boot kickoff turn-mode no-start";
+        } else if lane != KickoffLane::Idle
+            || crate::services::tui_o::turn_mode::transcript_turns(channel_id.get())
+        {
+            // Boot and full reconcile have no later no-start arm; a held direct turn needs one,
+            // and so does whatever a queued-only paste left behind.
+            let reason = match lane {
+                KickoffLane::Idle => "boot kickoff turn-mode no-start",
+                KickoffLane::QueuedOnly(reason) => reason,
+            };
             super::super::arm_slow_idle_queue_backstop_if_queue_nonempty(
                 shared, provider, channel_id, reason,
             )

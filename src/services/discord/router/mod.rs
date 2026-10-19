@@ -17,11 +17,14 @@ pub(crate) use intake_dispatch::{
     IntakeOrigin, IntakeSubmission, LocalAdmissionPermit, QueuedAdmissionDisposition,
     admit_queued_intake, admit_text_intake, checkpoint_waits_for_admission,
     dispatch_live_text_intake, dispatch_skill_intake, dispatch_text_intake,
-    finish_admitted_queued_intake, finish_admitted_text_intake, finish_text_intake_admission,
-    prepare_admitted_live_attachments, resolve_attachment_admission,
+    finish_admitted_queued_intake, finish_admitted_text_intake,
+    finish_nonlocal_attachment_admission, live_checkpoint_waits, prepare_admitted_live_attachments,
+    resolve_attachment_admission,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;
+#[cfg(test)]
+pub(in crate::services::discord) use intake_gate::stale_turn::thread_guard_test_api;
 pub(super) use intake_gate::{handle_event, should_process_turn_message};
 #[cfg(test)]
 pub(super) use message_handler::set_hosted_tui_promote_busy_for_tests;
@@ -47,4 +50,6 @@ pub(crate) use turn_start::{
 // Re-export items used across submodules
 use thread_binding::{link_dispatch_thread, lookup_dispatch_info, verify_thread_accessible};
 
-pub(in crate::services::discord) use intake_gate::busy_inject::covers as queued_head_inject_covers;
+pub(in crate::services::discord) use intake_gate::busy_inject::{
+    covers as live_intake_inject_covers, queued_head_covers as queued_head_inject_covers,
+};

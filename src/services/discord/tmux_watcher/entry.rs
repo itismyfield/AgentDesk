@@ -8,15 +8,8 @@ pub(super) enum WatcherLegacyMode {
 }
 
 impl WatcherLegacyMode {
-    pub(super) fn for_channel(provider: &ProviderKind, channel: ChannelId) -> Self {
-        if crate::services::discord::health::legacy_supervision::is_retired(
-            provider.as_str(),
-            channel.get(),
-        ) {
-            Self::RetiredO
-        } else {
-            Self::Legacy
-        }
+    pub(super) fn for_channel(_provider: &ProviderKind, _channel: ChannelId) -> Self {
+        Self::Legacy
     }
     pub(super) fn is_legacy(self) -> bool {
         self == Self::Legacy

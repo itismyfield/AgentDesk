@@ -4,9 +4,6 @@ use serenity::ChannelId;
 use std::sync::Arc;
 
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::turn_orchestrator::policy_close::{
-    PolicyCloseRequest, PolicyMailboxOutcome, PolicyStage,
-};
 use crate::services::turn_orchestrator::registry_purge::{MailboxRefusal, retry_while_closed};
 use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, ClearChannelResult, FinishTurnResult, HydratePendingQueueResult,
@@ -190,22 +187,6 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
         );
     }
     result
-}
-
-/// The policy close's mailbox commit, on the actor the bridge captured and no other: a lost
-/// actor is a typed stage, never a retry on the registry's successor.
-pub(in crate::services::discord) async fn policy_close_on_captured(
-    shared: &SharedData,
-    handle: &ChannelMailboxHandle,
-    channel_id: ChannelId,
-    request: PolicyCloseRequest,
-) -> Result<PolicyMailboxOutcome, PolicyStage> {
-    let outcome = handle.commit_policy_close(request).await?;
-    if let PolicyMailboxOutcome::Committed(finish) = &outcome {
-        apply_queue_exit_feedback(shared, channel_id, &finish.queue_exit_events).await;
-        handle.recovery_done().mark_done();
-    }
-    Ok(outcome)
 }
 
 /// Releases only the admitted token when setup ends before bridge guards exist.
@@ -401,16 +382,6 @@ pub(super) fn legacy_restitution_refusal(refusal: MailboxRefusal) -> HydratePend
             persistence_error: Some("mailbox still purge-closed after retries".to_string()),
             ..Default::default()
         },
-        MailboxRefusal::InputFenced(reason) => {
-            tracing::warn!(
-                ?reason,
-                "input fence refused queue restitution; source retained"
-            );
-            HydratePendingQueueResult {
-                persistence_error: Some(format!("input fence: {reason:?}")),
-                ..Default::default()
-            }
-        }
         MailboxRefusal::Unreachable => HydratePendingQueueResult::default(),
     }
 }
@@ -427,17 +398,5 @@ mod relay_state_contract_refs {
         let _ = |snapshot: &crate::services::turn_orchestrator::ChannelMailboxSnapshot| {
             let _ = &snapshot.active_turn_nonce;
         };
-    }
-}
-
-#[cfg(test)]
-mod input_fence_contract_tests {
-    #[test]
-    fn input_fence_restitution_is_observable_failure() {
-        use crate::services::discord::input_runtime::fence::{Failure, Mode};
-        let result = super::legacy_restitution_refusal(super::MailboxRefusal::InputFenced(
-            Failure::Mode(Mode::Held),
-        ));
-        assert!(result.persistence_error.unwrap().contains("Held"));
     }
 }

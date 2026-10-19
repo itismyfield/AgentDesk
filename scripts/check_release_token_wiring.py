@@ -47,6 +47,8 @@ def prepare(root: Path, repo: Path, script: str) -> dict[str, str]:
     scripts = root / "repo/scripts"
     (scripts / script).write_text(source + '\nprintf complete > "$DRY_ROOT/completed"\n')
     (scripts / "_defaults.sh").write_text(DEFAULTS)
+    helper = "_deploy_policy_generation.sh"
+    (scripts / helper).write_text((repo / "scripts" / helper).read_text())
     (root / "shell-env").write_text(SHELL_ENV)
     (root / "repo/dashboard/dist/index.html").write_text("dry dashboard")
     token_source = (repo / "scripts/build_token.py").read_text()

@@ -150,6 +150,20 @@ pub async fn clear_slot_sessions_pg(
     pool: &PgPool,
     thread_channel_ids: &[u64],
 ) -> Result<usize, String> {
+    clear_slot_sessions_with_owner_pg(pool, thread_channel_ids, None).await
+}
+
+struct SlotCleanupOwner<'a> {
+    agent_id: &'a str,
+    slot_index: i64,
+    run_ids: &'a [String],
+}
+
+async fn clear_slot_sessions_with_owner_pg(
+    pool: &PgPool,
+    thread_channel_ids: &[u64],
+    owner: Option<SlotCleanupOwner<'_>>,
+) -> Result<usize, String> {
     let mut thread_channel_ids = thread_channel_ids
         .iter()
         .map(u64::to_string)
@@ -171,11 +185,19 @@ pub async fn clear_slot_sessions_pg(
              last_heartbeat = NOW()
          WHERE thread_channel_id = ANY($2::TEXT[])
            AND status = ANY($3::TEXT[])
-           AND NOT replay_session_held(current_replay_receipt_id, active_dispatch_id)",
+           AND NOT replay_session_held(current_replay_receipt_id, active_dispatch_id)
+           AND ($4::TEXT IS NULL OR EXISTS (
+               SELECT 1 FROM auto_queue_slots
+               WHERE agent_id = $4 AND slot_index = $5
+                 AND (assigned_run_id IS NULL OR assigned_run_id = ANY($6::TEXT[]))
+           ))",
     )
     .bind(SLOT_THREAD_RESET_SESSION_INFO)
     .bind(&thread_channel_ids)
     .bind(&SLOT_RESET_STATUSES[..])
+    .bind(owner.as_ref().map(|owner| owner.agent_id))
+    .bind(owner.as_ref().map(|owner| owner.slot_index))
+    .bind(owner.as_ref().map(|owner| owner.run_ids))
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)
@@ -188,6 +210,26 @@ pub async fn clear_slot_threads_for_slot_pg(
     agent_id: &str,
     slot_index: i64,
 ) -> Result<usize, String> {
+    clear_slot_threads_pg(health_registry, pool, agent_id, slot_index, None).await
+}
+
+pub(super) async fn clear_slot_threads_for_runs_pg(
+    health_registry: Option<Arc<HealthRegistry>>,
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    run_ids: &[String],
+) -> Result<usize, String> {
+    clear_slot_threads_pg(health_registry, pool, agent_id, slot_index, Some(run_ids)).await
+}
+
+async fn clear_slot_threads_pg(
+    health_registry: Option<Arc<HealthRegistry>>,
+    pool: &PgPool,
+    agent_id: &str,
+    slot_index: i64,
+    run_ids: Option<&[String]>,
+) -> Result<usize, String> {
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
     let registry = health_registry.as_deref();
     let (safe_to_clear_thread_ids, verdicts) =
@@ -198,7 +240,24 @@ pub async fn clear_slot_threads_for_slot_pg(
             *channel,
         );
     }
-    let cleared = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
+    let cleared = clear_slot_sessions_with_owner_pg(
+        pool,
+        &safe_to_clear_thread_ids,
+        run_ids.map(|run_ids| SlotCleanupOwner {
+            agent_id,
+            slot_index,
+            run_ids,
+        }),
+    )
+    .await?;
+    if run_ids.is_some() && cleared == 0 {
+        tracing::warn!(
+            agent_id,
+            slot_index,
+            "[auto-queue] skipping slot thread clear: no eligible sessions or slot ownership changed"
+        );
+        return Ok(0);
+    }
 
     if health_registry.is_some() {
         #[cfg(test)]
@@ -273,7 +332,7 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         Some("d.id != $3"),
     );
     let dispatch_query = format!("SELECT {active_dispatch_exists}");
-    sqlx::query_scalar::<_, bool>(&dispatch_query)
+    sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(dispatch_query))
         .bind(agent_id)
         .bind(slot_index)
         .bind(exclude_id)

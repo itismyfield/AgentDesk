@@ -36,10 +36,11 @@ It also does not prove a call is reachable, successful, or the right lifecycle
 action. Conversely, a same-spelled free function in a file importing this
 writer could be over-counted. Comments, strings, pinned whole-file test modules,
 and `#[cfg(test)]` regions are excluded, but other cfgs are counted without
-target evaluation. Whole-file skips use the lexical pin in
-`scripts/test_only_module_skip_pin.py` + `.d/`; non-`.rs` regular files are rejected
-before classification, `src/` symlinks are rejected, and the skipped census
-must equal the pin count. Symlink rejection is lexical rather than atomic
+target evaluation. Whole-file skips use the basename rule with production
+module mounts rejected, plus the resolver pin in `scripts/test_only_module_skip_pin_paths.py` plus `.d/` fragments.
+Non-`.rs` regular files and `src/` symlinks are rejected before classification;
+the skipped census must equal basename count plus resolver pin count.
+Symlink rejection is lexical rather than atomic
 against a post-enumeration replacement; CI assumes a static checkout while
 the gate runs.
 
@@ -103,7 +104,7 @@ PINNED_TEST_ONLY_MODULE_FILES = _SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES
 
 
 def is_test_file(name: str) -> bool:
-    return name == "tests.rs" or name.endswith("_tests.rs")
+    return _SKIP_PIN.is_basename_test_file(name)
 
 
 def strip_source(text: str) -> str:
@@ -221,7 +222,8 @@ LIMITS = (
     "NOT seen (cargo fmt --check rejects the line-break call form); same-spelled free functions "
     "may be over-counted; direct protected-symbol aliases are rejected; only braced cfg(test) "
     "and cfg(all(test,...)) items are stripped, while other cfg/cfg_attr forms remain scanned; the "
-    "whole-file skips use one lexical pin, reject src symlinks, and check their census; "
+    "whole-file skips use the basename rule plus resolver pin, reject production basename "
+    "module mounts and src symlinks, and check their census; "
     "non-.rs regular files fail closed before classification; symlink rejection is "
     "non-atomic outside a static CI checkout; the scan root is `src/`; call sites in files "
     "reached by `#[path]`/`include!` targets resolving outside `src/` are not seen; "

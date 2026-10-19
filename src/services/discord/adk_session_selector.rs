@@ -47,6 +47,20 @@ pub(in crate::services::discord) async fn clear_provider_session_id_checked(
     Ok(())
 }
 
+/// The same selector clear written straight to PostgreSQL, the store the route itself writes, so
+/// a clear learns whether it landed without a running API.
+pub(in crate::services::discord) async fn clear_provider_session_id_pg(
+    pool: &sqlx::PgPool,
+    session_key: &str,
+) -> Result<(), String> {
+    let clear = crate::db::dispatched_sessions::clear_session_id_by_key_pg;
+    clear(pool, session_key).await?;
+    if let Some(legacy_key) = legacy_session_key_from_namespaced(session_key) {
+        clear(pool, &legacy_key).await?;
+    }
+    Ok(())
+}
+
 /// Save a provider session selector to DB so it survives dcserver restarts.
 /// The executable selector stays in the legacy `claude_session_id` column for
 /// compatibility, while the raw observed provider session id travels through

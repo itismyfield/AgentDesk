@@ -30,8 +30,8 @@
 //! about to be severed from the registry. Refused callers recover through the
 //! `*_with_closed_retry` registry helpers below, which re-resolve a FRESH
 //! actor (the unlink runs right after the verdict) and replay the request.
-//! The gate is exhaustive: a closed actor's channel-keyed state is the successor's, so every non-read
-//! arm is refused; restitution and user commands replay through [`retry_while_closed`].
+//! The gate is exhaustive: a closed actor's channel-keyed state is the successor's, so it refuses
+//! each non-read arm but a receipt-only policy reconcile; commands replay via [`retry_while_closed`].
 
 use std::future::Future;
 use std::sync::Arc;
@@ -39,7 +39,6 @@ use std::sync::Arc;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::closed_verdict::MailboxRefusal;
-use super::policy_close::{PolicyMailboxOutcome, PolicyRetain};
 use super::{
     ChannelMailboxHandle, ChannelMailboxMsg, ChannelMailboxRegistry, ChannelMailboxSnapshot,
     ChannelMailboxState, ClaimObservation, EnqueueInterventionResult, EnqueueRefusalReason,
@@ -74,17 +73,33 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     if super::injected_inputs::holds_order(state) {
         return Err("injection_reserved");
     }
-    // An installed actor's unacknowledged exits and driver outlive its slot.
-    #[cfg(test)]
-    if state.installed_pending.is_some() {
-        return Err("installed_pending");
-    }
     state.closed = true;
     Ok(())
 }
 
-/// Tombstone gate run before the actor's arm match: on a closed actor reads pass, every other arm is
-/// refused here and `None` skips the match. Exhaustive, so a new arm must be classified here.
+fn close_if_idle_observed_verdict(
+    state: &mut ChannelMailboxState,
+    expected_claim: Option<ClaimObservation>,
+) -> Result<(), &'static str> {
+    if expected_claim.is_some_and(|observed| state.claim_log.observation() != observed) {
+        return Err("claim_changed");
+    }
+    close_if_idle_verdict(state)
+}
+
+pub(super) fn answer_close_if_idle(state: &mut ChannelMailboxState, msg: ChannelMailboxMsg) {
+    let ChannelMailboxMsg::CloseIfIdle {
+        expected_claim,
+        reply,
+    } = msg
+    else {
+        unreachable!("only CloseIfIdle reaches its reply handler");
+    };
+    let _ = reply.send(close_if_idle_observed_verdict(state, expected_claim));
+}
+
+/// Tombstone gate run before the actor's arm match: a closed actor passes reads and a receipt-only
+/// policy reconcile, refuses the rest (`None` skips the match) and never retries a policy close.
 pub(super) fn gate_closed_arm(
     state: &ChannelMailboxState,
     channel_id: ChannelId,
@@ -95,8 +110,7 @@ pub(super) fn gate_closed_arm(
         return Some(msg);
     }
     let arm = match msg {
-        M::FreezeInput { .. }
-        | M::Snapshot { .. }
+        M::Snapshot { .. }
         | M::HasActiveTurn { .. }
         | M::HasBlockingActiveTurn { .. }
         | M::ActiveTurnKind { .. }
@@ -119,18 +133,6 @@ pub(super) fn gate_closed_arm(
             let _ = reply.send(());
             "RestoreActiveTurn"
         }
-        #[cfg(test)]
-        M::ScopedClaim(super::scoped_claim::ScopedMsg::Pending { .. }) => return Some(msg),
-        #[cfg(test)]
-        M::ScopedClaim(scoped) => {
-            scoped.refuse(super::scoped_claim::ScopedClaimRefusal::ActorClosed);
-            "ScopedClaim"
-        }
-        #[cfg(test)]
-        M::InstalledActorHandoff(request) => {
-            request.refuse(crate::services::cluster::channel_home_port::RestoreFailure::Rejected("handoff actor closed".into()));
-            "InstalledActorHandoff"
-        }
         M::RecoveryKickoff { reply, .. } => {
             let _ = reply.send(RecoveryKickoffResult::RefusedClosed);
             "RecoveryKickoff"
@@ -151,11 +153,9 @@ pub(super) fn gate_closed_arm(
             });
             "RequeueFront"
         }
-        // A policy close commits only on its captured actor; the successor is never retried.
-        M::PolicyClose { reply, .. } => {
-            let _ = reply.send(PolicyMailboxOutcome::Retained(PolicyRetain::ActorClosed));
-            "PolicyClose"
-        }
+        M::PolicyClose { ref request, .. } if request.reconciles(state, channel_id) => return Some(msg),
+        M::PolicyClose { reply, .. } => super::policy_close::refuse_closed(reply),
+        M::ClaimPolicyTail(claim) => claim.closed(),
         // Reply dropped: the handle's offline fallback is the refusal, and what an idle closed
         // actor would answer anyway; finish wrappers read `mailbox_online: false` and stop.
         M::CancelActiveTurnWithReason { .. }
@@ -168,6 +168,7 @@ pub(super) fn gate_closed_arm(
         M::AbandonPendingDispatch { .. } => "AbandonPendingDispatch",
         M::FinishTurn { .. } => "FinishTurn",
         M::FinishTurnIfMatches { .. } => "FinishTurnIfMatches",
+        M::ReleaseWitnessedEpisode(_) => "ReleaseWitnessedEpisode",
         M::FinishTurnIfToken { .. } => "FinishTurnIfToken",
         M::HardStop { .. } => "HardStop",
         M::FinishCancelledTurn { .. } => "FinishCancelledTurn",
@@ -256,27 +257,10 @@ impl ChannelMailboxRegistry {
         persistence: QueuePersistenceContext,
         observed: Option<ClaimObservation>,
     ) -> EnqueueInterventionResult {
-        let input_permit = match crate::services::discord::input_runtime::fence::effect::admit(
-            &persistence.provider,
-            channel_id.get(),
-        ) {
-            Ok(permit) => permit,
-            Err(reason) => {
-                return EnqueueInterventionResult::refused(
-                    super::input_fence::enqueue_reason(reason),
-                    Vec::new(),
-                );
-            }
-        };
         for attempt in 1..=CLOSED_RETRY_ATTEMPTS {
             let result = self
                 .handle(channel_id)
-                .enqueue_observed_with_permit(
-                    intervention.clone(),
-                    persistence.clone(),
-                    observed,
-                    input_permit.clone(),
-                )
+                .enqueue_observed(intervention.clone(), persistence.clone(), observed)
                 .await;
             if result.refusal_reason != Some(EnqueueRefusalReason::MailboxClosed) {
                 return result;
@@ -327,7 +311,8 @@ impl ChannelMailboxRegistry {
 /// #3029(D): outcome of a `PurgeQueue` request.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub(crate) struct PurgeQueueResult {
-    pub(crate) input_refusal: Option<crate::services::discord::input_runtime::fence::Failure>,
+    /// The protected queued head refused the purge; queue and files are left untouched.
+    pub(crate) queued_head_refused: bool,
     /// Number of intervention-queue entries drained.
     pub(crate) drained: usize,
     /// Number of persisted pending-queue/dispatch files removed across token
@@ -378,12 +363,18 @@ impl ChannelMailboxHandle {
 
     /// Ask the actor to verify it is idle and, if so, tombstone itself
     /// (`Ok(())` ⇒ purgeable; `Err(reason)` ⇒ live work, purge refused).
-    /// A dead actor (mailbox closed / reply dropped) can never start work
-    /// again, so the request fallback treats it as trivially purgeable.
-    async fn close_if_idle(&self) -> Result<(), &'static str> {
-        self.request(|reply| ChannelMailboxMsg::CloseIfIdle { reply })
-            .await
-            .unwrap_or(Ok(()))
+    /// The operator path may purge a dead actor; guarded retirement requires
+    /// an answer proving the expected claim history.
+    async fn close_if_idle(
+        &self,
+        expected_claim: Option<ClaimObservation>,
+    ) -> Result<(), &'static str> {
+        self.request(|reply| ChannelMailboxMsg::CloseIfIdle {
+            expected_claim,
+            reply,
+        })
+        .await
+        .unwrap_or_else(|_| expected_claim.map_or(Ok(()), |_| Err("actor_unreachable")))
     }
 }
 
@@ -429,8 +420,46 @@ impl ChannelMailboxRegistry {
         let Some(handle) = self.peek(channel_id) else {
             return MailboxPurgeOutcome::NoEntry;
         };
-        if let Err(refusal) = handle.close_if_idle().await {
+        self.remove_idle_handle(channel_id, &handle, None).await
+    }
+
+    /// Retire only the registered actor and claim history the caller observed.
+    /// A successor claim on the same actor refuses even when it has already finished.
+    pub(crate) async fn remove_idle_entry_if_current(
+        &self,
+        channel_id: ChannelId,
+        expected: &ChannelMailboxHandle,
+        observed: ClaimObservation,
+    ) -> MailboxPurgeOutcome {
+        let Some(current) = self.peek(channel_id) else {
+            return MailboxPurgeOutcome::NoEntry;
+        };
+        if !current.same_actor(expected) {
+            return MailboxPurgeOutcome::RefusedLiveWork("actor_changed");
+        }
+        self.remove_idle_handle(channel_id, expected, Some(observed))
+            .await
+    }
+
+    async fn remove_idle_handle(
+        &self,
+        channel_id: ChannelId,
+        handle: &ChannelMailboxHandle,
+        expected_claim: Option<ClaimObservation>,
+    ) -> MailboxPurgeOutcome {
+        let turn_finished = self
+            .turn_finished
+            .get(&channel_id)
+            .map(|signal| signal.clone());
+        if let Err(refusal) = handle.close_if_idle(expected_claim).await {
             return MailboxPurgeOutcome::RefusedLiveWork(refusal);
+        }
+        if self
+            .handles
+            .remove_if(&channel_id, |_, current| current.same_actor(handle))
+            .is_none()
+        {
+            return MailboxPurgeOutcome::RefusedLiveWork("actor_changed");
         }
         super::claim_observation::note_purge(channel_id);
         // Unlink the instance maps only when they still hold the exact
@@ -439,13 +468,13 @@ impl ChannelMailboxRegistry {
         // the verified incarnation (#5951), so only that one is unlinked. The
         // channel's re-mint fence cell (`remint_fences`) is kept: the next
         // incarnation inherits it.
-        self.handles.remove_if(&channel_id, |_, current| {
-            current.sender.same_channel(&handle.sender)
-        });
         self.recovery_done.remove_if(&channel_id, |_, signal| {
             Arc::ptr_eq(signal, handle.recovery_done())
         });
-        let removed_turn_finished = self.turn_finished.remove(&channel_id);
+        if let Some(signal) = &turn_finished {
+            self.turn_finished
+                .remove_if(&channel_id, |_, current| Arc::ptr_eq(current, signal));
+        }
         // #3297 finding 5: the GLOBAL_* maps are process-wide single slots —
         // another registry instance may have published a DIFFERENT (possibly
         // busy) actor/signal for this channel after ours. The idle check above
@@ -453,9 +482,7 @@ impl ChannelMailboxRegistry {
         // when it still points at the exact object we verified; otherwise
         // skip it and WARN.
         let global_handle_removed = GLOBAL_CHANNEL_MAILBOXES
-            .remove_if(&channel_id, |_, mirrored| {
-                mirrored.sender.same_channel(&handle.sender)
-            })
+            .remove_if(&channel_id, |_, mirrored| mirrored.same_actor(handle))
             .is_some();
         if !global_handle_removed && GLOBAL_CHANNEL_MAILBOXES.contains_key(&channel_id) {
             tracing::warn!(
@@ -466,14 +493,14 @@ impl ChannelMailboxRegistry {
         GLOBAL_RECOVERY_DONE_SIGNALS.remove_if(&channel_id, |_, mirrored| {
             Arc::ptr_eq(mirrored, handle.recovery_done())
         });
-        if let Some((_, signal)) = removed_turn_finished {
+        if let Some(signal) = turn_finished {
             GLOBAL_TURN_FINISHED_SIGNALS
                 .remove_if(&channel_id, |_, mirrored| Arc::ptr_eq(mirrored, &signal));
         }
         tracing::warn!(
             channel = channel_id.get(),
             global_handle_removed,
-            "mailbox registry entry purged (operator repair; in-memory unlink only)"
+            "idle mailbox registry entry purged (in-memory unlink only)"
         );
         MailboxPurgeOutcome::Removed
     }
@@ -481,6 +508,9 @@ impl ChannelMailboxRegistry {
 
 #[cfg(test)]
 mod closed_gate_tests;
+
+#[cfg(test)]
+mod current_entry_tests;
 
 #[cfg(test)]
 mod tests {
@@ -754,7 +784,7 @@ mod tests {
                 .await
         );
 
-        assert_eq!(handle.close_if_idle().await, Err("live_cancel_token"));
+        assert_eq!(handle.close_if_idle(None).await, Err("live_cancel_token"));
         assert_eq!(
             registry.remove_idle_entry(channel).await,
             MailboxPurgeOutcome::RefusedLiveWork("live_cancel_token")
@@ -929,7 +959,7 @@ mod tests {
         let registry = ChannelMailboxRegistry::default();
         let channel = ChannelId::new(93_293_104);
         let handle = registry.handle(channel);
-        assert_eq!(handle.close_if_idle().await, Ok(()));
+        assert_eq!(handle.close_if_idle(None).await, Ok(()));
 
         let enqueue = registry
             .enqueue_with_closed_retry(

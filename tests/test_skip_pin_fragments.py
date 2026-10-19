@@ -19,6 +19,7 @@ from scripts import skip_pin_registry as registry
 
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY = "scripts/test_only_module_skip_pin.py"
+SPLIT = "scripts/test_only_module_skip_pin_paths.py"
 FRAGMENTS = "scripts/test_only_module_skip_pin.d"
 NAMES = ("PINNED_BASENAME_TEST_FILES", "PINNED_RESOLVER_TEST_ONLY_FILES")
 
@@ -44,25 +45,12 @@ def legacy_text(basename=(), resolver=()) -> str:
 
 
 def literal_sets(text: str) -> tuple[list[str], list[str]]:
-    """The two legacy literals as Python evaluates them, element order kept."""
+    """Present legacy literals as Python evaluates them, element order kept."""
     found = {}
     for node in ast.parse(text).body:
         if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) in NAMES:
             found[node.targets[0].id] = [element.value for element in node.value.args[0].elts]
-    return found[NAMES[0]], found[NAMES[1]]
-
-
-def splice(text: str, basename=(), resolver=()) -> str:
-    """The real pin module with only its two literals replaced, so its loader code still runs."""
-    lines = text.splitlines(keepends=True)
-    spans = sorted(
-        ((node.lineno, node.end_lineno, node.targets[0].id) for node in ast.parse(text).body
-         if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) in NAMES),
-        reverse=True,
-    )
-    for start, end, name in spans:
-        lines[start - 1:end] = [block(name, basename if name == NAMES[0] else resolver)]
-    return "".join(lines)
+    return found.get(NAMES[0], []), found.get(NAMES[1], [])
 
 
 def write(root: Path, rel: str, text: str) -> None:
@@ -89,9 +77,9 @@ class TempRoot(unittest.TestCase):
 
 
 class LegacyCompatibilityTests(TempRoot):
-    def test_unchanged_legacy_file_reads_as_its_own_literals_and_the_module_constants(self) -> None:
-        text = (ROOT / LEGACY).read_text("utf-8")
-        rows, problems = registry.legacy_rows(text, LEGACY)
+    def test_split_legacy_reads_its_literal_and_the_module_uses_only_resolver_pins(self) -> None:
+        text = (ROOT / SPLIT).read_text("utf-8")
+        rows, problems = registry.legacy_rows(text, SPLIT)
         self.assertEqual(problems, [])
         basename, resolver = literal_sets(text)
         self.assertEqual(len(rows), len(basename) + len(resolver))
@@ -99,20 +87,34 @@ class LegacyCompatibilityTests(TempRoot):
         self.assertEqual(by_kind, {"basename": frozenset(basename), "resolver": frozenset(resolver)})
         merged = registry.load(ROOT).frozensets()
         self.assertTrue(by_kind["basename"] <= merged[0] and by_kind["resolver"] <= merged[1])
+        self.assertTrue(all(row.location.startswith(SPLIT + ":") for row in rows))
         pin = durable._SKIP_PIN
-        self.assertEqual((pin.PINNED_BASENAME_TEST_FILES, pin.PINNED_RESOLVER_TEST_ONLY_FILES), merged)
+        self.assertEqual(pin.PINNED_RESOLVER_TEST_ONLY_FILES, merged[1])
+        self.assertEqual(pin.PINNED_TEST_ONLY_MODULE_FILES, merged[1])
+
+    def test_unsplit_resolver_only_fixture_needs_no_basename_literal(self) -> None:
+        write(self.root, LEGACY, block(NAMES[1], ["src/helper.rs"]))
+        self.assertEqual(registry.load(self.root).frozensets(), (frozenset(), {"src/helper.rs"}))
+
+    def test_split_literal_is_selected_without_parsing_or_rewriting_its_delegate(self) -> None:
+        write(self.root, LEGACY, "PINNED_RESOLVER_TEST_ONLY_FILES = delegate.paths\n")
+        write(self.root, SPLIT, block(NAMES[1], ["src/helper.rs"]))
+        before = snapshot(self.root)
+        self.assertEqual(registry.load(self.root).frozensets(), (frozenset(), {"src/helper.rs"}))
+        self.assertEqual(snapshot(self.root), before)
 
     def test_legacy_only_new_only_and_mixed_layouts_build_the_same_pin(self) -> None:
-        text = (ROOT / LEGACY).read_text("utf-8")
-        basename, resolver = literal_sets(text)
+        basename = ["src/a_tests.rs", "src/b_tests.rs", "src/tests.rs"]
+        resolver = ["src/helper.rs", "src/other.rs"]
+        text = legacy_text(basename, resolver)
         expected = (frozenset(basename), frozenset(resolver))
         rows = sorted([*(f"basename | {p}" for p in basename), *(f"resolver | {p}" for p in resolver)],
                       key=lambda row: row.partition(" | ")[2])
         layouts = {
             "legacy-only": (text, {}),
-            "new-only": (splice(text), {"mac-mini-1-a.txt": rows[::3], "mac-mini-1-b.txt": rows[1::3],
+            "new-only": (legacy_text(), {"mac-mini-1-a.txt": rows[::3], "mac-mini-1-b.txt": rows[1::3],
                                          "mac-book-2-c.txt": rows[2::3]}),
-            "mixed": (splice(text, basename[::2], resolver[1::2]),
+            "mixed": (legacy_text(basename[::2], resolver[1::2]),
                       {"mac-mini-1-a.txt": [r for r in rows if r.partition(" | ")[2] in
                                             {*basename[1::2], *resolver[::2]}]}),
         }
@@ -158,6 +160,21 @@ class FailClosedTests(TempRoot):
         write(self.root, LEGACY, legacy_text(["src/a_tests.rs", "src/a_tests.rs"]))
         self.assert_red(f"{LEGACY}:4: duplicate of {LEGACY}:3")
 
+    def test_split_duplicates_and_cross_kind_conflicts_name_the_split_origin(self) -> None:
+        write(self.root, LEGACY, "PINNED_RESOLVER_TEST_ONLY_FILES = delegate.paths\n")
+        write(self.root, SPLIT, block(NAMES[1], ["src/a.rs", "src/helper.rs"]))
+        self.fragment("mac-mini-1-p1.txt", "resolver | src/a.rs", "basename | src/helper.rs")
+        self.assert_red(
+            f"{FRAGMENTS}/mac-mini-1-p1.txt:1: duplicate of {SPLIT}:3 for `src/a.rs`",
+            f"{FRAGMENTS}/mac-mini-1-p1.txt:2: conflicts with {SPLIT}:4 for `src/helper.rs`",
+        )
+
+    def test_split_duplicate_literal_rows_and_assignments_fail(self) -> None:
+        write(self.root, SPLIT, block(NAMES[1], ["src/a.rs", "src/a.rs"]))
+        self.assert_red(f"{SPLIT}:4: duplicate of {SPLIT}:3")
+        write(self.root, SPLIT, block(NAMES[1], []) * 2)
+        self.assert_red(f"{NAMES[1]} must be assigned once, found 2")
+
     def test_non_literal_or_malformed_legacy_entries_fail(self) -> None:
         write(self.root, LEGACY, legacy_text(["src/a_tests.rs"]).replace(
             '"src/a_tests.rs"', '"src/" + "a_tests.rs", "src/../b_tests.rs"'))
@@ -178,15 +195,16 @@ class FailClosedTests(TempRoot):
                         ":3: `lib/c_tests.rs` is no normalized", ":4: `src/d tests.rs` is no normalized")
 
     def test_invalid_fragments_fail_the_pin_import_in_a_fresh_process(self) -> None:
-        for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py",
+        for name in ("test_only_module_skip_pin.py", "skip_pin_registry.py", "rust_lex.py",
                      "registration_fragments.py", "generate_inventory_docs.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
-        write(self.root, LEGACY, splice((ROOT / LEGACY).read_text("utf-8"), ["src/a_tests.rs"]))
+        write(self.root, SPLIT, block(NAMES[1], ["src/helper.rs"]))
+        self.fragment("mac-mini-1-base.txt", "basename | src/a_tests.rs")
         self.fragment("mac-mini-1-p1.txt", "resolver | src/b.rs")
         probe = [sys.executable, "-c", "import sys; sys.path.insert(0, 'scripts'); "
                  "import test_only_module_skip_pin as p; print(*sorted(p.PINNED_TEST_ONLY_MODULE_FILES))"]
         result = subprocess.run(probe, cwd=self.root, capture_output=True, text=True)
-        self.assertEqual((result.returncode, result.stdout.split()), (0, ["src/a_tests.rs", "src/b.rs"]))
+        self.assertEqual((result.returncode, result.stdout.split()), (0, ["src/b.rs", "src/helper.rs"]))
         self.fragment("mac-book-2-p1.txt", "basename | src/b.rs")
         result = subprocess.run(probe, cwd=self.root, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -201,15 +219,16 @@ class WriterGateVerdictTests(TempRoot):
         write(self.root, "src/main.rs", "mod prod;\n#[cfg(test)]\nmod helper;\nfn main() {}\n")
         for rel in ("src/prod.rs", "src/helper.rs", "src/alpha_tests.rs", "src/beta/tests.rs"):
             write(self.root, rel, "fn fixture() {}\n")
-        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py"):
+        for name in ("skip_pin_registry.py", "registration_fragments.py", "generate_inventory_docs.py", "rust_lex.py"):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         self.real = (ROOT / LEGACY).read_text("utf-8")
         self.loads = 0
 
-    def verdicts(self, basename=(), resolver=(), **fragments):
+    def verdicts(self, resolver=(), **fragments):
         shutil.rmtree(self.root / FRAGMENTS)
         (self.root / FRAGMENTS).mkdir()
-        write(self.root, LEGACY, splice(self.real, basename, resolver))
+        write(self.root, LEGACY, self.real)
+        write(self.root, SPLIT, block(NAMES[1], resolver))
         for name, rows in fragments.items():
             self.fragment(name.replace("_", "-") + ".txt", *rows)
         self.loads += 1
@@ -222,19 +241,18 @@ class WriterGateVerdictTests(TempRoot):
                     intake.check(self.root, {}, pinned_test_only_files=pin))
 
     def test_layouts_give_one_verdict_and_a_missing_or_stale_row_fails_both_gates(self) -> None:
-        legacy_only = self.verdicts(["src/alpha_tests.rs", "src/beta/tests.rs"], ["src/helper.rs"])
+        legacy_only = self.verdicts(["src/helper.rs"])
         self.assertTrue(all(ok for ok, _ in legacy_only), legacy_only)
         new_only = self.verdicts(mac_mini_1_p1=["basename | src/alpha_tests.rs", "basename | src/beta/tests.rs"],
                                  mac_book_2_p1=["resolver | src/helper.rs"])
-        mixed = self.verdicts(["src/beta/tests.rs"], ["src/helper.rs"],
+        mixed = self.verdicts(["src/helper.rs"],
                               mac_mini_1_p1=["basename | src/alpha_tests.rs"])
         self.assertEqual(new_only, legacy_only)
         self.assertEqual(mixed, legacy_only)
-        missing = self.verdicts(["src/beta/tests.rs"], ["src/helper.rs"])
-        stale = self.verdicts(["src/beta/tests.rs"], ["src/helper.rs"],
-                              mac_mini_1_p1=["basename | src/alpha_tests.rs", "basename | src/gone_tests.rs"])
-        for verdicts, needle in ((missing, "scan-only (newly skipped): src/alpha_tests.rs"),
-                                 (stale, "pin-only (no longer skipped): src/gone_tests.rs")):
+        missing = self.verdicts()
+        stale = self.verdicts(["src/helper.rs"], mac_mini_1_p1=["resolver | src/gone.rs"])
+        for verdicts, needle in ((missing, "scan-only (newly skipped): src/helper.rs"),
+                                 (stale, "pin-only (no longer skipped): src/gone.rs")):
             for ok, message in verdicts:
                 self.assertFalse(ok)
                 self.assertIn(needle, message)
@@ -254,8 +272,8 @@ class SyncWriterTests(TempRoot):
         write(self.root, "src/lib.rs", "".join(f"mod {m};\n" for m in production)
               + "".join(f"#[cfg(test)]\nmod {m};\n" for m in test_only))
 
-    def sync(self, promoted=(), fragment=None):
-        return census.sync_skips(self.root, promoted, fragment)
+    def sync(self, promoted=(), fragment=None, *, deleted=()):
+        return census.sync_skips(self.root, promoted, deleted_paths=deleted, fragment=fragment)
 
     def test_a_clean_tree_writes_nothing(self) -> None:
         before = snapshot(self.root)
@@ -263,16 +281,17 @@ class SyncWriterTests(TempRoot):
         self.assertEqual(snapshot(self.root), before)
 
     def test_an_unnamed_sync_gives_each_new_path_its_own_fragment_and_keeps_the_legacy_bytes(self) -> None:
-        write(self.root, "src/new_tests.rs", "")
-        write(self.root, "src/deep/other_tests.rs", "")
+        write(self.root, "src/new_helper.rs", "")
+        write(self.root, "src/other_helper.rs", "")
+        self.lib("legacy_helper", "frag_helper", "new_helper", "other_helper")
         legacy = (self.root / LEGACY).read_bytes()
         manual, written = self.sync()
         self.assertEqual(manual, [])
         self.assertEqual(written, sorted(f"{FRAGMENTS}/{registry.auto_fragment(p)}"
-                                         for p in ("src/new_tests.rs", "src/deep/other_tests.rs")))
+                                         for p in ("src/new_helper.rs", "src/other_helper.rs")))
         self.assertEqual((self.root / written[0]).read_text().count("\n"), 1)
         self.assertEqual((self.root / LEGACY).read_bytes(), legacy)
-        self.assertIn("src/new_tests.rs", registry.load(self.root).rows)
+        self.assertIn("src/new_helper.rs", registry.load(self.root).rows)
         before = snapshot(self.root)
         self.assertEqual(self.sync(), ([], []))
         self.assertEqual(snapshot(self.root), before)
@@ -280,15 +299,32 @@ class SyncWriterTests(TempRoot):
     def test_a_named_sync_inserts_sorted_rows_and_keeps_comments(self) -> None:
         write(self.root, "src/a_tests.rs", "")
         write(self.root, "src/zz_tests.rs", "")
-        write(self.root, "src/new_helper.rs", "")
-        self.lib("legacy_helper", "frag_helper", "new_helper")
+        for name in ("a_helper", "new_helper", "zz_helper"):
+            write(self.root, f"src/{name}.rs", "")
+        self.lib("legacy_helper", "frag_helper", "a_helper", "new_helper", "zz_helper")
         legacy = (self.root / LEGACY).read_bytes()
         self.assertEqual(self.sync(fragment="mac-mini-1-p1"), ([], [f"{FRAGMENTS}/mac-mini-1-p1.txt"]))
         self.assertEqual((self.root / FRAGMENTS / "mac-mini-1-p1.txt").read_text(), (
-            "# reviewed fixture\nbasename | src/a_tests.rs\nresolver | src/frag_helper.rs\n"
-            "resolver | src/new_helper.rs\nbasename | src/zz_tests.rs\n"
+            "# reviewed fixture\nresolver | src/a_helper.rs\nresolver | src/frag_helper.rs\n"
+            "resolver | src/new_helper.rs\nresolver | src/zz_helper.rs\n"
         ))
         self.assertEqual((self.root / LEGACY).read_bytes(), legacy)
+
+    def test_new_basename_rule_files_need_no_sync_rows(self) -> None:
+        write(self.root, "src/new_tests.rs", "")
+        write(self.root, "src/deep/tests.rs", "")
+        before = snapshot(self.root)
+        self.assertEqual(self.sync(), ([], []))
+        self.assertEqual(snapshot(self.root), before)
+        self.assertNotIn("src/new_tests.rs", registry.load(self.root).rows)
+
+    def test_registry_sync_itself_never_adds_a_new_basename_row(self) -> None:
+        before = snapshot(self.root)
+        pin = registry.load(self.root)
+        measured = {path: row.payload for path, row in pin.rows.items()}
+        measured["src/new_tests.rs"] = "basename"
+        self.assertEqual(registry.sync(self.root, measured, set(measured)), ([], []))
+        self.assertEqual(snapshot(self.root), before)
 
     def test_a_legacy_promotion_returns_its_manual_step_and_writes_nothing(self) -> None:
         self.lib("frag_helper", production=("prod", "legacy_helper"))
@@ -325,6 +361,62 @@ class SyncWriterTests(TempRoot):
         self.assertFalse((self.root / FRAGMENTS / "mac-mini-1-p1.txt").exists())
         self.assertEqual((self.root / LEGACY).read_bytes(), legacy)
 
+    def test_a_fragment_deletion_removes_only_its_row_and_then_the_empty_fragment(self) -> None:
+        self.fragment("mac-mini-1-p1.txt", "# reviewed fixture", "resolver | src/frag_helper.rs",
+                      "resolver | src/kept.rs")
+        write(self.root, "src/kept.rs", "")
+        (self.root / "src/frag_helper.rs").unlink()
+        self.lib("legacy_helper", "kept")
+        legacy = (self.root / LEGACY).read_bytes()
+        self.assertEqual(self.sync(deleted=["src/frag_helper.rs"]),
+                         ([], [f"{FRAGMENTS}/mac-mini-1-p1.txt"]))
+        self.assertEqual((self.root / FRAGMENTS / "mac-mini-1-p1.txt").read_text(),
+                         "# reviewed fixture\nresolver | src/kept.rs\n")
+        (self.root / "src/kept.rs").unlink()
+        self.lib("legacy_helper")
+        self.assertEqual(self.sync(deleted=["src/kept.rs"]), ([], [f"{FRAGMENTS}/mac-mini-1-p1.txt"]))
+        self.assertFalse((self.root / FRAGMENTS / "mac-mini-1-p1.txt").exists())
+        self.assertEqual((self.root / LEGACY).read_bytes(), legacy)
+
+    def test_a_split_legacy_deletion_is_manual_and_never_rewrites_its_delegate(self) -> None:
+        write(self.root, LEGACY, "PINNED_RESOLVER_TEST_ONLY_FILES = delegate.paths\n")
+        write(self.root, SPLIT, block(NAMES[1], ["src/legacy_helper.rs"]))
+        (self.root / "src/legacy_helper.rs").unlink()
+        write(self.root, "src/new_helper.rs", "")
+        self.lib("frag_helper", "new_helper")
+        before = snapshot(self.root)
+        manual, written = self.sync(fragment="mac-mini-1-p1", deleted=["src/legacy_helper.rs"])
+        self.assertEqual(written, [])
+        self.assertEqual(manual, [f"{SPLIT}:3: delete the legacy pin `src/legacy_helper.rs` by hand; "
+                                  f"--sync-skips never rewrites {SPLIT}"])
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_a_split_legacy_promotion_is_manual_and_never_rewrites_its_delegate(self) -> None:
+        write(self.root, LEGACY, "PINNED_RESOLVER_TEST_ONLY_FILES = delegate.paths\n")
+        write(self.root, SPLIT, block(NAMES[1], ["src/legacy_helper.rs"]))
+        self.lib("frag_helper", production=("prod", "legacy_helper"))
+        before = snapshot(self.root)
+        manual, written = self.sync(["src/legacy_helper.rs"])
+        self.assertEqual(written, [])
+        self.assertEqual(len(manual), 1)
+        self.assertTrue(manual[0].startswith(f"{SPLIT}:3: delete the legacy pin"))
+        self.assertEqual(snapshot(self.root), before)
+
+    def test_deletion_refusals_leave_every_file_unchanged(self) -> None:
+        for deleted, needle in ((["src/frag_helper.rs"], "deletion path still exists"),
+                                (["src/absent.rs"], "deletion is not pinned")):
+            with self.subTest(deleted=deleted):
+                before = snapshot(self.root)
+                with self.assertRaisesRegex(RuntimeError, needle):
+                    self.sync(deleted=deleted)
+                self.assertEqual(snapshot(self.root), before)
+        (self.root / "src/frag_helper.rs").unlink()
+        (self.root / "src/frag_helper.rs").symlink_to("missing.rs")
+        before = snapshot(self.root)
+        with self.assertRaisesRegex(RuntimeError, "symlink"):
+            self.sync(deleted=["src/frag_helper.rs"])
+        self.assertEqual(snapshot(self.root), before)
+
     def test_refusals_leave_every_file_unchanged(self) -> None:
         self.lib("legacy_helper", production=("prod", "frag_helper"))
         write(self.root, "src/new_tests.rs", "")
@@ -348,14 +440,15 @@ class SyncWriterTests(TempRoot):
         self.assertEqual(snapshot(self.root), before)
 
     def test_the_cli_without_a_fragment_never_rewrites_the_legacy_file(self) -> None:
-        write(self.root, "src/new_tests.rs", "")
+        write(self.root, "src/new_helper.rs", "")
+        self.lib("legacy_helper", "frag_helper", "new_helper")
         legacy = (self.root / LEGACY).read_bytes()
         result = subprocess.run([sys.executable, str(ROOT / "scripts/check_legacy_supervision_census.py"),
                                  "--sync-skips"], cwd=self.root, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        name = registry.auto_fragment("src/new_tests.rs")
+        name = registry.auto_fragment("src/new_helper.rs")
         self.assertEqual(result.stdout.strip(), f"skip pin fragment written: {FRAGMENTS}/{name}")
-        self.assertEqual((self.root / FRAGMENTS / name).read_text(), "basename | src/new_tests.rs\n")
+        self.assertEqual((self.root / FRAGMENTS / name).read_text(), "resolver | src/new_helper.rs\n")
         self.assertEqual((self.root / LEGACY).read_bytes(), legacy)
 
     def test_review_preparation_passes_a_named_fragment_to_the_sync_only(self) -> None:

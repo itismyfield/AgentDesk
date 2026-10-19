@@ -14,7 +14,7 @@ use crate::services::tui_o::writer::binding::BindingLog;
 
 impl ProducerPane {
     /// Sends hook `event` through the receiver's binding judgment, published `secs` after launch.
-    fn http(
+    pub(in super::super) fn http(
         &self,
         event: &str,
         source: Option<&str>,
@@ -416,3 +416,8 @@ async fn an_adopted_resume_holds_its_rows_until_an_operator_resolves() {
     assert_eq!(harness.port.posts(), ["b out"], "[R5:resume_resolved]");
     halt(stop, task).await;
 }
+
+#[path = "transition_execution_tests.rs"]
+mod transition_execution;
+#[path = "transition_host_tests.rs"]
+mod transition_host;

@@ -1,10 +1,24 @@
-//! Pastes one external human input into a busy hosted Claude TUI composer; nothing here enqueues.
+//! Pastes one external human input into a hosted Claude TUI composer; nothing here enqueues.
 //! A person's draft is first stashed (`stash`); after the paste only Injected or Unconfirmed follow.
 
-mod screen;
+mod receipt;
+mod submit;
+#[cfg(test)]
+pub(crate) use submit::inject;
+#[cfg(all(test, unix))]
+use submit::{inject_gated, inject_listed};
+pub(crate) use submit::{inject_report, inject_report_any_turn};
+
+#[derive(Clone, Copy)]
+enum TurnGate {
+    BusyOnly,
+    AnyTurn,
+}
+pub(crate) use receipt::exact as exact_receipt;
+pub(in crate::services::claude_tui) mod screen;
 #[cfg(test)]
 mod screen_tests;
-mod stash;
+pub(in crate::services::claude_tui) mod stash;
 #[cfg(all(test, unix))]
 mod stash_tests;
 #[cfg(all(test, unix))]
@@ -197,7 +211,9 @@ pub(super) fn transcript_submission(
             && let Some((text, has_nontext)) = human_input_text(&record, expected.is_some())
             && text.contains(&marker)
         {
-            return Some(expected.is_none_or(|expected| !has_nontext && text == expected));
+            return Some(
+                expected.is_none_or(|expected| !has_nontext && receipt::exact(&text, expected)),
+            );
         }
         line.clear();
     }
@@ -471,13 +487,13 @@ enum Plan {
     Stash(Vec<String>),
 }
 
-/// Pre-mutation pane verdict: an empty composer under a live turn, a draft Claude can stash and
-/// give back, or the veto.
+/// Pre-mutation safety verdict, plus the caller's legacy busy-only policy when required.
 fn judge_before_paste(
     capture: &str,
     transcript: &Path,
     text: &str,
     size: Option<(usize, usize)>,
+    turn_gate: TurnGate,
 ) -> Result<Plan, Veto> {
     use crate::services::tmux_common::{
         tmux_capture_indicates_claude_tui_busy,
@@ -495,11 +511,12 @@ fn judge_before_paste(
     } else {
         Some(screen::stashable(capture, text, size).ok_or(Veto::Draft)?)
     };
-    // Enter on an idle pane would start a new turn instead of queueing behind this one. Claude
-    // hides its busy chrome while the composer holds text, so a draft rests on the transcript.
-    let turn = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript);
-    if !turn.is_busy() || (empty && !tmux_capture_indicates_claude_tui_busy(&plain)) {
-        return Err(Veto::NotBusy);
+    // Legacy output needs a live turn; transcript output follows whichever turn accepts input.
+    if matches!(turn_gate, TurnGate::BusyOnly) {
+        let turn = crate::services::tui_turn_state::observe_claude_jsonl_turn_state(transcript);
+        if !turn.is_busy() || (empty && !tmux_capture_indicates_claude_tui_busy(&plain)) {
+            return Err(Veto::NotBusy);
+        }
     }
     match stash {
         Some(draft) => Ok(Plan::Stash(draft)),
@@ -572,6 +589,15 @@ fn stash_channels_configured() -> &'static [u64] {
     CHANNELS.get_or_init(|| stash_channels(raw().as_deref()))
 }
 
+#[cfg(unix)]
+pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
+    #[cfg(test)]
+    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
+        return stash_channel_listed(channel, &stash_tests::configured_channels());
+    }
+    stash_channel_listed(channel, stash_channels_configured())
+}
+
 fn stash_channels(raw: Option<&str>) -> Vec<u64> {
     let ids = raw.unwrap_or_default().split(',');
     ids.filter_map(|id| id.trim().parse().ok()).collect()
@@ -580,78 +606,6 @@ fn stash_channels(raw: Option<&str>) -> Vec<u64> {
 /// Only the channel the caller resolved for this input counts; without one nothing is stashed.
 fn stash_channel_listed(channel: Option<u64>, listed: &[u64]) -> bool {
     channel.is_some_and(|channel| listed.contains(&channel))
-}
-
-/// Tries the composer lock a bounded number of times, then injects under it. No channel comes
-/// with this entry, so a person's draft is never stashed: it queues.
-#[cfg(test)]
-pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Outcome {
-    inject_report(pane, request, None, timing).outcome
-}
-
-/// `inject` with the draft axis kept apart from the delivery, for an input whose channel the
-/// caller resolved, if any.
-pub(crate) fn inject_report(
-    pane: &Pane,
-    request: &Request<'_>,
-    channel: Option<u64>,
-    timing: &Timing,
-) -> Report {
-    #[cfg(all(test, unix))]
-    if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
-        return inject_listed(
-            pane,
-            request,
-            channel,
-            &stash_tests::configured_channels(),
-            timing,
-        );
-    }
-    inject_listed(pane, request, channel, stash_channels_configured(), timing)
-}
-
-/// `inject_report` against an explicit allowlist.
-fn inject_listed(
-    pane: &Pane,
-    request: &Request<'_>,
-    channel: Option<u64>,
-    listed: &[u64],
-    timing: &Timing,
-) -> Report {
-    inject_gated(pane, request, timing, stash_channel_listed(channel, listed))
-}
-
-/// `inject_listed` with the stash path allowed or not.
-fn inject_gated(pane: &Pane, request: &Request<'_>, timing: &Timing, stash: bool) -> Report {
-    let text = frame(request.source, request.author, request.nonce, request.text);
-    // Both names reach tmux command strings, so only plain characters are accepted.
-    let plain = |value: &str, extra: &[char]| {
-        !value.is_empty()
-            && value
-                .chars()
-                .all(|c| c.is_alphanumeric() || extra.contains(&c))
-    };
-    if request.text.trim().is_empty()
-        || text.len() > MAX_INPUT_BYTES
-        || !plain(request.session, &['-', '_'])
-        || !request.nonce.chars().all(|c| c.is_ascii_alphanumeric())
-        || request.nonce.is_empty()
-    {
-        return Report::not_sent(Veto::InvalidInput);
-    }
-    let started = Instant::now();
-    // The whole transaction, restore watch included, runs under the lock: one stash at a time.
-    let locked = at_offsets(
-        timing.lock_retries,
-        || started.elapsed(),
-        std::thread::sleep,
-        || {
-            super::composer_lock::try_with_composer_mutation_lock(request.session, || {
-                inject_locked(pane, request, &text, timing, stash)
-            })
-        },
-    );
-    locked.unwrap_or(Report::not_sent(Veto::LockContended))
 }
 
 /// Runs `attempt` at each offset from the first try until one returns a value.
@@ -682,6 +636,7 @@ fn inject_locked(
     text: &str,
     timing: &Timing,
     stash: bool,
+    turn_gate: TurnGate,
 ) -> Report {
     // The lock fences AgentDesk writers; generation checks fence new clients, not human keys.
     let floor = unix_seconds();
@@ -710,7 +665,7 @@ fn inject_locked(
     if admission == ComposerAdmission::Held {
         return Report::not_sent(Veto::Draft);
     }
-    let plan = match judge_before_paste(&before, request.transcript, text, state.size) {
+    let plan = match judge_before_paste(&before, request.transcript, text, state.size, turn_gate) {
         Ok(plan) => plan,
         Err(veto) => return Report::not_sent(veto),
     };
@@ -873,28 +828,36 @@ impl Attempt<'_> {
             }
             Guard::Gone | Guard::Failed => return Outcome::Unconfirmed(Unconfirmed::EnterFailed),
         }
-        // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
         let request = self.request;
-        loop {
-            if Instant::now() >= deadline {
-                return Outcome::Unconfirmed(Unconfirmed::NotObserved);
-            }
-            if let Some(exact) = transcript_submission(
-                request.transcript,
-                self.offset,
-                request.nonce,
-                Some(self.text),
-            ) && Instant::now() < deadline
-            {
-                return if exact {
-                    Outcome::Injected
-                } else {
-                    Outcome::Unconfirmed(Unconfirmed::ContaminatedSubmit)
-                };
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            std::thread::sleep(self.timing.confirm_poll.min(left));
+        let receipt = (request.transcript, self.offset, request.nonce, self.text);
+        await_receipt(receipt, deadline, self.timing.confirm_poll)
+            .map_or_else(Outcome::Unconfirmed, |()| Outcome::Injected)
+    }
+}
+
+/// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:
+/// only the exact `text`, bare or in one paste block, is a receipt; another body is contaminated.
+pub(crate) fn await_receipt(
+    (transcript, offset, nonce, text): (&Path, u64, &str, &str),
+    deadline: Instant,
+    poll: Duration,
+) -> Result<(), Unconfirmed> {
+    // Only a scan that ends inside the window confirms; later evidence stays NotObserved.
+    loop {
+        if Instant::now() >= deadline {
+            return Err(Unconfirmed::NotObserved);
         }
+        if let Some(exact) = transcript_submission(transcript, offset, nonce, Some(text))
+            && Instant::now() < deadline
+        {
+            return if exact {
+                Ok(())
+            } else {
+                Err(Unconfirmed::ContaminatedSubmit)
+            };
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(poll.min(left));
     }
 }
 

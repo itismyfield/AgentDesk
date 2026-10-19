@@ -90,7 +90,8 @@ mod tests {
 
     #[test]
     fn same_tmux_different_output_path_replaces_watcher() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let channel_a = ChannelId::new(1485506232256168134);
         let channel_b = ChannelId::new(1485506232256168135);
         let tmux_name = "AgentDesk-codex-adk-cdx-path-change";
@@ -117,7 +118,8 @@ mod tests {
 
     #[test]
     fn turn_starts_reuse_healthy_runtime_path_incumbent_after_handoff() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(1_485_506_232_256_168_134);
         let tmux_name = "AgentDesk-claude-adk-cc-respawn";
         let runtime_path = "/tmp/claude-runtime-after-respawn.jsonl";
@@ -159,7 +161,8 @@ mod tests {
 
     #[test]
     fn reuse_existing_observes_reservation_mismatch_without_repair_or_candidate_write() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(5_191_000_000_000_000_071);
         let requester = ChannelId::new(5_191_000_000_000_000_072);
         let tmux = "AgentDesk-5191-reuse-observe-only";
@@ -194,7 +197,8 @@ mod tests {
     /// `current_msg_id` render seed and converter generation in authority.
     #[test]
     fn forced_rebind_replaces_live_same_output_incumbent() {
-        let watchers = TmuxWatcherRegistry::new();
+        let watchers =
+            TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
         let owner = ChannelId::new(1_485_506_232_256_168_136);
         let dispatch = ChannelId::new(1_485_506_232_256_168_137);
         let tmux_name = "AgentDesk-codex-adk-cdx-4455-forced";
@@ -240,7 +244,8 @@ mod tests {
         let owner = ChannelId::new(1_500_000_000_000_000_001);
         let dispatch = ChannelId::new(2_600_000_000_000_000_002);
         let claim = |incumbent: TmuxWatcherHandle, requested_output: &str| {
-            let watchers = TmuxWatcherRegistry::new();
+            let watchers =
+                TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(dashmap::DashMap::new()));
             assert!(try_claim_watcher(&watchers, owner, incumbent));
             claim_or_reuse_watcher(
                 &watchers,
@@ -369,116 +374,5 @@ mod tests {
             &tool_state,
             Some(TaskNotificationKind::Subagent),
         ));
-    }
-}
-
-#[cfg(test)]
-#[cfg(unix)]
-mod b2b1_presence_withdraw_tests {
-    use super::*;
-    use crate::services::discord::turn_presence::entrypoints::tests::Probe;
-    use poise::serenity_prelude::ChannelId;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    fn handle(session: &str) -> TmuxWatcherHandle {
-        TmuxWatcherHandle {
-            tmux_session_name: session.to_string(),
-            output_path: format!("/tmp/{session}.jsonl"),
-            paused: Arc::new(AtomicBool::new(false)),
-            resume_offset: Arc::new(std::sync::Mutex::new(None)),
-            cancel: Arc::new(AtomicBool::new(false)),
-            pause_epoch: Arc::new(0.into()),
-            turn_delivered: Arc::new(AtomicBool::new(false)),
-            last_heartbeat_ts_ms: Arc::new(crate::services::discord::tmux_watcher_now_ms().into()),
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn b2b1_replacement_withdraws_the_channel_and_the_session_it_displaced() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let probe = Probe::install(&shared);
-        let watchers = &shared.tmux_watchers;
-        let (x, y, z) = (6_325_711, 6_325_712, 6_325_713);
-        watchers.insert(ChannelId::new(x), handle("b2b1-a"));
-        watchers.insert(ChannelId::new(y), handle("b2b1-b"));
-        let (tx, ty, tz) = (probe.arm(x), probe.arm(y), probe.arm(z));
-        let other = crate::services::discord::make_shared_data_for_tests();
-        let elsewhere = Probe::install(&other);
-        let foreign = [elsewhere.arm(x), elsewhere.arm(y)];
-        // x takes y's session: x's own session and y's ownership are both displaced.
-        assert!(
-            watchers
-                .insert(ChannelId::new(x), handle("b2b1-b"))
-                .is_some()
-        );
-        assert!(!Probe::current(&tx), "channel-displaced owner");
-        assert!(!Probe::current(&ty), "session-displaced owner");
-        assert!(Probe::current(&tz));
-        assert!(
-            foreign.iter().all(Probe::current),
-            "another registry's runtime"
-        );
-        assert!(Probe::current(&probe.arm(x)), "the new owner starts fresh");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn b2b1_removals_withdraw_while_cas_misses_and_owner_bookkeeping_keep_the_successor() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let probe = Probe::install(&shared);
-        let watchers = &shared.tmux_watchers;
-        let x = ChannelId::new(6_325_721);
-        let live = handle("b2b1-c");
-        let (cancel, output) = (live.cancel.clone(), live.output_path.clone());
-        watchers.insert(x, live);
-        let ticket = probe.arm(x.get());
-        let other = Arc::new(AtomicBool::new(false));
-        assert!(!watchers.cancel_and_remove_channel_if_current(&x, "b2b1-c", &output, &other));
-        assert!(
-            watchers
-                .remove_tmux_session_if_current("b2b1-c", &other)
-                .is_none()
-        );
-        assert!(watchers.retain_owner_during_session_rebind("b2b1-c-next", x));
-        watchers.restore_owner_channel_for_tmux_session("b2b1-c-gone", x);
-        watchers.clear_restored_owner_for_tmux_session("b2b1-c-gone");
-        assert!(Probe::current(&ticket), "no live pair changed");
-        assert!(watchers.cancel_and_remove_channel_if_current(&x, "b2b1-c", &output, &cancel));
-        assert!(!Probe::current(&ticket));
-        for spelling in 0..3 {
-            let session = format!("b2b1-d{spelling}");
-            let live = handle(&session);
-            let cancel = live.cancel.clone();
-            watchers.insert(x, live);
-            let ticket = probe.arm(x.get());
-            let removed = match spelling {
-                0 => watchers.remove(&x),
-                1 => watchers.remove_tmux_session_if_current(&session, &cancel),
-                _ => {
-                    let guard = crate::services::discord::lock_tmux_watcher_registry();
-                    watchers.remove_tmux_session_locked(&guard, &session)
-                }
-            };
-            assert!(removed.is_some());
-            assert!(!Probe::current(&ticket), "removal spelling {spelling}");
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn b2b1_restore_claim_withdraws_only_when_it_replaces_an_incumbent() {
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let probe = Probe::install(&shared);
-        let watchers = &shared.tmux_watchers;
-        let x = ChannelId::new(6_325_731);
-        watchers.insert(x, handle("b2b1-e"));
-        let ticket = probe.arm(x.get());
-        // A live incumbent on the same transcript keeps its slot; the claim changes nothing.
-        assert!(!try_claim_watcher(watchers, x, handle("b2b1-e")));
-        assert!(Probe::current(&ticket));
-        // A heartbeat-stale incumbent is replaced, and the replacement withdraws.
-        let stale = watchers.get(&x).unwrap().last_heartbeat_ts_ms.clone();
-        stale.store(1, Ordering::Release);
-        assert!(try_claim_watcher(watchers, x, handle("b2b1-e")));
-        assert!(!Probe::current(&ticket));
     }
 }

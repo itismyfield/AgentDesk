@@ -117,7 +117,7 @@ mod tests {
         .expect("load slot run")
     }
 
-    async fn scalar_i64(pool: &sqlx::PgPool, query: &str) -> i64 {
+    async fn scalar_i64(pool: &sqlx::PgPool, query: &'static str) -> i64 {
         sqlx::query_scalar(query)
             .fetch_one(pool)
             .await
@@ -269,6 +269,67 @@ mod tests {
         assert_eq!(gate_count, 0);
         let outbox_count = scalar_i64(&pool, "SELECT COUNT(*)::BIGINT FROM message_outbox").await;
         assert_eq!(outbox_count, 1);
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    // The real activate route preserves grace, then completes and notifies exactly once.
+    #[tokio::test]
+    async fn dispatch_next_route_completes_drained_run_through_canonical_writer_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(6).await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-drained", "active").await;
+        sqlx::query(
+            "INSERT INTO auto_queue_slots
+            (agent_id, slot_index, assigned_run_id, assigned_thread_group, thread_id_map)
+         VALUES ('agent-1', 0, 'run-drained', 0, '{}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed drained slot");
+        seed_entry(&pool, "run-drained", "entry-drained", "failed", None).await;
+        sqlx::query(
+            "UPDATE auto_queue_runs
+         SET phase_gate_grace_until = NOW() + INTERVAL '30 seconds'
+         WHERE id = 'run-drained'",
+        )
+        .execute(&pool)
+        .await
+        .expect("open grace window");
+        let app = test_router(pool.clone());
+        let body = Some(json!({"run_id": "run-drained"}));
+
+        let status = request_json(&app, Method::POST, "/queue/dispatch-next", body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(run_status(&pool, "run-drained").await, "active");
+        assert_eq!(slot_run(&pool).await.as_deref(), Some("run-drained"));
+        assert_eq!(
+            scalar_i64(&pool, "SELECT COUNT(*)::BIGINT FROM message_outbox").await,
+            0
+        );
+
+        sqlx::query(
+            "UPDATE auto_queue_runs SET phase_gate_grace_until = NULL WHERE id = 'run-drained'",
+        )
+        .execute(&pool)
+        .await
+        .expect("close grace window");
+        let status = request_json(&app, Method::POST, "/queue/dispatch-next", body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(run_status(&pool, "run-drained").await, "completed");
+        assert_eq!(slot_run(&pool).await, None);
+        assert_eq!(
+            scalar_i64(&pool, "SELECT COUNT(*)::BIGINT FROM message_outbox").await,
+            1
+        );
+
+        let status = request_json(&app, Method::POST, "/queue/dispatch-next", body).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            scalar_i64(&pool, "SELECT COUNT(*)::BIGINT FROM message_outbox").await,
+            1
+        );
         pool.close().await;
         pg_db.drop().await;
     }
@@ -434,9 +495,10 @@ mod tests {
         wait_for_rebind_advisory_lock_waiter(&pool).await;
 
         assert!(
-            crate::db::auto_queue::complete_run_on_pg(&pool, "run-stale-rebind")
+            crate::db::auto_queue::finalize_run_if_ready_pg(&pool, "run-stale-rebind")
                 .await
                 .expect("canonically complete run after route status read")
+                .is_completed()
         );
         assert_eq!(run_status(&pool, "run-stale-rebind").await, "completed");
         assert_eq!(slot_run(&pool).await, None);

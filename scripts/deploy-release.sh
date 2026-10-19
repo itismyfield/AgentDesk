@@ -136,6 +136,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+. "$SCRIPT_DIR/_deploy_policy_generation.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_SCOPE="${AGENTDESK_POST_DEPLOY_SMOKE_SCOPE:-full}"
@@ -170,7 +171,7 @@ DEPLOY_DELAY_SECS="${AGENTDESK_DEPLOY_DELAY_SECS:-2}"
 DEPLOY_HEALTH_RETRIES="${AGENTDESK_DEPLOY_HEALTH_RETRIES:-60}"
 DEPLOY_HEALTH_DELAY_SECS="${AGENTDESK_DEPLOY_HEALTH_DELAY_SECS:-2}"
 DEPLOY_LOCK_FILE="${AGENTDESK_DEPLOY_LOCK_FILE:-$ADK_REL/runtime/deploy-release.lock}"
-DEPLOY_LOCK_TIMEOUT_SECS="${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}"
+DEPLOY_LOCK_TIMEOUT_SECS="$(python3 "$SCRIPT_DIR/build_token.py" --validate-deploy-lock-timeout "${AGENTDESK_DEPLOY_LOCK_TIMEOUT_SECS:-1800}")"
 DEPLOY_MKDIR_LOCK_DIR=""
 CODESIGN_IDENTITY="${AGENTDESK_CODESIGN_IDENTITY:-Developer ID Application: Wonchang Oh (A7LJY7HNGA)}"
 ALLOW_ADHOC_RELEASE_SIGN="${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-0}"
@@ -1167,7 +1168,7 @@ print("|".join(ids))
     echo "▸ Pre-existing reader-count alarms (non-blocking after deploy): ${DEPLOY_PREEXISTING_READER_CHANNEL_IDS:-none}"
 }
 
-# #3858: restore the last-known-good release binary and restart the service.
+# Restore the last-known-good release binary and its policies, then restart.
 # Invoked from the EXIT trap (via _cleanup_on_exit) whenever the binary was
 # promoted but the deploy never reached DEPLOY_OK — i.e. ANY non-zero exit after
 # promotion, not only the explicit health-check branch (an unguarded
@@ -1200,7 +1201,7 @@ _rollback_release_binary() {
         echo "   turning a one-node deploy failure into a cluster-wide outage."
         echo ""
         echo "   FAIL-FORWARD: leaving the NEW binary live (it is what is currently running under"
-        echo "   launchd). The rollback backup at $rel_backup is preserved for manual use."
+        echo "   launchd). The rollback backup at $rel_backup (with policies.prev, if any) is kept for manual use."
         echo ""
         echo "   MANUAL INTERVENTION REQUIRED:"
         echo "     1. Check whether the new binary is actually serving:"
@@ -1265,6 +1266,7 @@ _rollback_release_binary() {
     # below. A failed chflags can never leave the good binary restored but the
     # service stopped.
     chflags uchg "$rel_binary" 2>/dev/null || true
+    _restore_policy_generation "$ADK_REL"
     echo "↩ Previous binary restored — restarting release..."
     xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$plist.plist" 2>/dev/null || true
     if ! launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/$plist.plist"; then
@@ -1584,8 +1586,8 @@ _resolve_deploy_peers() {
 _deploy_peer_env_prelude() {
     printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
     local name value
-    # AGENTDESK_DEPLOY_BINARY is deliberately absent: it names a host-local path, so
-    # each peer builds from its own verified source with the provenance gates enabled.
+    # Host-local paths (binary, repo, root, lock) are deliberately absent: the peer resolves
+    # its own, so it builds its synced checkout under the root its verdict is read from.
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
@@ -1596,7 +1598,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
-        AGENTDESK_DEPLOY_LOCK_FILE \
         AGENTDESK_DEPLOY_PEERS \
         AGENTDESK_DEPLOY_PEERS_FILE \
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
@@ -1619,8 +1620,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
         AGENTDESK_PLIST_REL \
-        AGENTDESK_ROOT_DIR \
-        AGENTDESK_REPO_DIR \
         OBSIDIAN_VAULT_ROOT \
         AGENTDESK_OBSIDIAN_AGENTS_SRC
     do
@@ -2033,7 +2032,8 @@ echo \"\$port\"")"'')"; then
     fi
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
+    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
+    remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
     # peer's own `git fetch` above cannot deliver them. Push them before the peer
@@ -2515,12 +2515,8 @@ if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ] && [ -n "$(_schema_order_peers)" ]; the
     DEPLOY_BUILT_SOURCE_SHA="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
-    # #5855: the deploy lock is already held here, and a queued peer deploy only
-    # waits DEPLOY_LOCK_TIMEOUT_SECS for it while the token wait below defaults to
-    # four hours -- so a deploy that is merely queued for the token can starve a
-    # peer that never needed the token at all (artifact deploys included). Bound
-    # the wait by the same deadline every peer already agreed to wait. An explicit
-    # operator override still wins.
+    # Cap token wait duration by the deploy-lock wait; this is not a shared absolute deadline.
+    # An explicit operator override still wins.
     export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
@@ -3324,6 +3320,7 @@ unset POST_DEPLOY_SMOKE_LOG_FINGERPRINT_BYTES POST_DEPLOY_SMOKE_LOG_FINGERPRINT_
 REL_BINARY="$ADK_REL/bin/agentdesk"
 REL_BINARY_BACKUP="$ADK_REL/bin/agentdesk.prev"
 chflags nouchg "$REL_BINARY" 2>/dev/null || true
+_arm_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 if [ -f "$REL_BINARY_BACKUP" ]; then
     # #3858 (re-entrancy / finding 2): treat .prev as last-KNOWN-GOOD. A leftover
     # .prev means a PRIOR deploy failed before its success-path cleanup, so it
@@ -3368,6 +3365,9 @@ STAGED_BINARY=""
 # ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
 # last-known-good backup and restarts the service — see _rollback_release_binary.
 ROLLBACK_ARMED=1
+# Swap policies with nothing fallible since promotion, so rollback and fail-forward see one generation.
+_swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
+POLICIES_STAGED=""
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
 # check passes (see below). Locking here would force the rollback path to fight
 # the uchg flag on the bad binary, and the lock's only job — blocking unsigned
@@ -3402,12 +3402,6 @@ rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
-
-rm -rf "$ADK_REL/policies.old"
-[ -d "$ADK_REL/policies" ] && mv "$ADK_REL/policies" "$ADK_REL/policies.old"
-mv "$POLICIES_STAGED" "$ADK_REL/policies"
-POLICIES_STAGED=""
-rm -rf "$ADK_REL/policies.old"
 
 # #3288: self-heal policies.dir config drift. The release runtime must load
 # policies from the deployed snapshot ($ADK_REL/policies, staged above from the
@@ -3644,9 +3638,9 @@ fi
 chflags uchg "$REL_BINARY" 2>/dev/null || true
 chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
-# #3858 (re-review finding 1): also drop any stray atomic-backup temp so an
-# interrupted prior backup copy never lingers in bin/.
+# Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
+_drop_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"
@@ -3670,6 +3664,13 @@ POST_DEPLOY_SMOKE_CORE_API_ENDPOINTS=(
     "/api/health/detail"
     "/api/agents"
     "/api/sessions"
+    "/api/claude-accounts"
+    "/api/docs"
+)
+# Paths served only by the admin routers (agents, integrations, ops) that
+# compose_api_router skips when modules.admin_api=false, as on a runner.
+POST_DEPLOY_SMOKE_ADMIN_API_ENDPOINTS=(
+    "/api/agents"
     "/api/claude-accounts"
     "/api/docs"
 )
@@ -3729,6 +3730,44 @@ _post_deploy_smoke_optional_accounts_absent() {
         "$POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY" >/dev/null 2>&1
 }
 
+# Echo /api/health `modules.<name>` as true/false, read as a value (not `jq -e`).
+# Non-zero when the body, `modules` object or boolean field is missing, so callers keep full checks.
+_post_deploy_smoke_resolve_health_module() {
+    local health_body="$1" module="$2" value
+    if [ -z "$health_body" ] || [ ! -s "$health_body" ]; then
+        return 1
+    fi
+    if ! value=$(jq -r --arg module "$module" '
+        if (type == "object") and ((.modules | type) == "object")
+            and ((.modules[$module] | type) == "boolean") then
+            .modules[$module]
+        else
+            error("modules.\($module) is not boolean")
+        end
+    ' "$health_body"); then
+        return 1
+    fi
+    case "$value" in
+        true | false) printf '%s\n' "$value" ;;
+        *) return 1 ;;
+    esac
+}
+
+# An admin-router path answering 404 is an unmounted router only when this run's
+# /api/health says modules.admin_api=false; any other status or health shape still fails.
+_post_deploy_smoke_profile_unmounted() {
+    local endpoint="$1" http_code="$2" admin_path admin_api
+    [ "$http_code" = "404" ] || return 1
+    for admin_path in "${POST_DEPLOY_SMOKE_ADMIN_API_ENDPOINTS[@]}"; do
+        [ "$admin_path" = "$endpoint" ] || continue
+        admin_api=$(_post_deploy_smoke_resolve_health_module \
+            "${POST_DEPLOY_SMOKE_HEALTH_BODY:-}" admin_api 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") || return 1
+        [ "$admin_api" = "false" ]
+        return
+    done
+    return 1
+}
+
 _post_deploy_smoke_probe_apis() {
     local endpoint body_path http_code
     local failed=0
@@ -3751,6 +3790,10 @@ _post_deploy_smoke_probe_apis() {
         if [ "$http_code" != "200" ]; then
             if _post_deploy_smoke_optional_accounts_absent "$endpoint" "$http_code" "$body_path"; then
                 _post_deploy_smoke_note "api endpoint=${endpoint} optional=not_installed; no Claude runtime configured" || return 1
+                continue
+            fi
+            if _post_deploy_smoke_profile_unmounted "$endpoint" "$http_code"; then
+                _post_deploy_smoke_note "api endpoint=${endpoint} skipped=profile(admin_api=false)" || return 1
                 continue
             fi
             _post_deploy_smoke_fail "core API ${endpoint}: expected HTTP 200, got ${http_code}" || true
@@ -4105,7 +4148,7 @@ _post_deploy_smoke_classified_note() {
 }
 
 _post_deploy_smoke_check_relay_round_trip() {
-    local cluster_standby channel_id relay_output relay_log
+    local cluster_standby gateway channel_id relay_output relay_log
     local resolve_rc cell_busy cell_guard_rc rc=0 verdict
     local run_id
     local config_path="$ADK_REL/config/agentdesk.yaml"
@@ -4120,6 +4163,14 @@ _post_deploy_smoke_check_relay_round_trip() {
     fi
     if [ "$cluster_standby" = "true" ]; then
         _post_deploy_smoke_note "relay E-1=skipped cluster_standby=true (no standby injection)" || return 1
+        return 0
+    fi
+    # A runner (modules.gateway=false) owns no relay; skip before any config read.
+    # An unreadable gateway flag falls through to the round-trip.
+    if gateway=$(_post_deploy_smoke_resolve_health_module \
+        "$POST_DEPLOY_SMOKE_HEALTH_BODY" gateway 2>> "$POST_DEPLOY_SMOKE_EVIDENCE") \
+        && [ "$gateway" = "false" ]; then
+        _post_deploy_smoke_note "relay E-1=skipped modules.gateway=false (runner: relay belongs to the gateway)" || return 1
         return 0
     fi
     # Positive breadcrumb (#5026): the standby gate passed and the round-trip is

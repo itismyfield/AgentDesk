@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 #[cfg(test)]
 pub(crate) mod body_check;
@@ -58,6 +58,14 @@ pub(crate) struct BodyClaimed {
     pub(crate) send: Option<LegacySend>,
 }
 
+/// A sends snapshot taken before reading the binding log; order is local to this candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnMark {
+    pub(crate) sends: (u64, u64),
+    pub(crate) seq: u64,
+    pub(crate) order: u64,
+}
+
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
@@ -65,6 +73,11 @@ pub(crate) struct Candidate {
     sends: Arc<LegacySends>,
     /// Immutable boot origin, shared by every clone, distinct from ordinary Deferred retries.
     late_origin: bool,
+    /// The binding seq a late reservation baselines on: fixed by its first host's first read and
+    /// kept for every host that takes the reservation over.
+    late_boundary: Arc<OnceLock<u64>>,
+    turn_mark: Arc<Mutex<Option<TurnMark>>>,
+    baseline_order: Arc<AtomicU64>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
     #[cfg(test)]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
@@ -76,6 +89,9 @@ impl Candidate {
             state: Arc::new(Mutex::new(state)),
             sends: Arc::default(),
             late_origin: false,
+            late_boundary: Arc::default(),
+            turn_mark: Arc::default(),
+            baseline_order: Arc::default(),
             #[cfg(test)]
             bodiless: Arc::default(),
         }
@@ -92,6 +108,67 @@ impl Candidate {
         self.late_origin
     }
 
+    /// Callers hold the adoption lock, so a body claim and its baseline have a fixed order.
+    pub(crate) fn baseline_sends(&self) -> ((u64, u64), u64) {
+        let order = self.baseline_order.fetch_add(1, Ordering::SeqCst) + 1;
+        (self.sends(), order)
+    }
+
+    pub(crate) fn turn_mark(&self) -> Option<TurnMark> {
+        *self
+            .turn_mark
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
+    pub(crate) fn mark_turn_admitted(
+        &self,
+        channel: u64,
+        read_seq: impl FnOnce() -> Result<u64, String>,
+    ) -> bool {
+        let (sends, order) = {
+            let state = self.lock();
+            if *state != Adoption::Deferred || !self.late_origin {
+                return false;
+            }
+            *self
+                .turn_mark
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+            self.baseline_sends()
+        };
+        // The log may bind a rollout during this read; that rollout is already behind the mark.
+        let seq = match read_seq() {
+            Ok(seq) => seq,
+            Err(detail) => {
+                tracing::warn!(channel, order, detail, "[tui_o] Codex turn mark discarded");
+                return false;
+            }
+        };
+        let state = self.lock();
+        if *state != Adoption::Deferred || self.baseline_order.load(Ordering::SeqCst) != order {
+            return false;
+        }
+        let mark = TurnMark { sends, seq, order };
+        *self
+            .turn_mark
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(mark);
+        tracing::info!(channel, ?mark, "[tui_o] Codex fresh turn admitted");
+        true
+    }
+
+    /// The late reservation's binding boundary, once fixed.
+    pub(crate) fn late_boundary(&self) -> Option<u64> {
+        self.late_boundary.get().copied()
+    }
+
+    /// Fixes the boundary `judge` returns unless one is fixed already, and returns the fixed one.
+    pub(crate) fn fix_late_boundary(&self, judge: impl FnOnce() -> u64) -> u64 {
+        *self.late_boundary.get_or_init(judge)
+    }
+
     pub(crate) fn late_cleanup_guard(
         &self,
         channel: u64,
@@ -101,6 +178,7 @@ impl Candidate {
             candidate: self.clone(),
             channel,
             runtime_root,
+            keep: Arc::default(),
         })
     }
 
@@ -129,7 +207,16 @@ impl Candidate {
 
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
+    #[track_caller]
     pub(in crate::services::tui_o) fn claim_body(&self, channel: u64) -> BodyClaimed {
+        self.claim_body_from(channel, std::panic::Location::caller())
+    }
+
+    pub(in crate::services::tui_o) fn claim_body_from(
+        &self,
+        channel: u64,
+        origin: &'static std::panic::Location<'static>,
+    ) -> BodyClaimed {
         let state = self.take(channel);
         let owned = state.owned();
         #[cfg(test)]
@@ -144,6 +231,13 @@ impl Candidate {
             self.sends.started.fetch_add(1, Ordering::SeqCst);
             LegacySend(Arc::clone(&self.sends))
         });
+        let (started, finished) = self.sends();
+        let mark = self.turn_mark();
+        tracing::info!(channel, owned, started, finished, %origin,
+            mark_present = mark.is_some(), mark_order = mark.map(|m| m.order),
+            mark_used = mark.is_some_and(|m| m.order == self.baseline_order.load(Ordering::SeqCst)),
+            mark_seq = mark.map(|m| m.seq), mark_sends = ?mark.map(|m| m.sends),
+            "[tui_o] body claim");
         drop(state);
         BodyClaimed { owned, send }
     }
@@ -209,10 +303,28 @@ pub(crate) struct LateReservationGuard {
     candidate: Candidate,
     channel: u64,
     runtime_root: Option<PathBuf>,
+    /// Set before a stop whose successor host takes the reservation over, so this one keeps it.
+    keep: Arc<AtomicBool>,
+}
+
+impl LateReservationGuard {
+    /// Leaves the reservation as it is when `keep` was set by the time the host ends.
+    pub(crate) fn kept_by(mut self, keep: Arc<AtomicBool>) -> Self {
+        self.keep = keep;
+        self
+    }
 }
 
 impl Drop for LateReservationGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        let kept = self.keep.load(Ordering::SeqCst)
+            && std::env::var("ADK_S3B_MUTANT").ok().as_deref() != Some("stop_settles_reservation");
+        #[cfg(not(test))]
+        let kept = self.keep.load(Ordering::SeqCst);
+        if kept {
+            return;
+        }
         let mut state = self.candidate.lock();
         if !matches!(*state, Adoption::Pending | Adoption::Deferred) {
             return;

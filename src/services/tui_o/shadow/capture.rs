@@ -292,10 +292,18 @@ impl SourceCapture {
         Ok(before)
     }
 
-    fn poll_inner(&mut self, max_bytes: u64) -> Result<CaptureBatch, (Kind, String)> {
+    fn poll_inner(
+        &mut self,
+        max_bytes: u64,
+        retained: bool,
+    ) -> Result<CaptureBatch, (Kind, String)> {
         let io_err = |error: io::Error| (Kind::Unreadable, error.to_string());
         let len = self.file.metadata().map_err(io_err)?.len();
-        let path = Fingerprint::path(&self.source)?;
+        let path = if retained {
+            Fingerprint::of(&self.file.metadata().map_err(io_err)?).map_err(io_err)?
+        } else {
+            Fingerprint::path(&self.source)?
+        };
         if (path.dev, path.ino) != self.opened {
             return Err((Kind::Replaced, "path no longer names the open file".into()));
         }
@@ -354,17 +362,24 @@ impl SourceCapture {
     }
 }
 
-impl CaptureSource for SourceCapture {
-    fn source(&self) -> &SourceId {
-        &self.source
+impl SourceCapture {
+    /// Verified ownership retries path races; rotated sources still prove the retained FD and prefix.
+    pub(crate) fn poll_verified(&mut self, max_bytes: u64, retained: bool) -> CaptureOutcome {
+        if self
+            .halted
+            .as_ref()
+            .is_some_and(|anomaly| matches!(anomaly.kind, Kind::Missing | Kind::Replaced))
+        {
+            self.halted = None;
+        }
+        self.poll_checked(max_bytes, retained)
     }
 
-    /// The first anomaly halts the source; later polls repeat it.
-    fn poll(&mut self, max_bytes: u64) -> CaptureOutcome {
+    fn poll_checked(&mut self, max_bytes: u64, retained: bool) -> CaptureOutcome {
         if let Some(anomaly) = &self.halted {
             return CaptureOutcome::Anomaly(anomaly.clone());
         }
-        let (kind, detail) = match self.poll_inner(max_bytes) {
+        let (kind, detail) = match self.poll_inner(max_bytes, retained) {
             Ok(batch) => return CaptureOutcome::Batch(batch),
             Err(failure) => failure,
         };
@@ -377,6 +392,16 @@ impl CaptureSource for SourceCapture {
         };
         self.halted = Some(anomaly.clone());
         CaptureOutcome::Anomaly(anomaly)
+    }
+}
+
+impl CaptureSource for SourceCapture {
+    fn source(&self) -> &SourceId {
+        &self.source
+    }
+
+    fn poll(&mut self, max_bytes: u64) -> CaptureOutcome {
+        self.poll_checked(max_bytes, false)
     }
 }
 

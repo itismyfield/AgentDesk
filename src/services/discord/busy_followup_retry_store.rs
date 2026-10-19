@@ -1,6 +1,4 @@
 //! Durable per-input busy-notice binding and aggregate retry budget.
-use super::input_runtime::fence;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -102,18 +100,6 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
-}
-
-/// Runs one store write under the channel's input fence when the channel has one.
-fn fenced<T>(
-    provider: &ProviderKind,
-    channel_id: u64,
-    write: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    match fence::lookup(provider, channel_id) {
-        None => write(),
-        Some(_) => fence::write(provider, channel_id, write),
-    }
 }
 
 fn locked_root() -> Result<(PathBuf, std::sync::MutexGuard<'static, ()>), String> {
@@ -226,29 +212,6 @@ fn sweep_channel(channel: &Path, root: &Path, now_ms: u64) -> usize {
     removed
 }
 
-fn sweep_channel_checked(channel: &Path, root: &Path, now_ms: u64) -> Result<usize, String> {
-    let entries = match fs::read_dir(channel) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut removed = 0;
-    for entry in entries {
-        let path = entry.map_err(|error| error.to_string())?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-        if expired(expiry_stamp_ms(&path, &bytes)?, now_ms) {
-            fs::remove_file(&path).map_err(|error| error.to_string())?;
-            runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
-            removed += 1;
-            remove_empty_ancestors(&path, root);
-        }
-    }
-    Ok(removed)
-}
-
 fn save_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -278,52 +241,22 @@ pub(in crate::services::discord) async fn requeue_inflight_for_followup_retry(
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
 ) -> MailboxEnqueueOutcome {
-    let permit = match fence::effect::admit(provider, channel_id.get()) {
-        Ok(permit) => permit,
-        Err(failure) => {
-            use crate::services::turn_orchestrator::EnqueueRefusalReason as R;
-            return MailboxEnqueueOutcome {
-                refusal_reason: Some(match failure {
-                    fence::Failure::Mode(mode) => R::InputModeFenced(mode),
-                    fence::Failure::ActorUnreachable => R::ActorUnreachable,
-                    fence::Failure::LockTimeout => R::LockTimeout,
-                    _ => R::InputPersistence,
-                }),
-                ..Default::default()
-            };
-        }
-    };
-    if permit.is_none() && fence::effect::current().is_none() {
-        return Box::pin(requeue_admitted(
-            shared,
-            provider,
-            channel_id,
-            inflight_state,
-        ))
-        .await;
-    }
-    let (shared, provider, inflight_state) =
-        (shared.clone(), provider.clone(), inflight_state.clone());
-    fence::effect::run(permit, async move {
-        Box::pin(requeue_admitted(
-            &shared,
-            &provider,
-            channel_id,
-            &inflight_state,
-        ))
-        .await
-    })
+    // Boxed so the futures of callers that await a retry stay small.
+    Box::pin(requeue_inflight(
+        shared,
+        provider,
+        channel_id,
+        inflight_state,
+    ))
     .await
 }
 
-async fn requeue_admitted(
+async fn requeue_inflight(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
     inflight_state: &InflightTurnState,
 ) -> MailboxEnqueueOutcome {
-    #[cfg(test)]
-    tests::pause_root_retry(provider, channel_id).await;
     let user_msg_id = inflight_state.user_msg_id;
     let retry_user_msg_id = inflight_state.effective_busy_followup_retry_user_msg_id();
     if user_msg_id == 0 || inflight_state.user_text.trim().is_empty() {
@@ -471,17 +404,6 @@ pub(in crate::services::discord) fn bind_notice_if_absent(
     user_msg_id: u64,
     notice_message_id: u64,
 ) -> Result<BusyFollowupRetryState, String> {
-    fenced(provider, channel_id, || {
-        bind_notice_if_absent_unfenced(provider, channel_id, user_msg_id, notice_message_id)
-    })
-}
-
-fn bind_notice_if_absent_unfenced(
-    provider: &ProviderKind,
-    channel_id: u64,
-    user_msg_id: u64,
-    notice_message_id: u64,
-) -> Result<BusyFollowupRetryState, String> {
     let (root, _guard) = locked_root()?;
     let state = match refused(read_source_in_root(
         &root,
@@ -521,15 +443,13 @@ pub(in crate::services::discord) fn record_attempt(
 ) -> Result<BusyRetryDecision, String> {
     let attempt_ms = u64::try_from(attempt.as_millis()).unwrap_or(u64::MAX);
     let ids = (channel_id, user_msg_id, notice_message_id);
-    fenced(provider, channel_id, || {
-        record_retry_at_unfenced(
-            provider,
-            ids,
-            sources,
-            (attempt_ms, now_ms()),
-            draft_session,
-        )
-    })
+    record_retry_at(
+        provider,
+        ids,
+        sources,
+        (attempt_ms, now_ms()),
+        draft_session,
+    )
 }
 
 #[cfg(test)]
@@ -544,7 +464,7 @@ pub(in crate::services::discord) fn record_busy_retry(
 }
 
 /// `(channel, user message, notice message)`; `(attempt cost, now)` in milliseconds.
-fn record_retry_at_unfenced(
+fn record_retry_at(
     provider: &ProviderKind,
     (channel_id, user_msg_id, notice_message_id): (u64, u64, u64),
     sources: &[u64],
@@ -588,53 +508,10 @@ pub(in crate::services::discord) fn sweep_expired() -> usize {
     let Some(root) = runtime_store::discord_busy_followup_retries_root() else {
         return 0;
     };
-    if !fence::any_protected() {
-        let _guard = STORE_WRITE_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        return sweep_expired_in_root_at(&root, now_ms());
-    }
-    let mut removed = 0;
-    let mut protected = Vec::new();
-    let now;
-    {
-        let _guard = STORE_WRITE_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        now = now_ms();
-        let Ok(providers) = fs::read_dir(&root) else {
-            return 0;
-        };
-        for provider in providers.flatten() {
-            let kind =
-                ProviderKind::from_str_or_unsupported(&provider.file_name().to_string_lossy());
-            let Ok(channels) = fs::read_dir(provider.path()) else {
-                continue;
-            };
-            for channel in channels.flatten() {
-                let id = channel
-                    .file_name()
-                    .to_str()
-                    .and_then(|n| n.parse::<u64>().ok());
-                if let Some(id) = id.filter(|id| fence::lookup(&kind, *id).is_some()) {
-                    protected.push((kind.clone(), id, channel.path()));
-                } else {
-                    removed += sweep_channel(&channel.path(), &root, now);
-                }
-            }
-        }
-    }
-    // Never wait for canonical admission while holding the global store lock.
-    for (kind, id, path) in protected {
-        removed += fence::write(&kind, id, || {
-            let _guard = STORE_WRITE_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            sweep_channel_checked(&path, &root, now)
-        })
-        .unwrap_or(0);
-    }
-    removed
+    let _guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    sweep_expired_in_root_at(&root, now_ms())
 }
 
 /// One release pass: inputs given a fresh budget, and whether a failed step left any for a later
@@ -696,7 +573,7 @@ pub(in crate::services::discord) fn release_draft_holds(
         }
         Ok(pass)
     };
-    fenced(provider, channel_id, release).unwrap_or(DraftRelease {
+    release().unwrap_or(DraftRelease {
         released: 0,
         retry: true,
     })
@@ -730,20 +607,6 @@ pub(in crate::services::discord) fn draft_held_inputs(
         }
     }
     held
-}
-
-/// Busy-notice bindings kept for one channel, counted per input file.
-pub(in crate::services::discord) fn channel_presence(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> super::health::transcript_turn::Presence {
-    let dir = runtime_store::discord_busy_followup_retries_root()
-        .map(|root| root.join(provider.as_str()).join(channel_id.to_string()));
-    super::health::transcript_turn::Presence::of_dir(dir, |path| {
-        Ok(usize::from(
-            path.extension().is_some_and(|ext| ext == "json"),
-        ))
-    })
 }
 
 /// Ends the input's tie to its card once its turn reached a terminal answer. Spent retries stay
@@ -782,7 +645,7 @@ pub(in crate::services::discord) fn unbind_notice_if_current(
     user_msg_id: u64,
     notice_message_id: u64,
 ) -> bool {
-    fenced(provider, channel_id, || {
+    let unbind = || -> Result<bool, String> {
         let (root, _guard) = locked_root()?;
         let read = read_source_in_root(&root, provider, channel_id, user_msg_id);
         let Some(current) =
@@ -796,8 +659,8 @@ pub(in crate::services::discord) fn unbind_notice_if_current(
         };
         save_in_root(&root, provider, channel_id, user_msg_id, &unbound)?;
         Ok(true)
-    })
-    .unwrap_or(false)
+    };
+    unbind().unwrap_or(false)
 }
 
 /// Removes a binding for `notice_message_id` that spent no retry; spent retries are never
@@ -808,7 +671,7 @@ fn clear_if_current(
     user_msg_id: u64,
     notice_message_id: u64,
 ) -> bool {
-    fenced(provider, channel_id, || {
+    let clear = || -> Result<bool, String> {
         let (root, _guard) = locked_root()?;
         let read = read_source_in_root(&root, provider, channel_id, user_msg_id);
         let current = refused(read)?.filter(|current| {
@@ -821,219 +684,13 @@ fn clear_if_current(
         fs::remove_file(&path).map_err(|error| error.to_string())?;
         runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
         Ok(true)
-    })
-    .unwrap_or(false)
+    };
+    clear().unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::FutureExt;
-
-    static ROOT_RETRY_PROBE: Mutex<
-        Option<(
-            ChannelId,
-            tokio::sync::oneshot::Sender<(bool, bool)>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
-    > = Mutex::new(None);
-    pub(super) async fn pause_root_retry(provider: &ProviderKind, channel: ChannelId) {
-        let probe = {
-            let mut slot = ROOT_RETRY_PROBE.lock().unwrap();
-            if slot.as_ref().is_some_and(|probe| probe.0 == channel) {
-                slot.take()
-            } else {
-                None
-            }
-        };
-        if let Some((_, entered, resume)) = probe {
-            let named = fence::effect::current()
-                .is_some_and(|permit| permit.validate(provider, channel.get()).is_ok());
-            let _ = entered.send((named, fence::require_worker().is_ok()));
-            let _ = resume.await;
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn c1b_retry_root_cancel_releases_effect_before_any_mailbox_readmission() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = shared.provider.clone();
-        let channel = ChannelId::new(6_325_538);
-        let state = InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            None,
-            6_325_533,
-            6_325_534,
-            7,
-            "cancel root retry".into(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        );
-        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let (entered, observed) = tokio::sync::oneshot::channel();
-        let (_release, resume) = tokio::sync::oneshot::channel();
-        *ROOT_RETRY_PROBE.lock().unwrap() = Some((channel, entered, resume));
-        let mut retry = Box::pin(requeue_inflight_for_followup_retry(
-            &shared, &provider, channel, &state,
-        ));
-        let observed = tokio::select! {
-            observation = observed => observation.unwrap(),
-            _ = &mut retry => panic!("root retry must reach the rendezvous before mailbox re-admission"),
-        };
-        let closing = gate.close().unwrap();
-        assert!(
-            closing.drain().now_or_never().is_none(),
-            "root retry owns a preclose effect"
-        );
-        drop(retry);
-        tokio::time::timeout(Duration::from_secs(10), closing.drain())
-            .await
-            .unwrap();
-        assert_eq!(observed, (true, true));
-        assert!(shared.mailbox_peek(channel).is_none());
-        assert!(fence::effect::current().is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn c1b_retry_requeues_all_sources_and_updates_binding_after_closing() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir().unwrap();
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            root.path(),
-        );
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = shared.provider.clone();
-        let channel = ChannelId::new(6_325_603);
-        let mut state = InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            None,
-            6_325_504,
-            6_325_505,
-            7,
-            "retry input".into(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        );
-        state.source_message_ids = vec![6_325_504, 6_325_506];
-        state.busy_followup_retry_user_msg_id = 6_325_506;
-        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        let permit = gate.admit().unwrap();
-        let closing = gate.close().unwrap();
-        let refused =
-            requeue_inflight_for_followup_retry(&shared, &provider, channel, &state).await;
-        assert!(!refused.enqueued);
-        assert_eq!(
-            refused.refusal_reason,
-            Some(
-                crate::services::turn_orchestrator::EnqueueRefusalReason::InputModeFenced(
-                    fence::Mode::Closing
-                )
-            )
-        );
-        let work_shared = shared.clone();
-        let work_provider = provider.clone();
-        let result = fence::effect::run(Some(permit), async move {
-            bind_notice_if_absent(&work_provider, channel.get(), 6_325_506, 6_325_507).unwrap();
-            let queued =
-                requeue_inflight_for_followup_retry(&work_shared, &work_provider, channel, &state)
-                    .await;
-            assert!(queued.enqueued, "{queued:?}");
-            record_busy_retry(&work_provider, channel.get(), 6_325_506, 6_325_507).unwrap();
-            queued
-        })
-        .await;
-        assert!(result.enqueued);
-        closing.drain().await;
-        let snapshot = shared.mailbox(channel).snapshot().await;
-        assert_eq!(snapshot.intervention_queue.len(), 1);
-        assert_eq!(
-            snapshot.intervention_queue[0].source_message_ids,
-            vec![
-                MessageId::new(6_325_504),
-                MessageId::new(6_325_506),
-                MessageId::new(6_325_505)
-            ]
-        );
-        let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
-            &provider,
-            &shared.token_hash,
-            channel,
-        );
-        assert_eq!(disk.len(), 1);
-        assert_eq!(
-            disk[0].source_message_ids,
-            snapshot.intervention_queue[0].source_message_ids
-        );
-        assert_eq!(
-            load(&provider, channel.get(), 6_325_506)
-                .unwrap()
-                .busy_retry_count,
-            1
-        );
-        shared.mailboxes.remove_fixture_for_test(channel);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn c1b_retry_root_admits_protected_open_without_scheduler_writes() {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir().unwrap();
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            root.path(),
-        );
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let provider = shared.provider.clone();
-        let channel = ChannelId::new(6_325_513);
-        let state = InflightTurnState::new(
-            provider.clone(),
-            channel.get(),
-            None,
-            6_325_514,
-            6_325_515,
-            7,
-            "root retry input".into(),
-            None,
-            None,
-            None,
-            None,
-            0,
-        );
-        let gate = fence::Gate::protect(provider.clone(), channel.get()).unwrap();
-        let _health = fence::test_health::Clear::new(&gate);
-        assert_eq!(fence::require_worker(), Err(fence::Failure::Busy));
-        let result = requeue_inflight_for_followup_retry(&shared, &provider, channel, &state).await;
-        assert!(
-            result.enqueued,
-            "root retry must run protected persistence on worker: {result:?}"
-        );
-        gate.close().unwrap().drain().await;
-        let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_for_tests(
-            &provider,
-            &shared.token_hash,
-            channel,
-        );
-        assert_eq!(disk.len(), 1);
-        assert_eq!(disk[0].source_message_ids, vec![MessageId::new(6_325_515)]);
-        assert!(fence::effect::current().is_none());
-        assert_eq!(fence::require_worker(), Err(fence::Failure::Busy));
-        shared.mailboxes.remove_fixture_for_test(channel);
-    }
 
     fn record_busy_retry_at(
         provider: &ProviderKind,
@@ -1043,9 +700,7 @@ mod tests {
         now_ms: u64,
     ) -> Result<BusyRetryDecision, String> {
         let ids = (channel_id, user_msg_id, notice_message_id);
-        fenced(provider, channel_id, || {
-            record_retry_at_unfenced(provider, ids, &[], (0, now_ms), None)
-        })
+        record_retry_at(provider, ids, &[], (0, now_ms), None)
     }
 
     fn legacy(notice_message_id: u64, count: u32, first_ms: u64) -> BusyFollowupRetryState {
@@ -1070,78 +725,22 @@ mod tests {
     }
 
     #[test]
-    fn b2_busy_off_delta_zero_and_frozen_sweep_preserves_population() {
+    fn clear_keeps_spent_retries_and_refuses_zero_ids() {
         with_root(|| {
             let provider = ProviderKind::Claude;
             let channel = 6_325_309;
             let root = runtime_store::discord_busy_followup_retries_root().unwrap();
             let path = input_file_path_in_root(&root, &provider, channel, 8);
-            let first = bind_notice_if_absent(&provider, channel, 8, 108).unwrap();
-            let bytes = fs::read(&path).unwrap();
-            fs::remove_file(&path).unwrap();
-            assert_eq!(
-                bind_notice_if_absent_unfenced(&provider, channel, 8, 108).unwrap(),
-                first
-            );
-            assert_eq!(fs::read(&path).unwrap(), bytes);
-            let result = record_busy_retry_at(&provider, channel, 8, 108, 100).unwrap();
+            bind_notice_if_absent(&provider, channel, 8, 108).unwrap();
+            record_busy_retry_at(&provider, channel, 8, 108, 100).unwrap();
             let after = fs::read(&path).unwrap();
-            fs::write(&path, &bytes).unwrap();
-            let ids = (channel, 8, 108);
-            let baseline = record_retry_at_unfenced(&provider, ids, &[], (0, 100), None).unwrap();
-            assert_eq!(result.state, baseline.state);
-            assert_eq!(result.capped, baseline.capped);
-            assert_eq!(fs::read(&path).unwrap(), after);
             assert!(!clear_if_current(&provider, channel, 8, 999));
             assert!(
                 !clear_if_current(&provider, channel, 8, 108),
                 "spent retries stay"
             );
             assert_eq!(fs::read(&path).unwrap(), after);
-            assert_eq!(
-                bind_notice_if_absent(&provider, channel, 0, 0).unwrap_err(),
-                bind_notice_if_absent_unfenced(&provider, channel, 0, 0).unwrap_err()
-            );
-            assert!(
-                !runtime_store::runtime_root()
-                    .unwrap()
-                    .join("discord_inflight")
-                    .exists()
-            );
-            let protected = 6_325_310;
-            let gate = fence::Gate::protect(provider.clone(), protected).unwrap();
-            let _health =
-                crate::services::discord::input_runtime::fence::test_health::Clear::new(&gate);
-            let protected_path = input_file_path_in_root(&root, &provider, protected, 8);
-            bind_notice_if_absent(&provider, protected, 8, 108).unwrap();
-            assert!(!clear_if_current(&provider, protected, 8, 999));
-            assert!(clear_if_current(&provider, protected, 8, 108));
-            fs::create_dir(&protected_path).unwrap();
-            assert!(!clear_if_current(&provider, protected, 8, 108));
-            assert!(
-                fence::health_reasons()
-                    .iter()
-                    .any(|reason| reason.contains("channel=6325310")
-                        && reason.contains("Persistence"))
-            );
-            fs::remove_dir(&protected_path).unwrap();
-            gate.clear_failure_for_test();
-            let _closing = gate.close().unwrap();
-            let state = legacy(108, 0, 1);
-            save_in_root(&root, &provider, protected, 8, &state).unwrap();
-            save_in_root(&root, &provider, channel, 8, &state).unwrap();
-            let invalid = root.join("claude/non-numeric/8.json");
-            fs::create_dir_all(invalid.parent().unwrap()).unwrap();
-            fs::write(&invalid, serde_json::to_vec(&state).unwrap()).unwrap();
-            assert_eq!(
-                sweep_expired(),
-                2,
-                "unrelated off and invalid-name legacy entries keep original cleanup"
-            );
-            assert!(load_in_root(&root, &provider, protected, 8).is_some());
-            assert!(record_busy_retry_at(&provider, protected, 8, 108, 200).is_err());
-            assert!(!clear_if_current(&provider, protected, 8, 108));
-            gate.clear_failure_for_test();
+            assert!(bind_notice_if_absent(&provider, channel, 0, 0).is_err());
         });
     }
 
@@ -1245,7 +844,7 @@ mod tests {
     }
 
     /// A terminal answer unties the card but keeps spent retries; age alone never deletes them or
-    /// an unreadable record, on the fast or the protected sweep, while an unspent binding ages out.
+    /// an unreadable record, while an unspent binding ages out.
     #[test]
     fn sweeps_delete_only_unspent_bindings_however_old() {
         with_root(|| {
@@ -1282,7 +881,6 @@ mod tests {
                 ..capped
             };
             assert_eq!(sweep_expired_in_root_at(&root, now), 1);
-            assert_eq!(sweep_channel_checked(&channel, &root, now), Ok(0));
             assert!(load_in_root(&root, &provider, 48_884, 48_885).is_some());
             assert!(load_in_root(&root, &provider, 48_884, 48_886).is_none());
             assert_eq!(load_in_root(&root, &provider, 48_884, 48_887), Some(capped));

@@ -44,10 +44,8 @@ use super::voice_config_cache::ConfigSnapshotCache;
 use super::voice_id_sequences::VoiceIdSequences;
 use super::voice_sensitivity::SensitivityState;
 pub(super) use super::{
-    SharedData, enqueue_internal_followup, http,
-    mailbox_cancel_active_turn_if_handoff_user_message_with_reason,
-    mailbox_cancel_active_turn_with_reason, mailbox_has_active_turn, rate_limit_wait,
-    record_voice_handoff_cancel_tombstone, settings,
+    SharedData, enqueue_internal_followup, http, mailbox_cancel_active_turn_with_reason,
+    mailbox_has_active_turn, rate_limit_wait, settings,
 };
 
 #[path = "voice_barge_in/channel_state.rs"]
@@ -89,6 +87,7 @@ mod turn_dispatch;
 mod utility;
 #[path = "voice_barge_in/utterance_pipeline.rs"]
 mod utterance_pipeline;
+#[cfg(test)]
 use turn_dispatch::voice_background_handoff_ack;
 pub(in crate::services::discord) use utility::{
     INTERNAL_VOICE_MESSAGE_ID_START, is_synthetic_voice_message_id,
@@ -1100,7 +1099,7 @@ mod tests {
         );
 
         let channel = ChannelId::new(7_910_001);
-        let samples = vec![16_384i16, -16_384, 16_384, -16_384].repeat(480);
+        let samples = [16_384i16, -16_384, 16_384, -16_384].repeat(480);
         // Simulate ~50 of the ~20ms speaking ticks that occur during one
         // utterance; none of them should create or grow a feed-task bucket.
         for _ in 0..50 {

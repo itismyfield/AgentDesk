@@ -3,6 +3,10 @@
 use super::*;
 use crate::services::tui_o::cutover::BodyClaim;
 
+#[cfg(test)]
+#[path = "body_footer_rollover_tests.rs"]
+mod body_footer_rollover_tests;
+
 pub(super) fn make_owner(
     identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
     started_at_unix: i64,
@@ -94,6 +98,7 @@ pub(super) fn watcher_should_complete_separate_status_panel(status_panel_v2_enab
     watcher_separate_status_panel_enabled(status_panel_v2_enabled)
 }
 
+#[cfg(test)]
 fn compose_single_message_footer_status_block(indicator: &str, panel_text: &str) -> String {
     crate::services::discord::single_message_panel::compose_footer_status_block(
         indicator, panel_text,
@@ -113,12 +118,11 @@ pub(super) fn build_watcher_single_message_panel_status_block(
     status_panel_msg_id: Option<serenity::MessageId>,
 ) -> String {
     if watcher_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
-        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
-            channel_id,
-            provider,
-            started_at_unix,
-        );
-        return compose_single_message_footer_status_block(indicator, &panel_text);
+        let content = (full_response, indicator);
+        return shared
+            .ui
+            .placeholder_live_events
+            .render_footer_status_panel(channel_id, provider, started_at_unix, content);
     }
     build_watcher_placeholder_status_block(
         shared,

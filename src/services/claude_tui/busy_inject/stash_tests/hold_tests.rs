@@ -10,8 +10,7 @@ use crate::services::claude_tui::composer_lock::{
     DraftGuard, DraftRecoveryHold, admit_composer_write, guard_draft,
 };
 use crate::services::claude_tui::host_input::{
-    LegacyTmuxGate, NativeClearSubmission, SpyGuard, SpyState, capture_draft_with,
-    native_clear_composer_empty, native_clear_once,
+    SpyGuard, SpyState, capture_draft_with, native_clear_composer_empty,
 };
 use crate::services::claude_tui::hosting::{
     ClaudeTuiWarmFollowupOutcome, FollowupHost, try_claude_tui_warm_followup,
@@ -224,7 +223,6 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     let held = tui.capture();
     assert!(native_clear_composer_empty(&held));
     let (session, idle) = (tui.session(), idle(&tui));
-    let deadline = || tokio::time::Instant::now() + Duration::from_secs(20);
 
     let guard = spy(&[&held, &held, &held, BUSY], None);
     let ended = send_followup_prompt_or_idle_transcript(&session, "follow-up", None, &idle);
@@ -232,16 +230,6 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     assert_eq!(cleanup, None);
     assert_requeued(&ended, &guard.calls());
     drop(guard);
-    let refuse = |_: &[&str], _: Duration| -> bool { panic!("a held pane took /clear") };
-    let clear = native_clear_once(
-        &session,
-        &LegacyTmuxGate,
-        deadline(),
-        |_| Some(held.clone()),
-        |_| Some(held.clone()),
-        refuse,
-    );
-    assert_eq!(clear, NativeClearSubmission::NotSent);
 
     // No stash, but the person's text, an attachment chip or an unmeasured footer: still held.
     fs::remove_file(tui.dir.path().join("stash")).unwrap();
@@ -275,24 +263,11 @@ fn a_held_pane_keeps_the_follow_up_and_native_clear_out_until_recovered() {
     assert_eq!(ended, Ok(()));
     assert!(writes(&guard.calls()).contains(&"keys:Enter".to_string()));
     drop(guard);
-    let mut sent = 0;
-    let clear = native_clear_once(
+    crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
+        "claude",
         &session,
-        &LegacyTmuxGate,
-        deadline(),
-        |_| Some(recovered.clone()),
-        |_| Some(recovered.clone()),
-        |_, _| {
-            sent += 1;
-            true
-        },
+        "follow-up",
     );
-    assert_eq!((clear, sent), (NativeClearSubmission::Confirmed, 1));
-    for prompt in ["follow-up", "/clear"] {
-        crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
-            "claude", &session, prompt,
-        );
-    }
 }
 
 /// `/tui/send` sends nothing to a pane in recovery, read or not, and submits once after it.

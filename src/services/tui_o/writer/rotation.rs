@@ -42,12 +42,17 @@ const DORMANT_POLL: Duration = Duration::from_secs(60);
 pub const LINEAGE_SCAN_CAP_BYTES: u64 = 256 << 20;
 const PENDING_BIND_ALARM_SECS: i64 = 60;
 
+#[path = "rotation/claude_boundary.rs"]
+mod claude_boundary;
+#[path = "rotation/clear_end.rs"]
+mod clear_end;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
 pub(crate) mod provenance;
 #[path = "rotation/readers.rs"]
 mod readers;
+pub(crate) mod transition;
 use fork_lineage::Lineage;
 pub use owe::Owe;
 
@@ -130,6 +135,8 @@ pub struct Sources<B> {
     lineage: HashMap<String, Lineage>,
     /// Undecided sources that have shown at least one inherited row.
     prefix_seen: HashSet<String>,
+    /// Retained Pending bytes to derive once after an explicit hot refinement; resume replays them normally.
+    refined: Vec<SourceId>,
     /// Boundary decisions and alarms made while deriving, flushed before delivery.
     dirty: bool,
     raised: Vec<WriterAlarm>,
@@ -142,6 +149,9 @@ pub struct Sources<B> {
     /// The history needed to identify legacy hops has not been read successfully yet.
     legacy_hops_unread: bool,
     names: Names,
+    /// Clear ends published for this channel, and whether they must be matched again.
+    clear_notice: watch::Receiver<u64>,
+    clear_due: bool,
     reader_config: Option<ReaderConfig>,
     last_wall: Option<SystemTime>,
     validation: Option<Validation>,
@@ -292,6 +302,7 @@ impl<B: BindingEvents> Sources<B> {
             readers: Vec::new(),
             lineage: HashMap::new(),
             prefix_seen: HashSet::new(),
+            refined: Vec::new(),
             dirty: false,
             raised: Vec::new(),
             readers_alarmed: false,
@@ -300,6 +311,8 @@ impl<B: BindingEvents> Sources<B> {
             legacy_hops: HashMap::new(),
             legacy_hops_unread: false,
             names: Names::new(provider),
+            clear_notice: crate::services::tui_o::store::clear_end::subscribe(channel),
+            clear_due: false,
             reader_config: None,
             last_wall: None,
             validation: None,
@@ -388,7 +401,7 @@ impl<B: BindingEvents> Sources<B> {
             },
         };
         if *self.notice.borrow() <= checkpoint {
-            return Ok(());
+            return self.settle_cleared(writer);
         }
         if self.legacy_hops_unread {
             self.restore_legacy_hops(writer)?;
@@ -418,9 +431,11 @@ impl<B: BindingEvents> Sources<B> {
         });
         let superseded: HashSet<u64> = pending
             .filter(|p| {
-                events
-                    .iter()
-                    .any(|later| super::adoption::supersedes(p, later))
+                events.iter().any(|later| {
+                    super::adoption::supersedes(p, later)
+                        || matches!(&later.record, BindingRecord::Rejected { closes: Some(seq), .. }
+                                if *seq == p.seq && later.seq > p.seq)
+                })
             })
             .map(|p| p.seq)
             .collect();
@@ -457,13 +472,14 @@ impl<B: BindingEvents> Sources<B> {
                     self.bind(writer, event, old, new, *cause, parent)?;
                 }
                 self.prove(writer, event)?;
+                self.clear_due = true;
             }
             let moved = writer.store().set_binding_checkpoint(event.seq);
             moved.map_err(halted("binding checkpoint"))?;
             self.checkpoint = Some(event.seq);
             expected += 1;
         }
-        Ok(())
+        self.settle_cleared(writer)
     }
 
     /// Reads binding events past `after`; a failed read alarms once per outage and applies nothing.
@@ -528,8 +544,7 @@ impl<B: BindingEvents> Sources<B> {
         let Some(session) = proving_session(event) else {
             return Ok(());
         };
-        let mut proved = false;
-        let mut wake = Vec::new();
+        let mut proved = Vec::new();
         for (key, next) in &mut self.rotation.successors {
             let made = match (next.seq, next.tmux_session.as_deref()) {
                 (Some(seq), Some(tmux)) => Some((seq, tmux)),
@@ -541,25 +556,13 @@ impl<B: BindingEvents> Sources<B> {
                 made.is_some_and(|(seq, tmux)| seq <= event.seq && tmux == event.tmux_session);
             if next.proof.is_none() && ours && left {
                 next.proof = Some(event.seq);
-                proved = true;
-                if self.reader_config.is_some() {
-                    wake.push(key.clone());
-                }
+                proved.push(key.clone());
             }
         }
-        if proved {
+        if !proved.is_empty() {
             let written = writer.store().write_rotation(&self.rotation);
             written.map_err(halted("rotation"))?;
-            for key in wake {
-                if let Some(index) = self
-                    .readers
-                    .iter()
-                    .position(|r| source_key(&r.source) == key)
-                {
-                    self.readers[index].quiet = None;
-                    self.wake(writer, index)?;
-                }
-            }
+            self.wake_proven(writer, proved)?;
         }
         Ok(())
     }
@@ -587,6 +590,9 @@ impl<B: BindingEvents> Sources<B> {
         cause: BindingCause,
         parent_hint: Option<&SourceId>,
     ) -> Result<(), WriterAlarm> {
+        let verified = crate::services::tui_prompt_dedupe::codex_verified::historical_source_proven(
+            event, &new,
+        );
         // A source an earlier event of this batch attached is the stored name of its file now.
         let mut stored = |source: &SourceId| self.names.bind_name(writer.store(), source);
         let old = old.map(&mut stored).transpose()?;
@@ -613,20 +619,38 @@ impl<B: BindingEvents> Sources<B> {
             let log = self.bindings.binding_events_since(self.channel, 0);
             let attached = |source: &SourceId| store.cursor(source).is_some();
             let unread = past_bind::unread_before(log, event.seq, &new, attached);
-            let boundary = past_bind::first_boundary(cause, parent.is_some(), unread);
-            if matches!(boundary, Boundary::Pending { .. }) {
-                let source = new.clone();
-                writer.alarm(WriterAlarm::BoundaryPending { source });
-            }
+            // A verified source an adoption left unread holds old records; it is not owed from 0.
+            let boundary = if verified && !unread {
+                Boundary::Owed { from: 0 }
+            } else {
+                past_bind::first_boundary(cause, parent.is_some(), unread)
+            };
             let link = SourceLink {
                 source: new.clone(),
                 seq: event.seq,
                 parent: parent.cloned(),
                 committed_at: event.committed_at,
+                hot_candidate: (self.provider == ShadowProvider::Claude
+                    && cause == BindingCause::Unknown
+                    && !unread
+                    && parent.is_none()
+                    && event.channel_id == self.channel
+                    && event.provider == self.provider
+                    && !event.tmux_session.is_empty()
+                    && !event.execution_nonce.is_empty())
+                .then(|| old.filter(|old| **old != new && store.cursor(old).is_some()))
+                .flatten()
+                .map(|old| claude_boundary::candidate(event, old)),
                 boundary,
             };
+            if matches!(link.boundary, Boundary::Pending { .. }) {
+                writer.alarm(WriterAlarm::BoundaryPending {
+                    source: new.clone(),
+                });
+            }
             self.rotation.links.insert(key.clone(), link);
         }
+        self.refine_provisional(writer, event, &new, parent_hint)?;
         self.rotation.successors.remove(&key);
         // A source bound again leaves its old rotation, so a next one measures its own quiet.
         if let Some(r) = self.readers.iter_mut().find(|r| r.source == new) {
@@ -690,123 +714,6 @@ impl<B: BindingEvents> Sources<B> {
         Ok(())
     }
 
-    /// Spools each read source once. A successor waits while a predecessor is still short of its
-    /// rotation-time length, so that backlog is owed first whatever the reader order.
-    pub fn capture<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        deriver: &mut UnitDeriver,
-        owed: &mut impl Owe,
-    ) -> Result<(), WriterAlarm> {
-        if self.checkpoint.is_none() {
-            return Ok(());
-        }
-        let mut left: Vec<usize> = (0..self.readers.len()).collect();
-        while let Some(at) = left.iter().position(|&index| !self.held(index)) {
-            let index = left.remove(at);
-            self.capture_one(writer, deriver, owed, index)?;
-        }
-        self.flush(writer)?;
-        if let Some(source) = self.stalled(deriver) {
-            return Err(WriterAlarm::RotationStalled { source });
-        }
-        Ok(())
-    }
-
-    fn capture_one<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-        &mut self,
-        writer: &mut ChannelWriter<P, L, A>,
-        deriver: &mut UnitDeriver,
-        owed: &mut impl Owe,
-        index: usize,
-    ) -> Result<(), WriterAlarm> {
-        if self.reader_config.is_some() && self.readers[index].watch_until.is_none() {
-            let reader = &self.readers[index];
-            if reader.capture.is_none() && (reader.drain_to.is_some() || reader.pending.is_some()) {
-                return Err(halt(
-                    "reader without an FD still holds a capture obligation",
-                ));
-            }
-        }
-        let reader = &mut self.readers[index];
-        let Some(capture) = reader
-            .capture
-            .as_mut()
-            .filter(|_| reader.watch_until.is_none())
-        else {
-            if self.reader_config.is_none() {
-                reader.drain_to = None;
-            }
-            return Ok(());
-        };
-        let retried = reader.pending.is_some();
-        let batch = match reader.pending.take() {
-            Some(batch) => batch,
-            None => match capture.poll(MAX_READ_BYTES) {
-                CaptureOutcome::Batch(batch) => batch,
-                CaptureOutcome::Anomaly(anomaly) => {
-                    let (kind, detail) = (anomaly.kind, anomaly.detail);
-                    if self.reader_config.is_some() && kind == SourceAnomalyKind::Missing {
-                        return self.cleanup_missing(writer, index, SystemTime::now());
-                    }
-                    return Err(halt(format!("source {kind:?}: {detail}")));
-                }
-            },
-        };
-        let read_through = capture.read_through();
-        let at_end = capture.file_len().ok() == Some(capture.captured_through());
-        let first_capture = !reader.captured_any && !batch.records.is_empty();
-        match writer.store().append_spool(&batch, &capture.prefix_hash()) {
-            Ok(()) => reader.captured_any |= !batch.records.is_empty(),
-            Err(StoreError::SpoolFull) => {
-                if !retried {
-                    writer.alarm(WriterAlarm::SpoolFull);
-                }
-                reader.pending = Some(batch);
-                return Ok(());
-            }
-            Err(error) => return Err(halt(format!("spool append: {error:?}"))),
-        }
-        if !reader.drain_to.is_some_and(|end| read_through < end) {
-            reader.drain_to = None;
-        }
-        if first_capture && self.reader_config.is_some() {
-            for old in &mut self.readers {
-                if self
-                    .rotation
-                    .successors
-                    .get(&source_key(&old.source))
-                    .is_some_and(|next| next.source == batch.source)
-                {
-                    old.quiet = None;
-                }
-            }
-        }
-        let key = source_key(&batch.source);
-        let store = writer.store();
-        self.sync_parent(&key, |parent| {
-            store.cursor(parent).map(|c| c.captured_through)
-        });
-        for record in &batch.records {
-            self.owe(deriver, owed, &batch.source, record);
-        }
-        if at_end {
-            self.pend_at_end(&key, batch.captured_through);
-        }
-        Ok(())
-    }
-
-    /// A reading predecessor of this reader has not yet spooled through its rotation-time length.
-    fn held(&self, index: usize) -> bool {
-        let source = &self.readers[index].source;
-        self.readers.iter().any(|reader| {
-            reader.drain_to.is_some()
-                && (reader.reading() || self.reader_config.is_some())
-                && (self.rotation.successors.get(&source_key(&reader.source)))
-                    .is_some_and(|next| next.source == *source)
-        })
-    }
-
     /// An old source the full spool refuses while it holds a successor, with an announced unit
     /// keeping GC off: its sealing record may sit behind the barrier, so no step frees the spool.
     fn stalled(&self, deriver: &UnitDeriver) -> Option<SourceId> {
@@ -827,7 +734,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     /// Brings the parent identities a source is judged against to the parent's durable cursor.
-    fn sync_parent(&mut self, key: &str, consumed: impl Fn(&SourceId) -> Option<u64>) {
+    fn sync_parent(&mut self, key: &str, consumed: impl Fn(&SourceId) -> Option<(u64, String)>) {
         let Some(link) = self.rotation.links.get(key) else {
             return;
         };
@@ -848,7 +755,18 @@ impl<B: BindingEvents> Sources<B> {
         let parent_key = source_key(&parent);
         let cached = self.lineage.remove(&parent_key);
         let through = consumed(&parent);
-        let synced = through.and_then(|t| fork_lineage::sync(cached, self.provider, &parent, t));
+        let automatic = link.hot_candidate.is_some();
+        let synced = through.and_then(|(t, hash)| {
+            if automatic && SourceCapture::reopen(parent.clone(), t, &hash).is_err() {
+                return None;
+            }
+            fork_lineage::sync(
+                if automatic { None } else { cached },
+                self.provider,
+                &parent,
+                t,
+            )
+        });
         if let Some(lineage) = synced {
             self.lineage.insert(parent_key, lineage);
         }
@@ -981,3 +899,5 @@ pub(crate) mod probe {
             .map(|w| w.observed_at)
     }
 }
+
+mod retained_capture;

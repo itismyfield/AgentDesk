@@ -530,6 +530,11 @@ pub(super) async fn log_session_strategy_diagnostic(
     recovery_context_present: bool,
     memento_context_loaded: bool,
 ) {
+    crate::services::tui_o::cutover::mark_codex_turn_admitted(
+        channel_id.get(),
+        provider,
+        provider_session_id,
+    );
     let tmux_alive = if let Some(tmux_name) = tmux_session_name
         .map(str::trim)
         .filter(|value| !value.is_empty())

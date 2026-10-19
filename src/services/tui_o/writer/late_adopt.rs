@@ -5,11 +5,13 @@ use tokio::sync::watch;
 use super::adoption::{self, Hold, Refused};
 use super::binding::{BindingEvent, BindingEvents, BindingRecord, BindingTarget};
 use super::deferred::{self, Waiting};
-use super::host::{HostIo, release, until_owned};
+use super::host::{Custody, HostIo, release, until_owned};
 use crate::services::tui_o::channel_policy::{Adoption, Candidate};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
+
+mod codex;
 
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
 pub(super) struct Wake {
@@ -52,7 +54,53 @@ pub(super) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
     })
 }
 
-pub(super) async fn activate<I: HostIo>(
+/// The source last bound at or before `boundary`, else the first bound after it, with its seq.
+pub(super) fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
+    let binds = events.iter().filter_map(|event| match &event.record {
+        BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            ..
+        }
+        | BindingRecord::Resolved { source, .. } => Some((source, event.seq)),
+        _ => None,
+    });
+    let within = binds.clone().take_while(|(_, seq)| *seq <= boundary).last();
+    let bound = within.or_else(|| binds.clone().find(|(_, seq)| *seq > boundary));
+    bound.map(|(source, seq)| (source.clone(), seq))
+}
+
+/// The reservation's boundary: the end of its first read when this process's Legacy had started
+/// no body and held no custody for the channel, else 0 so the whole log is the baseline.
+fn reservation_boundary<I: HostIo>(
+    io: &I,
+    channel: u64,
+    provider: ShadowProvider,
+    candidate: &Candidate,
+    events: &[BindingEvent],
+) -> u64 {
+    candidate.fix_late_boundary(|| {
+        let end = events.last().map_or(0, |event| event.seq);
+        let started = || {
+            let _adoption = candidate.lock();
+            candidate.sends().0
+        };
+        // Sends are read again after custody, so a body sent during that read still counts.
+        let before = started();
+        let custody = io.local_custody(channel, provider);
+        let clean = before == 0 && matches!(custody, Ok(Custody::Free)) && started() == 0;
+        let boundary = if clean { end } else { 0 };
+        tracing::info!(
+            channel,
+            boundary,
+            end,
+            ?custody,
+            "[tui_o] late reservation boundary fixed"
+        );
+        boundary
+    })
+}
+
+pub(crate) async fn activate<I: HostIo>(
     io: &I,
     channel: u64,
     provider: ShadowProvider,
@@ -61,6 +109,9 @@ pub(super) async fn activate<I: HostIo>(
     candidate: &Candidate,
     gate: &OwnershipGate,
 ) -> bool {
+    if provider == ShadowProvider::Codex {
+        return codex::activate(io, channel, store, log, candidate, gate).await;
+    }
     let alarms = io.alarms();
     let mut wake = Wake::new(log, channel);
     let mut checked = false;
@@ -94,7 +145,8 @@ pub(super) async fn activate<I: HostIo>(
                     return false;
                 }
             };
-            if let Some(bound) = first_bound(&events) {
+            let boundary = reservation_boundary(io, channel, provider, candidate, &events);
+            if let Some(bound) = baseline(&events, boundary) {
                 let seq = events.last().map_or(0, |event| event.seq);
                 let waiting = Waiting {
                     io,

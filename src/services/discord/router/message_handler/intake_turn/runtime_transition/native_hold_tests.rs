@@ -31,7 +31,13 @@ async fn acquire(
         ),
         (&None, false, false),
         (&mut owned, &None),
-        (false, &None, None, false, false),
+        (
+            false,
+            &None,
+            None,
+            false,
+            (false, route(fixture.channel_id)),
+        ),
         (Some("old".into()), false, String::new()),
     )
     .await
@@ -222,6 +228,7 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
             provider: ProviderKind::Claude,
             voice_receiver: crate::voice::VoiceReceiver::from_voice_config(&voice_config),
             voice_config,
+            ingress_shadow: None,
         };
 
         let handled = crate::services::discord::router::message_handler::handle_text_command(
@@ -238,8 +245,8 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
 
         assert!(handled);
         assert!(
-            effects.calls().iter().any(|call| call == "submit"),
-            "the text command executed native clear"
+            !effects.calls().iter().any(|call| call == "submit"),
+            "the clear ends the session without typing a native /clear"
         );
         assert_eq!(
             crate::db::session_transcripts::native_channel_clear_state(
@@ -248,7 +255,7 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
             )
             .await
             .unwrap(),
-            NativeClearBoundary::Resolved
+            NativeClearBoundary::Superseded
         );
         assert!(
             acquire(&fixture, &http, 6_577_813, &[]).await.is_some(),
@@ -259,4 +266,12 @@ fn held_native_boundary_accepts_clear_through_the_text_command_router_pg() {
         drop(enabled);
         fixture.drop_db().await;
     });
+}
+
+fn route(target: ChannelId) -> super::super::adk_thread::Route {
+    super::super::adk_thread::Route {
+        target,
+        parent: None,
+        role: None,
+    }
 }

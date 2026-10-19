@@ -1,26 +1,11 @@
 use super::*;
+use crate::services::discord::recovery_engine::relay_output_replacements::relay_output_replacements;
 
 pub(super) struct LegacySessionRelayConsumer(pub(super) Arc<SessionBoundDiscordRelaySink>);
 
 #[async_trait::async_trait]
 impl RelaySink for LegacySessionRelayConsumer {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
-        if frame
-            .binding
-            .channel_id
-            .parse::<u64>()
-            .is_ok_and(|channel| {
-                super::health::legacy_supervision::is_retired(
-                    frame.binding.provider.as_str(),
-                    channel,
-                )
-            })
-        {
-            // Keep the raw producer alive without granting its Legacy consumer O's range.
-            return Err(RelaySinkError::Transient(
-                "retired Legacy relay consumer".into(),
-            ));
-        }
         self.0.deliver(frame).await
     }
 }
@@ -85,10 +70,6 @@ pub(super) async fn run_idle_jsonl_relay_loop(
             let Ok(channel_id) = matched.channel_id.parse::<u64>() else {
                 continue;
             };
-            if super::health::legacy_supervision::is_retired(matched.provider.as_str(), channel_id)
-            {
-                continue;
-            }
             let Ok(metadata) = std::fs::metadata(&relay_source.path) else {
                 continue;
             };
@@ -103,10 +84,12 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                 relay_source.path.clone(),
                 expected_file,
             );
-            if offsets
-                .get(&session_name)
-                .is_some_and(|cursor| cursor.source != source)
-            {
+            let replacements = relay_output_replacements(&relay_source.path);
+            let mut replaced_in_place = false;
+            if let Some(cursor) = offsets.get(&session_name).filter(|c| c.source != source) {
+                // Only a rebind's replacement restarts at 0; another new file keeps EOF.
+                replaced_in_place =
+                    cursor.source.2 == source.2 && cursor.replacements != replacements;
                 offsets.remove(&session_name);
                 first_seen = Instant::now();
                 first_seen_at.insert(session_name.clone(), first_seen);
@@ -114,9 +97,10 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                 session_init_seen.remove(&session_name);
             }
             let cursor = offsets.entry(session_name.clone()).or_insert(IdleCursor {
-                offset: len,
+                offset: if replaced_in_place { 0 } else { len },
                 source,
-                first_restore: true,
+                first_restore: !replaced_in_place,
+                replacements,
             });
             if len < cursor.offset {
                 cursor.offset = 0;

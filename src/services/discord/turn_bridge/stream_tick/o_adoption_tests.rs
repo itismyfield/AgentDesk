@@ -198,61 +198,41 @@ fn panel_with_last_tool(channel: ChannelId) -> Arc<SharedData> {
 }
 
 /// On O's channel the placeholder is the live panel: a status frame with the last tool and no
-/// body, sent again below O's newest post with the old panel deleted once the new one is bound.
+/// body, edited under its own id whether or not O has posted below it.
 #[tokio::test(flavor = "current_thread")]
-async fn o_channel_panel_shows_the_last_tool_and_moves_below_o_posts() {
+async fn o_channel_panel_shows_the_last_tool_in_place_even_below_o_posts() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
-    let (channel, moved) = (ChannelId::new(42_593_320), ChannelId::new(42_593_321));
+    let (channel, posted) = (ChannelId::new(42_593_320), ChannelId::new(42_593_321));
     let _o = test_override::force_channels(&[
         (channel.get(), RuntimeHandoffKind::CodexTui),
-        (moved.get(), RuntimeHandoffKind::CodexTui),
+        (posted.get(), RuntimeHandoffKind::CodexTui),
     ]);
-    let shared = panel_with_last_tool(channel);
-
-    let edit = Arc::new(CapturingGateway {
-        direct: true,
-        ..Default::default()
-    });
-    let state = tick_with(shared.clone(), channel, BODY, edit.clone(), false, true).await;
-    let edits = edit.edits.lock().unwrap().clone();
-    assert!(
-        matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
-        "{edits:?}"
-    );
-    assert!(edit.sends.lock().unwrap().is_empty() && edit.deletes.lock().unwrap().is_empty());
-    assert_eq!(state.current_msg_id, 18);
-
-    crate::services::tui_o::writer::deliver::note_posted_for_tests(moved.get(), 50);
-    let resend = Arc::new(CapturingGateway {
-        send_id: 60,
-        direct: true,
-        ..Default::default()
-    });
-    let shared = panel_with_last_tool(moved);
-    let state = tick_with(shared, moved, BODY, resend.clone(), false, true).await;
-    let sends = resend.sends.lock().unwrap().clone();
-    assert!(
-        matches!(sends.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
-        "{sends:?}"
-    );
-    assert_eq!(*resend.deletes.lock().unwrap(), [18]);
-    assert_eq!(state.current_msg_id, 60);
-    let durable = crate::services::discord::inflight::load_inflight_state_read_only(
-        &ProviderKind::Codex,
-        moved.get(),
-    )
-    .expect("durable row");
-    assert_eq!(
-        durable.current_msg_id, 60,
-        "the moved panel is the turn's bound placeholder"
-    );
+    crate::services::tui_o::writer::deliver::note_posted_for_tests(posted.get(), 50);
+    for channel in [channel, posted] {
+        let gateway = Arc::new(CapturingGateway {
+            send_id: 60,
+            direct: true,
+            ..Default::default()
+        });
+        let shared = panel_with_last_tool(channel);
+        let state = tick_with(shared, channel, BODY, gateway.clone(), false, true).await;
+        let edits = gateway.edits.lock().unwrap().clone();
+        assert!(
+            matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
+            "{edits:?}"
+        );
+        assert!(
+            gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty()
+        );
+        assert_eq!(state.current_msg_id, 18);
+    }
 }
 
-/// The last tick that shows a still unshown tool moves the panel below O's posts, never edits it
-/// in place above them.
+/// The last tick that shows a still unshown tool edits it into the panel in place, though O has
+/// posted below it.
 #[tokio::test(flavor = "current_thread")]
-async fn a_last_tick_tool_goes_into_a_panel_below_o_posts() {
+async fn a_last_tick_tool_is_edited_into_the_panel_below_o_posts() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let channel = ChannelId::new(42_593_325);
@@ -265,17 +245,13 @@ async fn a_last_tick_tool_goes_into_a_panel_below_o_posts() {
     });
     let shared = panel_with_last_tool(channel);
     let state = tick_with(shared, channel, BODY, gateway.clone(), true, true).await;
+    let edits = gateway.edits.lock().unwrap().clone();
     assert!(
-        gateway.edits.lock().unwrap().is_empty(),
-        "the panel above O's post is not edited"
+        matches!(edits.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
+        "{edits:?}"
     );
-    let sends = gateway.sends.lock().unwrap().clone();
-    assert!(
-        matches!(sends.as_slice(), [frame] if frame.contains("Bash") && !frame.contains(BODY)),
-        "{sends:?}"
-    );
-    assert_eq!(*gateway.deletes.lock().unwrap(), [18]);
-    assert_eq!(state.current_msg_id, 60);
+    assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
+    assert_eq!(state.current_msg_id, 18);
 }
 
 /// A channel O does not own never moves its placeholder below O's posts.
@@ -295,31 +271,4 @@ async fn legacy_channel_placeholder_is_never_moved() {
     let state = tick_with(shared, channel, "", gateway.clone(), false, true).await;
     assert!(gateway.sends.lock().unwrap().is_empty() && gateway.deletes.lock().unwrap().is_empty());
     assert_eq!(state.current_msg_id, 18);
-}
-
-/// A moved panel whose old message fails its first delete goes to the orphan-spinner cleanup and
-/// is retried until gone; O's post is never deleted.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_failed_old_panel_delete_is_retried_until_the_panel_is_gone() {
-    let temp = tempfile::TempDir::new().expect("runtime root");
-    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
-    let channel = ChannelId::new(42_593_340);
-    let _o = test_override::force_channels(&[(channel.get(), RuntimeHandoffKind::CodexTui)]);
-    crate::services::tui_o::writer::deliver::note_posted_for_tests(channel.get(), 50);
-    let gateway = Arc::new(CapturingGateway {
-        send_id: 60,
-        direct: true,
-        fail_delete_once: 18.into(),
-        ..Default::default()
-    });
-    let shared = panel_with_last_tool(channel);
-    let state = tick_with(shared, channel, BODY, gateway.clone(), false, true).await;
-    assert_eq!(state.current_msg_id, 60);
-    assert_eq!(*gateway.deletes.lock().unwrap(), [18], "first delete fails");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(
-        *gateway.deletes.lock().unwrap(),
-        [18, 18],
-        "the cleanup retries the old panel"
-    );
 }

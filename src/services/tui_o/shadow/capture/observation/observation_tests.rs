@@ -24,6 +24,23 @@ mod tests {
     }
 
     #[test]
+    fn s1_capture_shrink_ahead_of_cursor_is_not_current_eof() {
+        let bytes = b"{}\n".repeat(3000);
+        let (_dir, mut capture) = fixture(&bytes, 0);
+        assert_eq!(records(&mut capture, 3).unwrap().len(), 1);
+        let cursor = capture.read_through();
+        let smaller = 4500;
+        assert!(cursor < smaller && smaller < bytes.len() as u64);
+        File::options()
+            .write(true)
+            .open(&capture.source().path)
+            .unwrap()
+            .set_len(smaller)
+            .unwrap();
+        assert!(matches!(records(&mut capture, 9999), Err(Kind::Shrunk)));
+    }
+
+    #[test]
     fn s0o_alignment_preserves_complete_first_and_partial_last() {
         let bytes = "discard é fragment\n{}\npartial".as_bytes();
         let lf = bytes.iter().position(|b| *b == b'\n').unwrap() as u64 + 1;

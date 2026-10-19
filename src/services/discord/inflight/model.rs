@@ -6,6 +6,9 @@
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 
+mod circuit_evidence;
+use crate::services::discord::relay_recovery::circuit_evidence::CircuitPendingEvidence;
+use circuit_evidence::mix_finalizer_hash;
 mod identity;
 mod legacy_replay_coordinate;
 mod serde_adapters;
@@ -62,15 +65,6 @@ mod discord_id_tests {
 
 const SYNTHETIC_FINALIZER_TURN_ID_MASK: u64 = i64::MAX as u64;
 const SYNTHETIC_FINALIZER_TURN_ID_FLOOR: u64 = 1_000_000_000_000_000_000;
-
-fn mix_finalizer_hash(mut hash: u64, bytes: &[u8]) -> u64 {
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
 
 #[allow(clippy::too_many_arguments)]
 fn synthetic_finalizer_turn_id(
@@ -180,12 +174,6 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub tmux_session_name: Option<String>,
     pub output_path: Option<String>,
     pub input_fifo_path: Option<String>,
-    #[serde(default)]
-    pub claude_e_pid: Option<u32>,
-    #[serde(default)]
-    pub claude_e_process_starttime: Option<u128>,
-    #[serde(default)]
-    pub claude_e_macos_lstart_hash: Option<u128>,
     /// #2235: deserializing through `deserialize_runtime_kind_tolerant` so a
     /// future variant written by a newer binary collapses to `None` instead
     /// of failing the whole row's parse (which would otherwise lose the
@@ -235,6 +223,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// this row as an active provider turn after this point.
     #[serde(default)]
     pub terminal_delivery_committed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_circuit_evidence: Vec<CircuitPendingEvidence>,
     /// Original opened terminal FD (dev, ino); recovery must not synthesize this from a pathname.
     #[serde(default)]
     pub tui_terminal_source_file_identity: Option<(u64, u64)>,
@@ -1071,9 +1061,6 @@ impl InflightTurnState {
             tmux_session_name,
             output_path,
             input_fifo_path,
-            claude_e_pid: None,
-            claude_e_process_starttime: None,
-            claude_e_macos_lstart_hash: None,
             runtime_kind,
             runtime_kind_unknown_on_disk: false,
             host_locator: None,
@@ -1087,6 +1074,7 @@ impl InflightTurnState {
             full_response: String::new(),
             response_sent_offset: 0,
             terminal_delivery_committed: false,
+            pending_circuit_evidence: Vec::new(),
             tui_terminal_source_file_identity: None,
             tui_terminal_generation_mtime_ns: None,
             tui_terminal_kind: None,

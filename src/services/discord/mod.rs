@@ -10,7 +10,6 @@ pub(crate) mod busy_followup_retry_store;
 pub(crate) mod herdr_terminate;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
-mod codex_adoption_runtime;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
@@ -35,10 +34,12 @@ pub(crate) mod idle_recap;
 mod idle_recap_interaction;
 mod idle_relay_drift;
 mod inflight;
+#[cfg(test)]
 pub(crate) use inflight::read_only_owner_snapshot::{
     CodexEpisodeOwnerSnapshot, codex_episode_snapshot,
 };
 mod inflight_heartbeat_sweeper;
+mod ingress_shadow;
 pub(crate) mod inject_disposition;
 pub(crate) mod internal_api;
 mod jsonl_watcher;
@@ -102,17 +103,9 @@ mod role_map;
 mod role_map_enrichment;
 mod router;
 mod runtime_bootstrap;
-#[cfg(test)]
-pub use runtime_bootstrap::boot_retirement;
 pub(in crate::services::discord) mod semantic_boundaries;
 mod skills_scan;
 mod turn_presence;
-pub(crate) use turn_presence::entrypoints::{
-    Lease as PresenceLease, withdraw_target as presence_withdraw_target,
-    withdraw_unmounted as presence_withdraw_unmounted,
-};
-#[cfg(all(test, unix))]
-pub(crate) use turn_presence::lifecycle::Runtime as PresenceRuntime;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
@@ -149,12 +142,6 @@ mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
 #[cfg(all(test, unix))]
-pub use tmux::{
-    OOnlyInstallOutcome, OOnlyInstallReason, OOnlyInstallRequest, install_retired_o_watcher,
-};
-#[cfg(unix)]
-pub use tmux::{RetiredOWatcherRestore, restore_retired_o_watchers};
-#[cfg(all(test, unix))]
 pub(crate) fn claim_cross_channel_tmux_watcher_for_high_risk_test(
     requested_channel_id: ChannelId,
     existing_channel_id: ChannelId,
@@ -185,9 +172,6 @@ mod tmux_watcher_registry;
 #[rustfmt::skip]
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
-pub(crate) mod input_runtime;
-#[allow(dead_code)]
-mod input_transition;
 #[cfg(test)]
 mod relay_coord_tests;
 pub(crate) mod terminal_delivery_custody;
@@ -218,7 +202,6 @@ mod voice_sensitivity;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
-
 #[allow(unused_imports)]
 pub(in crate::services::discord) use tmux_watcher_registry::{
     TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
@@ -301,11 +284,7 @@ use serenity::{ChannelId, MessageId, UserId};
 
 use crate::services::agent_protocol::{DEFAULT_ALLOWED_TOOLS, StreamMessage};
 use crate::services::claude;
-use crate::services::codex;
-use crate::services::gemini;
-use crate::services::opencode;
 use crate::services::provider::{CancelToken, ProviderKind, ReadOutputResult};
-use crate::services::qwen;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::HasPendingSoftQueueResult;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType};
@@ -385,7 +364,6 @@ pub(in crate::services::discord) use dispatch_policy::{
     stale_dispatch_turn_for_queued_intervention, stale_dispatch_turn_for_text,
     strip_monitor_auto_turn_origin,
 };
-pub(crate) use inflight::latest_request_owner_user_id_for_channel;
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
 };
@@ -2231,17 +2209,15 @@ async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
+    let park = &shared.queue_park_ledger;
     let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
         Ok(guard) => guard,
         Err(_) => {
-            tracing::debug!(
-                provider = provider.as_str(),
-                channel_id = channel_id.get(),
-                "KICKOFF: session transition owns channel; preserving queued head"
-            );
+            park.note_session_transition_hold(provider, channel_id);
             return MailboxTakeNextSoftOutcome::default();
         }
     };
+    park.clear_promote_hold(channel_id, "session_transition");
 
     // #3167 — only a real (non-background) active turn blocks the dequeue. The
     // cleanup-retry guard remains a correctness guard; the hosted-TUI busy-pane
@@ -2703,6 +2679,7 @@ pub(super) struct Data {
     pub(super) provider: ProviderKind,
     pub(super) voice_config: crate::voice::VoiceConfig,
     pub(super) voice_receiver: crate::voice::VoiceReceiver,
+    pub(in crate::services::discord) ingress_shadow: Option<ingress_shadow::IngressShadow>,
 }
 
 pub(super) fn mark_reconcile_complete(shared: &SharedData) {

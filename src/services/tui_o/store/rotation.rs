@@ -1,5 +1,5 @@
 //! Source rotation state: the consumed binding seq and each bound source's start boundary.
-//! Both files are replaced atomically; a decided boundary changes only by `BoundaryResolved`.
+//! Both files are replaced atomically; only resolution or explicit provisional refinement changes a decided boundary.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 use super::ledger::{self, LedgerEntry};
 use super::spool::source_key;
 use super::{ChannelStore, LEDGER_FILE, OStore, StoreError, damage, durable};
-use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{FileMatch, file_identity, file_match};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
+use crate::services::tui_o::writer::binding::{
+    BindingCause, BindingEvent, BindingRecord, BindingTarget,
+};
 
 pub const CHECKPOINT_FILE: &str = "binding_checkpoint";
 pub const BOUNDARY_FILE: &str = "boundary";
@@ -37,6 +40,28 @@ pub struct SourceLink {
     pub parent: Option<SourceId>,
     pub committed_at: DateTime<Utc>,
     pub boundary: Boundary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_candidate: Option<HotCandidate>,
+}
+
+/// Fixed at first hot attachment; an old Pending never gains this eligibility on restore.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotCandidate {
+    pub channel: u64,
+    pub pane: String,
+    pub nonce: String,
+    pub parent: SourceId,
+}
+
+/// The binding and captured snapshots that justified an automatic start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryEvidence {
+    pub candidate: HotCandidate,
+    pub seq: u64,
+    pub through: u64,
+    pub prefix_hash: String,
+    pub parent_through: u64,
+    pub parent_hash: String,
 }
 
 /// The source an old one was rotated to and what that hop measured. The extra fields sit beside
@@ -53,7 +78,8 @@ pub struct Successor {
     /// The old source's length when the hop was applied; the successor waits until it is spooled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_to: Option<u64>,
-    /// Seq of the provider record showing the old source's session was left.
+    /// Seq of the provider record showing the old source's session was left, or of the hop's own
+    /// bind when a confirmed clear end shows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<u64>,
 }
@@ -132,6 +158,80 @@ impl ChannelStore {
         self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))
     }
 
+    /// Refines only a later explicit re-pin of this exact provisional Unknown attachment.
+    pub(crate) fn refine_provisional_hot_link(
+        &mut self,
+        expected: &SourceLink,
+        event: &BindingEvent,
+    ) -> Result<Option<Rotation>, StoreError> {
+        let BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            cause,
+            parent_hint,
+            ..
+        } = &event.record
+        else {
+            return Ok(None);
+        };
+        let Some(candidate) = &expected.hot_candidate else {
+            return Ok(None);
+        };
+        if !matches!(expected.boundary, Boundary::Pending { .. })
+            || *cause == BindingCause::Unknown
+            || event.seq <= expected.seq
+            || event.channel_id != self.init.channel
+            || event.channel_id != candidate.channel
+            || event.provider != ShadowProvider::Claude
+            || event.tmux_session != candidate.pane
+            || event.execution_nonce != candidate.nonce
+            || *source != expected.source
+            || candidate.parent == *source
+            || candidate.pane.is_empty()
+            || candidate.nonce.is_empty()
+            || self.cursor(&candidate.parent).is_none()
+        {
+            return Ok(None);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(LEDGER_FILE))?;
+        let mut file = durable::LockedFile::try_lock(file)?;
+        if ledger::resolution(&mut file, source)?.is_some() {
+            return Err(StoreError::Rejected(
+                "boundary already resolved; reopen the writer".into(),
+            ));
+        }
+        let mut rotation = self.rotation()?;
+        let Some(link) = rotation.links.get_mut(&source_key(source)) else {
+            return Ok(None);
+        };
+        if link != expected {
+            return Ok(None);
+        }
+        let parent = match cause {
+            BindingCause::Fork | BindingCause::Continuation | BindingCause::Compact => {
+                Some(candidate.parent.clone())
+            }
+            BindingCause::Resume => parent_hint
+                .clone()
+                .filter(|p| p != source && self.cursor(p).is_some()),
+            _ => None,
+        };
+        link.boundary = match cause {
+            BindingCause::Clear | BindingCause::Startup => Boundary::Owed { from: 0 },
+            _ if parent.is_some() => Boundary::Undecided,
+            _ => expected.boundary.clone(),
+        };
+        link.parent = parent;
+        link.hot_candidate = None;
+        link.seq = event.seq;
+        link.committed_at = event.committed_at;
+        let bytes = serde_json::to_vec(&rotation)?;
+        self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))?;
+        Ok(Some(rotation))
+    }
+
     /// Only a source whose owed start is known may lose spool segments.
     pub(super) fn gc_allowed(&self, source: &SourceId) -> Result<bool, StoreError> {
         let rotation = self.rotation()?;
@@ -146,6 +246,19 @@ impl ChannelStore {
         for link in rotation.links.values_mut() {
             let from = self.ledger.boundary_resolved(&link.source);
             if let (Boundary::Pending { .. }, Some(from)) = (&link.boundary, from) {
+                if let Some(evidence) = self.ledger.boundary_evidence(&link.source) {
+                    if link.hot_candidate.as_ref() != Some(&evidence.candidate)
+                        || link.seq != evidence.seq
+                        || evidence.candidate.channel != self.init.channel
+                        || evidence.candidate.parent == link.source
+                        || from >= evidence.through
+                    {
+                        return Err(damage("automatic boundary evidence does not match link"));
+                    }
+                    link.parent = Some(evidence.candidate.parent.clone());
+                } else {
+                    link.hot_candidate = None;
+                }
                 link.boundary = Boundary::Owed { from };
                 applied.push(link.source.clone());
             }
@@ -155,6 +268,59 @@ impl ChannelStore {
             self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))?;
         }
         Ok(applied)
+    }
+
+    /// Appends/fsyncs proof before applying parent and start together through the resolution path.
+    pub(crate) fn resolve_automatic_boundary(
+        &mut self,
+        source: &SourceId,
+        from: u64,
+        evidence: BoundaryEvidence,
+    ) -> Result<(), StoreError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(LEDGER_FILE))?;
+        let mut file = durable::LockedFile::try_lock(file)?;
+        if ledger::resolution(&mut file, source)?.is_some() {
+            return Err(StoreError::Rejected(
+                "boundary already resolved; reopen the writer".into(),
+            ));
+        }
+        let rotation = self.rotation()?;
+        let link = rotation
+            .link(source)
+            .ok_or_else(|| damage("missing pending link"))?;
+        let snapshot = |source: &SourceId, through, hash: &str| {
+            self.cursor(source)
+                .is_some_and(|c| c.captured_through == through && c.prefix_hash == hash)
+        };
+        if !matches!(link.boundary, Boundary::Pending { .. })
+            || link.seq != evidence.seq
+            || link.hot_candidate.as_ref() != Some(&evidence.candidate)
+            || evidence.candidate.channel != self.init.channel
+            || evidence.candidate.parent == *source
+            || from >= evidence.through
+            || !snapshot(source, evidence.through, &evidence.prefix_hash)
+            || !snapshot(
+                &evidence.candidate.parent,
+                evidence.parent_through,
+                &evidence.parent_hash,
+            )
+            || self.ledger.boundary_resolved(source).is_some()
+        {
+            return Err(damage("stale automatic boundary proof"));
+        }
+        self.append_ledger(LedgerEntry::BoundaryResolved {
+            source: source.clone(),
+            from,
+            excluded_range: 0..from,
+            operator: "claude_content_continuity".into(),
+            at: Utc::now(),
+            evidence: Some(Box::new(evidence)),
+        })?;
+        self.apply_resolved_boundaries()?;
+        Ok(())
     }
 }
 
@@ -245,6 +411,7 @@ impl OStore {
             excluded_range: 0..from,
             operator,
             at,
+            evidence: None,
         };
         append(&mut file, at, &entry)?;
         Ok((link.source.clone(), from))

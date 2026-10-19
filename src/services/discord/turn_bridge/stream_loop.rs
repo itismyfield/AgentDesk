@@ -47,6 +47,10 @@ pub(super) async fn run_stream_loop(
     let (request_owner_name, adk_session_key) = (ctx.request_owner_name, ctx.adk_session_key);
     let (adk_session_name, adk_session_info) = (ctx.adk_session_name, ctx.adk_session_info);
     let (adk_cwd, dispatch_id) = (ctx.adk_cwd, ctx.dispatch_id);
+    shared_owned
+        .ui
+        .placeholder_live_events
+        .set_tool_activity_cwd(channel_id, adk_cwd.as_deref());
     let (role_binding, turn_id) = (ctx.role_binding, ctx.turn_id);
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
@@ -279,8 +283,16 @@ pub(super) async fn run_stream_loop(
                         finalize_cancel_inner!();
                         break 'outer;
                     }
-                    #[rustfmt::skip]
-                    let admitted_terminal = { #[cfg(unix)] let injected_candidates = crate::services::discord::replay_policy::injected::native(&shared_owned, channel_id.get(), &msg); let admitted = inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_deliver_directly(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await; #[cfg(unix)] if admitted.is_ok() && !injected_candidates.is_empty() { crate::services::discord::replay_policy::injected::consume(&shared_owned, channel_id.get(), injected_candidates).await; } admitted };
+                    let admitted_terminal = inflight_state
+                        .admit_tui_terminal_frame(
+                            &mut persisted_inflight_baseline,
+                            &stream_tick_expected_identity,
+                            gateway.can_deliver_directly(),
+                            (shared_owned.as_ref(), &cancel_token),
+                            &full_response,
+                            msg,
+                        )
+                        .await;
                     #[rustfmt::skip]
                     let (msg, admission, was_codex_terminal, herdr_terminal) = match admitted_terminal {
                         Ok(admitted) => admitted,

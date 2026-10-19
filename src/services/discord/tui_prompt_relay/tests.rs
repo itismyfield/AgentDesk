@@ -3,6 +3,8 @@ use super::observed_prompt_decision::is_local_only_slash_command_prompt;
 use super::*;
 use crate::services::discord::gateway::TurnGateway;
 
+#[cfg(unix)]
+mod absent_tmux_host_tests;
 mod compact_summary_tests;
 
 fn compact_command_name_first_stub() -> &'static str {
@@ -534,14 +536,12 @@ fn drift_triggered_restore_makes_routine_session_route_again() {
 // runtime binding + channel mapping must NOT spam the per-poll drift/skip
 // WARN forever. After the rehydrate pass evicts the mirror, the next idle
 // relay iteration finds NO runtime binding to iterate and NO channel mapping
-// to drift on — proving the 0.5s spam is stopped. A unique, never-created
-// session name guarantees `tmux_session_has_live_pane` is false.
+// to drift on — proving the 0.5s spam is stopped. A private `tmux` that reports
+// every session missing pins the dead verdict against PATH-swapping fixtures.
 #[cfg(unix)]
 #[test]
 fn dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam() {
-    let _guard = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
+    let _host = absent_tmux_host_tests::AbsentTmuxHost::isolate();
     let shared = super::super::make_shared_data_for_tests();
     // A session that does not exist on this host (pane gone / orphaned).
     let tmux = "AgentDesk-claude-adk-cc-t1504468805772902471-DEAD-ORPHAN-fix3105";
@@ -2269,12 +2269,13 @@ fn external_input_owner_uses_resolved_claude_transcript_before_session_bound_own
     let stale_binding_path = dir.path().join("stale-binding.jsonl");
     let resolved_fresh_path = dir.path().join("resolved-fresh.jsonl");
     let tmux_session_name = "AgentDesk-claude-stale-binding-owner";
-    let watchers = super::super::TmuxWatcherRegistry::new();
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     watchers.insert(
         ChannelId::new(940_000_000_000_001),
         test_watcher_handle(tmux_session_name, &stale_binding_path),
     );
-
     assert_eq!(
         external_input_relay_owner_for_watchers(
             &watchers,
@@ -2304,8 +2305,9 @@ fn external_input_owner_selects_one_relay_path_per_observed_turn() {
     let output_path = dir.path().join("output.jsonl");
     let other_path = dir.path().join("other.jsonl");
     let tmux_session_name = "AgentDesk-codex-owner-split";
-    let watchers = super::super::TmuxWatcherRegistry::new();
-
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     assert_eq!(
         external_input_relay_owner_for_watchers(
             &watchers,
@@ -2315,7 +2317,6 @@ fn external_input_owner_selects_one_relay_path_per_observed_turn() {
         ),
         ExternalInputRelayOwner::BridgeAdapter
     );
-
     watchers.insert(
         ChannelId::new(940_000_000_000_002),
         test_watcher_handle(tmux_session_name, &output_path),
@@ -3289,16 +3290,17 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
 
 // #5464 S2 — the completion ACK partition, pinned by BEHAVIOR.
 //
-// `finish_idle_bridge_completion` takes four dispositions and EXACTLY ONE —
-// `Finalized` — is an acknowledgement: only it may return `Ok`, and only it
-// may clear the prompt anchor. Three were already pinned (s3t1/s3t5 for
-// `EntryAborted`/`RecvError`, s3t4 for `Finalized`); `Err(Elapsed)` had no
-// behavioral coverage, so `docs/relay-state-contract.md:41` — "Never use
-// `>= N`, another turn's ACK, timeout-as-success, blind skip, or blind
-// resend" — rested on nothing executable for the timeout case. Driving all
-// four against ONE anchor makes a changed production disposition RED on its
-// per-arm assertion. The expected-table invariant separately guarantees that
-// the table itself names exactly one acknowledgement before any arm runs.
+// `finish_idle_bridge_completion` accepts four completion dispositions, but
+// has a fifth outcome when `Finalized` arrives with OUR uncommitted durable
+// row: delivery validation returns `Err` and the prompt anchor must survive.
+// `s3t1`/`s3t5` pin `EntryAborted`/`RecvError`, `s3t4` pins the absent/foreign
+// `Finalized` acknowledgement, and `completion_timeout_is_not_an_ack...` pins
+// `Err(Elapsed)`. The matching-own-row `Finalized` outcome is exercised in
+// `bridge_completion::tests::tui_direct_bridge_completion_rejects_uncommitted_matching_inflight`;
+// its retained-anchor assertion kills X6 (clearing before delivery validation).
+// These checks keep the contract at `docs/relay-state-contract.md:41` — never
+// use timeout-as-success, blind skip, or blind resend — executable on each
+// completion path.
 #[cfg(unix)]
 #[test]
 fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
@@ -4083,8 +4085,7 @@ fn s5833_r2_codex_repair_replaces_stale_durable_key() {
     assert_eq!(
         repair
             .lines()
-            .filter(|line| *line
-                == "                                repaired.restamp_external_turn_lease(&lease);")
+            .filter(|line| line.trim() == "repaired.restamp_external_turn_lease(&lease);")
             .count(),
         1
     );
@@ -4454,14 +4455,14 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
     let output_path = dir.path().join("output.jsonl");
     let other_path = dir.path().join("other.jsonl");
     let tmux_session_name = "AgentDesk-codex-synthetic-owner";
-    let watchers = super::super::TmuxWatcherRegistry::new();
-
+    let watchers = super::super::TmuxWatcherRegistry::new_with_coords(std::sync::Arc::new(
+        dashmap::DashMap::new(),
+    ));
     assert!(!tui_direct_watcher_can_own_output(
         &watchers,
         tmux_session_name,
         Some(&output_path),
     ));
-
     watchers.insert(
         ChannelId::new(940_000_000_000_007),
         test_watcher_handle(tmux_session_name, &output_path),
@@ -4477,7 +4478,6 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
         Some(&other_path),
     ));
 }
-
 /// Birth-site owner table. `SessionBoundRelay` needs session-bound delivery, a live
 /// producer AND a live tmux watcher reading this output: the sink only hears that watcher,
 /// so a producer alone or a watcher on another file leaves the row with no deliverer.
@@ -5274,7 +5274,7 @@ fn claude_idle_transcript_scan_replays_full_prompt_after_mid_line_shrink() {
         .append(true)
         .open(&transcript)
         .expect("open partial transcript")
-        .write_all(prompt[split..].as_bytes())
+        .write_all(&prompt.as_bytes()[split..])
         .expect("finish prompt line");
 
     assert_eq!(
@@ -6424,7 +6424,7 @@ mod synthetic_terminal_ordering_tests;
 mod retired_pending_start_claim_tests;
 
 #[cfg(unix)]
-mod pending_start_input_fence_tests;
+mod pending_start_worker_claim_tests;
 
 #[cfg(unix)]
 mod relayerless_claim_tests {

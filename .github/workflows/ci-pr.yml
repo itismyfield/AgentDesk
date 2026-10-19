@@ -38,15 +38,15 @@ jobs:
       # to 'false'; the mirrors read these same outputs, so the skipped jobs still publish green.
       comment_only: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'true' || 'false' }}
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
-      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.pg_db }}
+      pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
       rust_or_policy: ${{ steps.filter.outputs.rust_or_policy }}
       # rust_or_policy for the library sweep, which still runs when an include! call
-      # reads a changed file; check_fast and lint keep the raw filter.
+      # reads a changed file; lint keeps the raw filter.
       rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       rust_compile: ${{ steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
-      # (`check_fast`, which compiles the `relay_state_contract_refs` blocks)
+      # (`lint`, whose clippy compiles the `relay_state_contract_refs` blocks)
       # even for doc-only contract changes (#4268).
       relay_contract: ${{ steps.filter.outputs.relay_contract }}
       # True when a Rust-compile change touches a source surface that needs
@@ -150,12 +150,16 @@ jobs:
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
               - 'src/server/worker_registry.rs'
+              - 'src/server/mod.rs'
+              - 'src/server/policy_tick_logging.rs'
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
               - 'src/services/scheduled_messages.rs'
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
+              - 'src/services/tui_prompt_dedupe/**'
+              - 'src/services/tui_o/**'
               # #5147: the forensics module, the health-path DB awaits it
               # brackets, and the boot site that starts the self-watchdog (and
               # with it the runtime beacon). Load-bearing now that the `!`
@@ -213,12 +217,15 @@ jobs:
               - 'src/db/auto_queue/entries.rs'
               - 'src/db/auto_queue/entries/dispatch_failure.rs'
               - 'src/db/auto_queue/phase_gates.rs'
+              - 'src/db/auto_queue/run_completion_pg_tests.rs'
+              - 'src/db/auto_queue/run_owner_guard_pg_tests.rs'
               - 'src/db/auto_queue/tests.rs'
               - 'src/db/automation_candidates/verdict_tests.rs'
               - 'src/db/calendar_sync/postgres_tests.rs'
               - 'src/db/campaigns/tests.rs'
               - 'src/db/dispatched_sessions.rs'
               - 'src/db/dispatched_sessions/canonical_identity_pg_tests.rs'
+              - 'src/db/dispatched_sessions/hosted_execution/legacy_return_tests.rs'
               - 'src/db/dispatched_sessions/rebind_override.rs'
               - 'src/db/dispatched_sessions/tests.rs'
               - 'src/db/dispatches/delivery_events.rs'
@@ -226,6 +233,8 @@ jobs:
               - 'src/db/idempotency.rs'
               - 'src/db/imsg_reply_tests.rs'
               - 'src/db/intake_outbox.rs'
+              - 'src/db/intake_outbox/owner_fence_pg_tests.rs'
+              - 'src/db/intake_outbox/postgres_tests.rs'
               - 'src/db/intake_outbox_delivery_proof.rs'
               - 'src/db/intake_outbox_dispatch_stamp/tests.rs'
               - 'src/db/intake_outbox_dispatched_audit.rs'
@@ -239,6 +248,7 @@ jobs:
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'
+              - 'src/db/relay_dead_letter/migration_tests.rs'
               - 'src/db/replay_disposition/register_tests.rs'
               - 'src/db/replay_disposition/write_tests.rs'
               - 'src/db/replay_disposition_tests.rs'
@@ -291,6 +301,8 @@ jobs:
               - 'src/services/auto_queue/activate_command.rs'
               - 'src/services/auto_queue/campaign_handoff_tests.rs'
               - 'src/services/auto_queue/cancel_run.rs'
+              - 'src/services/auto_queue/cancel_run/malformed_context_pg_tests.rs'
+              - 'src/services/auto_queue/cleanup_tasks_ownership_pg_tests.rs'
               - 'src/services/auto_queue/cleanup_tasks_pg_tests.rs'
               - 'src/services/auto_queue/command.rs'
               - 'src/services/auto_queue/dispatch_query.rs'
@@ -298,11 +310,13 @@ jobs:
               - 'src/services/auto_queue/phase_gate.rs'
               - 'src/services/auto_queue/planning.rs'
               - 'src/services/auto_queue/route_generate.rs'
+              - 'src/services/auto_queue/run_completion_activate_pg_tests.rs'
               - 'src/services/auto_queue/runtime/clear_slot_sessions_pg_tests.rs'
               - 'src/services/auto_queue/runtime/slot_reset_host_pg_tests.rs'
               - 'src/services/auto_queue/runtime/verified_reset_pg_tests.rs'
               - 'src/services/automation_candidate_materializer/iteration_result_tests.rs'
               - 'src/services/cluster/attachment_transfer/storage_tests.rs'
+              - 'src/services/cluster/channel_home_boot/home_writers_tests.rs'
               - 'src/services/cluster/channel_home_boot_tests.rs'
               - 'src/services/cluster/channel_home_drain_tests.rs'
               - 'src/services/cluster/channel_home_tests.rs'
@@ -320,21 +334,24 @@ jobs:
               - 'src/services/cluster/intake_worker/dispatch_stamp_tests.rs'
               - 'src/services/cluster/intake_worker/home_accept_tests.rs'
               - 'src/services/cluster/intake_worker/home_route_tests.rs'
-              - 'src/services/cluster/intake_worker/input_effect_tests.rs'
               - 'src/services/cluster/intake_worker/o_route_tests.rs'
+              - 'src/services/cluster/intake_worker/owner_fence_pg_tests.rs'
               - 'src/services/cluster/intake_worker/replay_hold_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/drain_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/force_pg_tests.rs'
+              - 'src/services/cluster/intake_worker/s3_real_tests/fresh_drain_pg_tests.rs'
+              - 'src/services/cluster/intake_worker/s3_real_tests/holder_pg_tests.rs'
               - 'src/services/cluster/intake_worker/s3_real_tests/route_pg_tests.rs'
               - 'src/services/cluster/machine_resources/store.rs'
               - 'src/services/discord/admin_host_guard_tests.rs'
               - 'src/services/discord/catch_up/too_old_drop_pg_tests.rs'
               - 'src/services/discord/commands/cancel_backstop_tests.rs'
-              - 'src/services/discord/commands/control.rs'
+              - 'src/services/discord/commands/control/clear_end_tests.rs'
+              - 'src/services/discord/commands/control/clear_entry_tests.rs'
+              - 'src/services/discord/commands/control/clear_persist_failure_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_relaunch_tests.rs'
+              - 'src/services/discord/commands/control/codex_clear_retirement_tests.rs'
               - 'src/services/discord/commands/control/home_fence_tests.rs'
-              - 'src/services/discord/commands/control/input_clear_tests.rs'
-              - 'src/services/discord/commands/control/native_herdr_e2e_tests.rs'
-              - 'src/services/discord/commands/control/native_herdr_tests.rs'
               - 'src/services/discord/commands/control/native_policy_tests.rs'
               - 'src/services/discord/commands/control/native_tests.rs'
               - 'src/services/discord/commands/restart.rs'
@@ -343,9 +360,10 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/live_agent_recovery.rs'
               - 'src/services/discord/health/recovery/stall_alert.rs'
+              - 'src/services/discord/health/turn_deliver/inject/herdr_tests.rs'
+              - 'src/services/discord/health/turn_deliver/inject/turn_mode_reading_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_codex_tests.rs'
               - 'src/services/discord/health/turn_deliver/inject_tests.rs'
-              - 'src/services/discord/health/watcher_respawn/o_only_retry_tests.rs'
               - 'src/services/discord/herdr_terminate.rs'
               - 'src/services/discord/herdr_terminate_exit_tests.rs'
               - 'src/services/discord/herdr_terminate_route_tests.rs'
@@ -358,21 +376,23 @@ jobs:
               - 'src/services/discord/inflight/receipt_boundary_tests.rs'
               - 'src/services/discord/inflight/removal/custody_notice_tests.rs'
               - 'src/services/discord/inflight/save_store/identity_gate/runtime_stamp/herdr_terminal_restart_tests.rs'
-              - 'src/services/discord/input_runtime/runtime/ports_tests.rs'
+              - 'src/services/discord/ingress_shadow/compat_tests.rs'
+              - 'src/services/discord/ingress_shadow/shadow_tests.rs'
               - 'src/services/discord/mod.rs'
               - 'src/services/discord/placeholder_sweeper/abandon_guard.rs'
               - 'src/services/discord/placeholder_sweeper/retirement_tests.rs'
+              - 'src/services/discord/queue_dispatch/codex_clear_compat_tests.rs'
+              - 'src/services/discord/queue_io/queued_head_auto_tests.rs'
               - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_guard_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_rig_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/host_probe_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/kickoff_identity_tests.rs'
               - 'src/services/discord/recovery_engine/restore_inflight/replay_hold_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_policy_receipt_tests.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore.rs'
-              - 'src/services/discord/recovery_engine/restore_inflight/scoped_restore_claim_tests.rs'
               - 'src/services/discord/recovery_engine/routing_orphan_tests.rs'
               - 'src/services/discord/relay_recovery/tests/host_deferred.rs'
               - 'src/services/discord/relay_recovery_circuit_alert_producer.rs'
@@ -383,8 +403,10 @@ jobs:
               - 'src/services/discord/router/intake_dispatch/home_order_tests.rs'
               - 'src/services/discord/router/intake_dispatch/replay_admission_tests.rs'
               - 'src/services/discord/router/intake_dispatch/tests.rs'
+              - 'src/services/discord/router/intake_dispatch/tests/codex_turn_hold.rs'
               - 'src/services/discord/router/intake_dispatch/tests/replay_hold.rs'
               - 'src/services/discord/router/intake_gate/stale_turn_host_tests.rs'
+              - 'src/services/discord/router/message_handler/codex_resume_companion_queue_tests.rs'
               - 'src/services/discord/router/message_handler/goal_lifecycle.rs'
               - 'src/services/discord/router/message_handler/intake_turn/dispatch_stamp/tests.rs'
               - 'src/services/discord/router/message_handler/intake_turn/native_fresh_prompt_tests.rs'
@@ -396,48 +418,51 @@ jobs:
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_reconnect_tests.rs'
               - 'src/services/discord/router/message_handler/provider_dispatch_herdr_tests.rs'
               - 'src/services/discord/router/message_handler/provider_isolation_host_tests.rs'
+              - 'src/services/discord/router/message_handler/s1_entry_tests.rs'
               - 'src/services/discord/router/message_handler/voice_announcement_route.rs'
               - 'src/services/discord/router/message_handler/watchdog_host_tests.rs'
               - 'src/services/discord/runtime_bootstrap/channel_homes_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_handback_integration_tests.rs'
               - 'src/services/discord/runtime_bootstrap/gateway_lease_recovery_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/home_lifecycle_tests.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs'
               - 'src/services/discord/runtime_bootstrap/o_writer_host.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host_custody_tests.rs'
+              - 'src/services/discord/runtime_bootstrap/o_writer_host_takeover_tests.rs'
               - 'src/services/discord/runtime_bootstrap/orphan_recovery_fence_tests.rs'
               - 'src/services/discord/runtime_bootstrap/queued_placeholders/scoped_recovery_tests.rs'
-              - 'src/services/discord/runtime_bootstrap/scoped_inflight_restore_tests.rs'
               - 'src/services/discord/session_idle_cleanup_tests.rs'
               - 'src/services/discord/session_runtime.rs'
               - 'src/services/discord/task_notification_delivery/tests.rs'
               - 'src/services/discord/terminal_delivery_custody/pg_tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
-              - 'src/services/discord/terminal_ui_obligation/input_fence_tests.rs'
+              - 'src/services/discord/terminal_ui_obligation/sweep_tests.rs'
               - 'src/services/discord/tmux_reaper/host_guard_tests.rs'
               - 'src/services/discord/tmux_watcher/herdr_entry_host_tests.rs'
-              - 'src/services/discord/tmux_watcher/inherited_fixture_tests.rs'
-              - 'src/services/discord/tmux_watcher/injected_bridge_tests.rs'
-              - 'src/services/discord/tmux_watcher/injected_watcher_tests.rs'
+              - 'src/services/discord/tmux_watcher/lost_body_record_pg_tests.rs'
               - 'src/services/discord/tmux_watcher/path_b_record_tests.rs'
               - 'src/services/discord/tmux_watcher/post_stream_exit_host_tests.rs'
-              - 'src/services/discord/tmux_watcher/retired_host_tick_tests.rs'
               - 'src/services/discord/tmux_watcher/streaming_baseline_tests.rs'
               - 'src/services/discord/tui_prompt_relay/herdr_source_tests.rs'
               - 'src/services/discord/tui_prompt_relay/rehydration.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_thread_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/busy_inject_turn_mode_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/cancel_backstop_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_activation_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_o_real_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/herdr_terminate_route_e2e_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/relay_e2e/idle_inject_echo_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/registered_bootstrap_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/replay_defer_intake_e2e_tests.rs'
               - 'src/services/discord/tui_prompt_relay/relay_e2e/thread_guard_host_e2e.rs'
               - 'src/services/discord/tui_prompt_relay/tests/background_child_close_pg_tests.rs'
+              - 'src/services/discord/tui_prompt_relay/tests/codex_direct_owner_tests/boundary_tests/loss_tests.rs'
               - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/completion_guard/completion_postgres.rs'
               - 'src/services/discord/turn_bridge/completion_guard/replay_hold_tests.rs'
@@ -456,12 +481,20 @@ jobs:
               - 'src/services/discord/turn_bridge/tmux_runtime/process_force_kill_tests.rs'
               - 'src/services/discord/turn_bridge/tmux_runtime/stop_host_tests.rs'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/live_review_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs'
+              - 'src/services/discord/turn_presence/activity/unbound/unit_tests.rs'
+              - 'src/services/discord/turn_presence/activity_tests.rs'
               - 'src/services/discord/turn_teardown_clearance_tests.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
               - 'src/services/discord/watchers/lifecycle/n3bc_restore_tests.rs'
-              - 'src/services/discord/watchers/lifecycle/n4d2_restore_tests.rs'
               - 'src/services/discord/watchers/lifecycle/restore.rs'
               - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
+              - 'src/services/discord/watchers/lifecycle/resume_companion_restore_tests.rs'
               - 'src/services/dispatches/discord_delivery/guard.rs'
               - 'src/services/dispatches/outbox_claiming.rs'
               - 'src/services/dispatches/outbox_queue_replay_tests.rs'
@@ -477,6 +510,7 @@ jobs:
               - 'src/services/observability/turn_lifecycle.rs'
               - 'src/services/pipeline_override.rs'
               - 'src/services/pipeline_routes.rs'
+              - 'src/services/routines/agent_executor/execution.rs'
               - 'src/services/routines/agent_executor/reliability.rs'
               - 'src/services/routines/reliability_pg_tests.rs'
               - 'src/services/routines/session_control.rs'
@@ -507,7 +541,10 @@ jobs:
               - 'src/services/tui_o/repost/writer_activation_tests.rs'
               - 'src/services/tui_o/writer/deferred_pg_tests.rs'
               - 'src/services/tui_o/writer/late_adopt_delegated_tests.rs'
+              - 'src/services/tui_o/writer/local_retry_repost_tests.rs'
               - 'src/services/tui_o/writer/repost_turn_tests.rs'
+              - 'src/services/tui_o/writer/tool_result_repost_tests.rs'
+              - 'src/services/tui_o/writer/transition_route_tests.rs'
               - 'src/services/turn_host_tests.rs'
               - 'src/services/turn_lifecycle.rs'
               - 'src/voice/announce_meta.rs'
@@ -515,6 +552,8 @@ jobs:
               # END generated pg_db source paths
               # Re-post production changes must run the shared-budget tests too.
               - 'src/services/tui_o/repost/**'
+              # Presence hooks run inside the PG entry-point tests that install a runtime.
+              - 'src/services/discord/turn_presence/**'
               - 'src/services/tui_o/writer/**'
               - 'src/services/tui_o/store/ledger.rs'
               - 'src/services/discord/outbound/o_writer*.rs'
@@ -651,6 +690,7 @@ jobs:
               - 'policies/**'
               - 'scripts/**'
               - '.github/workflows/**'
+              - '.github/actions/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'package.json'
@@ -668,7 +708,7 @@ jobs:
               - 'routines/**'
             # relay_contract: the doc<->code binding surface for the #4268
             # contract symbol-ref gate. When any of these change, the
-            # compile-existence half (check_fast, which compiles the
+            # compile-existence half (lint, whose clippy compiles the
             # `relay_state_contract_refs` blocks so a renamed/removed contract
             # symbol fails to compile) MUST run even for doc-only changes.
             # Mirrors REFERENCE_SOURCE_MODULES in scripts/check_contract_symbol_refs.py;
@@ -779,11 +819,12 @@ jobs:
               # covers the inflight std::fs::File advisory-lock owners and the
               # restart-v2 per-platform fs backend, listed by hand until now.
               - 'src/services/discord/admin_host_guard.rs'
+              - 'src/services/discord/busy_followup_retry_store/**'
               - 'src/services/discord/catch_up/**'
-              - 'src/services/discord/codex_adoption_runtime/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'
+              - 'src/services/discord/e2e_control.rs'
               - 'src/services/discord/health.rs'
               - 'src/services/discord/health/**'
               - 'src/services/discord/host_defer_gate.rs'
@@ -793,10 +834,9 @@ jobs:
               - 'src/services/discord/idle_relay_drift.rs'
               - 'src/services/discord/inflight.rs'
               - 'src/services/discord/inflight/**'
+              - 'src/services/discord/ingress_shadow.rs'
               - 'src/services/discord/inject_disposition_test_support.rs'
               - 'src/services/discord/inject_disposition_tests.rs'
-              - 'src/services/discord/input_runtime/**'
-              - 'src/services/discord/input_transition_tests.rs'
               - 'src/services/discord/jsonl_watcher.rs'
               - 'src/services/discord/live_bridge.rs'
               - 'src/services/discord/mailbox_probe.rs'
@@ -805,6 +845,8 @@ jobs:
               - 'src/services/discord/outbound/**'
               - 'src/services/discord/placeholder_live_events/**'
               - 'src/services/discord/placeholder_sweeper/**'
+              - 'src/services/discord/queue_dispatch.rs'
+              - 'src/services/discord/queue_dispatch/**'
               - 'src/services/discord/queue_io.rs'
               - 'src/services/discord/queue_io/**'
               - 'src/services/discord/queue_park_ledger.rs'
@@ -814,12 +856,12 @@ jobs:
               - 'src/services/discord/recovery_paths/**'
               - 'src/services/discord/relay_coord.rs'
               - 'src/services/discord/relay_health.rs'
+              - 'src/services/discord/relay_health/**'
               - 'src/services/discord/relay_recovery.rs'
               - 'src/services/discord/relay_recovery/**'
               - 'src/services/discord/relay_recovery_circuit_breaker.rs'
               - 'src/services/discord/replace_outcome_policy.rs'
               - 'src/services/discord/replay_policy.rs'
-              - 'src/services/discord/replay_policy/**'
               - 'src/services/discord/restart_mode/**'
               - 'src/services/discord/router/**'
               - 'src/services/discord/runtime_bootstrap.rs'
@@ -850,8 +892,7 @@ jobs:
               - 'src/services/discord/turn_lease.rs'
               - 'src/services/discord/turn_lease_tests.rs'
               - 'src/services/discord/turn_presence/activity.rs'
-              - 'src/services/discord/turn_presence/entrypoints.rs'
-              - 'src/services/discord/turn_presence/mod.rs'
+              - 'src/services/discord/turn_presence/activity/tail.rs'
               - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/zombie_foreground_release.rs'
               - 'src/services/git/**'
@@ -920,75 +961,6 @@ jobs:
 
       - name: dashboard build/test
         run: ./scripts/verify-dashboard.sh
-
-  # Ubuntu Rust lane: canonical fast compile check. Gated on the broad rust_or_policy
-  # filter so a `policies/*.js`, `scripts/*.sh`, `.github/workflows/**`, or
-  # Node package change still gets a Rust check on Linux.
-  #
-  # The `relay_contract == 'true'` OR-clause forces this lane for a #4268
-  # contract anchor, doc, or sync-gate change, including doc-only changes. This
-  # job compiles the `relay_state_contract_refs` blocks, which is the only proof
-  # that each contract symbol still exists.
-  check_fast:
-    name: Fast compile check (${{ matrix.os }})
-    needs: changes
-    if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.94.1"
-          components: clippy, rustfmt
-
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just@1.51.0
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.10
-
-      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
-      # compiled rustc output, and caching multi-GB `target/` directories
-      # starves the 10GB GHA cache quota, evicting sccache shards (observed
-      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
-      # docs/ci/sccache-setup.md §4.2.
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-targets: false
-          cache-bin: false
-          shared-key: cargo-dependencies-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Ensure swap for the workspace check
-        uses: ./.github/actions/ensure-swap
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Policy JS unit tests
-        run: npm run test:policies
-
-      # `lint` owns fmt/clippy in its independent required mirror. Keep this
-      # required Ubuntu lane to compilation and policy tests; main and nightly
-      # retain the longer non-PG test coverage outside the PR critical path.
-      - name: cargo check
-        run: just cargo-check
-
-      - name: sccache stats
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
 
   # Cross-OS Rust compile lane. The required-context mirror below makes this
   # conditionally required when `cross_os_rust` is true; unrelated paths may
@@ -1141,8 +1113,8 @@ jobs:
 
       - name: Writer namespace exact Windows targets
         if: runner.os == 'Windows'
-        # Healthy runs took 16-27 min on 2026-10-12 and two PRs were cut at 30.
-        timeout-minutes: 45
+        # Healthy runs took 24-46 min on 2026-10-15/16 and three PRs were cut at 45.
+        timeout-minutes: 60
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1166,11 +1138,12 @@ jobs:
       - shell: pwsh
         run: git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663
 
+  # Publishes the required Fast check context from `lint`, whose clippy compiles the workspace.
   fast_check_required_context:
     name: Fast check (ubuntu-latest)
     needs:
       - changes
-      - check_fast
+      - lint
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -1182,8 +1155,8 @@ jobs:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: rust_or_policy
           FILTER_OUTPUT: ${{ needs.changes.outputs.rust_or_policy }}
-          UPSTREAM_JOB_NAME: check_fast
-          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+          UPSTREAM_JOB_NAME: lint
+          UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
 
       # Contract changes use their own filter identity so a doc-only contract
@@ -1195,8 +1168,8 @@ jobs:
           CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
           FILTER_NAME: relay_contract
           FILTER_OUTPUT: ${{ needs.changes.outputs.relay_contract }}
-          UPSTREAM_JOB_NAME: check_fast
-          UPSTREAM_RESULT: ${{ needs.check_fast.result }}
+          UPSTREAM_JOB_NAME: lint
+          UPSTREAM_RESULT: ${{ needs.lint.result }}
         run: ./scripts/required-check-mirror.sh
 
   fast_targeted_tests_required_context:
@@ -1204,6 +1177,7 @@ jobs:
     needs:
       - changes
       - test_fast
+      - pg15_owner_proof
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -1216,6 +1190,15 @@ jobs:
           FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
           UPSTREAM_JOB_NAME: test_fast
           UPSTREAM_RESULT: ${{ needs.test_fast.result }}
+        run: ./scripts/required-check-mirror.sh
+
+      - name: Mirror PostgreSQL 15 owner proof result for branch protection
+        env:
+          CHANGED_PATHS_RESULT: ${{ needs.changes.result }}
+          FILTER_NAME: pg_db
+          FILTER_OUTPUT: ${{ needs.changes.outputs.pg_db }}
+          UPSTREAM_JOB_NAME: pg15_owner_proof
+          UPSTREAM_RESULT: ${{ needs.pg15_owner_proof.result }}
         run: ./scripts/required-check-mirror.sh
 
   dashboard_required_context:
@@ -1253,24 +1236,70 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.dashboard.result }}
         run: ./scripts/required-check-mirror.sh
 
-  pg_shards:
-    needs: changes
-    if: needs.changes.outputs.pg_db == 'true'
+  # One lib binary and inventory per candidate; consumers rebuild if sharing is unavailable.
+  lib_test_prepare:
+    name: Prepare shared lib tests
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+      - name: Prepare and verify lib tests
+        timeout-minutes: 45
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+        run: |
+          python3 scripts/ci/lib-test-artifact.py prepare --directory "$ADK_LIB_TEST_ARTIFACT"
+          python3 scripts/ci/lib-test-artifact.py validate --directory "$ADK_LIB_TEST_ARTIFACT"
+          python3 scripts/check_test_target_integrity.py --verify-lib-inventory
+          tar -C "$ADK_LIB_TEST_ARTIFACT" -czf "$RUNNER_TEMP/lib-test-artifact.tar.gz" .
+      - name: Upload shared lib tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  pg_shards:
+    needs: changes
+    runs-on: ubuntu-latest
+    outputs:
+      force_full: ${{ steps.plan.outputs.force_full }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      plan: ${{ steps.plan.outputs.plan }}
+    steps:
+      - uses: actions/checkout@v4
+      # Every PR plans; ADK_CI_SELECT=off forces full now, the ci-full label from the next push or reopen (no `labeled` run).
       - id: plan
         shell: bash
-        run: |
-          matrix=$(python3 scripts/check_pg_test_lane_membership.py --pg-shard-matrix)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+        env:
+          ADK_CI_SELECT: ${{ vars.ADK_CI_SELECT }}
+        run: python3 scripts/ci/test-selection.py plan
 
   test_fast:
     name: PostgreSQL tests (shard ${{ matrix.shard }})
-    needs: [changes, pg_shards]
-    if: needs.changes.outputs.pg_db == 'true'
+    needs: [changes, pg_shards, lib_test_prepare]
+    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1286,13 +1315,25 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: postgres
       AGENTDESK_REQUIRE_PG: "1"
-      # Preserve the full serial PostgreSQL suite while reducing cold-link
-      # time and memory exposure on hosted runners. Assertions and panic text
-      # remain available; only native debug symbols are omitted.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
@@ -1320,7 +1361,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale: `target/` excluded to protect the
+      # See `lint` for rationale: `target/` excluded to protect the
       # sccache GHA cache quota.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -1333,78 +1374,57 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
-      - name: Observe curated lane selections
-        timeout-minutes: 20
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -o pipefail
-          bash scripts/ci/mem-measure.sh observe-test-fast -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job test_fast --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-test-fast.log"
-
-      - name: Require observer summary
-        if: always()
-        timeout-minutes: 1
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-test-fast.log"
-
       - name: Footer-only marker regressions
         timeout-minutes: 10
         shell: bash
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           source scripts/ci/non-pg-test-filter.sh
-          cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"
-          cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib task_notification -- "${NON_PG_SKIP_ARGS[@]}"
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests -- "${NON_PG_SKIP_ARGS[@]}"
 
       - name: Trusted session forwarding tests
         timeout-minutes: 10
         shell: bash
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           source scripts/ci/non-pg-test-filter.sh
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::session_forwarding -- "${NON_PG_SKIP_ARGS[@]}"
 
       # #5025: this job is mirrored by the branch-protected
-      # `Fast targeted tests (ubuntu-latest)` context above. Keep the router test
-      # and both real identity-gate producers together so a red WARN regression
-      # blocks merge instead of remaining advisory.
       - name: Terminal delivery evidence regressions
         timeout-minutes: 10
         shell: bash
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib inflight::terminal_delivery_evidence_loss::tests
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
-          env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
-          env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib inflight::terminal_delivery_evidence_loss::tests
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
-      # Use the same partition and step budget as the main PG matrix.
-      - name: just test-postgres-shard
-        timeout-minutes: 60
+      # The plan's shard subset, or main's `just test-postgres-shard` with the same budget.
+      - name: PostgreSQL shard tests
+        timeout-minutes: 75
         shell: bash
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: just test-postgres-shard
+        run: python3 scripts/ci/test-selection.py run --lane pg
 
       - name: Stop PostgreSQL service
         if: always()
@@ -1414,11 +1434,119 @@ jobs:
         if: always()
         run: sccache --show-stats || true
 
+  # PostgreSQL 15 is the supported floor; the canonical shards above run the image default.
+  pg15_owner_proof:
+    name: PostgreSQL 15 owner proof
+    needs: [changes, pg_shards, lib_test_prepare]
+    if: ${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUST_BACKTRACE: 1
+      POSTGRES_SERVICE_IMAGE: postgres:15
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      POSTGRES_TEST_DATABASE_URL_BASE: postgresql://postgres:postgres@127.0.0.1:5432
+      POSTGRES_TEST_ADMIN_DB: postgres
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      AGENTDESK_REQUIRE_PG: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
+
+      - name: Start PostgreSQL service
+        run: ./scripts/ci/postgres-service.sh start
+
+      - name: Require PostgreSQL 15 server
+        shell: bash
+        run: |
+          version="$(docker exec "${POSTGRES_SERVICE_CONTAINER:-agentdesk-postgres}" psql -U postgres -tAc 'SHOW server_version_num' | tr -d '[:space:]')"
+          echo "server_version_num=${version}"
+          case "$version" in
+            15[0-9][0-9][0-9][0-9]) ;;
+            *) echo "::error::expected PostgreSQL 15, got '${version}'"; exit 1 ;;
+          esac
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94.1"
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Ensure swap for the lib test build
+        uses: ./.github/actions/ensure-swap
+
+      # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      - name: PostgreSQL 15 exact owner proof
+        timeout-minutes: 40
+        shell: bash
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          BASH_ENV: /dev/null
+        run: >-
+          python3 scripts/run_test_lane.py --lane pg --max-summaries 4
+          --expected-ids scripts/ci/pg15_required_ids.txt --
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --
+          cargo test --lib -- --exact
+          db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg
+          db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg
+          db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg
+          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
+          dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
+          services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
+          services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
+          --test-threads=1
+
+      - name: Stop PostgreSQL service
+        if: always()
+        run: ./scripts/ci/postgres-service.sh stop
+
   # The required `High-risk recovery` context is published by high_risk_recovery_required_context.
   high-risk-recovery:
     name: High-risk recovery runner
-    needs: changes
-    if: needs.changes.outputs.high_risk_recovery == 'true'
+    needs: [changes, lib_test_prepare]
+    if: ${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
@@ -1435,6 +1563,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
+
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
 
@@ -1446,7 +1589,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale.
+      # See `lint` for rationale.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -1458,105 +1601,73 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
-      - name: Observe curated lane selections
-        timeout-minutes: 20
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -o pipefail
-          bash scripts/ci/mem-measure.sh observe-high-risk -- python3 scripts/check_test_target_integrity.py --observe-selection --workflow .github/workflows/ci-pr.yml --job high-risk-recovery | tee "$RUNNER_TEMP/selection-evidence-high-risk.log"
-
-      - name: Require observer summary
-        if: always()
-        timeout-minutes: 1
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-          CARGO_PROFILE_DEV_DEBUG: "0"
-          CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          set -euo pipefail
-          python3 scripts/check_test_target_integrity.py --verify-selection-evidence "$RUNNER_TEMP/selection-evidence-high-risk.log"
-
       - name: High-risk recovery lane
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          cargo test --lib high_risk_recovery:: -- --test-threads=1
-          cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
-          cargo test --lib services::discord::relay_health::tests -- --test-threads=1
-          cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
-          cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
-          cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
-          cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
-          # #5147: the self-watchdog's kill-time forensics. Belongs in the
-          # high-risk recovery lane because these tests are what stop the
-          # watchdog from silently regressing to a bare pass/fail probe — the
-          # exact blind spot that stalled #4756, #4770 and #5147.
-          cargo test --lib services::hang_forensics::tests -- --test-threads=1
-          cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
-          # The other half of the same guard: that every Postgres await on the
-          # public /api/health path is still bracketed, so a kill line cannot
-          # report db_in_flight=0 while the handler is stuck inside one.
-          cargo test --lib services::health_diagnostics::tests -- --test-threads=1
-
-      # #5034: watchdog/operational alerts are notifications, not queued turns;
-      # run the sender-policy, attachment-delivery, catch-up, outbox-delivery,
-      # watchdog, and intake-boundary regressions in the same path-filtered
-      # required lane as the production change.
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1
+          python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1
       - name: Operational alert intake admission regressions
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
-
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1
       - name: Accepted turn lifetime regressions
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_turn_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib child_exit_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::process_group_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
-
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_turn_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib child_exit_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::stream_child::stream_queue::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::process_group_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::process::simple_cancel_watcher_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_token_cleanup::executor::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_quiet_turn_survives_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib accepted_stream_runs_past_virtual_day_until_real_eof -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib productive_turns_older_than_four_and_six_hours_defer_cleanup -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib quiet_native_turn_resumes_after_virtual_day -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::provider::cancel_watchdog::tests -- --test-threads=1
       - name: Cancel-preserved queue observation regression
-        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
-
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+        run: |
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1
       # #5003: this production-path E2E previously ran only in main's broad
       # non-PG lane, so test-only fixes could merge without executing it on PRs.
       - name: Local model durable queue wake regression
-        run: env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+        run: env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
       # #5170: the transition-busy requeue oracles live in two modules that no
-      # curated PR filter selected, so they would have been counted by the lib
-      # inventory manifest and executed nowhere -- the #5046/#5041 defect. The
-      # queue_io oracle was originally named exactly because the surrounding
-      # `queue_io` module carried pre-existing #4270 failures that predated that
-      # lane, and a module-wide filter would have imported them.
-      #
-      # #5181 removed that reason: the two #4270 pins were stale oracles calling
-      # the lease-less `mailbox_requeue_intervention_front` after #4811 made the
-      # promote-gate front-restore lease-AUTHORIZED, and the `_4893` capped-retry
-      # test released the shared test env lock while still depending on
-      # `AGENTDESK_ROOT_DIR`. With both fixed, the whole `queue_io` module is
-      # wired here so the next regression in it cannot merge unexecuted. The two
-      # named #5170 filters are kept deliberately: they pin the exact oracles
-      # that lane added, independent of how the module filter later evolves.
       - name: Transition-busy requeue spin regressions
+        env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
         run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::queue_io:: -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::message_handler::intake_turn::race_loss:: -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io::presleep_tests::race_loss_recheck_fences_on_transition_without_parking_a_waiter_5170 -- --exact --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_io:: -- --test-threads=1
+
+      - name: Codex resume ownership regressions
+        env: { ADK_LIB_TEST_ARTIFACT: "${{ runner.temp }}/lib-test-artifact" }
+        run: 'env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --test-threads=1 services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::executed_resume:: services::discord::router::message_handler::codex_resume_companion_queue_tests:: services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests:: services::tui_o::writer::binding::terminal_tests:: services::tui_o::writer::adoption::terminal_tests:: services::tui_o::writer::source_read_tests::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost services::tui_o::writer::tests::actor::host_start::first_init:: services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held'
 
       - name: Stop PostgreSQL service
         if: always()
@@ -1601,178 +1712,11 @@ jobs:
           UPSTREAM_RESULT: ${{ needs.high-risk-recovery.result }}
         run: ./scripts/required-check-mirror.sh
 
-  # Relay authority targets execute on every PR; the broader library sweep
-  # covers non-PG tests when its path filter selects the lane.
-  # Whole-harness-minus-filter plus 15 replays: `rust_tests` selects 7,025 tests, of which
-  # 8 are `#[ignore]`d, so 7,017 execute. Those three figures are derived
-  # from `scripts/lib_test_inventory_manifest.txt` at THIS commit. The newest
-  # figures a real run of this lane has REPORTED are at `6c2c43634`, 14 commits
-  # before `fb2357a66`: `expected=6971 ignored=8 executed=6963`. The Linux
-  # `derive_expected_selection` difference between those SHAs with skips `_pg`, `pg_` and `postgres` is 54 added and none removed, under
-  # `server::routes::health_api::tests` (4),
-  # `server::worker_registry::leader_takeover_tests` (1) and
-  # `services::health_diagnostics::tests` (4), `services::hang_forensics::tests` (30),
-  # `services::discord::recovery_engine::terminal_text_idempotency::tests` (5) and
-  # `services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests` (5) and
-  # `services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests` (5). They
-  # track the manifest, so a later PR that adds or removes a library test dates
-  # them; what enforces the set is `run_test_lane.py`, which recomputes it every
-  # run and names the difference. Read these as orientation, not as a gate.
-  # Measured wall time for the libtest run itself on an M4 Pro: 262-274 s
-  # across five sweeps (an earlier
-  # revision of this comment claimed "~1 min", which was never measured);
-  # a two-core `ubuntu-latest` runner is slower still, which is what the
-  # 45-minute step timeout is sized for. darwin derives 7,028 / 7,020 from the
-  # same manifest because four macOS-only tests are `#[cfg]`-absent on Linux
-  # while one Linux-only test is present; the wrapper resolves that through
-  # `--platform`, which defaults to the host, so the runner derives the Linux
-  # figures and a local reproduction on a Mac derives the darwin ones.
-  #
-  # THIS JOB NEEDS POSTGRESQL, even though its filters are named for excluding
-  # it. The canonical non-PG filter is a substring filter over test
-  # ids, and PostgreSQL dependence is a property of a test *body*. The two do
-  # not coincide: `scripts/pg_test_lane_manifest.txt` classifies 625 library
-  # tests as PG-dependent and 68 of them carry none of those three substrings
-  # in their id, so this lane selects those 68. Both figures are what
-  # `scripts/check_pg_test_lane_membership.py` prints at this commit (the
-  # residual is its `rule2` count); rerun it rather than trusting this
-  # sentence. The residual was 61 until #5218 renamed
-  # `server::multinode_regression::tests` (5 ids) and the Postgres half of
-  # `server::issue_specs::tests` (1 id) into `_pg_` modules, which handed
-  # those 6 to the id-filtered `test_fast` lane, leaving 55; #5266 then
-  # widened *discovery* (Rust-2018 sibling module paths, and `#[test]` items
-  # that sit outside an inline `#[cfg(test)] mod`) and surfaced pre-existing
-  # tests neither figure had been counting. The count moves again whenever a
-  # module gains or loses a lane token, or whenever discovery widens.
-  #
-  # The two counts move independently, and #5142 is the worked example: it took
-  # the PG-dependent total from 460 to 477 while leaving the residual at 55 --
-  # the same 55 ids, not merely the same count. Its 17 new PG-dependent tests
-  # all live in `services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests`
-  # and every id ends in `_pg`, so the substring filter removes all of them and
-  # this lane's selection is unchanged by them. Growth in the PG total is
-  # therefore not evidence that this lane's PG obligation grew; only a test
-  # whose id lacks all three tokens can change that.
-  #
-  # The three measurements below were taken against the 61-id set, before that
-  # rename. They are kept rather than rerun because what they establish is
-  # FIXTURE BEHAVIOUR -- a property of each test body, which the rename did not
-  # touch. Measured with the fixture base pointed at a closed port, those ids
-  # do not degrade to a skip -- `TestPostgresDb::create()` panics through
-  # `.expect(...)` and the soft-skip variants stall on connect retries for
-  # minutes each. Against a live server the 61 were measured
-  # `61 passed; 0 failed` in 24.8 s, in parallel, with
-  # `AGENTDESK_REQUIRE_PG=1` -- on ONE development machine, server version
-  # unrecorded. Both numbers are conditional on that host, and neither is a
-  # property of this lane:
-  #   * `0 failed` is not a guarantee. A review on another machine measured
-  #     60 passed / 1 failed, the loser being the `multinode_regression`
-  #     dispatch/reclaim test that `scripts/known_test_failures.txt` carries as
-  #     `flaky` -- an intra-test race that reproduces under `--exact` on an idle
-  #     machine. That worked example no longer describes THIS lane: #5218 moved
-  #     that id into `test_fast`, and its ledger entry now prints here as
-  #     `ledger-note: ... selected no test in lane non-pg-sweep`. Measured at
-  #     this commit, no `lane=non-pg-sweep` ledger entry matches any of the 55,
-  #     so a failure among them is reported `unexpected` and turns this lane red
-  #     instead of being held green by the ledger.
-  #   * 24.8 s is not a budget. `POSTGRES_TEST_LIFECYCLE_LOCK`
-  #     (`src/db/postgres.rs`) serialises every fixture database create/drop
-  #     process-globally, so the elapsed time is whatever one
-  #     create+migrate+drop costs on the host; a two-core `ubuntu-latest`
-  #     runner is expected to be far slower, and that is not a regression.
-  # What is host-independent is the direction, and that is all this evidence is
-  # asked to carry: with a live server the 55 run and are adjudicated on the
-  # change. With a closed port they still run -- one review measured `57 FAILED
-  # / 4 ok` in 915.72 s, against the 61-id set of the time. What that red
-  # reports can be listed, and the list is short: which of the two fixture
-  # behaviours each id takes -- `create()`
-  # panicking through `.expect(...)`, or a soft-skip variant burning its
-  # connect-retry budget -- and that the port was closed. Which of the two a
-  # given id does is a property of the test, not of the diff. What it does not
-  # report is whether the assertions past the fixture call hold, and those are
-  # where a change is normally adjudicated.
-  #
-  # It does not follow that such a run says nothing about a change, and an
-  # earlier revision of this comment claimed exactly that. The lines before the
-  # fixture call are diffable, and that branch diffed them: three of the 55 live
-  # in `src/services/session_resume.rs`, which that branch edited, and
-  # `resume_production_path_clears_stale_binding_and_rebinds_runtime` there now
-  # takes its `TEST_LOCK` with `unwrap_or_else(|poison| poison.into_inner())`
-  # before its own `TestPostgresDb::create()` call. A closed port is
-  # what makes that `create()` panic, and that panic is what poisons the lock
-  # the edit exists to survive -- so against a closed port the fixture, not the
-  # assertion, decides what that edit is worth. State the harm that way: the
-  # lane does not go unrun, it goes red slowly, and it answers a narrower
-  # question than the pull request asked.
-  #
-  # So the service below is not defensive: without it
-  # this required context can never be green, and with it ids that no PR lane
-  # ran at all start running on every Rust PR against a real database. The
-  # count, measured rather than asserted: `[rule1]` of
-  # `scripts/pg_test_lane_baseline.txt` held 56 such ids at 31465b184, the last
-  # commit before this lane emptied it, and 55 of the 55 residual ids above are
-  # among those 56. The 56th is
-  # `server::issue_specs::tests::upsert_issue_spec_persists_parsed_contract`,
-  # which #5218 renamed into `issue_specs_pg_tests` and thereby handed to
-  # `test_fast`; it is still run by a PR lane, which is why `[rule1]` stays
-  # empty rather than regaining an entry.
-  #
-  # `scripts/check_pg_test_lane_membership.py` `[rule5]` is what keeps the
-  # SELECTION honest -- the selection, and nothing beyond it. What the rule
-  # actually decides is whether a job's YAML text references the PostgreSQL
-  # service start script at all; a `cargo test` job whose text does not
-  # reference it fails rule5, naming every PG-dependent id that job selects.
-  # Being a substring test over job text, it does not evaluate `if:`
-  # conditions, does not tell a live step from a commented-out one, and cannot
-  # know whether the container came up. `docs/ci/release-gates.md` records the
-  # same limit in its required-context procedure -- rule5 inspects the
-  # selection set, not whether the service really started -- which is why that
-  # procedure ALSO makes you confirm, in a real main run, that this job's
-  # service step exists and succeeded. Within those limits the rule carries no
-  # baseline tolerance, so deleting the service step below turns this into a
-  # red script check rather than a red sweep discovered by every PR author at
-  # once.
-  #
-  # Residual risk, recorded rather than closed because it is low-probability
-  # and has no cheap guard: a container that FAILS TO START is already safe --
-  # the start step polls `pg_isready` for its budget and fast-fails the job. A
-  # container that starts and then DIES mid-sweep is not. Every PG-dependent
-  # test still to run then burns its connect-retry budget (a review measured
-  # ~45 s per test against a closed port) before failing, which on a two-core
-  # runner adds far more than the 45-minute step timeout has left. That
-  # surfaces as a TIMEOUT red with no named failure -- not as the clean,
-  # id-naming red this lane is built to produce -- so read a timeout here as
-  # "check the service", not as "the sweep got slower".
-  #
-  # Boundaries and why they are here rather than wider:
-  #   * `--lib` only: an `--all-targets` non-PG sweep panics in SQLite-fixture
-  #     tests that still await their PostgreSQL migration.
-  #   * The id-filtered PostgreSQL suite keeps its existing home in `test_fast`
-  #     / `just test-postgres`: that lane runs it `--test-threads=1` under its
-  #     own container. This lane provisions its own container for the 55
-  #     residual ids only; the two jobs run on separate runners and share
-  #     nothing.
-  #   * `DATABASE_URL` is deliberately NOT exported here even though `test_fast`
-  #     and `high-risk-recovery` export it. Those lanes select hundreds of tests;
-  #     this one selects 7,025 and executes 7,017, and the fixture helpers read
-  #     `POSTGRES_TEST_DATABASE_URL_BASE`/`PG*`, not `DATABASE_URL` -- the 55
-  #     pass without it. Exporting a production connection string across the
-  #     whole harness is a blast radius that was not measured, so it is not
-  #     claimed.
-  #   * Parallel, NOT `--test-threads=1`: serialising would hide the shared
-  #     process-global state this sweep exposes instead of recording it.
-  #
-  # `scripts/run_test_lane.py` is what makes the green meaningful. It derives
-  # the exact id set this lane must run and fails -- naming every id on either
-  # side of the difference -- when the run reports a different one, and it
-  # fails on any failure that is not carried in
-  # `scripts/known_test_failures.txt` with a tracking issue and a reason.
-  # There is deliberately no execution-count floor; the step comment below
-  # records the two measured evasions that cleared one.
+  # The plan's non-PG tests, or main's full sweep and replay, against live PostgreSQL without DATABASE_URL.
   library_sweep:
     name: Library test sweep
-    needs: changes
-    if: needs.changes.outputs.rust_tests == 'true'
+    needs: [changes, lib_test_prepare, pg_shards]
+    if: ${{ !cancelled() && (needs.changes.outputs.rust_tests == 'true' || needs.pg_shards.outputs.force_full == 'true') }}
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
@@ -1784,13 +1728,7 @@ jobs:
       PGPORT: "5432"
       PGUSER: postgres
       PGPASSWORD: postgres
-      # #4979 S2 contract, and rule4 of check_pg_test_lane_membership.py: any
-      # job that starts the service must also hard-fail on an unreachable
-      # database instead of soft-skipping to green. rule4 enforces this.
-      # A newly appearing rule4 debt entry (missing this env var) prints as
-      # `FAIL` and the check exits 1. Deleting this line would turn this gate
-      # red before the PG-dependent tests selected by this lane could quietly
-      # soft-skip to green. This line is load-bearing on rule4 enforcement.
+      # Fail on an unreachable PG fixture server rather than silently skipping tests.
       AGENTDESK_REQUIRE_PG: "1"
       # Match the other test lanes: assertions and panic text are preserved,
       # only native debug symbols are dropped to cut link memory (#4245).
@@ -1798,6 +1736,21 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
 
       - name: Start PostgreSQL service
         run: ./scripts/ci/postgres-service.sh start
@@ -1820,7 +1773,7 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale: `target/` excluded to protect the
+      # See `lint` for rationale: `target/` excluded to protect the
       # sccache GHA cache quota.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -1833,32 +1786,17 @@ jobs:
       - name: Ensure swap for the lib test build
         uses: ./.github/actions/ensure-swap
 
-      # There is no execution-count floor here, deliberately. A floor is a
-      # scalar summary of a set, and both measured evasions cleared one: a
-      # 402-test narrowing of a single module and a 213-test module disable
-      # each stayed above a floor of 6500 and reported a green lane. The
-      # adjudicator instead derives the exact id set this lane must run from
-      # scripts/lib_test_inventory_manifest.txt minus the --skip patterns
-      # declared below, and names every id on either side of the difference --
-      # the same set-comparison convention #5144 moved the inventory pin onto.
-      #
-      # --skip is declared to the adjudicator as well as to libtest, and the
-      # two must match: a lane that told the adjudicator about a narrower
-      # selection than it executed would shrink its own expectation to fit.
-      #
-      # --max-summaries 4 includes the primary run and the hook relay child.
-      # codex_legacy_lock_tests adds two child runs; further nesting is an error.
+      # Compare complete expected/executed ID sets rather than an execution-count floor.
       - name: Library sweep (selection-set gated)
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: bash
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
+          ADK_TEST_SELECTION_PLAN: ${{ needs.pg_shards.outputs.plan }}
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          python3 scripts/run_test_lane.py --lane non-pg-sweep --max-summaries 4 "${NON_PG_SKIP_ARGS[@]}" -- env -u AGENTDESK_ROOT_DIR cargo test --lib -- "${NON_PG_SKIP_ARGS[@]}"
-          run_non_pg_filter_replay
+        run: python3 scripts/ci/test-selection.py run --lane sweep
 
       - name: Stop PostgreSQL service
         if: always()
@@ -1891,8 +1829,8 @@ jobs:
   lint:
     name: Lint runner
     needs: changes
-    # Match check_fast's composite gate so relay-contract-only changes retain
-    # fmt/clippy coverage after duplicate linting was removed from that job.
+    # Relay-contract changes, doc-only included, run this job too: its clippy
+    # compile is the existence proof for the `relay_state_contract_refs` blocks.
     if: needs.changes.outputs.rust_or_policy == 'true' || needs.changes.outputs.relay_contract == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -1914,7 +1852,11 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale.
+      # `target/` is intentionally NOT cached — sccache (GHA-backed) handles
+      # compiled rustc output, and caching multi-GB `target/` directories
+      # starves the 10GB GHA cache quota, evicting sccache shards (observed
+      # Rust hit-rate collapse: 99.80% → 0.00% within hours of merges). See
+      # docs/ci/sccache-setup.md §4.2.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -1925,6 +1867,14 @@ jobs:
 
       - name: just fmt-check
         run: just fmt-check
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Policy JS unit tests
+        run: npm run test:policies
 
       # Workspace clippy can exhaust hosted-runner memory; swap pages it instead of killing the runner.
       - name: Ensure swap for clippy
@@ -2030,16 +1980,30 @@ jobs:
 
   scripts:
     name: Script checks runner
-    needs: changes
+    needs: [changes, lib_test_prepare]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --verify-lib-inventory invokes `cargo test --lib -- --list`, so this
-      # required aggregate job must provision the same pinned toolchain and
-      # cache used by the other Rust lanes before running ci-script-checks.sh.
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
+
+      # Keep Rust available for inventory fallback and the H2 module-map driver.
       - name: Install Rust toolchain for lib inventory
         uses: dtolnay/rust-toolchain@master
         with:
@@ -2065,12 +2029,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # `scripts/check_pg_test_lane_membership.py` stays dependency-free on
-      # purpose, but `tests/test_check_pg_test_lane_membership.py` uses PyYAML
-      # as an independent oracle to prove the hand-written `tests/fixtures/
-      # pg_lane/jobs_*.yml` inputs really are the YAML shapes the dependency-free
-      # parser claims to handle. setup-python gives a clean interpreter, so the
-      # oracle must be installed explicitly or the suite errors on import.
+      # Install PyYAML for independent workflow-shape test oracles.
       - name: Install script-test Python deps
         run: python3 -m pip install --disable-pip-version-check pyyaml
 
@@ -2093,9 +2052,7 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck zsh
 
-      # This direct PR-job step is deliberately outside the aggregate it
-      # inspects, so deleting an aggregate writer gate or its wiring test cannot
-      # also prevent the deletion check from running.
+      # Check aggregate wiring independently so deleting an aggregate gate still fails.
       - name: Protect writer gate aggregate wiring (#5308)
         timeout-minutes: 10
         shell: bash
@@ -2108,6 +2065,7 @@ jobs:
         shell: bash
         run: ./scripts/ci-script-checks.sh
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           # Keep the aggregate interpreter and non-interactive Bash startup
           # behavior explicit at the protected step boundary.
           BASH_ENV: /dev/null
@@ -2122,6 +2080,8 @@ jobs:
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
           SCRIPT_CHECK_SHARD: cargo
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
 
       - name: Production PR cap
         shell: bash
@@ -2145,12 +2105,7 @@ jobs:
       - name: Inflight blind-save ratchet (always, #4259)
         run: python3 scripts/check_inflight_blind_save_ratchet.py
 
-      # Contract symbol-ref doc<->code sync checks verify that the contract's
-      # `sym:` anchors exactly match the references parsed from the
-      # `relay_state_contract_refs` blocks that `cargo check --all-targets`
-      # compiles to prove those symbols exist. The `relay_contract` path filter
-      # force-runs that compile for doc-only changes, so both halves stay on.
-      # H2 contract anchors are also checked against imported Python functions.
+      # Verify documented contract anchors against compiled symbol references.
       - name: Contract symbol-ref sync gate (always, #4268)
         run: |
           python3 scripts/check_contract_symbol_refs.py
@@ -2161,8 +2116,6 @@ jobs:
         run: bash scripts/ci/h2_measure.sh --lane linux --inert
 
       # H2 R-O module map: module/cfg driver self-tests are required; only the repo map stays inert until activation.
-      # sccache cannot wrap the driver, and a cached compile would skip writing the map.
-      # --canary then runs each --suite against the driver it built; skips or a short run fail the step.
       - name: H2 module map (linux, inert)
         timeout-minutes: 30
         env:
@@ -2184,7 +2137,7 @@ jobs:
     name: Script checks runner (guards)
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2220,7 +2173,7 @@ jobs:
     name: Script checks runner (contracts)
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2281,7 +2234,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2329,6 +2282,8 @@ jobs:
   # Contract targets and mutation shards run independently on separate runners.
   relay_authority_targets:
     name: Relay authority targets
+    needs: lib_test_prepare
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -2336,6 +2291,21 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download shared lib tests
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-test-artifact
+          path: ${{ runner.temp }}/lib-test-download
+      - name: Restore shared lib tests
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lib-test-artifact"
+          if [ -f "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz" ]; then
+            tar -C "$RUNNER_TEMP/lib-test-artifact" -xzf "$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz"
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -2358,6 +2328,7 @@ jobs:
 
       - name: Verify named relay-authority targets and selection floors
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
@@ -2367,23 +2338,24 @@ jobs:
 
       - name: Run named relay-authority contract targets
         env:
+          ADK_LIB_TEST_ARTIFACT: ${{ runner.temp }}/lib-test-artifact
           BASH_ENV: /dev/null
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         shell: bash
         timeout-minutes: 30
         run: |
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::session_relay_sink -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_without_ending_stream_lifecycle -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::entry_gate_matrix_over_outcome_and_anchor -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::tui_prompt_relay::tests::scenario_census_e2e -- --test-threads=1
 
       - name: sccache stats
         if: always()
@@ -2514,7 +2486,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=a3113c31c1eeab56122b360be4c323370e1cd3c4358fd1b1b5dfc5eca18510e5
+          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

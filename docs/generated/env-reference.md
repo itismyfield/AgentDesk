@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 119
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -24,16 +24,16 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT` | `src/services/discord/health/turn_deliver/inject.rs` | `ADK_BUSY_INJECT` turns on busy-turn injection of human input into Claude TUI sessions, read once per process: `external` or `all` opens it for any turn holder… |
 | `ADK_BUSY_INJECT_DISCORD_CHANNELS` | `src/services/discord/router/intake_gate/busy_inject.rs` | `ADK_BUSY_INJECT_DISCORD_CHANNELS` opens busy-turn injection of admitted Discord text, read once per process: `*` or channel ids split by commas or spaces, thr… |
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
-| `ADK_C2B_TEST_ATTACHMENT_URL` | `src/services/discord/router/intake_gate/ledger.rs` |  |
+| `ADK_CLEAR_END_MUTANT` | `src/services/tui_o/store/clear_end.rs` | Test-only switch arming one named mutant of the clear-end contract. |
 | `ADK_COLDSTOP_MUTANT` | `src/services/provider/herdr_before_start.rs` |  |
 | `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
 | `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
+| `ADK_HERDR_ROW_END_MUTANT` | `src/services/discord/inflight/clear_store/herdr_row_end.rs`, `src/services/discord/recovery_engine/herdr_row_end.rs` | The receipt recheck, which only a test build's mutant turns off. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` | Cache the kill switch once so activation requires a process restart. |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
-| `ADK_N4D2_ENTRY_CHILD` | `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
@@ -43,15 +43,19 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
 | `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_S3ACT_B1_MUTANT` | `src/services/discord/inflight/removal.rs` |  |
-| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs`, `src/services/turn_orchestrator/installed_actor_handoff.rs` |  |
+| `ADK_S3ACT_B3A1_MUTANT` | `src/services/cluster/channel_home_port.rs` |  |
+| `ADK_S3A_RESTORE_MUTANT` | `src/services/cluster/channel_home/intake.rs`, `src/services/cluster/channel_home_boot.rs` | Test-only mutant of the restore flag's hold, read only for a gate that has one. |
+| `ADK_S3B_MUTANT` | `src/services/cluster/channel_home_boot.rs`, `src/services/tui_o/channel_policy/adoption.rs`, `src/services/tui_o/writer/host/first_init.rs`, `src/services/tui_o/writer/host/hosting.rs` | Test-only mutants of the watch's writer return, a never-held home's drain reads and first init. |
+| `ADK_S3C_MUTANT` | `src/services/cluster/channel_home_boot.rs` | Test-only mutants of a runtime's shutdown of its homes. |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TEST_CODEX_PROMOTE_READY` | `src/services/discord/router/message_handler/tui_followup.rs` | ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests. |
 | `ADK_TEST_HOME_COMMAND_MUTANT` | `src/services/cluster/channel_home.rs` |  |
-| `ADK_TEST_INPUT_G1A_MUTANT` | `src/services/discord/input_runtime/supervisor.rs`, `src/services/tui_input/actor.rs`, `src/services/tui_input/receipt_identity.rs` |  |
-| `ADK_TEST_INPUT_TRANSITION_MUTANT` | `src/services/tui_input/transition.rs` |  |
+| `ADK_TEST_INPUT_MUTANT` | `src/services/tui_input/mod.rs` | A named fault a test run switches on to check that the live input tests catch it. |
 | `ADK_THREAD_LOCK_WAIT_STARTED` | `src/cli/discord_thread_create_lock.rs` |  |
+| `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `ADK_VOICE_KEEP_WAV` | `src/voice/config.rs` | `keep_recordings` 또는 환경변수 `ADK_VOICE_KEEP_WAV` 에 따라 utterance wav / segment / transcript sidecar 를 보존할지 결정한다 (#2156). |
 | `ADK_VOICE_SILENCE` | `src/services/discord/voice_barge_in/foreground_decision.rs` |  |
+| `ADK_WATCHER_FIXTURE_CHILD` | `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_BINDING_CONTEXT` | `src/services/tui_prompt_dedupe/binding_context.rs` | Hook capture reads this value without consulting mutable markers. |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs` |  |
@@ -74,8 +78,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_FILES` | `src/logging.rs` |  |
-| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
-| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
+| `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record/rollout.rs` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
+| `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record/rollout.rs` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs` |  |
 | `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs` | - `high_risk_enabled_via_env` — explicit opt-in via `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`. |
 | `AGENTDESK_E2E_CHANNEL_IDS` | `src/services/discord/e2e_control.rs` | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
@@ -124,12 +128,13 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REQUIRE_PG` | `src/db/postgres.rs` | Every fixture that creates a database must use this authority; callers that can skip return `None`, while required lanes still get the hard failure below when… |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/n4d2_entry_test.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/test_env/teardown_probe.rs`, `src/services/claude.rs`, `src/services/claude_tui/hook_relay/ordered_queue.rs`, `src/services/codex.rs`, `src/services/discord/runtime_store.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs`, `src/services/discord/watchers/lifecycle/watcher_install_fixture.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs`, `src/services/tui_prompt_dedupe/handoff.rs` | Canonical runtime root: $AGENTDESK_ROOT_DIR → ~/.adk/release All code that needs the AgentDesk root directory MUST call this function instead of reimplementing… |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | The rollout gate previously short-circuited a missing env var to `false`, so any environment without an explicit `AGENTDESK_SINGLE_MESSAGE_PANEL=1` silently fe… |
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs` | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
+| `AGENTDESK_TEST_CODEX_BINDING_ROOT` | `src/services/tui_prompt_dedupe/binding_events/codex.rs` | Provider workers inherit only a fixture's explicit test root, never the live runtime root. |
 | `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs` | Test seam: a child process stops at this create stage until stdin yields a line. |
@@ -147,7 +152,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `APPDATA` | `src/services/platform/binary_resolver.rs` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs`, `src/services/claude_tui/transcript_tail.rs`, `src/services/discord/mcp_credential_watcher.rs`, `src/services/discord/recovery_engine/manual_rebind_override.rs` | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
-| `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
+| `CODEX_HOME` | `src/services/codex_tui/rollout_tail/discovery.rs` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
 | `COKACDIR_DEBUG` | `src/services/claude.rs` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs` |  |
 | `DATABASE_URL` | `src/db/postgres.rs` |  |
@@ -159,7 +164,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs`, `src/services/stream_json_cli/dialects/agy.rs` |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs`, `src/services/maintenance/jobs/memento_consolidation.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs` | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/dispatch/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
@@ -168,7 +173,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs` | The directive every shipped dcserver process adds on top of `RUST_LOG`. |
 | `SHELL` | `src/services/platform/binary_resolver.rs` |  |
-| `TMUX` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
-| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
+| `TMUX_TMPDIR` | `src/services/claude/host_gate.rs`, `src/services/platform/tmux/session_inventory.rs` | The server socket tmux itself connects to with no `-L`/`-S`: `$TMUX`, else `$TMUX_TMPDIR` (or `/tmp`) `/tmux-<uid>/default`. |
 | `USERPROFILE` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/operator_connectors.rs`, `src/services/platform/binary_resolver.rs`, `src/services/qwen.rs`, `src/services/routines/migrated.rs` |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs` |  |

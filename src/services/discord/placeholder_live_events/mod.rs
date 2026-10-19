@@ -9,9 +9,11 @@ use crate::services::agent_protocol::StatusEvent;
 use crate::services::provider::ProviderKind;
 
 mod background_task_events;
+mod channel_visibility;
 mod common;
 mod completion_footer;
 mod context_panel;
+mod footer_activity;
 mod freshness;
 mod panel_cache_invalidation;
 mod recent_events;
@@ -24,11 +26,16 @@ mod subagent_panel;
 mod subagent_rollout;
 mod subagent_summary;
 mod task_panel;
+mod tool_activity;
+mod tool_summary;
 mod turn_anchor;
 mod workflow_panel;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::services::discord) mod footer_activity_tests;
 
 pub(in crate::services::discord) use background_task_events::{
     notification_is_error, notification_is_terminal,
@@ -90,6 +97,7 @@ pub(in crate::services::discord) enum TaskCompletionDisplayPolicy {
 
 #[derive(Debug, Default)]
 pub(in crate::services::discord) struct PlaceholderLiveEvents {
+    tool_activity_display: crate::config::ToolActivityDisplay,
     by_channel: dashmap::DashMap<ChannelId, Mutex<VecDeque<RecentPlaceholderEvent>>>,
     status_by_channel: dashmap::DashMap<ChannelId, Mutex<StatusPanelState>>,
     // #3477 item 3: monotonic timestamp of the most recent live (Recent/terminal)
@@ -105,6 +113,7 @@ pub(in crate::services::discord) struct PlaceholderLiveEvents {
     // (no needless re-edit) while Discord shows the localized live age client-side.
     last_recent_event_unix: dashmap::DashMap<ChannelId, i64>,
     panel_cache_invalidations: panel_cache_invalidation::PanelCacheInvalidations,
+    panel_channel_kinds: channel_visibility::PanelChannelKinds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -615,30 +624,12 @@ impl PlaceholderLiveEvents {
         // stable stored last-activity stamp, not this render-time heartbeat).
         _heartbeat_at_unix: i64,
     ) -> String {
-        let snapshot = self
-            .status_by_channel
-            .get(&channel_id)
-            .map(|entry| {
-                let mut guard = entry
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                // #4396 point 2: the #4177 stuck-subagent TTL sweep used to run
-                // only at turn-boundary resets, which a long single turn never
-                // crosses — sweep on the periodic panel render tick too, so a
-                // stuck background subagent slot is bounded by its silence TTL
-                // instead of by turn length. Slot activity refreshes the TTL
-                // clock (see `SubagentSlot::started_at`), so a live noisy slot
-                // is never force-aborted here.
-                status_panel::force_abort_stuck_subagent_slots(&mut guard.subagents, panel_now());
-                guard.clone()
-            })
-            .unwrap_or_default();
-        // #4093 + #4367 후속: the #3404 live-panel terminal-slot compaction (and
-        // its count-change INFO log) is retired — terminal Tasks/Subagents are now
-        // hidden from the live panel outright, so nothing is ever compacted out.
-        let turn_trigger_line = self.request_anchor_line(channel_id, &snapshot);
-        let time_line = self.panel_time_line(channel_id, started_at_unix);
-        render_status_panel(snapshot, provider, time_line, turn_trigger_line)
+        self.render_status_panel_with_display(
+            channel_id,
+            provider,
+            started_at_unix,
+            self.tool_activity_display,
+        )
     }
 
     pub(in crate::services::discord) fn render_completion_footer(

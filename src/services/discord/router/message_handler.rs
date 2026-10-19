@@ -62,6 +62,10 @@ pub(in crate::services::discord) use watchdog::incident_attach;
 use self::goal_lifecycle::*;
 #[cfg(test)]
 pub(in crate::services::discord) use self::provider_dispatch::producer_error_test_support::producer_error_frame;
+#[cfg(test)]
+pub(in crate::services::discord) use self::provider_dispatch::{
+    CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
+};
 use self::provider_isolation::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
@@ -253,6 +257,8 @@ async fn refresh_claimed_runtime_for_launch(
     *state.3 = runtime.3;
 }
 
+#[cfg(test)]
+pub(super) use self::attachments::TEST_DOWNLOADS;
 pub(super) use self::attachments::{
     AttachmentDescriptor, LocalAttachmentPreparationPermit, describe_attachments,
     prepare_admitted_local_attachment, prepare_portable_attachments,
@@ -279,6 +285,7 @@ pub(super) async fn finish_admitted_local(
     request: IntakeRequest,
     preserve_on_cancel: bool,
     queued_drain: bool,
+    queued: Option<crate::services::turn_orchestrator::QueuedRoute>,
     preloaded_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
     voice_announcement: Option<crate::voice::prompt::VoiceTranscriptAnnouncement>,
 ) -> Result<IntakeExecution, Error> {
@@ -286,15 +293,46 @@ pub(super) async fn finish_admitted_local(
         deps,
         preserve_on_cancel,
         request,
-        queued_drain,
+        (queued_drain, queued),
         preloaded_uploads,
         voice_announcement,
     )
     .await
 }
 
+/// Test seam: holds the next provider effect on `channel` until the returned sender fires.
+#[cfg(test)]
+pub(in crate::services::discord) fn hold_input_effect_for_tests(
+    channel: u64,
+) -> (
+    tokio::sync::oneshot::Receiver<std::thread::ThreadId>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (entered, at) = tokio::sync::oneshot::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let probe = provider_dispatch::InputEffectProbe {
+        channel,
+        entered,
+        release: wait,
+        terminal_before_release: false,
+    };
+    *provider_dispatch::INPUT_EFFECT_PROBE.lock().unwrap() = Some(probe);
+    (at, release)
+}
+
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;
 
+#[cfg(all(test, unix))]
+mod turn_mark_admission_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
+
 mod turn_context;
 use turn_context::TurnContext;
+
+#[cfg(test)]
+pub(in crate::services::discord) fn input_result_for_tests(at: (u64, String)) -> impl Drop {
+    provider_dispatch::tests::set_result(at.0, at.1)
+}

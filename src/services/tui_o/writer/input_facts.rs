@@ -1,10 +1,8 @@
 //! Dormant input adapter: replay O's parent transcript facts without storing turn state.
 
-use chrono::Utc;
 use serde_json::Value;
 
 use crate::services::codex_tui::rollout_index::strict_parent_session;
-use crate::services::tui_o::n1_observation as observation;
 use crate::services::tui_o::shadow::capture::{SourceCapture, observation::ObservationCapture};
 use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
 use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
@@ -69,8 +67,6 @@ pub struct InputFacts {
     /// A resumed reader's carried state; only the carried turn's own closer may end it.
     carried: TurnState,
     awaiting_boundary: bool,
-    /// Offset of the record being read, or of the capture end before the first one.
-    reading: u64,
 }
 
 impl InputFacts {
@@ -127,7 +123,6 @@ impl InputFacts {
             resume: None,
             carried: TurnState::Unknown,
             awaiting_boundary: false,
-            reading: offset,
         })
     }
 
@@ -148,6 +143,17 @@ impl InputFacts {
         facts.awaiting_boundary = true;
         facts.carried = resume.carried.clone();
         Ok(facts)
+    }
+    /// Carries a typed block only after the previous observation authenticates the handoff.
+    pub fn resume_observation_checked(&self) -> Result<Self, String> {
+        let Capture::Observation(old) = &self.capture else {
+            return Err("handoff requires an observation capture".into());
+        };
+        old.validate_handoff().map_err(|e| e.to_string())?;
+        let resume = self.resume_point().ok_or("not a typed block")?;
+        let next = Self::resume_observation(self.binding.clone(), resume)?;
+        old.validate_handoff().map_err(|e| e.to_string())?;
+        Ok(next)
     }
     pub fn boundaries(&self) -> &[Boundary] {
         &self.boundaries
@@ -218,11 +224,6 @@ impl InputFacts {
         match self.poll_inner(max_bytes, end) {
             Ok(fact) => Ok(fact),
             Err(error) => {
-                // A turn this reader held open loses its outcome here; read it before it is reset.
-                if let Some(open) = self.open_turn() {
-                    let native = open.map(String::as_str);
-                    observation::turn_unknown(&self.binding, self.reading, native, "reader_halted");
-                }
                 self.state = TurnState::Unknown;
                 self.halted = Some(error.clone());
                 Err(error)
@@ -248,7 +249,6 @@ impl InputFacts {
     ) -> Result<ChannelFact, String> {
         self.events.clear();
         self.boundaries.clear();
-        self.reading = self.capture.captured_through();
         if self.binding.provider == ShadowProvider::Codex {
             strict_parent_session(&self.binding.source.path, &self.binding.source.session_id)
                 .map_err(|e| e.to_string())?;
@@ -258,7 +258,6 @@ impl InputFacts {
             CaptureOutcome::Anomaly(anomaly) => return Err(anomaly.detail),
         };
         for record in batch.records {
-            self.reading = record.start;
             if record.line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
@@ -295,8 +294,7 @@ impl InputFacts {
                         });
                     }
                 }
-                let event = self.tracker.observe(&fact, row.as_ref(), range, Utc::now());
-                self.observe_unresolved(&event, &fact, range.0);
+                let event = self.tracker.observe(&fact, row.as_ref());
                 let (next, closed) = match event {
                     TurnEvent::Opened(id) => (
                         Some(TurnState::Open {
@@ -304,14 +302,7 @@ impl InputFacts {
                         }),
                         None,
                     ),
-                    TurnEvent::Closed(turn) => {
-                        observation::turn_closed(
-                            &self.binding,
-                            &turn,
-                            aborted(self.binding.provider, &value),
-                        );
-                        (Some(TurnState::Idle), turn.native_turn_id)
-                    }
+                    TurnEvent::Closed(id) => (Some(TurnState::Idle), Some(id)),
                     TurnEvent::StrayIdle | TurnEvent::EdgeTurn => (Some(TurnState::Idle), None),
                     TurnEvent::None => {
                         if let RecordFact::Blocked(reason) = &fact {
@@ -362,21 +353,6 @@ impl InputFacts {
             through,
             state,
         })
-    }
-
-    /// A closer without its own turn's opener cannot be counted completed or aborted.
-    fn observe_unresolved(&self, event: &TurnEvent, fact: &RecordFact, at: u64) {
-        let RecordFact::Idle(close) = fact else {
-            return;
-        };
-        let reason = match (event, self.open_turn()) {
-            (TurnEvent::EdgeTurn, _) => "edge_turn",
-            // Normal repeated closers with nothing open stay silent.
-            (TurnEvent::StrayIdle | TurnEvent::None, Some(_)) => "unattributed_close",
-            _ => return,
-        };
-        let native = close.as_ref().or(self.open_turn().flatten());
-        observation::turn_unknown(&self.binding, at, native.map(String::as_str), reason);
     }
 
     fn mark(&mut self, next: TurnState, range: (u64, u64), closed: Option<String>, value: &Value) {

@@ -335,6 +335,7 @@ impl SharedData {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn apply_watchdog_orphan_token_cleanup(
     registry: &HealthRegistry,
     provider: &ProviderKind,
@@ -358,73 +359,9 @@ pub(super) async fn apply_watchdog_orphan_token_cleanup(
     }
 }
 
-pub(super) async fn run_orphan_token_auto_heal_pass(
-    registry: &HealthRegistry,
-    provider: &ProviderKind,
-    runtimes: &[Arc<SharedData>],
-) -> usize {
-    let mut applied = 0usize;
-    for shared in runtimes {
-        let mut redrive_channels = std::collections::HashSet::new();
-        let mailbox_snapshots = shared.mailboxes.snapshot_all().await;
-        for (channel_id, mailbox) in mailbox_snapshots {
-            redrive_channels.insert(channel_id);
-            if mailbox.cancel_token.is_some()
-                && !super::legacy_supervision::legacy_retired(
-                    provider.as_str(),
-                    channel_id.get(),
-                    "orphan_token_auto_heal",
-                )
-            {
-                match apply_orphan_pending_token_cleanup(
-                    registry,
-                    provider,
-                    shared.clone(),
-                    channel_id,
-                    RelayRecoveryApplySource::ProbeAutoHeal,
-                )
-                .await
-                {
-                    Ok(true) => applied += 1,
-                    Ok(false) => {}
-                    Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
-                    Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
-                }
-            }
-
-            match redrive_undelivered_backlog(registry, provider, shared.clone(), channel_id).await
-            {
-                Ok(true) => applied += 1,
-                Ok(false) => {}
-                Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
-                Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
-            }
-        }
-
-        let watcher_owner_channels: Vec<ChannelId> = shared
-            .tmux_watchers
-            .iter()
-            .filter_map(|entry| {
-                shared
-                    .tmux_watchers
-                    .owner_channel_for_tmux_session(entry.key())
-            })
-            .collect();
-        for channel_id in watcher_owner_channels {
-            if !redrive_channels.insert(channel_id) {
-                continue;
-            }
-            match redrive_undelivered_backlog(registry, provider, shared.clone(), channel_id).await
-            {
-                Ok(true) => applied += 1,
-                Ok(false) => {}
-                Err(RelayRecoveryError::SnapshotNotFound { .. }) => {}
-                Err(error) => trace_orphan_auto_heal_error(provider, channel_id, &error),
-            }
-        }
-    }
-    applied + relay_recovery::leaked_row_sweep::sweep_leaked_inflight_rows(registry, provider).await
-}
+#[path = "relay_auto_heal/producer_resume_pass.rs"]
+mod producer_resume_pass;
+pub(super) use producer_resume_pass::run_orphan_token_auto_heal_pass;
 
 async fn redrive_undelivered_backlog(
     registry: &HealthRegistry,
@@ -450,20 +387,10 @@ impl HealthRegistry {
         channel_id: ChannelId,
         now_unix_secs: i64,
     ) -> Result<bool, RelayRecoveryError> {
-        // A retired key ends here with no snapshot, nudge, reattach or accounting.
-        if retired_target(provider, channel_id, None, "redrive_entry") {
-            return Ok(false);
-        }
-        let snapshot = self
+        let Some(snapshot) = self
             .snapshot_watcher_state_for_shared(provider, shared.clone(), channel_id.get())
-            .await;
-        #[cfg(test)]
-        retired_redrive_tests::checkpoint(channel_id, "redrive_snapshot");
-        // The snapshot await can span a retirement, and it names the owner channel the nudge targets.
-        if retired_target(provider, channel_id, snapshot.as_ref(), "redrive_snapshot") {
-            return Ok(false);
-        }
-        let Some(snapshot) = snapshot else {
+            .await
+        else {
             return Ok(false);
         };
         #[cfg(test)]
@@ -515,11 +442,6 @@ impl HealthRegistry {
                 {
                     return Ok(false);
                 }
-                #[cfg(test)]
-                retired_redrive_tests::checkpoint(channel_id, "redrive_reattach");
-                if retired_target(provider, channel_id, Some(&snapshot), "redrive_reattach") {
-                    return Ok(false);
-                }
                 let response = relay_recovery::auto_apply_relay_recovery_for_shared(
                     self,
                     shared.clone(),
@@ -555,21 +477,6 @@ impl HealthRegistry {
         }
         Ok(applied)
     }
-}
-
-/// True when the redrive channel, or the watcher owner channel its nudge targets, is retired.
-fn retired_target(
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    snapshot: Option<&WatcherStateSnapshot>,
-    site: &'static str,
-) -> bool {
-    let retired =
-        |channel| super::legacy_supervision::legacy_retired(provider.as_str(), channel, site);
-    retired(channel_id.get())
-        || snapshot
-            .and_then(|snapshot| snapshot.watcher_owner_channel_id)
-            .is_some_and(|owner| owner != channel_id.get() && retired(owner))
 }
 
 fn redrive_shield_channel_for_action(
@@ -660,12 +567,12 @@ fn nudge_existing_watcher_for_backlog(
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
     token: RelayFrontierToken,
 ) -> RedriveNudge {
     #[cfg(test)]
     let _test_clock = stall_liveness::set_redrive_grace_test_clock(
-        now_unix_secs,
+        _now_unix_secs,
         snapshot.inflight_identity.clone(),
     );
     if !should_redrive_undelivered_backlog(provider, channel_id, snapshot, token) {
@@ -849,20 +756,6 @@ async fn apply_orphan_pending_token_cleanup(
         if snapshot.relay_stall_state != RelayStallState::OrphanPendingToken {
             return Ok(false);
         }
-    }
-
-    #[cfg(test)]
-    orphan_token_tests::snapshot_barrier(channel_id).await;
-    // The helper snapshot can suspend after the sweep admitted this channel.
-    if matches!(
-        source,
-        RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog
-    ) && super::legacy_supervision::legacy_retired(
-        provider.as_str(),
-        channel_id.get(),
-        "orphan_token_before_auto_apply",
-    ) {
-        return Ok(false);
     }
 
     let watchdog_watcher = (source == RelayRecoveryApplySource::StallWatchdog)
@@ -1121,6 +1014,7 @@ mod tests {
     ) -> WatcherStateSnapshot {
         let unread_bytes = capture_offset.saturating_sub(last_relay_offset);
         WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: ProviderKind::Codex.as_str().to_string(),
             attached: true,
             tmux_session: Some(tmux_session.to_string()),
@@ -1245,7 +1139,6 @@ mod tests {
             channel_id,
             Some(tmux_session),
         );
-
         let capture_offset = 301_613;
         let now = 1_800_000_000;
         let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, capture_offset);

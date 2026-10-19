@@ -22,10 +22,8 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
         return Ok(false);
     }
     let channel = expected.channel_id;
-    let input_held =
-        || crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some();
-    if channel == 0 || input_held() || expected.provider_kind().as_ref() != Some(provider) {
-        return Err("generation restore scope/input mismatch".into());
+    if channel == 0 || expected.provider_kind().as_ref() != Some(provider) {
+        return Err("generation restore scope mismatch".into());
     }
     let root = inflight_runtime_root()
         .ok_or_else(|| RestoreFailure::retryable("inflight root unavailable"))?;
@@ -68,21 +66,16 @@ pub(in crate::services::discord) async fn invalidate_stale_generation_scoped(
     {
         return Ok(false);
     }
-    crate::services::discord::input_runtime::fence::write(provider, channel, || {
-        if input_held() {
-            return Err("input-protected generation restore".into());
-        }
-        log_inflight_remove(
-            provider,
-            channel,
-            fresh.user_msg_id,
-            "invalidate_stale_generation_scoped",
-            &path,
-        );
-        fs::remove_file(&path).map_err(|error| String::from(RestoreFailure::retryable(error)))?;
-        crate::services::discord::runtime_store::fsync_parent_dir(&path)
-            .map_err(|error| String::from(RestoreFailure::retryable(error)))
-    })?;
+    log_inflight_remove(
+        provider,
+        channel,
+        fresh.user_msg_id,
+        "invalidate_stale_generation_scoped",
+        &path,
+    );
+    fs::remove_file(&path).map_err(|error| String::from(RestoreFailure::retryable(error)))?;
+    crate::services::discord::runtime_store::fsync_parent_dir(&path)
+        .map_err(|error| String::from(RestoreFailure::retryable(error)))?;
     Ok(true)
 }
 

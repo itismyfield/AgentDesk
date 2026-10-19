@@ -29,6 +29,7 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorC
         Option<u64>,
     pub(in crate::services::discord::tmux::tmux_watcher) host: Arc<HostSnapshot>,
     pub(in crate::services::discord::tmux::tmux_watcher) legacy_mode: WatcherLegacyMode,
+    pub(in crate::services::discord::tmux::tmux_watcher) watcher_instance_id: u64,
 }
 
 pub(in crate::services::discord::tmux::tmux_watcher) struct TurnStreamCollectorIo {
@@ -168,9 +169,6 @@ pub(in crate::services::discord::tmux::tmux_watcher) struct CollectedTurnStream 
     pub(in crate::services::discord::tmux::tmux_watcher) found_result: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_kind: Option<WatcherTerminalKind>,
     pub(in crate::services::discord::tmux::tmux_watcher) terminal_evidence_offset: Option<u64>,
-    #[cfg(unix)]
-    pub(in crate::services::discord::tmux::tmux_watcher) injected_candidates:
-        Vec<crate::services::discord::replay_policy::injected::Candidate>,
     pub(in crate::services::discord::tmux::tmux_watcher) is_prompt_too_long: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) stale_resume_detected: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) task_notification_kind:
@@ -215,6 +213,7 @@ impl TurnStreamCollectorContext {
             restored_injected_prompt_message_id,
             host: context.host.clone(),
             legacy_mode: context.legacy_mode,
+            watcher_instance_id: context.watcher_instance_id,
         }
     }
 }

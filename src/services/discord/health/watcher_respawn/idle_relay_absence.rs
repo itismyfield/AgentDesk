@@ -13,7 +13,6 @@ use super::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
-use crate::services::discord::input_runtime::fence::{BootTarget, boot_skip};
 use crate::services::provider::ProviderKind;
 
 /// Four STALL-WATCHDOG ticks. Normal recovery takes one, so this WARN only ever
@@ -117,25 +116,10 @@ pub(super) async fn observe_routable_unwatched_tui_sessions(
         provider,
         &live_sessions,
         |tmux_session| {
-            #[cfg(unix)]
-            if crate::services::tmux_common::read_tmux_channel_binding(tmux_session).is_some_and(
-                |channel| super::super::legacy_supervision::is_retired(provider.as_str(), channel),
-            ) {
-                return crate::services::tmux_common::resolve_tmux_runtime_kind_marker(
-                    tmux_session,
-                );
-            }
             crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session)
                 .map(|binding| binding.runtime_kind)
         },
         |tmux_session| {
-            #[cfg(unix)]
-            if let Some(channel) =
-                crate::services::tmux_common::read_tmux_channel_binding(tmux_session)
-                && super::super::legacy_supervision::is_retired(provider.as_str(), channel)
-            {
-                return Some(ChannelId::new(channel));
-            }
             runtimes.iter().find_map(|runtime| {
                 runtime
                     .tmux_watchers
@@ -164,12 +148,6 @@ pub(super) fn observe_routable_unwatched_session(
     candidate: &RoutableUnwatchedSession,
     now_unix_secs: i64,
 ) -> bool {
-    // Like boot, absence observation leaves a protected channel to its move or handback.
-    let retired =
-        super::super::legacy_supervision::is_retired(provider.as_str(), candidate.channel_id.get());
-    if !retired && boot_skip(BootTarget::Channel(provider, candidate.channel_id.get())) {
-        return false;
-    }
     let key = WatcherAbsenceKey::new(provider, candidate.channel_id);
     // A channel the relay-work sweep already observed on this tick carries the
     // richer evidence (and the dead-man ERROR); do not double-observe it.
@@ -180,12 +158,6 @@ pub(super) fn observe_routable_unwatched_session(
         .entry(key)
         .or_insert_with(|| WatcherAbsenceState::newly_absent(now_unix_secs));
     entry.last_seen_unix_secs = now_unix_secs;
-    #[cfg(unix)]
-    if retired {
-        drop(entry);
-        super::o_only_retry::observe_absence(provider, candidate.channel_id, now_unix_secs);
-        return true;
-    }
     let absence_secs = saturating_age_secs(entry.first_seen_unix_secs, now_unix_secs);
     if idle_relay_absence_warn_due(absence_secs, entry.idle_relay_announced || entry.escalated) {
         entry.idle_relay_announced = true;

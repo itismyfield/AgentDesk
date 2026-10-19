@@ -9,18 +9,6 @@ pub(in crate::services::discord) async fn complete_force_clean_watcher_recovery(
     now_unix_secs: i64,
     repair_started_at: Instant,
 ) {
-    #[cfg(unix)]
-    if super::super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-        o_only_retry::install_for_channel(
-            registry,
-            provider,
-            std::slice::from_ref(shared),
-            channel_id,
-            now_unix_secs,
-        )
-        .await;
-        return;
-    }
     let Ok(recovery) = discord::live_bridge::try_respawn_recovery(provider, channel_id.get())
     else {
         return;
@@ -45,19 +33,6 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
     channel_id: ChannelId,
     now_unix_secs: i64,
 ) -> bool {
-    #[cfg(unix)]
-    if super::super::legacy_supervision::is_retired(provider.as_str(), channel_id.get()) {
-        return o_only_retry::retry(registry, provider, runtimes, channel_id, now_unix_secs).await;
-    }
-    use discord::input_runtime::fence;
-    // A closed input gate refuses before the retry's first read; the entry keeps its budget.
-    let permit = match fence::effect::admit(provider, channel_id.get()) {
-        Ok(permit) => permit,
-        Err(failure) => {
-            fence::record_failure(provider, channel_id.get(), &[], failure);
-            return false;
-        }
-    };
     let Ok(recovery) = discord::live_bridge::try_respawn_recovery(provider, channel_id.get())
     else {
         // A live Claude original owns the turn; a concurrent recovery keeps this entry's budget.
@@ -68,28 +43,17 @@ pub(in crate::services::discord) async fn retry_pending_watcher_respawn(
         }
         return false;
     };
-    // The admitted retry keeps its input permit until the respawn returns.
     recovery
-        .run(fence::effect::scope(
-            permit,
-            retry_pending_watcher_respawn_admitted(
-                registry,
-                provider,
-                runtimes,
-                channel_id,
-                now_unix_secs,
-            ),
+        .run(retry_pending_watcher_respawn_admitted(
+            registry,
+            provider,
+            runtimes,
+            channel_id,
+            now_unix_secs,
         ))
         .await
 }
 
-/// Synchronous row IO: on the input worker while an input permit is held, where a protected row's
-/// writer is allowed, and inline otherwise.
-pub(super) async fn row_io<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
-    use discord::input_runtime::fence;
-    fence::effect::run(fence::effect::current(), async move { work() }).await
-}
-
 #[cfg(all(test, unix))]
-#[path = "input_fence_tests.rs"]
-mod input_fence_tests;
+#[path = "live_bridge_guard_tests.rs"]
+mod tests;

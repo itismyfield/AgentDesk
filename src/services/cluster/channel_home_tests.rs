@@ -450,12 +450,17 @@ fn nothing_outside_the_owners_writes_a_home_or_runs_its_gate() {
                 }
                 continue;
             }
-            // Each loop is named once at its definition and once where the boot starts it.
-            for (owner, start) in [
-                ("src/services/cluster/channel_home.rs", "run_lease"),
-                ("src/services/cluster/channel_home_drain.rs", "run_drain"),
+            // Each loop is named once at its definition, the lease once more where the boot starts
+            // it; the boot's watch runs the drain a round at a time, never its loop.
+            for (owner, start, started) in [
+                ("src/services/cluster/channel_home.rs", "run_lease", true),
+                (
+                    "src/services/cluster/channel_home_drain.rs",
+                    "run_drain",
+                    false,
+                ),
             ] {
-                let starter = relative == "src/services/cluster/channel_home_boot.rs";
+                let starter = started && relative == "src/services/cluster/channel_home_boot.rs";
                 let expected = usize::from(relative == owner || starter);
                 let named = tokens.iter().filter(|token| **token == start).count();
                 if named != expected {
@@ -801,47 +806,93 @@ async fn command_registration_never_discards_a_preexisting_local_execution() {
     unregister(old.channel_id());
 }
 
-/// Whether a Home mount on this thread's registry would wait right now.
-pub(crate) fn mount_waits() -> bool {
-    with_homes(|homes| match homes.get() {
-        Some(homes) => homes.try_lock().is_err(),
-        None => FIRST_MOUNT.try_lock().is_err(),
-    })
+/// This thread's home registry for another thread, until the returned guard drops there: both
+/// then register, read and withdraw the same gates.
+pub(crate) fn shared_homes() -> impl FnOnce() -> SharedHomes + Send + 'static {
+    let homes = HOMES.with(|homes| Arc::clone(&homes.borrow()));
+    move || SharedHomes(HOMES.with(|slot| slot.replace(homes)))
 }
 
-#[derive(Clone, Default)]
 pub(crate) struct SharedHomes(Arc<Registry>);
 
-pub(crate) struct HomesScope(Arc<Registry>);
-
-impl SharedHomes {
-    pub(crate) fn enter(&self) -> HomesScope {
-        HomesScope(HOMES.with(|homes| homes.replace(self.0.clone())))
-    }
-
-    pub(crate) fn available(&self) -> bool {
-        self.0.get().is_some_and(|homes| homes.try_lock().is_ok())
-    }
-}
-
-impl Drop for HomesScope {
+impl Drop for SharedHomes {
     fn drop(&mut self) {
-        HOMES.with(|homes| homes.replace(self.0.clone()));
+        HOMES.with(|slot| slot.replace(Arc::clone(&self.0)));
     }
 }
 
-thread_local! {
-    static UNHOMED_POLL: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+/// What `home`'s ingress sample reads as its ownership.
+fn sampled(home: &HomeGate) -> HomeOwnership {
+    match ingress_snapshot::sample_gate(home, "claude") {
+        ingress_snapshot::GateSample::Sampled(sample) => sample.ownership,
+        other => panic!("not sampled: {other:?}"),
+    }
 }
 
-pub(crate) fn before_unhomed_poll() {
-    UNHOMED_POLL.with(|hook| {
-        if let Some(hook) = hook.borrow().as_ref() {
-            hook();
-        }
-    });
+/// A gate opening after a restore flag takes no intake until it is set but admits the restore and
+/// owed POSTs; a drain's close outlasts it, and the ingress sample reads the gate's ownership.
+#[tokio::test(start_paused = true)]
+async fn a_gate_that_opens_after_a_flag_takes_intake_only_once_it_is_set() {
+    let restored = Arc::new(AtomicBool::new(false));
+    let home = HomeGate::new(C, "mini").opens_after(Some(Arc::clone(&restored)));
+    assert_eq!(
+        (home.ownership(), sampled(&home)),
+        (HomeOwnership::Lost, HomeOwnership::Lost)
+    );
+    home.confirm(&written("mini", 2, HomeState::Worker), Instant::now())
+        .unwrap();
+    let closed = owned(2, 1, HomeIntake::Closed);
+    assert_eq!((home.ownership(), sampled(&home)), (closed, closed));
+    assert!(home.admit_command("claude").is_none() && !home.intake_open());
+    assert!(home.admit_at_epoch("claude", 2, false).is_none());
+    assert_eq!(home.refusal(), Some(HomeRefusal::Draining));
+    let restore = home.admit_at_epoch("claude", 2, true);
+    assert!(restore.is_some(), "the restore is admitted");
+    assert_eq!(
+        home.admit_post(|epoch| epoch),
+        Some(1),
+        "an owed POST is admitted"
+    );
+    drop(restore);
+
+    restored.store(true, Ordering::Release);
+    let open = owned(2, 1, HomeIntake::Open);
+    assert_eq!((home.ownership(), sampled(&home)), (open, open));
+    assert!(home.admit_command("claude").is_some() && home.intake_open());
+    home.close_intake();
+    assert_eq!(
+        (home.ownership(), sampled(&home)),
+        (closed, closed),
+        "a drain's close outlasts the flag"
+    );
 }
 
-pub(crate) fn at_unhomed_poll(hook: Option<Box<dyn Fn()>>) {
-    UNHOMED_POLL.with(|current| current.replace(hook));
+/// A restore permit taken before the home is lost is not revoked by the loss, but the restore that
+/// finishes with it opens nothing: the lost home takes no intake and admits no new permit.
+#[tokio::test(start_paused = true)]
+async fn a_restore_finishing_after_its_home_was_lost_opens_no_intake() {
+    let restored = Arc::new(AtomicBool::new(false));
+    let home = HomeGate::new(C, "mini").opens_after(Some(Arc::clone(&restored)));
+    home.confirm(&written("mini", 2, HomeState::Worker), Instant::now())
+        .unwrap();
+    let restore = home.admit_at_epoch("claude", 2, true).expect("held");
+    home.renewal_stale(2);
+    restored.store(true, Ordering::Release);
+    assert_eq!(
+        (home.ownership(), sampled(&home)),
+        (HomeOwnership::Lost, HomeOwnership::Lost)
+    );
+    assert!(!home.intake_open() && home.admit_command("claude").is_none());
+    assert_eq!(home.refusal(), Some(HomeRefusal::NotHeld));
+    assert!(
+        home.admit_at_epoch("claude", 2, true).is_none(),
+        "no new permit"
+    );
+    assert_eq!(
+        home.commands_in_flight(),
+        1,
+        "the permit already taken stays"
+    );
+    drop(restore);
+    assert_eq!(home.commands_in_flight(), 0);
 }

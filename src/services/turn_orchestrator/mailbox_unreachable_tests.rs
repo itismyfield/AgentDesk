@@ -54,7 +54,7 @@ impl ChannelMailboxRegistry {
         let counter = attempts.clone();
         let (sender, mut receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
-            while let Some((msg, _input_permit)) = receiver.recv().await {
+            while let Some(msg) = receiver.recv().await {
                 match msg {
                     super::ChannelMailboxMsg::CancelToken { reply } if observed_idle => {
                         let _ = reply.send(None);

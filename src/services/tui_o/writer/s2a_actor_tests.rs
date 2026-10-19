@@ -4,6 +4,7 @@ use crate::services::tui_o::store::codex_provenance::submit_floor::{
     SubmitFloor, tests as fixture,
 };
 use crate::services::tui_o::store::fault::{self, Step};
+use crate::services::tui_o::writer::actor;
 use crate::services::tui_o::writer::actor::codex_submission::Operation;
 use crate::services::tui_o::writer::host::{ManagedWriterHandle, start_managed};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::admission;
@@ -288,35 +289,36 @@ async fn s2b1b_actual_driver_failures_cancel_and_stale_evidence_issue_nothing() 
     for case in [
         "no_receipt",
         "cancel_before",
-        "cancel_submitted",
-        "open",
-        "synthetic",
-        "close_write",
-        "close_sync",
-        "close_readback",
-        "row_swap",
+        "cancel_after_payload",
+        "cancel_after_enter",
+        "wrong_nonce",
+        "missing_context",
         "source_changed",
-        "late_prepare",
-        "late_close",
-        "cancel_attach",
+        "wrong_uuid",
+        "missing_source",
+        "wrong_runtime_marker",
+        "missing_options",
+        "missing_endpoint",
+        "wrong_channel",
     ] {
         actual_driver_case(case).await;
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn s2b1b_actual_driver_delivery_gate_off_keeps_closed_evidence_without_post() {
-    actual_driver_case("delivery_off").await;
+async fn s2b1b_actual_driver_unknown_permission_posts_without_closed_episode() {
+    actual_driver_case("unknown").await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn s2b1b_actual_driver_issued_record_fences_cancellation_during_first_poll() {
+async fn s2b1b_actual_driver_source_read_survives_cancellation_during_first_poll() {
     actual_driver_case("first_poll").await;
 }
 
-// Dedupe state stays isolated until the blocking driver and its actor have both stopped.
+// Fixture guards stay isolated until the blocking driver and its actor have both stopped.
 struct ActualDriverIsolation {
     _state: std::sync::MutexGuard<'static, ()>,
+    _endpoint: std::sync::MutexGuard<'static, ()>,
 }
 
 async fn actual_driver_case(mode: &'static str) {
@@ -345,15 +347,39 @@ async fn actual_driver_case(mode: &'static str) {
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &temp_parent);
     let _dedupe_lock = ActualDriverIsolation {
         _state: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+        _endpoint: crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
     };
-    let (_env_root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
+    let (env_root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     dedupe::reset_state_for_tests();
+    let binary = env_root.path().join("codex");
+    let probes = env_root.path().join("probes");
+    let unsupported = env_root.path().join("unsupported");
+    let signal = probes.with_extension("signal");
+    let ack = probes.with_extension("ack");
+    let target = match mode {
+        "s1w_prepare" | "source_changed" => 2,
+        "s1w_enter" => 3,
+        _ => 0,
+    };
+    std::fs::write(&binary, format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = 'resume --help' ]; then echo probe >> '{}'; n=$(wc -l < '{}' | tr -d ' '); if [ \"$n\" = '{}' ]; then touch '{}'; while [ ! -f '{}' ]; do sleep 0.002; done; fi; if [ -f '{}' ]; then echo unsupported; else echo --dangerously-bypass-hook-trust; fi; else echo 'codex-cli 0.157.1'; fi\n",
+        probes.display(), probes.display(), target, signal.display(), ack.display(), unsupported.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let _hooks = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_DIRECT_TUI_HOOKS",
+        std::ffi::OsStr::new("1"),
+    );
+    if mode == "s1w_support" {
+        std::fs::write(&unsupported, "unsupported").unwrap();
+    }
     let channel = crate::services::codex_tui::canary::CANARY_CHANNEL;
     let tmux = crate::services::codex_tui::canary::CANARY_TMUX;
     let native_id = "019e660d-4859-7522-9cee-8ba7c4e7c743";
     let _selected = test_override::force_candidates(&[(channel, CodexTui)]);
     admission::forget_channel_for_tests(channel);
-    admission::set_ready_for_tests(channel, true);
     let mut source = None;
     let harness = Harness::build_channel(channel, |root| {
         let path = root.join(format!("rollout-{native_id}.jsonl"));
@@ -388,7 +414,21 @@ async fn actual_driver_case(mode: &'static str) {
         first_prompt_digest: Some(format!("sha256:{}", hex::encode(Sha256::digest(b"first")))),
         source_policy: Some("verified".into()),
     };
-    PreparedIncarnation::create(context.clone()).unwrap();
+    let canonical = PreparedIncarnation::create(context.clone()).unwrap().path;
+    let archive_dir =
+        std::path::Path::new(&context.owner_runtime_root).join("runtime/binding_evidence/codex");
+    let archive = archive_dir.join(format!("{}.json", context.execution_nonce));
+    let identity_paths = [canonical, archive, source.path.clone()];
+    let identity_before: Vec<_> = identity_paths
+        .iter()
+        .map(|path| {
+            (
+                std::fs::read(path).unwrap(),
+                std::fs::metadata(path).unwrap().modified().unwrap(),
+            )
+        })
+        .collect();
+    let archive_count = std::fs::read_dir(&archive_dir).unwrap().count();
     let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&nonce).parent().unwrap()).unwrap();
     std::fs::write(nonce, &context.execution_nonce).unwrap();
@@ -402,11 +442,15 @@ async fn actual_driver_case(mode: &'static str) {
     .unwrap();
     dedupe::register_tmux_channel(tmux, channel);
     dedupe::binding_events::set_test_root(Some(harness._runtime.path()));
-    dedupe::codex_verified::set_permission_for_tests(
-        &context,
-        dedupe::codex_verified::DeliveryPermission::Allowed,
-    );
     let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+    let _binary = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_PATH",
+        &binary,
+    );
+    assert_eq!(
+        std::env::var_os("AGENTDESK_CODEX_PATH").as_deref(),
+        Some(binary.as_os_str())
+    );
     let envelope = HookBindingEnvelope {
         context: CapturedContext::Captured(context.clone()),
         observed: ObservedHookProcess::default(),
@@ -439,67 +483,55 @@ async fn actual_driver_case(mode: &'static str) {
         &crate::services::codex::actual_submit_tests::options(native_id, harness._runtime.path()),
     )
     .unwrap();
+    assert_eq!(
+        dedupe::runtime_binding_for_tmux_session(tmux)
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(native_id),
+        "production Unknown selects the actual proven UUID"
+    );
     harness.gate.acquired();
-    let close_fault = if matches!(mode, "close_sync" | "close_readback") {
-        Some(
-            crate::services::tui_o::store::codex_provenance::ActualCloseFault::install(
-                harness
-                    ._runtime
-                    .path()
-                    .join("o_store")
-                    .join(channel.to_string()),
-                mode == "close_sync",
+    let _ = fake.take_calls();
+    let (stop, stopped) = watch::channel(false);
+    let (_command_port, receiver) = actor::codex_submission::Port::new(1);
+    let log = crate::services::tui_o::writer::binding::ChannelBindingLog::new(
+        channel,
+        ShadowProvider::Codex,
+    );
+    let task = actor::codex_submission::spawning(receiver, || {
+        actor::spawn_projecting(
+            &WriterConfig { enabled: true },
+            None,
+            writer_over(&harness, harness.channel()),
+            ShadowProvider::Codex,
+            Arc::new(log),
+            (
+                stopped,
+                watch::channel(false).0,
+                watch::channel(None).0,
+                actor::Owing::default(),
             ),
         )
-    } else {
-        None
-    };
-    let io = TestIo::over(&harness);
-    let ready = crate::services::tui_o::writer::host::process_readiness();
-    let mut handles = start_managed(
-        ShadowProvider::Codex,
-        true,
-        cutover::boot_ownership(),
-        || HostParts {
-            io: Arc::clone(&io),
-            runtime_root: Some(root(&harness)),
-            gate: Arc::clone(&harness.gate),
-            readiness: Arc::clone(&ready),
-        },
-    );
-    assert_eq!(handles.len(), 1);
+    })
+    .unwrap();
     polls(3).await;
-    assert!(ready.accepts(channel), "{:?}", io.alarms.halted());
     let registry = ChannelMailboxRegistry::default();
     let mailbox = registry.handle(ChannelId::new(channel));
-    admission::set_ready_for_tests(channel, mode == "first_poll");
-    let first_poll_cancel = Arc::new(Mutex::new(None));
-    let first_poll_raced = Arc::new(Mutex::new(None));
+    let mut outcomes = Vec::new();
     let mut tokens = Vec::new();
-    let mut spans = Vec::new();
+    let post_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     for (i, body) in [(0, "first body"), (1, "second body")]
         .into_iter()
         .take(if mode == "two" { 2 } else { 1 })
     {
         let token = Arc::new(CancelToken::new());
         if mode == "first_poll" {
-            harness.port.lazy.store(true, Ordering::SeqCst);
-            let (owner, join, raced) = (
-                Arc::clone(&token),
-                Arc::clone(&first_poll_cancel),
-                Arc::clone(&first_poll_raced),
-            );
+            let owner = Arc::clone(&token);
+            let observed = Arc::clone(&post_cancelled);
             *harness.port.on_post.lock().unwrap() = Some(Box::new(move || {
-                let (attempt, attempted) = std::sync::mpsc::channel();
-                let stopped = Arc::clone(&owner);
-                let thread = std::thread::spawn(move || {
-                    attempt.send(()).unwrap();
-                    stopped.publish_cancel("first poll stop");
-                });
-                attempted.recv().unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                *raced.lock().unwrap() = Some(owner.cancelled.load(Ordering::Acquire));
-                *join.lock().unwrap() = Some(thread);
+                owner.publish_cancel("first poll stop");
+                observed.store(owner.cancelled.load(Ordering::Acquire), Ordering::Release);
             }));
         }
         assert!(
@@ -510,32 +542,102 @@ async fn actual_driver_case(mode: &'static str) {
         let row =
             crate::services::discord::save_actual_episode_for_tests(channel, tmux, 30 + i, &token);
         let row_before = std::fs::read(&row).unwrap();
+        let row_modified = std::fs::metadata(&row).unwrap().modified().unwrap();
         let worker_context = context.clone();
         let worker_token = Arc::clone(&token);
         let path = source.path.clone();
-        let worker_mailbox = mailbox.clone();
+        let canonical = identity_paths[0].clone();
+        let probe_path = probes.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        let task = tokio::task::spawn_blocking(move || {
+        let endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
+            "http://127.0.0.1:9".into(),
+        );
+        let worker = tokio::task::spawn_blocking(move || {
             use crate::services::codex_tui::host_input::spy::{SpyGuard, SpyState};
             use std::io::Write;
             dedupe::binding_events::set_test_root(worker_context.provider_root.as_deref());
-            dedupe::codex_verified::set_permission_for_tests(
-                &worker_context,
-                if mode == "delivery_off" {
-                    dedupe::codex_verified::DeliveryPermission::Unknown
-                } else {
-                    dedupe::codex_verified::DeliveryPermission::Allowed
-                },
+            let endpoint = if matches!(mode, "s1w_initial" | "s1w_rollback" | "missing_endpoint") {
+                drop(endpoint);
+                None
+            } else {
+                Some(endpoint)
+            };
+            if mode == "s1w_rollback" {
+                crate::services::codex::SOURCE_MODE_TEST.with(|slot| slot.set(Some(crate::services::codex_tui::session::source_observation::CodexSourceMode::Legacy)));
+            }
+            match mode {
+                "cancel_before" => worker_token.publish_cancel("before input"),
+                "wrong_nonce" => std::fs::write(
+                    crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce"),
+                    "other-nonce",
+                )
+                .unwrap(),
+                "missing_context" => std::fs::remove_file(&canonical).unwrap(),
+                "wrong_uuid" => {
+                    let bytes = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(
+                        &path,
+                        bytes.replace(native_id, "019e660d-4859-7522-9cee-8ba7c4e7c744"),
+                    )
+                    .unwrap();
+                }
+                "missing_source" => std::fs::remove_file(&path).unwrap(),
+                "wrong_runtime_marker" => std::fs::write(
+                    crate::services::tmux_common::session_temp_path(
+                        tmux,
+                        crate::services::tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT,
+                    ),
+                    "claude-tui",
+                )
+                .unwrap(),
+                "missing_options" => {
+                    let options_path = crate::services::tmux_common::session_temp_path(
+                        tmux,
+                        "codex-tui-launch-options.sha256",
+                    );
+                    std::fs::remove_file(options_path).unwrap();
+                }
+                _ => (),
+            }
+            // A probe handshake changes real eligibility or descriptor evidence at an effect boundary.
+            let signal = probe_path.with_extension("signal");
+            let ack = probe_path.with_extension("ack");
+            let changed_path = path.clone();
+            let (finished, done) = (
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
             );
+            let monitor_done = Arc::clone(&done);
+            let monitor = std::thread::spawn(move || {
+                let mut endpoint = endpoint;
+                while !monitor_done.load(Ordering::Acquire) {
+                    if signal.exists() {
+                        if mode == "source_changed" {
+                            std::fs::rename(
+                                &changed_path,
+                                changed_path.with_extension("old-inode"),
+                            )
+                            .unwrap();
+                            std::fs::copy(changed_path.with_extension("old-inode"), &changed_path)
+                                .unwrap();
+                        } else {
+                            endpoint.take();
+                        }
+                        std::fs::write(&ack, "changed").unwrap();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                endpoint
+            });
             let ready_pane = "╭──────────────────────────────────────────────╮\n│ ▌                                            │\n╰──────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
             let draft = "╭──────────────────────────────────────────────╮\n│ first ▌                                      │\n╰──────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
             let native_path = path.clone();
+            let enter_token = Arc::clone(&worker_token);
             let spy = SpyGuard::install(SpyState {
-                fail_send: if mode == "no_receipt" {
-                    Some((1, Err("unacknowledged Enter".into())))
-                } else {
-                    None
-                },
+                fail_send: (mode == "no_receipt").then(|| (1, Err("unacknowledged Enter".into()))),
+                cancel_after_send: (mode == "cancel_after_payload")
+                    .then(|| (0, Arc::clone(&worker_token))),
                 captures: [ready_pane, draft, ready_pane, ready_pane]
                     .into_iter()
                     .map(|s| Some(s.into()))
@@ -543,7 +645,7 @@ async fn actual_driver_case(mode: &'static str) {
                 on_enter: Some(Box::new(move || {
                     let mut file = std::fs::OpenOptions::new()
                         .append(true)
-                        .open(&path)
+                        .open(&native_path)
                         .unwrap();
                     let turn = format!("native-{i}");
                     for record in [
@@ -551,287 +653,297 @@ async fn actual_driver_case(mode: &'static str) {
                         serde_json::json!({"type":"response_item","payload":{"type":"message","id":format!("body-{i}"),"role":"assistant","content":[{"type":"output_text","text":body}]}}),
                         serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":body}}),
                     ] {
-                        if matches!(mode, "open") && record["payload"]["type"] == "task_complete" {
-                            continue;
-                        }
-                        let mut record = record;
-                        if mode == "synthetic" && record["payload"]["type"] == "task_complete" {
-                            record["payload"]["synthetic"] = true.into();
-                        }
                         writeln!(file, "{record}").unwrap();
+                    }
+                    if mode == "cancel_after_enter" {
+                        enter_token.publish_cancel("after Enter");
                     }
                 })),
                 ..SpyState::default()
             });
             let boundaries = Arc::new(Mutex::new(Vec::<String>::new()));
             let stages = Arc::clone(&boundaries);
-            let (hook_token, hook_context) = (Arc::clone(&worker_token), worker_context.clone());
-            let mut faults = Vec::new();
+            let hook_token = Arc::clone(&worker_token);
             crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY.with(|slot| {
                 *slot.borrow_mut() = Some(Box::new(move |stage| {
                     stages.lock().unwrap().push(stage.to_owned());
-                    if (mode=="cancel_before" && stage=="prepare_ack") || (mode=="cancel_submitted" && stage=="submitted")
-                        || (mode=="cancel_attach" && stage=="close_ack") {hook_token.publish_cancel("boundary stop");}
-                    if mode=="close_write" && stage=="before_close" {
-                        faults.push(fault::plant(hook_context.provider_root.as_ref().unwrap(),Step::Write,std::io::ErrorKind::StorageFull,Some(1)));
+                    if stage.starts_with("held:") {
+                        hook_token.publish_cancel("observed guard refusal");
                     }
-                    if mode=="row_swap" && stage=="prepare_ack" {
-                        let runtime=tokio::runtime::Handle::current();
-                        runtime.block_on(async {
-                            worker_mailbox.finish_turn_if_token(Some(Arc::clone(&hook_token)),
-                                crate::services::turn_orchestrator::QueuePersistenceContext::new(
-                                    &crate::services::provider::ProviderKind::Codex,"actual-row-swap",None)).await;
-                            let other=Arc::new(CancelToken::from_persisted_turn_nonce(hook_token.turn_nonce().map(str::to_owned)));
-                            assert!(worker_mailbox.try_start_turn(other,UserId::new(8),MessageId::new(30)).await);
-                        });
-                    }
-                    if mode=="source_changed" && stage=="prepare_ack" {
-                        std::fs::rename(&native_path,native_path.with_extension("old-inode")).unwrap();
-                        let bytes=std::fs::read(native_path.with_extension("old-inode")).unwrap();
-                        std::fs::write(&native_path,bytes).unwrap();
-                    }
-                    if (mode=="late_prepare" && stage=="prepare_ack") || (mode=="late_close" && stage=="close_ack") {
-                        let runtime=tokio::runtime::Handle::current();
-                        let ready=crate::services::tui_o::writer::host::process_readiness();
-                        let old=ready.submission(channel).unwrap();
-                        let execution=crate::services::tmux_common::with_tmux_source_authority(&hook_context.tmux_session,
-                            |a| dedupe::codex_verified::VerifiedSourceSnapshot::capture(a).unwrap().execution().clone());
-                        let row=runtime.block_on(crate::services::discord::codex_episode_snapshot(channel,&hook_context.tmux_session,&hook_token)).unwrap();
-                        let mut episode=row.episode().clone();episode.user_message_id+=100;episode.turn_nonce.push_str("-halt");
-                        let bad=fault::plant(hook_context.provider_root.as_ref().unwrap(),Step::Write,std::io::ErrorKind::StorageFull,Some(1));
-                        assert!(runtime.block_on(old.request(Operation::Capture(Box::new((crate::services::tui_o::store::codex_provenance::submit_floor::PreparedLaunch{
-                            context:hook_context.clone(),episode},execution))))).is_err());
-                        drop(bad);
-                        runtime.block_on(async {
-                            for _ in 0..60 {if ready.submission(channel).is_some_and(|p|!p.same_run(&old)) && ready.accepts(channel) {return;}
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;}
-                            panic!("actual stale reply fixture never restarted its actor: mode={mode}, live={:?}, accepts={}",ready.submission(channel).map(|p|p.same_run(&old)),ready.accepts(channel));
-                        });
-                    }
-                    let _=&worker_mailbox;
                 }));
             });
-            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (done, timeout, stopper) = (
+            let (watch_done, timeout, stopper) = (
                 Arc::clone(&finished),
                 Arc::clone(&expired),
                 Arc::clone(&worker_token),
             );
             let watchdog = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(if matches!(mode, "two" | "first_poll") {
-                        10
-                    } else {
-                        2
-                    });
-                while !done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while !watch_done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                if !done.load(Ordering::Acquire) {
+                if !watch_done.load(Ordering::Acquire) {
                     timeout.store(true, Ordering::Release);
-                    stopper.publish_cancel("actual fixture deadline");
+                    stopper.publish_cancel("fixture deadline");
                 }
             });
+            let mut requested = worker_context.clone();
+            if mode == "wrong_channel" {
+                requested.channel_id = Some(channel + 1);
+            }
             let result = crate::services::codex::actual_submit_tests::driver(
-                &worker_context,
+                &requested,
                 native_id,
                 "first",
                 worker_token,
                 tx,
             );
             finished.store(true, Ordering::Release);
+            done.store(true, Ordering::Release);
             watchdog.join().unwrap();
-            let result_tuple = (
+            let endpoint = monitor.join().unwrap();
+            crate::services::codex::SOURCE_MODE_TEST.with(|slot| slot.set(None));
+            crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY
+                .with(|slot| slot.borrow_mut().take());
+            let observed = (
                 result,
                 spy.calls(),
                 expired.load(Ordering::Acquire),
                 boundaries.lock().unwrap().clone(),
             );
-            crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY
-                .with(|slot| slot.borrow_mut().take());
-            result_tuple
+            drop(endpoint);
+            observed
         });
-        while !task.is_finished() {
+        while !worker.is_finished() {
             tokio::time::advance(std::time::Duration::from_millis(100)).await;
             tokio::task::yield_now().await;
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let outcome = task.await;
-        if outcome.is_err() {
-            handles.pop().unwrap().stop_and_join().await.unwrap();
-        }
-        let (result, calls, expired, stages) = outcome.unwrap();
-        assert!(result.is_ok(), "actual driver: {result:?}, calls={calls:?}");
-        let expected_input = !matches!(
-            mode,
-            "cancel_before" | "source_changed" | "late_prepare" | "row_swap"
-        );
-        assert_eq!(
-            calls.iter().any(|c| c == "keys:Enter"),
-            expected_input,
-            "actual input boundary: mode={mode}, calls={calls:?}, stages={stages:?}"
-        );
-        if matches!(mode, "two" | "first_poll") {
-            let file = harness
-                ._runtime
-                .path()
-                .join("o_store")
-                .join(channel.to_string())
-                .join("codex_provenance");
-            let saved: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
-            let floor = saved["floors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|floor| {
-                    floor["launch"]["episode"]["user_message_id"] == serde_json::json!(30 + i)
-                })
-                .unwrap();
-            assert_eq!(
-                floor["launch"]["episode"]["turn_nonce"].as_str(),
-                token.turn_nonce(),
-                "actual driver must carry token turn nonce instead of execution nonce"
-            );
-        }
-        if matches!(mode, "two" | "first_poll") {
-            assert!(
-                !expired,
-                "positive driver cannot complete by fixture timeout: {stages:?}"
-            );
-        }
-        assert_eq!(
-            std::fs::read(row).unwrap(),
+        outcomes.push((
+            worker.await.unwrap(),
+            rx.try_iter().collect::<Vec<_>>(),
             row_before,
-            "live caller must not rewrite its episode row"
-        );
-        polls(3).await;
-        if matches!(mode, "close_sync" | "close_readback") {
-            assert!(
-                !admission::issued_for_tests(channel, 30 + i, token.turn_nonce().unwrap()),
-                "fsync/read-back failure cannot issue or attach"
-            );
-            assert!(harness.port.posts().is_empty());
-            handles.pop().unwrap().stop_and_join().await.unwrap();
-            drop(close_fault);
-            admission::set_ready_for_tests(channel, false);
-            admission::forget_channel_for_tests(channel);
-            dedupe::binding_events::set_test_root(None);
-            dedupe::reset_state_for_tests();
-            return;
-        }
-        let read = harness.channel().codex_provenance();
-        let crate::services::tui_o::store::codex_provenance::Sidecar::Present(read) = read else {
-            panic!("closed sidecar absent")
-        };
-        let expected_registry = matches!(mode, "two" | "delivery_off" | "first_poll");
-        assert_eq!(
-            admission::issued_for_tests(channel, 30 + i, token.turn_nonce().unwrap()),
-            expected_registry,
-            "actual issuer must wait for durable close/current run: {mode}, stages={stages:?}"
-        );
-        let expected_closed = matches!(
-            mode,
-            "two" | "delivery_off" | "cancel_attach" | "late_close" | "first_poll"
-        );
-        assert_eq!(
-            !read.spans().is_empty(),
-            expected_closed,
-            "closed evidence: mode={mode}, stages={stages:?}"
-        );
-        if expected_closed {
-            let span = read.spans().last().unwrap().clone();
-            assert!(span.end.is_some());
-            assert_eq!(span.execution.execution_nonce, context.execution_nonce);
-            assert_eq!(span.episode.turn_nonce, token.turn_nonce().unwrap());
-            let origin = provenance_origin_for_actual_test(&span);
-            admission::set_ready_for_tests(channel, true);
-            let found = admission::lookup(&origin);
-            let expected_issue = matches!(mode, "two" | "delivery_off" | "first_poll");
-            assert_eq!(
-                found.is_ok(),
-                expected_issue,
-                "current live run issuer: mode={mode}, stages={stages:?}"
-            );
-            if let Ok(record) = found {
-                assert!(Arc::ptr_eq(&record, &admission::lookup(&origin).unwrap()));
-            }
-            admission::set_ready_for_tests(channel, mode == "first_poll");
-            spans.push(span);
-        }
-        if mode == "delivery_off" {
-            assert!(
-                rx.try_iter().next().is_none(),
-                "production delivery-off must emit no body/Done/RuntimeReady"
-            );
-        }
+            std::fs::read(&row).unwrap(),
+            row_modified,
+            std::fs::metadata(&row).unwrap().modified().unwrap(),
+        ));
         tokens.push(token);
         mailbox
             .finish_turn_if_token(
                 Some(Arc::clone(tokens.last().unwrap())),
                 crate::services::turn_orchestrator::QueuePersistenceContext::new(
                     &crate::services::provider::ProviderKind::Codex,
-                    "s2b1b-fixture",
+                    "source-read-fixture",
                     None,
                 ),
             )
             .await;
-        if mode != "first_poll" {
+        polls(3).await;
+    }
+    polls(4).await;
+    if stop.send(true).is_err() {
+        assert!(
+            task.is_finished(),
+            "source guard may already have halted the actor"
+        );
+    }
+    task.await.unwrap();
+    if mode == "two" {
+        assert_eq!(
+            dedupe::binding_events::codex::read_ownership(&context)
+                .unwrap()
+                .verified
+                .unwrap()
+                .source,
+            source,
+            "both caller turns keep the same execution source proof"
+        );
+    }
+    dedupe::binding_events::set_test_root(None);
+    dedupe::reset_state_for_tests();
+    for token in &tokens {
+        assert!(
+            !admission::issued_for_tests(
+                channel,
+                if std::sync::Arc::ptr_eq(token, &tokens[0]) {
+                    30
+                } else {
+                    31
+                },
+                token.turn_nonce().unwrap()
+            ),
+            "source delivery requires no episode issuance"
+        );
+    }
+    admission::forget_channel_for_tests(channel);
+    let expects_enter = matches!(
+        mode,
+        "two" | "unknown" | "first_poll" | "no_receipt" | "cancel_after_enter"
+    );
+    let expects_payload = expects_enter || matches!(mode, "cancel_after_payload" | "s1w_enter");
+    for (
+        (result, calls, expired, stages),
+        frames,
+        row_before,
+        row_after,
+        row_modified,
+        row_modified_after,
+    ) in outcomes
+    {
+        assert!(result.is_ok(), "{mode}: {result:?}; {calls:?}; {stages:?}");
+        assert!(
+            !expired,
+            "watchdog cannot be PASS: {mode}; {stages:?}; {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c.as_str(), "literal:first" | "load:first"))
+                .count(),
+            usize::from(expects_payload),
+            "payload once: {mode}; {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c.as_str() == "keys:Enter").count(),
+            usize::from(expects_enter),
+            "Enter once: {mode}; {calls:?}"
+        );
+        assert_eq!(row_after, row_before, "caller episode bytes preserved");
+        assert_eq!(
+            row_modified_after, row_modified,
+            "caller episode mtime preserved"
+        );
+        if mode.starts_with("s1w_") {
             assert!(
-                harness.port.posts().is_empty(),
-                "held work cannot POST before release: {mode}"
+                stages.iter().any(|s| s.contains("HooksUnavailable")
+                    || (matches!(mode, "s1w_prepare" | "s1w_enter") && s.contains("Conflict"))),
+                "real eligibility refusal: {stages:?}"
+            );
+            assert!(
+                frames.is_empty(),
+                "held driver emits no body/Done/Error/RuntimeReady/handback"
+            );
+            assert!(
+                !stages
+                    .iter()
+                    .any(|s| matches!(s.as_str(), "prepare_ack" | "close_ack" | "submitted")),
+                "no episode admission required"
+            );
+            if matches!(mode, "s1w_initial" | "s1w_rollback" | "s1w_support") {
+                assert!(calls.is_empty(), "initial refusal before pane transport");
+            }
+            for (path, before) in identity_paths.iter().zip(&identity_before) {
+                assert_eq!(
+                    &(
+                        std::fs::read(path).unwrap(),
+                        std::fs::metadata(path).unwrap().modified().unwrap()
+                    ),
+                    before,
+                    "identity bytes/mtime: {path:?}"
+                );
+            }
+            assert_eq!(
+                std::fs::read_dir(&archive_dir).unwrap().count(),
+                archive_count
             );
         }
-    }
-    if mode == "two" {
-        assert_ne!(tokens[0].turn_nonce(), tokens[1].turn_nonce());
-        assert!(!Arc::ptr_eq(&tokens[0], &tokens[1]));
-        assert_eq!(spans[0].execution, spans[1].execution);
-        assert!(spans[0].end.unwrap() <= spans[1].start);
-        admission::set_ready_for_tests(channel, true);
-        polls(4).await;
-        assert_eq!(harness.port.posts(), ["first body", "second body"]);
-    } else if mode == "first_poll" {
-        polls(4).await;
-        first_poll_cancel
-            .lock()
-            .unwrap()
-            .take()
-            .expect("actual issued record must reach the real first poll")
-            .join()
-            .unwrap();
-        assert_eq!(
-            *first_poll_raced.lock().unwrap(),
-            Some(false),
-            "cancellation passed the actual first-poll record fence"
-        );
-        assert_eq!(harness.port.posts(), ["first body"]);
-        assert!(tokens[0].cancelled.load(Ordering::Acquire));
-    } else {
         assert!(
-            harness.port.posts().is_empty(),
-            "negative/delivery-off cases are not positive delivery PASS"
+            calls.iter().all(|c| !c.contains("kill")),
+            "no cleanup or fallback"
         );
     }
     assert!(
-        fake.take_calls()
-            .iter()
-            .all(|c| !c.contains("kill-session")),
-        "new warm path has no kill authority"
+        matches!(
+            harness.channel().codex_provenance(),
+            crate::services::tui_o::store::codex_provenance::Sidecar::Missing
+        ),
+        "source reading does not require a closed sidecar"
     );
-    handles.pop().unwrap().stop_and_join().await.unwrap();
-    admission::set_ready_for_tests(channel, false);
-    admission::forget_channel_for_tests(channel);
-    dedupe::binding_events::set_test_root(None);
-    dedupe::reset_state_for_tests();
+    if mode == "two" {
+        assert_ne!(tokens[0].turn_nonce(), tokens[1].turn_nonce());
+        assert!(!Arc::ptr_eq(&tokens[0], &tokens[1]));
+    }
+    let expected: Vec<_> = if expects_enter {
+        if mode == "two" {
+            vec!["first body", "second body"]
+        } else {
+            vec!["first body"]
+        }
+    } else {
+        vec![]
+    };
+    assert_eq!(harness.port.posts(), expected, "real POST: {mode}");
+    let store = harness.channel();
+    let ledger = store.ledger();
+    let posted = (0..ledger.next_serial())
+        .filter_map(|i| ledger.piece(i))
+        .filter(|p| {
+            matches!(
+                p.outcome,
+                Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+                    _
+                ))
+            )
+        })
+        .count();
+    assert_eq!(posted, expected.len(), "durable Posted: {mode}");
+    if mode == "first_poll" {
+        assert!(
+            post_cancelled.load(Ordering::Acquire),
+            "source POST remains independent of episode cancellation"
+        );
+        assert!(tokens[0].cancelled.load(Ordering::Acquire));
+    }
+    if mode == "s1w_support" {
+        assert!(std::fs::read_to_string(&probes).unwrap().contains("probe"));
+    }
+    if matches!(mode, "s1w_prepare" | "s1w_enter" | "source_changed") {
+        assert!(
+            signal.exists() && ack.exists(),
+            "real guard fault handshake must execute"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&probes).unwrap().lines().count(),
+            target,
+            "fault must run at the selected actual effect probe"
+        );
+    }
+    assert!(
+        fake.take_calls().iter().all(|c| ![
+            "kill-session",
+            "new-session",
+            "send-keys",
+            "paste-buffer"
+        ]
+        .iter()
+        .any(|effect| c.starts_with(effect))),
+        "no cleanup/fallback/replay effect"
+    );
 }
 
-fn provenance_origin_for_actual_test(
-    span: &crate::services::tui_prompt_dedupe::codex_verified::provenance::CodexEpisodeSpan,
-) -> crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin {
-    crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::OwedOrigin {
-        span: span.clone(),
-        range: span.start..span.end.unwrap(),
-    }
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_missing_endpoint_refuses_before_capture() {
+    actual_driver_case("s1w_initial").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_rechecks_eligibility_before_payload() {
+    actual_driver_case("s1w_prepare").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_rechecks_before_enter_without_claiming_no_attempt() {
+    actual_driver_case("s1w_enter").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_pinned_verified_warm_cannot_skip_checks_after_launch_mode_rollback() {
+    actual_driver_case("s1w_rollback").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn s1w_actual_warm_support_refusal_is_not_an_empty_fixture_pass() {
+    actual_driver_case("two").await;
+    actual_driver_case("s1w_support").await;
 }

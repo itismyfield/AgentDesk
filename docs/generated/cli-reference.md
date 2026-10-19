@@ -12,7 +12,7 @@ subcommand starts the server.
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
 - Top-level commands: 57
-- Commands including nested subcommands: 109
+- Commands including nested subcommands: 111
 
 ## Global options
 
@@ -126,6 +126,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk o boundary`](#agentdesk-o-boundary) | Source boundaries the writer could not decide |  |
 | [`agentdesk o status`](#agentdesk-o-status) | Rejected pieces of a channel and their operator approvals; writes nothing |  |
 | [`agentdesk o resume`](#agentdesk-o-resume) | Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start |  |
+| [`agentdesk o transition`](#agentdesk-o-transition) | Ask the local server about a transcript transition's cleanup; opens no store here |  |
 | [`agentdesk herdr`](#agentdesk-herdr) | Herdr-hosted executions on this node: read-only status, and retire of an ended one |  |
 | [`agentdesk herdr status`](#agentdesk-herdr-status) | Each local Herdr row, its pane as read now and the held inputs; changes nothing |  |
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
@@ -135,6 +136,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk channel-home delegate`](#agentdesk-channel-home-delegate) | Start releasing a gateway-owned channel from this node to `--to` |  |
 | [`agentdesk channel-home reclaim`](#agentdesk-channel-home-reclaim) | Start draining a worker-owned channel back to this node |  |
 | [`agentdesk channel-home force`](#agentdesk-channel-home-force) | Orphan a holder whose lease has been silent past F; nothing adopts the channel after |  |
+| [`agentdesk channel-home abort-release`](#agentdesk-channel-home-abort-release) | On the gateway, drop a released or held releasing row at that epoch with no open intake |  |
 
 ## Commands
 
@@ -1260,6 +1262,7 @@ Subcommands:
 - `boundary` — Source boundaries the writer could not decide
 - `status` — Rejected pieces of a channel and their operator approvals; writes nothing
 - `resume` — Approve one more POST of the latest 400/403/404 piece; the writer sends it at its next start
+- `transition` — Ask the local server about a transcript transition's cleanup; opens no store here
 
 ### `agentdesk o boundary`
 
@@ -1291,6 +1294,12 @@ Usage: `agentdesk o resume [OPTIONS]`
 | `--operator <OPERATOR>` | `String` | `operator` |  |
 
 > Exit: 0 recorded, 1 no store, 3 already recorded, 4 refused, 5 busy, 6 not written, 7 unknown
+
+### `agentdesk o transition`
+
+Ask the local server about a transcript transition's cleanup; opens no store here
+
+Usage: `agentdesk o transition`
 
 ## `agentdesk herdr`
 
@@ -1344,6 +1353,7 @@ Subcommands:
 - `delegate` — Start releasing a gateway-owned channel from this node to `--to`
 - `reclaim` — Start draining a worker-owned channel back to this node
 - `force` — Orphan a holder whose lease has been silent past F; nothing adopts the channel after
+- `abort-release` — On the gateway, drop a released or held releasing row at that epoch with no open intake
 
 ### `agentdesk channel-home status`
 
@@ -1382,3 +1392,14 @@ Usage: `agentdesk channel-home force <CHANNEL>`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `<CHANNEL>` | `u64` |  |  |
+
+### `agentdesk channel-home abort-release`
+
+On the gateway, drop a released or held releasing row at that epoch with no open intake
+
+Usage: `agentdesk channel-home abort-release [OPTIONS] <CHANNEL>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<CHANNEL>` | `u64` |  |  |
+| `--expected-epoch <EXPECTED_EPOCH>` (required) | `i64` |  |  |

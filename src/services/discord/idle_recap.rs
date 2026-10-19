@@ -121,7 +121,7 @@ pub(crate) struct RecapSnapshot {
     pub(crate) discord_channel_alt: Option<String>,
     /// Working directory of the provider session, persisted on `sessions.cwd`.
     /// Used as the fallback source for transcript-based scrollback when no
-    /// live tmux pane exists (e.g. the `claude-e` per-turn spawn runtime).
+    /// live tmux pane exists, including sessions already torn down.
     pub(crate) cwd: Option<String>,
     pub(crate) is_routine_session: bool,
     /// #3148: per-channel turn-generation counter captured at snapshot load.
@@ -585,7 +585,7 @@ async fn bump_by_provider_channel(
            AND {column_predicate}
            AND lower(COALESCE(s.provider, '')) = $2"
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(channel_text)
         .bind(provider.as_str().to_lowercase())
         .execute(pool)

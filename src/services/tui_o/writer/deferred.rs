@@ -37,7 +37,8 @@ pub(super) struct Waiting<'a, I: HostIo> {
     pub(super) store: &'a OStore,
     pub(super) log: &'a I::Bindings,
     pub(super) legacy: Arc<dyn LegacyView>,
-    /// The source the log bound when the adoption was deferred, as of that log entry.
+    /// The source the log bound when the adoption was deferred, or at a late reservation's
+    /// boundary, as of that log entry.
     pub(super) bound: (SourceId, u64),
     pub(super) late: bool,
 }
@@ -67,7 +68,7 @@ pub(super) async fn first<I: HostIo>(
                 return First::Wait(Refused::retry(owed.to_string()));
             }
             return match io.local_custody(channel, provider) {
-                Ok(Custody::Row | Custody::Active) => {
+                Ok(Custody::Row | Custody::PendingStart | Custody::Active) => {
                     First::Wait(Refused::retry("Legacy retains delivery custody"))
                 }
                 // A failed read refuses under the adoption lock.
@@ -512,7 +513,7 @@ async fn commit<I: HostIo>(
         };
         let local = || {
             let custody = io.local_custody(channel, provider)?;
-            Ok((end.is_none() && custody == Custody::Active)
+            Ok((end.is_none() && custody.active())
                 || relay_blocks(end.map(|(_, kind)| kind), io.relaying(channel)))
         };
         let result = waiting
@@ -549,12 +550,20 @@ fn relay_blocks(kind: Option<StallKind>, relaying: bool) -> bool {
     relaying && kind != Some(StallKind::Soft)
 }
 
+/// Names the bind, the baseline it left, the late boundary and the log's end the read saw.
 fn rotation<I: HostIo>(waiting: &Waiting<'_, I>, events: &[BindingEvent]) -> Option<String> {
     let (source, since) = &waiting.bound;
-    let rotated = adoption::rotated(events, *since, source)?;
+    let (rotated, seq) = adoption::rotated(events, *since, source)?;
+    let boundary = (waiting.late)
+        .then(|| waiting.candidate.late_boundary())
+        .flatten()
+        .map_or_else(|| "-".to_owned(), |boundary| boundary.to_string());
+    let end = events.last().map_or(0, |event| event.seq);
     Some(format!(
-        "source {} was bound while the adoption waited",
-        rotated.path.display()
+        "source {} was bound while the adoption waited (seq {seq}; baseline {}@{since}; \
+         boundary {boundary}; log end {end})",
+        rotated.path.display(),
+        source.path.display()
     ))
 }
 
@@ -616,10 +625,10 @@ async fn relaxed<I: HostIo>(
     if current.is_some_and(|(_, tmux)| waiting.legacy.tail_running(tmux)) {
         markers.push("tail");
     }
-    if matches!(
-        io.local_custody(channel, waiting.provider),
-        Ok(Custody::Active)
-    ) {
+    if io
+        .local_custody(channel, waiting.provider)
+        .is_ok_and(Custody::active)
+    {
         markers.push("custody");
     }
     if io.legacy_busy(channel).await {

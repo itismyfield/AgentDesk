@@ -1,5 +1,5 @@
-//! The native clear correlation as stored, whatever its state, so a cutoff is never forgotten
-//! unread.
+//! The native clear correlation as stored, whatever its state; tests read it back to check what
+//! a clear left behind.
 
 use super::{NativeClearGeneration, NativeClearStateRow, Result};
 use sqlx::PgPool;

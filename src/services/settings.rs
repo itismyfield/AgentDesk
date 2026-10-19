@@ -30,10 +30,11 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
     "context_clear_idle_minutes",
     "counter_model_review_enabled",
     "narrate_progress",
-    // #5993: the human-alert channel was retired; operator signals are WARN
-    // lines and observability events. Deleting the row at boot also leaves the
-    // remaining frozen reader with no target.
+    // Retired rows deleted at boot: the human-alert channel (its frozen reader then has
+    // no target), the PM decision gate toggle, and the escalation routing override.
     "kanban_human_alert_channel_id",
+    "pm_decision_gate_enabled",
+    "escalation-settings-override",
 ];
 
 const RUNTIME_CONFIG_KEYS: &[&str] = &[
@@ -103,13 +104,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "최대 리뷰 라운드",
         "Max Review Rounds",
         Some("3"),
-    ),
-    (
-        "pm_decision_gate_enabled",
-        "pipeline",
-        "PM 판단 게이트",
-        "PM Decision Gate",
-        None,
     ),
     ("server_port", "system", "서버 포트", "Server Port", None),
     (
@@ -507,7 +501,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "kanban_relay_alert_threshold" => stringified_number(config.kanban.relay_alert_threshold),
         "review_enabled" => stringified_bool(config.review.enabled),
         "max_review_rounds" => stringified_number(config.review.max_rounds),
-        "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),
         "requested_timeout_min" => stringified_number(config.runtime.requested_timeout_min),
         "in_progress_stale_min" => stringified_number(config.runtime.in_progress_stale_min),
         "context_compact_percent" => stringified_number(config.runtime.context_compact_percent),

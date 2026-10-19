@@ -16,13 +16,14 @@ pub(super) async fn run_bot_framework_setup(
     startup_reconcile_remaining: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     api_port: u16,
+    ingress_shadow: Option<super::super::ingress_shadow::ShadowConfig>,
 ) -> Result<Data, Error> {
     // Register in each guild for instant slash command propagation
     // (register_globally can take up to 1 hour)
     let commands = &framework.options().commands;
     // Populate known slash command names for router fallback logic
     let cmd_names: std::collections::HashSet<String> =
-        commands.iter().map(|c| c.name.clone()).collect();
+        commands.iter().map(|c| c.name.to_string()).collect();
     let _ = shared_for_migrate
         .known_slash_commands
         .set(cmd_names.clone());
@@ -201,18 +202,30 @@ pub(super) async fn run_bot_framework_setup(
     )
     .await;
 
+    let ingress_shadow = super::super::ingress_shadow::start_if_enabled(
+        ingress_shadow.as_ref(),
+        &provider_for_setup,
+        || super::super::ingress_shadow::Begin {
+            bot: ready.user.id.to_string(),
+            generation: shared_clone.restart.current_generation,
+            pool: shared_clone.pg_pool.clone(),
+        },
+    );
+
     Ok(Data {
         shared: shared_clone,
         token: token_owned,
         provider: provider_for_setup,
         voice_config: voice_config_for_setup,
         voice_receiver: voice_receiver_for_setup,
+        ingress_shadow,
     })
 }
 
 /// Build the full ordered list of poise slash commands registered by the bot.
 /// Order is preserved exactly as it was inline in run_bot.
-pub(super) fn run_bot_build_slash_commands() -> Vec<poise::Command<Data, Error>> {
+pub(in crate::services::discord) fn run_bot_build_slash_commands()
+-> Vec<poise::Command<Data, Error>> {
     let mut slash_commands = vec![
         commands::cmd_start(),
         commands::cmd_resume(),

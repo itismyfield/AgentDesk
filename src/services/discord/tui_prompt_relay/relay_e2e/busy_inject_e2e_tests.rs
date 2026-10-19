@@ -21,8 +21,12 @@ use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::ActiveTurnKind;
 
+#[path = "idle_inject_echo_e2e_tests.rs"]
+mod idle_echo;
 #[path = "busy_inject_thread_e2e_tests.rs"]
 mod thread;
+#[path = "busy_inject_turn_mode_e2e_tests.rs"]
+mod turn_mode;
 
 const WAIT: Duration = Duration::from_secs(10);
 const QUEUE_UNKNOWN: &str = "⚠️ 메시지 큐 저장 중 오류가 감지되어 접수 표시를 생략했어.";
@@ -82,6 +86,23 @@ async fn busy() -> Busy {
         _gate: hook::open_gate(CHANNEL_ID),
         rt,
     }
+}
+
+#[test]
+fn postgres_runtime_helpers_keep_bootstrap_futures_off_the_test_stack() {
+    fn future_size<F>(_: impl FnOnce() -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let (runtime, busy, announce) = (
+        future_size(runtime),
+        future_size(busy),
+        future_size(busy_with_announce),
+    );
+    eprintln!("bootstrap future bytes: runtime={runtime}, busy={busy}, announce={announce}");
+    assert!(
+        runtime <= 16_384 && busy <= 16_384 && announce <= 16_384,
+        "bootstrap helpers must hold a pinned future: runtime={runtime}, busy={busy}, announce={announce}"
+    );
 }
 
 impl Runtime {
@@ -413,7 +434,7 @@ async fn a_handed_back_message_the_queue_ran_is_not_replayed_by_catch_up_pg() {
     );
 }
 
-/// A handback whose four writes all fail ends the message with the owner's refusal notice: it is
+/// A handback whose four writes all fail ends the message with the owner's resend notice: it is
 /// neither queued behind input sent meanwhile nor marked, and the checkpoint stays before it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
@@ -430,10 +451,9 @@ async fn a_handback_that_never_lands_ends_the_message_with_a_notice_pg() {
     );
     busy.pane.set("go", "");
     request.await.unwrap();
-    let replies =
-        rt.h.messages()
-            .into_iter()
-            .filter(|(to, _)| *to == Some(message));
+    let resend = "입력을 저장하지 못했습니다. 원본을 유지하고 다시 시도해 주세요.";
+    let replies = rt.h.messages().into_iter();
+    let replies = replies.filter(|(to, text)| *to == Some(message) && text == resend);
     let observed = (
         hook::seen(message).outcomes,
         rt.queue().await,
@@ -659,7 +679,13 @@ async fn busy_with_announce() -> Busy {
         db = Some(fixture);
         Some(pool)
     };
-    let h = RelayE2eHarness::start_inner(ProviderStub::Success, true, storage, true).await;
+    let h = Box::pin(RelayE2eHarness::start_inner(
+        ProviderStub::Success,
+        true,
+        storage,
+        true,
+    ))
+    .await;
     let registry = h.health_registry.clone().expect("a health registry");
     registry
         .set_utility_bot_user_id_for_tests(UtilityBotRole::Announce, ANNOUNCE_ID)

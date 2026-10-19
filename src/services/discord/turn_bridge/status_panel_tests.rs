@@ -43,17 +43,10 @@ struct ChildFixture {
     completion: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     disposed: Option<tokio::sync::oneshot::Sender<()>>,
     path: std::path::PathBuf,
-    channel: ChannelId,
-    protected: bool,
 }
 impl Drop for ChildFixture {
     fn drop(&mut self) {
-        use crate::services::discord::input_runtime::fence::{self, effect};
-        assert_eq!(effect::current().is_some(), self.protected);
-        fence::write(&ProviderKind::Claude, self.channel.get(), || {
-            std::fs::write(&self.path, b"child cleanup").map_err(|e| e.to_string())
-        })
-        .unwrap();
+        std::fs::write(&self.path, b"child cleanup").unwrap();
         let _ = self.disposed.take().unwrap().send(());
     }
 }
@@ -218,24 +211,18 @@ impl TurnGateway for StatusPanelFallbackGateway {
     }
 }
 
+// Each spawned bridge child runs its gateway call through cleanup; a retry's release child
+// waits for the dispatch completion.
 #[tokio::test(flavor = "current_thread")]
-async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_completion() {
-    use crate::services::discord::input_runtime::fence::{self, Gate, effect};
-    use futures::FutureExt;
+async fn actual_bridge_children_run_through_cleanup_and_retry_completion() {
     let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_ROOT_DIR",
         root.path(),
     );
-    for (n, (protected, retry)) in [(false, false), (false, true), (true, false), (true, true)]
-        .into_iter()
-        .enumerate()
-    {
+    for (n, retry) in [false, true].into_iter().enumerate() {
         let channel = ChannelId::new(6_325_439 + n as u64);
-        let gate = protected.then(|| Gate::protect(ProviderKind::Claude, channel.get()).unwrap());
-        let _health = gate.as_ref().map(fence::test_health::Clear::new);
-        let permit = gate.as_ref().map(|gate| gate.admit().unwrap());
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         let (disposed_tx, disposed_rx) = tokio::sync::oneshot::channel();
@@ -248,34 +235,25 @@ async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_compl
                 completion: completion.clone(),
                 disposed: Some(disposed_tx),
                 path: path.clone(),
-                channel,
-                protected,
             }),
             ..Default::default()
         });
-        effect::scope(permit, async {
-            if retry {
-                super::super::retry_state::spawn_retry_with_history_with_release(
-                    gateway,
-                    channel,
-                    MessageId::new(7),
-                    "retry".into(),
-                );
-            } else {
-                super::super::watcher_orphan_cleanup::spawn_watcher_orphan_spinner_cleanup_retry(
-                    crate::services::discord::make_shared_data_for_tests(),
-                    ProviderKind::Claude,
-                    gateway,
-                    channel,
-                    MessageId::new(7),
-                    None,
-                );
-            }
-        })
-        .await;
-        let closing = gate.as_ref().map(|gate| gate.close().unwrap());
-        if let Some(closing) = &closing {
-            assert!(closing.drain().now_or_never().is_none());
+        if retry {
+            super::super::retry_state::spawn_retry_with_history_with_release(
+                gateway,
+                channel,
+                MessageId::new(7),
+                "retry".into(),
+            );
+        } else {
+            super::super::watcher_orphan_cleanup::spawn_watcher_orphan_spinner_cleanup_retry(
+                crate::services::discord::make_shared_data_for_tests(),
+                ProviderKind::Claude,
+                gateway,
+                channel,
+                MessageId::new(7),
+                None,
+            );
         }
         tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
             .await
@@ -288,18 +266,7 @@ async fn c1_actual_bridge_children_retain_effect_through_cleanup_and_retry_compl
             .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"child cleanup");
         if retry {
-            if let Some(closing) = &closing {
-                assert!(
-                    closing.drain().now_or_never().is_none(),
-                    "release child outlives dispatch cleanup"
-                );
-            }
             completion.lock().unwrap().take().unwrap().send(()).unwrap();
-        }
-        if let Some(closing) = closing {
-            tokio::time::timeout(std::time::Duration::from_secs(10), closing.drain())
-                .await
-                .unwrap();
         }
     }
 }
@@ -726,6 +693,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             "test_completion_before_body",
             1510319194921504929,
             true,
+            false,
         )
         .await;
     }
@@ -753,6 +721,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             "test_completion_after_body",
             1510319194921504929,
             true,
+            false,
         )
         .await;
         assert!(committed);
@@ -789,6 +758,7 @@ async fn bridge_status_panel_completion_emits_background_agent_pending_payload()
         "test_bridge_background_agent_pending_payload",
         4_047_402,
         true,
+        false,
     )
     .await;
 
@@ -853,6 +823,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             0,
             None,
             false,
+            false,
             |_| async { false },
         )
         .await
@@ -900,6 +871,7 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             0,
             None,
             true,
+            false,
             |_| async { false },
         )
         .await
@@ -960,6 +932,7 @@ async fn foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm() {
         0,
         None,
         false,
+        false,
         |_| async { false },
     )
     .await;
@@ -1003,6 +976,7 @@ async fn bridge_status_panel_completion_producer_threads_sniffed_background_agen
             0,
             Some("AgentDesk-claude-status-panel-background-test".to_string()),
             true,
+            false,
             move |tmux_session_name| async move {
                 sniffer_observed_tmux_session
                     .lock()
@@ -1060,6 +1034,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         "test_synthetic_status_panel_id",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1094,6 +1069,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         "test_synthetic_status_panel_id_retry",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1145,6 +1121,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         "test_wip_warning_order",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1177,6 +1154,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         "test_wip_warning_order_retry",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1252,6 +1230,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
             "test_status_panel_completion_path",
             user_msg_id,
             true,
+            false,
         )
         .await
     );
@@ -1280,6 +1259,118 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
     crate::services::discord::footer_view_reconciler::completion_footer_forget_registered_target(
         channel_id,
     );
+}
+
+#[test]
+fn background_refreshes_keep_delivered_wip_warning_through_final_refresh_5350() {
+    // No git skip: a missing git must fail instead of passing without a warning.
+    let worktree = init_git_repo_for_wip_warning().expect("git is required for this test");
+    fs::write(worktree.path().join("untracked.txt"), "untracked\n").expect("write untracked file");
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    // A sync owner keeps the env lock outside the async body (clippy::await_holding_lock).
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+        .block_on(refresh_sequence_keeps_wip_warning(worktree.path()));
+}
+
+async fn refresh_sequence_keeps_wip_warning(worktree: &Path) {
+    use crate::services::agent_protocol::StatusEvent;
+    use crate::services::discord::footer_view_reconciler as fvr;
+
+    let shared = make_status_panel_v2_shared_for_tests();
+    let events = &shared.ui.placeholder_live_events;
+    let sink = fvr::FooterViewTestSink::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_350_201);
+    let message_id = MessageId::new(5_350_203);
+    let owner = fvr::CompletionFooterOwner::new(5_350_202, 1_700_000_000);
+    fvr::completion_footer_forget_registered_target(channel_id);
+    save_inflight_state(&wip_warning_inflight_state(
+        &provider,
+        channel_id.get(),
+        owner.user_msg_id,
+        worktree,
+    ))
+    .expect("save inflight state");
+    for id in ["5350-a", "5350-b"] {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".into(),
+                summary: format!("job {id}"),
+                tool_use_id: id.into(),
+            },
+        );
+    }
+    let end = |id: &str| {
+        events.push_status_event(
+            channel_id,
+            StatusEvent::BackgroundTaskEnd {
+                tool_use_id: id.into(),
+                success: true,
+            },
+        );
+    };
+    let assert_step = |step: usize, registered: bool| {
+        let edits = sink.edits();
+        assert_eq!(edits.len(), step, "step {step} must take the edit path");
+        let wire = &edits[step - 1].text;
+        assert_eq!(edits[step - 1].message_id, message_id);
+        assert_eq!(wire.matches("커밋되지 않은 변경사항").count(), 1, "{wire}");
+        assert_eq!(wire.matches("⏱").count(), 1, "{wire}");
+        assert!(
+            crate::services::discord::formatting::discord_message_units(wire)
+                <= crate::services::discord::DISCORD_MSG_LIMIT
+        );
+        assert!(crate::services::discord::http::discord_content_or_zwsp(wire).is_ok());
+        assert_eq!(
+            fvr::completion_footer_has_registered_target(channel_id),
+            registered
+        );
+        wire.clone()
+    };
+
+    assert!(
+        fvr::note_turn_completed_footer(
+            fvr::FooterViewWriter::test(shared.as_ref(), &sink),
+            channel_id,
+            Some(message_id),
+            owner,
+            &provider,
+            "Final answer",
+            "⠸",
+            false,
+            false,
+            "5350_completion",
+        )
+        .await
+    );
+    assert!(assert_step(1, true).contains("job 5350-a ⠸"));
+
+    end("5350-a");
+    let refresh = || {
+        fvr::note_background_refresh_due(
+            fvr::FooterViewWriter::test(shared.as_ref(), &sink),
+            channel_id,
+            Some(owner),
+            "⠼",
+            "5350_refresh",
+        )
+    };
+    assert!(refresh().await);
+    let wire = assert_step(2, true);
+    assert!(wire.contains("job 5350-a ✓") && wire.contains("job 5350-b ⠼"));
+
+    // The card claims b's terminal slot, so the last refresh renders no block.
+    end("5350-b");
+    assert!(events.claim_terminal_slot_for_card(channel_id, "background", Some("5350-b")));
+    let rendered = events.render_completion_footer(channel_id, &provider, "⠼");
+    assert!(rendered.block.is_none() && !rendered.has_unfinished_entries);
+    assert!(refresh().await);
+    let wire = assert_step(3, false);
+    assert!(wire.contains("Final answer") && !wire.contains("job 5350"));
 }
 
 #[test]
@@ -1339,6 +1430,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         "test_unknown_status_panel_id",
         1510319194921504929,
         true,
+        false,
     )
     .await;
 
@@ -1407,6 +1499,7 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         "test_pending_bind_completion_purge",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1484,6 +1577,7 @@ async fn ledger_commit_failure_does_not_delete_a_completed_panel_4891() {
         "test_4891_ledger_failure_is_not_completion_failure",
         user_msg_id,
         true,
+        false,
     )
     .await;
 
@@ -1577,6 +1671,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         "test_singleton_transition_pending",
         4_860_102,
         true,
+        false,
     )
     .await;
     assert!(committed);
@@ -1603,6 +1698,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         "test_singleton_transition_final",
         4_860_102,
         true,
+        false,
     )
     .await;
     assert!(committed);
@@ -1669,6 +1765,7 @@ async fn single_message_mode_completion_leaves_singleton_store_untouched() {
         "test_flag_off_no_singleton",
         4_860_202,
         true,
+        false,
     )
     .await;
 

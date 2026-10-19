@@ -1,9 +1,9 @@
 #[path = "tui_followup/codex_observation.rs"]
 mod codex_observation;
 #[cfg(unix)]
-pub(super) use codex_observation::{
-    observe_codex_tui_rollout_state_for_cwd, observe_codex_tui_rollout_state_for_cwd_with_sessions,
-};
+pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd;
+#[cfg(all(test, unix))]
+pub(super) use codex_observation::observe_codex_tui_rollout_state_for_cwd_with_sessions;
 
 use super::*;
 
@@ -29,10 +29,9 @@ pub(super) fn claude_tui_busy_followup_refusal_notice(
         ) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_ACTIVE_NOTICE,
         Some(E::SourceIdAlreadyQueued) => CLAUDE_TUI_BUSY_FOLLOWUP_ALREADY_QUEUED_NOTICE,
         Some(E::LastItemDedup) => CLAUDE_TUI_BUSY_FOLLOWUP_DEDUP_NOTICE,
-        Some(E::ActorUnreachable | E::MailboxClosed | E::LockTimeout | E::InputPersistence) => {
+        Some(E::ActorUnreachable | E::MailboxClosed) => {
             CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
         }
-        Some(E::InputModeFenced(_)) => crate::services::discord::queue_io::INPUT_PENDING_NOTICE,
         None => CLAUDE_TUI_BUSY_FOLLOWUP_NOTICE,
     }
 }
@@ -467,7 +466,7 @@ pub(super) fn tui_busy_followup_diagnostic(
     }
     let tmux_session_name = tmux_session_name?;
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(tmux_session_name)
     {
         return Some(ClaudeTuiBusyFollowupDiagnostic {
             tmux_session_name: tmux_session_name.to_owned(),
@@ -656,36 +655,25 @@ pub(in crate::services::discord) fn set_hosted_tui_promote_busy_for_tests(
     HostedTuiPromoteBusyHookResetForTests
 }
 
-/// #4270 A — pre-teardown hosted-TUI readiness probe for the two queued-turn
-/// promote entrypoints (`kickoff_idle_queue_channel` pre-dequeue and
-/// `DiscordGateway::dispatch_queued_turn` pre-drain). Returns `true` when the
-/// channel's hosted TUI is verifiably busy per the SAME diagnostic the
-/// post-claim busy branch uses (`tui_busy_followup_diagnostic`), so the caller
-/// can defer the promotion BEFORE any user-visible teardown (turn-view
-/// started/⏳ flip, 📬/➕ marker drain, merged queued-card deletion, mailbox
-/// claim). A session the host guard keeps (Herdr, unknown or conflicting host, or with no
-/// name or entry and no legacy row) also defers. Everything else — no tmux pane, remote profile,
-/// non-hosted driver, ready, unknown — returns `false`: fail-open to the normal
-/// dispatch path, whose existing post-claim busy branch owns the defer UX
-/// (queued-card render + 📬 re-attach). This probe must NEVER be load-bearing
-/// for message preservation; it only avoids churn.
-///
-/// Root cause it closes (#4270): the promote path used to dequeue + flip the
-/// head's turn-view to started/⏳ + drain 📬 + claim the mailbox, and only THEN
-/// discover the hosted TUI was busy — re-queue + re-attach + release + fast
-/// re-kick, every ~2s, forever. Probing the same verdict before teardown
-/// short-circuits the whole cycle with zero visible state change.
+/// Probe hosted readiness before teardown; host-kept sessions, verified Codex holds and busy panes defer.
+/// The normal post-claim path retains responsibility for message preservation and defer UX.
 pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
+    let park = &shared.queue_park_ledger;
     #[cfg(test)]
     if let Some(busy) = *HOSTED_TUI_PROMOTE_BUSY_HOOK_FOR_TESTS
         .lock()
         .expect("hosted tui promote busy hook lock")
     {
         return busy;
+    }
+    // A Herdr-configured channel's queued turn is judged by its turn host, not this tmux probe.
+    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
+        park.clear_promote_hold(channel_id, "codex_verified");
+        return false;
     }
 
     let (tmux_session_name, remote_profile_named, current_path, session_id) = {
@@ -715,18 +703,15 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     // Verified incarnations wait for source and permission before queue teardown.
     #[cfg(unix)]
     if matches!(provider, ProviderKind::Codex)
-        && crate::services::tui_prompt_dedupe::codex_verified_input_blocked(&tmux_session_name)
+        && crate::services::tui_prompt_dedupe::clear_relaunch::launch_blocked(&tmux_session_name)
     {
+        park.note_codex_verified_hold(channel_id, &tmux_session_name);
         return true;
     }
+    park.clear_promote_hold(channel_id, "codex_verified");
     // ADK_TEST_CODEX_PROMOTE_READY isolates source permission from host readiness in tests.
     #[cfg(test)]
     if std::env::var_os("ADK_TEST_CODEX_PROMOTE_READY").is_some() {
-        return false;
-    }
-    // The host guard keeps a retired Herdr row off tmux; on a Herdr channel its turn relaunches.
-    let retired = super::super::super::host_defer_gate::configured_herdr_retired;
-    if retired(shared, provider, channel_id.get(), &tmux_session_name).await {
         return false;
     }
     let host = super::super::super::host_defer_gate::channel_session_deferred;
@@ -774,27 +759,14 @@ pub(in crate::services::discord) async fn hosted_tui_promote_readiness_blocked(
     blocked
 }
 
-/// With no session name, the registered fallback name still lets a retired Herdr row promote;
-/// anything else keeps the nameless host check.
+/// With no session name, the nameless host check decides.
 async fn nameless_promote_blocked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
 ) -> bool {
-    let fallback = crate::services::discord::adk_session::registered_channel_fallback_name;
-    let retired = super::super::super::host_defer_gate::configured_herdr_retired;
-    if provider.uses_managed_tmux_backend()
-        && let Some(name) = fallback(channel_id, provider)
-        && retired(
-            shared,
-            provider,
-            channel_id.get(),
-            &provider.build_tmux_session_name(&name),
-        )
-        .await
-    {
-        return false;
-    }
+    let park = &shared.queue_park_ledger;
+    park.clear_promote_hold(channel_id, "codex_verified");
     let nameless = super::super::super::host_defer_gate::nameless_channel_deferred;
     nameless(shared, provider, channel_id.get()).await
 }
@@ -1190,26 +1162,4 @@ pub(super) async fn apply_tui_busy_enqueue_refusal(
         notice,
     )
     .await;
-}
-
-#[cfg(test)]
-mod input_fence_contract_tests {
-    #[test]
-    fn input_fence_notice_is_pending_not_duplicate_or_success() {
-        use crate::services::discord::input_runtime::fence::Mode;
-        use crate::services::turn_orchestrator::EnqueueRefusalReason;
-        let notice = super::claude_tui_busy_followup_refusal_notice(Some(
-            EnqueueRefusalReason::InputModeFenced(Mode::Closing),
-        ));
-        assert!(notice.contains("보류됨"));
-        for reason in [
-            EnqueueRefusalReason::LockTimeout,
-            EnqueueRefusalReason::InputPersistence,
-        ] {
-            assert_eq!(
-                super::claude_tui_busy_followup_refusal_notice(Some(reason)),
-                super::CLAUDE_TUI_BUSY_FOLLOWUP_QUEUE_UNREACHABLE_NOTICE
-            );
-        }
-    }
 }

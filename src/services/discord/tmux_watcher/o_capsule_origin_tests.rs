@@ -1,19 +1,15 @@
 use super::o_seed_install_tests as seed_cases;
 use super::*;
-use crate::services::discord::health::legacy_supervision::test_support::tree_fingerprint;
-use crate::services::discord::health::legacy_supervision::{RetiredForTest, is_retired};
 use crate::services::discord::inflight::load_inflight_state_read_only_result;
-use crate::services::discord::tmux::OOnlyInstallOutcome;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t6_d_clean_rowless_legacy_capsule_origin_prevents_o_adoption() {
-    let test = "t6_d_clean_rowless_legacy_capsule_origin_prevents_o_adoption";
+async fn rowless_legacy_capsule_keeps_partial_utf8_and_source_authority() {
+    let test = "rowless_legacy_capsule_keeps_partial_utf8_and_source_authority";
     if !isolated_in("o_capsule_origin_tests", test, &[]) {
         return;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (fixture, _discord) = seed_cases::fixture(632_513_001).await;
-    assert!(!is_retired("claude", fixture.channel.get()));
     assert!(
         load_inflight_state_read_only_result(&CLAUDE, fixture.channel.get())
             .unwrap()
@@ -88,53 +84,4 @@ async fn t6_d_clean_rowless_legacy_capsule_origin_prevents_o_adoption() {
             .relay_frontier_token(fixture.channel)
             .reset_incarnation
     );
-
-    let _retired = RetiredForTest::new("claude", fixture.channel.get());
-    let root = crate::services::discord::runtime_store::discord_inflight_root().unwrap();
-    let before = tree_fingerprint(&root);
-    let observed = seed_cases::observe(&fixture);
-    assert_eq!(fixture.install().await, OOnlyInstallOutcome::Spawned);
-    seed_cases::until(
-        &observed,
-        "O successor initial EOF or forbidden custody adoption",
-        |s| s.event_count("outer_eof") > 0 || s.event_count("capsule_o_adopted") > 0,
-    )
-    .await;
-    assert_eq!(
-        observed.snapshot().event_count("capsule_o_adopted"),
-        0,
-        "clean Legacy payload still has Legacy provenance"
-    );
-    let fresh_body = "fresh O body after rowless Legacy predecessor";
-    let fresh = said(fresh_body);
-    seed_cases::append(&fixture, fresh.as_bytes());
-    seed_cases::until(&observed, "new O source body decode", |s| {
-        s.decoded_chunks.concat() == fresh
-    })
-    .await;
-    fixture.cancel_and_join().await;
-    let remaining =
-        cancel_handoff::capsule_observation::pending(&fixture.shared, fixture.channel).await;
-    assert_eq!(
-        remaining
-            .into_iter()
-            .filter(|p| p.origin.is_legacy())
-            .collect::<Vec<_>>(),
-        legacy,
-        "clean Legacy custody must be retained byte for byte"
-    );
-    seed_cases::assert_rowless(&observed);
-    let seen = observed.snapshot();
-    assert_eq!(seen.event_count("capsule_o_adopted"), 0, "{seen:?}");
-    assert!(
-        seen.parser_responses.iter().any(|body| body == fresh_body),
-        "{seen:?}"
-    );
-    assert!(
-        seen.parser_responses
-            .iter()
-            .all(|body| !body.contains("Legacy carried scalar")),
-        "{seen:?}"
-    );
-    assert_eq!(tree_fingerprint(&root), before);
 }

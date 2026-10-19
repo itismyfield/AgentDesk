@@ -7,12 +7,12 @@ use tokio::sync::Notify;
 
 use super::tests::{admit_any_host, seed_busy_channel, still_busy};
 use crate::config::TestEnvVarGuard;
-use crate::services::discord::health::legacy_supervision::RetiredForTest;
-use crate::services::discord::health::legacy_supervision::test_support::fingerprint;
+use crate::services::discord::health::test_support::fingerprint;
 use crate::services::discord::inflight::{load_inflight_state, save_inflight_state};
 use crate::services::provider::ProviderKind;
 
-async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
+/// A dead session seen by both probes is finalized after the second probe await.
+async fn final_probe_case(periodic: bool, channel: u64) {
     let temp = tempfile::tempdir().unwrap();
     let _root =
         TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", temp.path());
@@ -30,8 +30,7 @@ async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
         &ProviderKind::Claude,
         channel,
     );
-    let before = fingerprint(&row);
-    assert!(before.is_some());
+    assert!(fingerprint(&row).is_some());
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
@@ -48,7 +47,6 @@ async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
             })
         }
     };
-    let mut retired = None;
     let work = async {
         if periodic {
             super::reap_stale_busy_mailboxes_with_probe(&shared, &probe, &admit_any_host).await;
@@ -63,16 +61,13 @@ async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
                 &admit_any_host,
             )
             .await;
-            assert_eq!(healed, !retire);
+            assert!(healed);
         }
     };
     let transition = async {
         entered.notified().await;
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert!(still_busy(&shared, channel).await);
-        if retire {
-            retired = Some(RetiredForTest::new("claude", channel));
-        }
         release.notify_one();
     };
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -80,32 +75,23 @@ async fn final_probe_case(periodic: bool, retire: bool, channel: u64) {
     })
     .await
     .expect("final probe barrier");
-    assert_eq!(still_busy(&shared, channel).await, retire);
-    assert_eq!(token.cancelled.load(Ordering::Relaxed), !retire);
-    assert_eq!(
-        shared.restart.global_active.load(Ordering::Relaxed),
-        usize::from(retire)
+    assert!(!still_busy(&shared, channel).await);
+    assert!(token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    assert!(
+        fingerprint(&row).is_none(),
+        "finalizer clears the legacy row"
     );
-    if retire {
-        assert_eq!(fingerprint(&row), before);
-    } else {
-        assert!(
-            fingerprint(&row).is_none(),
-            "finalizer clears the legacy row"
-        );
-    }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn intake_rechecks_retirement_after_final_probe() {
+async fn intake_finalizes_after_final_probe() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    final_probe_case(false, true, 6_325_412_001).await;
-    final_probe_case(false, false, 6_325_412_002).await;
+    final_probe_case(false, 6_325_412_002).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn periodic_rechecks_retirement_after_final_probe() {
+async fn periodic_finalizes_after_final_probe() {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    final_probe_case(true, true, 6_325_412_003).await;
-    final_probe_case(true, false, 6_325_412_004).await;
+    final_probe_case(true, 6_325_412_004).await;
 }

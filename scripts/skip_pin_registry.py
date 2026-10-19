@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The writer-gate skip pin: legacy sets in `test_only_module_skip_pin.py` plus `.d` fragments.
+"""The writer-gate skip pin: legacy resolver paths plus `.d` fragments.
 
-New pins are `basename | src/...rs` or `resolver | src/...rs` rows, sorted by path, in
-`scripts/test_only_module_skip_pin.d/<node>-<issue>-<slice>.txt`. The two legacy
-`frozenset({...})` literals stay readable in their reviewed order for lanes that still add
-there; they are checked for literals, path syntax and duplicates, never for order. Every row of
-both sources is validated, then indexed by path, then turned into the two frozensets.
+Rows are `basename | src/...rs` or `resolver | src/...rs`, sorted by path, in
+`scripts/test_only_module_skip_pin.d/<node>-<issue>-<slice>.txt`. The split resolver
+literal and old combined basename/resolver literals stay readable in reviewed order;
+they are checked for literals, path syntax and duplicates, never for order. Basename
+rows remain readable for compatibility; new syncs register only resolver exclusions.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LEGACY_REL = Path("scripts/test_only_module_skip_pin.py")
+LEGACY_PATHS_REL = Path("scripts/test_only_module_skip_pin_paths.py")
 FRAGMENTS_REL = Path("scripts/test_only_module_skip_pin.d")
 KINDS = {"basename": "PINNED_BASENAME_TEST_FILES", "resolver": "PINNED_RESOLVER_TEST_ONLY_FILES"}
 ROW_HINT = "expected `basename | src/...rs` or `resolver | src/...rs`"
@@ -53,7 +54,7 @@ def path_problem(path: str) -> str | None:
 
 
 def legacy_rows(source: str, label: str):
-    """Rows of the two legacy set literals in file order, read before a set can drop a copy."""
+    """Literal rows in file order; resolver-only layouts need no basename assignment."""
     try:
         tree = ast.parse(source, label)
     except SyntaxError as error:
@@ -87,7 +88,7 @@ def legacy_rows(source: str, label: str):
                 problems.append((location, problem))
             rows.append(FRAGMENTS.Row(element.value, kind, location))
     for kind, count in assigned.items():
-        if count != 1:
+        if count != 1 and not (kind == "basename" and count == 0):
             problems.append((label, f"{KINDS[kind]} must be assigned once, found {count}"))
     return rows, problems
 
@@ -122,12 +123,14 @@ class SkipPin:
         )
 
     def legacy(self, path: str) -> bool:
-        return self.rows[path].location.startswith(LEGACY_REL.as_posix() + ":")
+        source = self.rows[path].location.rsplit(":", 1)[0]
+        return source in (LEGACY_REL.as_posix(), LEGACY_PATHS_REL.as_posix())
 
 
 def load(root: Path) -> SkipPin:
     """Validate every legacy and fragment row, index them by path, then build the pin."""
-    rows, problems = legacy_rows((root / LEGACY_REL).read_text("utf-8"), LEGACY_REL.as_posix())
+    legacy = LEGACY_PATHS_REL if (root / LEGACY_PATHS_REL).is_file() else LEGACY_REL
+    rows, problems = legacy_rows((root / legacy).read_text("utf-8"), legacy.as_posix())
     lines, read_problems = FRAGMENTS.read_lines(root / FRAGMENTS_REL, FRAGMENTS_REL.as_posix())
     added, row_problems = fragment_rows(lines)
     indexed, index_problems = FRAGMENTS.index([*rows, *added])
@@ -152,15 +155,21 @@ def auto_fragment(path: str) -> str:
     return f"auto-0-{hashlib.sha256(path.encode()).hexdigest()[:12]}.txt"
 
 
-def sync(root: Path, measured: dict, existing: set, promoted=(), fragment=None):
-    """Write measured new pins to fragments and drop explicitly promoted fragment rows.
+def sync(root: Path, measured: dict, existing: set, promoted=(), fragment=None, *, deleted=()):
+    """Write new resolver pins and drop explicitly promoted or deleted fragment rows.
 
     `measured` maps every test-only path to its kind. Refusals raise before any write. A
-    promoted legacy pin returns its manual deletion step and nothing is written, because this
-    writer never rewrites the legacy file. Returns `(manual steps, written fragment paths)`."""
+    legacy removal returns its manual deletion step and nothing is written, because this
+    writer never rewrites legacy sources. Returns `(manual steps, written fragment paths)`."""
     target = fragment_file(fragment) if fragment else None
     pin = load(root)
     promoted = set(promoted)
+    deleted = set(deleted)
+    for rel in sorted(deleted):
+        if (root / rel).exists() or (root / rel).is_symlink():
+            raise RuntimeError("deletion path still exists: " + rel)
+        if rel not in pin.rows:
+            raise RuntimeError("deletion is not pinned: " + rel)
     for rel in sorted(promoted):
         if rel not in existing:
             raise RuntimeError("promotion path missing: " + rel)
@@ -168,20 +177,23 @@ def sync(root: Path, measured: dict, existing: set, promoted=(), fragment=None):
             raise RuntimeError("promotion remains test-only: " + rel)
         if rel not in pin.rows:
             raise RuntimeError("promotion is not pinned: " + rel)
-    if set(pin.rows) - set(measured) - promoted:
+    if set(pin.rows) - set(measured) - promoted - deleted:
         raise RuntimeError("refusing pin removal")
+    removed = promoted | deleted
     manual = [
         f"{pin.rows[rel].location}: delete the legacy pin `{rel}` by hand; --sync-skips "
-        f"never rewrites {LEGACY_REL.as_posix()}"
-        for rel in sorted(promoted) if pin.legacy(rel)
+        f"never rewrites {pin.rows[rel].location.rsplit(':', 1)[0]}"
+        for rel in sorted(removed) if pin.legacy(rel)
     ]
     if manual:
         return manual, []
     edits: dict[str, tuple[set, list]] = {}
-    for rel in sorted(promoted):
+    for rel in sorted(removed):
         file, number = pin.rows[rel].location.rsplit(":", 1)
         edits.setdefault(Path(file).name, (set(), []))[0].add(int(number))
     for rel in sorted(set(measured) - set(pin.rows)):
+        if measured[rel] == "basename":
+            continue
         edits.setdefault(target or auto_fragment(rel), (set(), []))[1].append(
             f"{measured[rel]} | {rel}"
         )

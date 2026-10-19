@@ -64,6 +64,9 @@ fn publish_stop(tmux: &str, turn: &str) {
 /// One Codex channel under the real idle rollout loop and observer, Discord recorded.
 struct Fixture {
     shared: Arc<SharedData>,
+    http: Arc<serenity::Http>,
+    automatic: bool,
+    hook_probe: Arc<super::super::super::hook_observer::HookObserverProbe>,
     codex: CodexChannel,
     requests: Requests,
     /// Message POSTs still to be rejected.
@@ -85,8 +88,26 @@ impl Fixture {
 
     /// `resume`: a restarted process — the rollout stays and the binding cursor sits at its end.
     async fn start_with(root: &Path, channel: u64, tmux: &str, resume: bool) -> Self {
+        Self::start_inner(
+            root,
+            channel,
+            tmux,
+            resume,
+            crate::services::discord::make_shared_data_for_tests(),
+            false,
+        )
+        .await
+    }
+
+    async fn start_inner(
+        root: &Path,
+        channel: u64,
+        tmux: &str,
+        resume: bool,
+        mut shared: Arc<SharedData>,
+        automatic: bool,
+    ) -> Self {
         enable_session_bound_delivery();
-        let mut shared = crate::services::discord::make_shared_data_for_tests();
         // The observer announces direct input through the notify utility bot.
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         Arc::get_mut(&mut shared)
@@ -120,20 +141,32 @@ impl Fixture {
                 http.clone(),
             )
             .await;
-        let rest = crate::services::discord::shared_state::test_rest::install(http);
+        let rest = crate::services::discord::shared_state::test_rest::install(http.clone());
         let observed = crate::services::tui_prompt_dedupe::subscribe_observed_prompts();
-        // The production hook observer; the test relays each published event itself.
+        // The PG entry test uses production's callback; other scenarios relay observations explicitly.
         let (hooks, hook_rx) = tokio::sync::broadcast::channel(64);
+        let hook_probe = Arc::new(super::super::super::hook_observer::HookObserverProbe::default());
+        let relay_shared = shared.clone();
         super::super::super::hook_observer::spawn_tui_prompt_relay_observer_inner(
             "codex".to_string(),
             hook_rx,
-            |_| Box::pin(async {}),
-            None,
+            move |prompt| {
+                let shared = relay_shared.clone();
+                Box::pin(async move {
+                    if automatic {
+                        super::super::super::relay_observed_prompt(&shared, prompt).await;
+                    }
+                })
+            },
+            Some(hook_probe.clone()),
         );
         super::super::super::CODEX_IDLE_ROLLOUT_RELAY_STARTED.store(false, Ordering::Release);
         super::super::super::spawn_codex_idle_rollout_relay(shared.clone());
         Self {
             shared,
+            http,
+            automatic,
+            hook_probe,
             codex,
             requests,
             failing_posts,
@@ -402,7 +435,7 @@ fn live_pane_tmux(root: &Path) -> crate::config::TestEnvVarGuard {
     let tmux = dir.join("tmux");
     std::fs::write(
         &tmux,
-        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do shift; done\ncase \"$1\" in list-panes) [ -f \"$(dirname \"$0\")/dead\" ] && echo 1 || echo 0;; esac\nexit 0\n",
+        "#!/bin/sh\nwhile [ \"${1#-}\" != \"$1\" ]; do case \"$1\" in -L|-S) shift;; esac; shift; done\ncase \"$1\" in list-sessions) /bin/cat \"$(dirname \"$0\")/names\" 2>/dev/null;; list-panes) [ -f \"$(dirname \"$0\")/dead\" ] && echo 1 || echo 0;; esac\nexit 0\n",
     )
     .expect("fake tmux");
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -456,6 +489,10 @@ fn resumed_channel(
 }
 
 fn run(scenario: impl FnOnce(PathBuf) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
     let _env_lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -558,6 +595,13 @@ fn codex_direct_answer_keeps_its_boundary_when_a_later_direct_input_lands_first(
             let second_end = fx.append(&opening(&t2, PROMPT2));
             fx.append(&(item_completed_line_for(&t2) + &answer_for(&t2, RESPONSE2)));
             fx.scanned_past(second_end).await;
+            assert!(
+                crate::services::tui_prompt_dedupe::codex_restore_observation_for_tests(
+                    &fx.codex.tmux
+                )
+                .is_none(),
+                "a live same-binding poll installed a restore scope"
+            );
             super::super::super::relay_observed_prompt(&fx.shared, first).await;
             let first_anchor = fx.codex.row().expect("first claim").user_msg_id;
             super::super::super::relay_observed_prompt(&fx.shared, second).await;
@@ -1171,3 +1215,79 @@ mod handoff_tests;
 mod loss_tests;
 /// Native turn identity: fallback, steering joins, durable deferral.
 mod native_turn_tests;
+
+#[test]
+fn codex_6903_discovery_keeps_live_input_out_of_bootstrap_history() {
+    run(|root| {
+        Box::pin(async move {
+            let _tmux = live_pane_tmux(&root);
+            let mut fx = Fixture::start(&root, 6_903_901, "AgentDesk-codex-6903-discovery").await;
+            crate::services::tui_prompt_dedupe::register_tmux_channel(
+                &fx.codex.tmux,
+                fx.codex.channel.get(),
+            );
+            crate::services::codex_tui::session::write_codex_tui_rollout_marker(
+                &fx.codex.tmux,
+                &fx.codex.rollout,
+                Some("s-5704"),
+            )
+            .unwrap();
+            assert!(
+                crate::services::tui_prompt_dedupe::codex_restore_observation_for_tests(
+                    &fx.codex.tmux
+                )
+                .is_none()
+            );
+            fx.append(
+                &(opening(&turn(71), "LIVE_DISCOVERY_6903")
+                    + &answer_for(&turn(71), "LIVE_DISCOVERY_6903_ANSWER")),
+            );
+            let channel = super::super::super::rehydration::run_codex_rehydrate_pass_for_tests(
+                &fx.shared,
+                &fx.codex.tmux,
+            );
+            assert_eq!(
+                channel,
+                Some(fx.codex.channel.get()),
+                "actual listed discovery must visit this live binding"
+            );
+            assert!(
+                crate::services::tui_prompt_dedupe::codex_restore_observation_for_tests(
+                    &fx.codex.tmux
+                )
+                .is_none(),
+                "discovery reclassified a live input as bootstrap history"
+            );
+            let event = loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), fx.observed.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if event.tmux_session_name == fx.codex.tmux && event.prompt == "LIVE_DISCOVERY_6903"
+                {
+                    break event;
+                }
+            };
+            assert!(!event.steer_echo);
+            super::super::super::relay_observed_prompt(&fx.shared, event).await;
+            let anchor = fx
+                .codex
+                .row()
+                .expect("live discovery input owns its bridge row")
+                .user_msg_id;
+            assert!(fx.delivered("LIVE_DISCOVERY_6903_ANSWER").await);
+            fx.polls(3).await;
+            assert_eq!(fx.sent("LIVE_DISCOVERY_6903_ANSWER").len(), 1);
+            fx.assert_answer("LIVE_DISCOVERY_6903_ANSWER", anchor);
+            assert_eq!(fx.completed_turns(), 1);
+            assert_eq!(tail_starts(fx.codex.channel), 1);
+            while let Ok(event) = fx.observed.try_recv() {
+                assert!(
+                    event.tmux_session_name != fx.codex.tmux
+                        || event.prompt != "LIVE_DISCOVERY_6903"
+                );
+            }
+            fx.finish();
+        })
+    });
+}

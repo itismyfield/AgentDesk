@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Label cargo-test commands with the CI context that runs them, and require every
-explicit justfile filter to be selected by explicit required-PR filters or an exception."""
+"""Label cargo-test commands with the CI context that runs them, and require every explicit
+justfile filter to be selected by required-PR or main lane filters, or an exception."""
 
 from __future__ import annotations
 
@@ -24,12 +24,12 @@ INERT_MODES = ("--list", "--ignored")
 SWEEP_COVERED = "sweep-covered"
 MAIN_ONLY_TARGET = "main-only-target"
 LIBRARY_TARGETS = frozenset({"lib", "all-targets", "default"})
+_NESTED_JUST = re.compile(r"(?:^|&&|;)\s*just\s+([A-Za-z0-9_-]+)\s*$")
 _UPSTREAM_NAME = re.compile(r"\bUPSTREAM_JOB_NAME\s*:\s*['\"]?([A-Za-z0-9_-]+)")
 _UPSTREAM_RESULT = re.compile(
     r"\bUPSTREAM_RESULT\s*:\s*['\"]?\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}"
 )
 _KEY = re.compile(r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_-]+)\s*:(?P<value>.*)$")
-_STEP_GUARD = re.compile(r"^[ \t]*(?:-[ \t]+)?(?P<key>if|continue-on-error)\s*:(?P<value>.*)$")
 # `if:` values that always run the step; `continue-on-error` is safe only as false.
 RUNNING_IF = frozenset({"true", "always()", "!cancelled()", "success()"})
 
@@ -95,12 +95,20 @@ class Sources:
     pr_jobs: tuple = ()
 
     def of(self, *origins: str) -> tuple[LaneSource, ...]:
-        """The running sources of these origins; `--list`/`--ignored` commands prove no run."""
-        return tuple(s for s in self.sources if s.origin in origins and s.runs)
+        """The running sources of these origins; `--list`/`--ignored` commands and steps that
+        may skip or swallow a failure prove no run."""
+        return tuple(s for s in self.sources if s.origin in origins and s.runs and not s.guard)
+
+    @property
+    def required(self) -> tuple[LaneSource, ...]:
+        """Required PR runs plus main's lanes: a PR runs only the plan's PostgreSQL and sweep
+        tests, so main's literal full lanes, which a deploy needs green, prove coverage."""
+        return self.of("pr-required") + tuple(s for s in self.of("main") if s.lane)
 
     @property
     def required_test_jobs(self) -> str:
-        return ", ".join(sorted({s.owner for s in self.of("pr-required")})) or "none proven"
+        return ", ".join(sorted({f"{'main:' * (s.origin == 'main')}{s.owner}"
+                                 for s in self.required})) or "none proven"
 
 
 @dataclass(frozen=True)
@@ -174,11 +182,13 @@ def _source(cti, coverage, expansions, origin, owner, location, words):
 
 
 def justfile_sources(cti, coverage, repo_root: Path, expansions):
-    """Every recipe's cargo-test commands, owned by the recipe that declares them."""
+    """Every recipe's cargo-test commands, owned by the recipe that declares them, and the
+    recipes each one runs through `just <recipe>`."""
     path = repo_root / "justfile"
     extracted = {line: words for line, words, _ in cti.extract_justfile_commands(path)}
     sources: list[LaneSource] = []
     findings: list[Finding] = []
+    calls: dict[str, list[str]] = {}
     recipe = None
     for lineno, line in enumerate(path.read_text("utf-8").splitlines(), 1):
         if line and not line[0].isspace():
@@ -196,7 +206,9 @@ def justfile_sources(cti, coverage, repo_root: Path, expansions):
             findings.extend([finding] if finding else [])
         elif "cargo test" in line:
             findings.append(_unreadable(location, line.strip()))
-    return sources, findings
+        elif nested := _NESTED_JUST.search(line.strip()):
+            calls.setdefault(recipe, []).append(nested.group(1))
+    return sources, findings, calls
 
 
 def _line_owners(text: str, jobs) -> tuple[dict[int, str], list[str], dict[str, int]]:
@@ -319,18 +331,18 @@ def unconditional(key: str, value: str) -> bool:
     return value == "false" if key == "continue-on-error" else value in RUNNING_IF
 
 
-def _step_guard(step_lines: list[str]) -> str:
-    """The first `if:` or `continue-on-error:` of one step that may skip it or hide a failure."""
-    for line in step_lines:
-        match = _STEP_GUARD.match(line)
-        if match and not unconditional(match.group("key"), match.group("value")):
-            return f"step {match.group('key')}: {match.group('value').strip()}"
+def _step_guard(pgm, step_lines: list[str]) -> str:
+    """Read only the step's own guard keys, excluding nested mappings and scalar bodies."""
+    code = "\n".join([re.sub(r"^([ \t]*)-", r"\1 ", step_lines[0]), *step_lines[1:]])
+    for key, (value, _) in job_keys(pgm, code).items():
+        if key in ("if", "continue-on-error") and not unconditional(key, value):
+            return f"step {key}: {value}"
     return ""
 
 
 def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], headers):
-    """Required PR jobs are the upstreams a required-check-mirror step both reports in its
-    own env and its job needs; env on any other step proves nothing."""
+    """Required PR jobs are the upstreams an unconditional required-check-mirror step both
+    reports in its own env and its job needs; env on any other step proves nothing."""
     names = {job.name for job in jobs}
     required: set[str] = set()
     findings: list[Finding] = []
@@ -357,8 +369,9 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
                 problem = f"upstream {upstreams[0]} is not in needs"
             elif upstreams[0] not in names:
                 problem = f"upstream {upstreams[0]} is not a job in this workflow"
-            conditional = bool(_step_guard(lines[first:last + 1])) or (
-                "if" in keys and not unconditional("if", keys["if"][0])
+            conditional = bool(_step_guard(pgm, lines[first:last + 1])) or any(
+                key in keys and not unconditional(key, keys[key][0])
+                for key in ("if", "continue-on-error")
             )
             for upstream in upstreams or [""]:
                 mirrors.append(Mirror(job.name, context, upstream, not problem, conditional))
@@ -369,24 +382,48 @@ def _mirror_upstreams(pgm, rel: Path, jobs, mirror_lines: dict[str, set[int]], h
                     "step that runs it names the same job in needs, UPSTREAM_JOB_NAME and "
                     "UPSTREAM_RESULT",
                 ))
-            else:
+            elif not conditional:
                 required.update(upstreams)
     return required, findings, mirrors
 
 
+def _conditionally_mirrored(rel: Path, mirrors, demoted: set[str], found) -> list[Finding]:
+    """A test-selecting job that only conditional mirrors report has no required run."""
+    selecting = demoted & {source.owner for source in found if source.runs}
+    pairs = dict.fromkeys(
+        (m.job, m.upstream) for m in mirrors if m.proven and m.upstream in selecting
+    )
+    return [
+        Finding(
+            "pr-context-unproven", f"{rel.as_posix()}:{job}",
+            f"every proven mirror of {upstream} may skip or swallow its result (`if:` or "
+            "`continue-on-error:`), so its tests prove no required PR run; drop the condition "
+            "or add an unconditional mirror",
+        )
+        for job, upstream in pairs
+    ]
+
+
 def guarded_lines(pgm, jobs, headers) -> dict[int, str]:
-    """Workflow lines inside a step whose own `if:`/`continue-on-error:` is conditional."""
+    """Workflow lines inside a step whose own `if:`/`continue-on-error:` is conditional, or
+    inside a job whose `continue-on-error:` may swallow every step's failure."""
     guarded: dict[int, str] = {}
     for job in jobs:
         lines = job.code.splitlines()
+        value = job_keys(pgm, job.code).get("continue-on-error", ("false", -1))[0]
+        swallowed = "" if unconditional("continue-on-error", value) else (
+            f"job continue-on-error: {value}"
+        )
         for first, last in _steps(pgm, job.code) if job.name in headers else ():
-            guard = _step_guard(lines[first:last + 1])
+            guard = _step_guard(pgm, lines[first:last + 1]) or swallowed
             span = range(headers[job.name] + first, headers[job.name] + last + 1)
             guarded.update(dict.fromkeys(span, guard) if guard else {})
     return guarded
 
 
-def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded):
+def _job_sources(
+    cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded, strict=frozenset()
+):
     sources: list[LaneSource] = []
     findings: list[Finding] = []
     for job, line, snippet in lines:
@@ -417,7 +454,7 @@ def _job_sources(cti, coverage, expansions, recipes, rel, lines, commands, origi
         sources.extend([source] if source else [])
         if line in guarded:
             sources[before:] = [replace(s, guard=guarded[line]) for s in sources[before:]]
-        if finding and origin == "pr-required":
+        if finding and (origin == "pr-required" or job in strict):
             findings.append(finding)
     return sources, findings
 
@@ -431,11 +468,16 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
         coverage.load_non_pg_skip_args(repo_root) if filter_present else (),
         coverage.load_non_pg_filter_replay(repo_root) if filter_present else (),
     )
-    sources, justfile_findings = justfile_sources(cti, coverage, repo_root, expansions)
+    sources, justfile_findings, calls = justfile_sources(cti, coverage, repo_root, expansions)
     findings: list[Finding] = []
-    recipes: dict[str, list[LaneSource]] = {}
+    own: dict[str, list[LaneSource]] = {}
     for source in sources:
-        recipes.setdefault(source.owner, []).append(source)
+        own.setdefault(source.owner, []).append(source)
+
+    def runs(name: str, seen: frozenset[str] = frozenset()) -> list[LaneSource]:
+        return [*own.get(name, ()), *(source for callee in calls.get(name, ()) if callee not in seen
+                                      for source in runs(callee, seen | {name}))]
+    recipes = {name: runs(name) for name in {*own, *calls}}
     mirrors: list[Mirror] = []
     pr_jobs: tuple = ()
     for name, rel in (("pr", PR_WORKFLOW_REL), *OTHER_WORKFLOWS):
@@ -454,6 +496,8 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
                 pgm, rel, jobs, mirror_lines, headers
             )
             findings.extend(unproven)
+            # Jobs only conditional mirrors report still fail closed on unreadable commands.
+            demoted = {mirror.upstream for mirror in mirrors if mirror.proven} - required
             origins = {
                 job.name: "pr-required" if job.name in required else "pr-advisory"
                 for job in jobs
@@ -461,12 +505,13 @@ def collect_sources(repo_root: Path, coverage) -> Sources:
             guarded = guarded_lines(pgm, jobs, headers)
         else:
             origins = dict.fromkeys((job.name for job in jobs), name)
-            guarded = {}
+            guarded, demoted = {}, set()
         found, problems = _job_sources(
-            cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded
+            cti, coverage, expansions, recipes, rel, lines, commands, origins, guarded, demoted
         )
         sources.extend(found)
         findings.extend(problems)
+        findings.extend(_conditionally_mirrored(rel, mirrors, demoted, found))
     return Sources(
         tuple(sources), tuple(findings), tuple(justfile_findings), tuple(mirrors), pr_jobs
     )
@@ -519,9 +564,9 @@ def _sample(ids) -> str:
 def judge_parity(
     sources: Sources, test_ids: frozenset[str], exceptions, pg_tests=frozenset(), pg_only=()
 ) -> ParityResult:
-    """Explicit justfile filters need explicit required-PR selection or a proven exception;
-    the required sweep and its replay never count as explicit, the PG lane only for PG ids."""
-    required = sources.of("pr-required")
+    """Explicit justfile filters need required-PR or main selection or a proven exception;
+    the sweep and its replay never count as explicit, the PG lane only for PG ids."""
+    required = sources.required
     ordered = sorted(test_ids)
 
     def selected(lanes) -> set[str]:

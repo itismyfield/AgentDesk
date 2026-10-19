@@ -31,7 +31,6 @@ use std::sync::{Arc, Mutex};
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 
-use crate::services::discord::health::transcript_turn::Presence;
 use crate::services::discord::inflight::{InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::runtime_store;
 use crate::services::provider::ProviderKind;
@@ -359,6 +358,96 @@ fn remove_pending_bind_if_owned_in_root(
     PendingBindOwnedRemovalOutcome::OwnedRecordRemoved
 }
 
+/// Why the store cannot prove a panel free of pending-bind and delete records.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum PendingBindCheckError {
+    Read,
+    Parse,
+    Write,
+    /// A stranded delete for the panel is queued; unbinding would let drain delete it.
+    DeleteQueued,
+}
+
+#[cfg(test)]
+fn load_channel_checked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+) -> Result<Vec<StatusPanelOrphanEntry>, PendingBindCheckError> {
+    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(PendingBindCheckError::Read),
+    };
+    serde_json::from_str::<StatusPanelOrphanChannelFile>(&raw)
+        .map(StatusPanelOrphanChannelFile::into_entries)
+        .map_err(|_| PendingBindCheckError::Parse)
+}
+
+#[cfg(test)]
+fn save_channel_checked_in_root(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    entries: &[StatusPanelOrphanEntry],
+) -> Result<(), PendingBindCheckError> {
+    let path = channel_file_path_in_root(root, provider, token_hash, channel_id);
+    let saved = if entries.is_empty() {
+        fs::remove_file(&path).or_else(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error.to_string()),
+        })
+    } else {
+        serde_json::to_string_pretty(entries)
+            .map_err(|error| error.to_string())
+            .and_then(|json| runtime_store::atomic_write(&path, &json))
+    };
+    saved.map_err(|_| PendingBindCheckError::Write)
+}
+
+/// Like `remove_pending_bind_if_owned_in_root`, but `Removed`/`Missing` only on a proven
+/// store state, and a mismatch never writes delete protection for the panel.
+#[cfg(test)]
+fn remove_pending_bind_if_owned_checked_in_root(
+    root: &Path,
+    inflight_root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+    identity: &InflightTurnIdentity,
+) -> Result<PendingBindOwnedRemovalOutcome, PendingBindCheckError> {
+    use crate::services::discord::inflight::{inflight_state_path, lock_inflight_state_path};
+    let inflight_path = inflight_state_path(inflight_root, provider, channel_id);
+    let _inflight_guard =
+        lock_inflight_state_path(&inflight_path).map_err(|_| PendingBindCheckError::Read)?;
+    let owned = fs::read_to_string(&inflight_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<InflightTurnState>(&raw).ok())
+        .is_some_and(|inflight| {
+            identity.matches_state(&inflight) && inflight.status_message_id == Some(panel_msg_id)
+        });
+    if !owned {
+        return Ok(PendingBindOwnedRemovalOutcome::OwnershipMismatch);
+    }
+    let _store_guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut entries = load_channel_checked_in_root(root, provider, token_hash, channel_id)?;
+    let before = entries.len();
+    entries.retain(|entry| !(entry.id == panel_msg_id && entry.is_pending_bind()));
+    if entries.iter().any(|entry| entry.id == panel_msg_id) {
+        return Err(PendingBindCheckError::DeleteQueued);
+    }
+    if entries.len() == before {
+        return Ok(PendingBindOwnedRemovalOutcome::OwnedRecordMissing);
+    }
+    save_channel_checked_in_root(root, provider, token_hash, channel_id, &entries)?;
+    Ok(PendingBindOwnedRemovalOutcome::OwnedRecordRemoved)
+}
+
 fn is_queued_in_root(
     root: &Path,
     provider: &ProviderKind,
@@ -564,6 +653,32 @@ pub(in crate::services::discord) fn remove_pending_bind_if_owned(
     )
 }
 
+/// Checked counterpart of [`remove_pending_bind_if_owned`] for releasing a binding.
+#[cfg(test)]
+pub(in crate::services::discord) fn remove_pending_bind_if_owned_checked(
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_msg_id: u64,
+    identity: &InflightTurnIdentity,
+) -> Result<PendingBindOwnedRemovalOutcome, PendingBindCheckError> {
+    let (Some(root), Some(inflight_root)) = (
+        runtime_store::discord_status_panel_orphans_root(),
+        runtime_store::discord_inflight_root(),
+    ) else {
+        return Err(PendingBindCheckError::Read);
+    };
+    remove_pending_bind_if_owned_checked_in_root(
+        &root,
+        &inflight_root,
+        provider,
+        token_hash,
+        channel_id,
+        panel_msg_id,
+        identity,
+    )
+}
+
 /// Is this panel still queued for deletion? Used by [`drain`] to re-validate a
 /// record immediately before deleting it, so a record the completion path
 /// removed (the panel became valid) after the drain's snapshot is not deleted.
@@ -577,20 +692,6 @@ pub(in crate::services::discord) fn is_queued(
         return false;
     };
     is_queued_in_root(&root, provider, token_hash, channel_id, panel_msg_id)
-}
-
-/// This bot's queued panel deletes for one channel; a corrupt file still counts as residue.
-pub(in crate::services::discord) fn channel_presence(
-    provider: &ProviderKind,
-    token_hash: &str,
-    channel_id: u64,
-) -> Presence {
-    let path = runtime_store::discord_status_panel_orphans_root()
-        .map(|root| channel_file_path_in_root(&root, provider, token_hash, channel_id));
-    Presence::of_file(path, |raw| {
-        serde_json::from_str::<StatusPanelOrphanChannelFile>(raw)
-            .map_or(1, |file| file.into_entries().len())
-    })
 }
 
 fn delete_error_is_permanent(err: &serenity::Error) -> bool {
@@ -743,15 +844,6 @@ pub(in crate::services::discord) async fn drain(
     };
     let mut cleared = 0usize;
     for (channel_id, entry) in pending {
-        // Ahead of the writing loader and pending-bind bookkeeping; nothing awaits
-        // between here and the delete.
-        if crate::services::discord::health::legacy_supervision::legacy_retired(
-            provider.as_str(),
-            channel_id,
-            "status_panel_orphan_drain",
-        ) {
-            continue;
-        }
         let panel_msg_id = entry.id;
         // #3003 (codex P2 r26): re-validate against the live store immediately
         // before deleting. Between `load_pending` and here, the completion path may

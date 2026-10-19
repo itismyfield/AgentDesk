@@ -13,6 +13,7 @@ use super::binding::BindingEvents;
 use super::deliver::{ChannelWriter, Step, StopCause};
 use super::pieces::{Derived, UnitDeriver};
 use super::rotation::Sources;
+use super::transition_port;
 use super::{AlarmSink, DeliveryLease, DiscordPort, ReaderConfig, WriterAlarm, WriterConfig};
 use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
 use crate::services::tui_o::store::rotation::Boundary;
@@ -55,7 +56,7 @@ pub type Unsettled = watch::Sender<Option<usize>>;
 /// What a Herdr-configured channel's actor still owes Discord, as its last poll read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Undelivered {
-    /// Derived items not delivered yet.
+    /// Derived items and pending local retries not delivered yet.
     pub owed: usize,
     /// A `Prepared` piece without a recorded result.
     pub prepared: usize,
@@ -149,6 +150,7 @@ where
 {
     let run = || {
         let commands = codex_submission::take_spawn_receiver();
+        let transitions = transition_port::take_spawn_receiver();
         let projections = (unsettled, owing);
         tokio::spawn(run_publishing(
             writer,
@@ -157,7 +159,7 @@ where
             (stop, resumed),
             projections,
             (None, readers),
-            commands,
+            (commands, transitions),
         ))
     };
     config.enabled.then(run)
@@ -171,6 +173,7 @@ struct Actor<P, L, A, B> {
     verified: Option<super::owed::OwedLog>,
     sources: Sources<B>,
     bindings: Arc<B>,
+    transitions: transition::Transitions,
     /// The binding log's latest seq, watched once the channel first publishes what it owes.
     notice: Option<watch::Receiver<u64>>,
     waiting: Waiting,
@@ -225,7 +228,7 @@ where
         (stop, resumed),
         projections,
         (None, None),
-        None,
+        (None, None),
     )
     .await
 }
@@ -238,7 +241,10 @@ async fn run_publishing<P, L, A, B>(
     (mut stop, resumed): (watch::Receiver<bool>, watch::Sender<bool>),
     (unsettled, owing): (Unsettled, Owing),
     (utc, readers): (Option<chrono::DateTime<chrono::Utc>>, Option<ReaderConfig>),
-    mut commands: Option<codex_submission::Receiver>,
+    (mut commands, transitions): (
+        Option<codex_submission::Receiver>,
+        Option<transition_port::Receiver>,
+    ),
 ) -> Option<StopCause>
 where
     P: DiscordPort,
@@ -246,35 +252,14 @@ where
     A: AlarmSink,
     B: BindingEvents,
 {
-    let mut writer = writer.with_repost_stop(stop.clone());
+    let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
     let owed = VecDeque::new();
-    let ready = admission::owed_delivery_ready(writer.channel())
-        || (commands.is_some()
-            && provider == ShadowProvider::Codex
-            && writer.channel() == crate::services::codex_tui::canary::CANARY_CHANNEL
-            && crate::services::tui_prompt_dedupe::codex_verified_channel_requires_proof(
-                writer.channel(),
-            )
-            && {
-                let channel = writer.channel();
-                let mut cursors = writer
-                    .store()
-                    .cursors()
-                    .filter(|cursor| !cursor.retired)
-                    .peekable();
-                cursors.peek().is_some()
-                    && cursors.all(|cursor| {
-                        crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
-                            channel,
-                            &cursor.source,
-                        )
-                    })
-            });
+    let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
     let mut actor = Actor {
         writer,
@@ -283,6 +268,7 @@ where
         verified,
         sources,
         bindings,
+        transitions: transition::Transitions::new(transitions, stop.clone()),
         notice: None,
         waiting: Waiting::default(),
         clock: (
@@ -308,14 +294,25 @@ where
             }
         }
         actor.observe_waiting(false);
-        actor.deliver_owed().await;
+        let now = actor.utc_now();
+        if actor.delivery_allowed() {
+            actor.writer.retry_local(now).await;
+        }
+        if !actor.writer.has_local_retry() {
+            actor.deliver_owed().await;
+        }
         // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
         // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
-        if actor.verified.is_none() && actor.owed.is_empty() && actor.delivery_allowed() {
+        if actor.verified.is_none()
+            && actor.owed.is_empty()
+            && !actor.writer.has_local_retry()
+            && actor.delivery_allowed()
+        {
             actor.writer.repost_turn().await;
         }
         actor.collect_settled();
         actor.read_sources();
+        actor.poll_transition(sources_resumed, &unsettled);
         actor.observe_waiting(sources_resumed);
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -373,296 +370,15 @@ where
         (stop, watch::channel(false).0),
         (watch::channel(None).0, Owing::default()),
         (Some(utc), None),
-        None,
+        (None, None),
     )
     .await
 }
 
-pub(crate) mod codex_submission {
-    use super::*;
-    use crate::services::tui_o::store::StoreError;
-    use crate::services::tui_o::store::codex_provenance::submit_floor::{
-        DurableClosedEpisode, NativeFloor, PreparedLaunch, SubmitFloor,
-    };
-    use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
-        CodexEpisodeSpan, ExecutionProofRef,
-    };
-    use tokio::sync::{mpsc, oneshot};
+mod transition;
+mod transition_snapshot;
 
-    #[derive(Clone, Debug)]
-    pub(crate) struct Port {
-        generation: u64,
-        run: Arc<()>,
-        send: mpsc::Sender<Request>,
-    }
-
-    pub(crate) struct Receiver {
-        generation: u64,
-        run: Arc<()>,
-        receive: mpsc::Receiver<Request>,
-    }
-
-    pub(crate) enum Operation {
-        #[cfg(test)]
-        Prepare(SubmitFloor),
-        Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
-        Close(Box<CodexEpisodeSpan>),
-    }
-
-    pub(crate) struct Request {
-        run: Arc<()>,
-        operation: Operation,
-        reply: oneshot::Sender<Result<Reply, StoreError>>,
-    }
-
-    #[derive(Debug)]
-    pub(crate) struct Reply {
-        generation: u64,
-        run: Arc<()>,
-        closed: Option<Closed>,
-        prepared: Option<Prepared>,
-    }
-
-    #[derive(Debug)]
-    pub(crate) struct Prepared {
-        run: Arc<()>,
-        floor: NativeFloor,
-    }
-
-    impl Prepared {
-        pub(crate) fn floor(&self) -> &NativeFloor {
-            &self.floor
-        }
-    }
-
-    #[derive(Debug)]
-    pub(crate) struct Closed {
-        run: Arc<()>,
-        durable: DurableClosedEpisode,
-    }
-
-    impl Closed {
-        pub(crate) fn span(&self) -> &CodexEpisodeSpan {
-            self.durable.span()
-        }
-    }
-
-    impl Port {
-        pub(crate) fn new(generation: u64) -> (Self, Receiver) {
-            let run = Arc::new(());
-            let (send, receive) = mpsc::channel(4);
-            let receiver = Receiver {
-                generation,
-                run: Arc::clone(&run),
-                receive,
-            };
-            (
-                Self {
-                    generation,
-                    run,
-                    send,
-                },
-                receiver,
-            )
-        }
-
-        #[cfg(test)]
-        pub(crate) fn same_run(&self, other: &Self) -> bool {
-            Arc::ptr_eq(&self.run, &other.run)
-        }
-
-        pub(crate) async fn request(&self, operation: Operation) -> Result<Reply, String> {
-            let (reply, receive) = oneshot::channel();
-            self.send
-                .send(Request {
-                    run: Arc::clone(&self.run),
-                    operation,
-                    reply,
-                })
-                .await
-                .map_err(|_| "actor ended".to_owned())?;
-            receive
-                .await
-                .map_err(|_| "actor reply unavailable".to_owned())?
-                .map_err(|error| format!("{error:?}"))
-        }
-
-        pub(crate) fn take_closed(&self, reply: Reply) -> Result<Closed, &'static str> {
-            if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
-                return Err("stale_actor_reply");
-            }
-            let closed = reply.closed.ok_or("episode_not_closed")?;
-            if !Arc::ptr_eq(&self.run, &closed.run) {
-                return Err("stale_actor_reply");
-            }
-            Ok(closed)
-        }
-
-        pub(crate) fn accepts_prepared(&self, prepared: &Prepared) -> bool {
-            Arc::ptr_eq(&self.run, &prepared.run)
-        }
-
-        pub(crate) fn take_prepared(&self, reply: Reply) -> Result<Prepared, &'static str> {
-            if self.generation != reply.generation || !Arc::ptr_eq(&self.run, &reply.run) {
-                return Err("stale_actor_reply");
-            }
-            let prepared = reply.prepared.ok_or("episode_not_prepared")?;
-            if !Arc::ptr_eq(&self.run, &prepared.run) {
-                return Err("stale_actor_reply");
-            }
-            Ok(prepared)
-        }
-    }
-
-    impl Receiver {
-        pub(super) async fn next(&mut self) -> Option<Request> {
-            self.receive.recv().await
-        }
-
-        pub(super) fn apply<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
-            &self,
-            writer: &mut ChannelWriter<P, L, A>,
-            request: Request,
-        ) {
-            let mut prepared = None;
-            let result = if !Arc::ptr_eq(&self.run, &request.run) {
-                Err(StoreError::Rejected("foreign actor command".into()))
-            } else {
-                match request.operation {
-                    #[cfg(test)]
-                    Operation::Prepare(floor) => {
-                        if let SubmitFloor::NativeFloor(floor) = &floor {
-                            prepared = Some((**floor).clone());
-                        }
-                        writer.store().prepare_codex_floor(floor).map(|()| None)
-                    }
-                    Operation::Capture(intent) => {
-                        let (launch, execution) = *intent;
-                        let capture = || -> Result<NativeFloor, StoreError> {
-                            let cursor = writer
-                                .store()
-                                .cursor(&execution.source)
-                                .ok_or_else(|| {
-                                    StoreError::Rejected("canonical cursor unavailable".into())
-                                })?
-                                .clone();
-                            let modified = std::fs::metadata(&execution.source.path)?.modified()?;
-                            let generation = modified
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .ok()
-                                .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
-                                .ok_or_else(|| {
-                                    StoreError::Rejected("native generation unavailable".into())
-                                })?;
-                            NativeFloor::capture(launch, execution, &cursor, generation)
-                                .map_err(|reason| StoreError::Rejected(reason.into()))
-                        };
-                        capture().and_then(|floor| {
-                            writer
-                                .store()
-                                .prepare_codex_floor(SubmitFloor::NativeFloor(Box::new(
-                                    floor.clone(),
-                                )))?;
-                            prepared = Some(floor);
-                            Ok(None)
-                        })
-                    }
-                    Operation::Close(span) => writer.store().close_codex_episode(*span).map(Some),
-                }
-            };
-            if writer.store().io_failure().is_some() {
-                writer.stop(WriterAlarm::Halted {
-                    detail: "Codex provenance publication failed".into(),
-                });
-            }
-            let closed = result.map(|closed| {
-                closed.map(|durable| Closed {
-                    run: Arc::clone(&self.run),
-                    durable,
-                })
-            });
-            let reply = closed.map(|closed| Reply {
-                generation: self.generation,
-                run: Arc::clone(&self.run),
-                closed,
-                prepared: prepared.map(|floor| Prepared {
-                    run: Arc::clone(&self.run),
-                    floor,
-                }),
-            });
-            let _ = request.reply.send(reply);
-        }
-    }
-
-    impl crate::services::tui_o::writer::host::Readiness {
-        pub(crate) fn prepared_reply(
-            &self,
-            channel: u64,
-            reply: Reply,
-        ) -> Result<Prepared, &'static str> {
-            self.with_submission(channel, |port| port.take_prepared(reply))
-        }
-
-        /// Rechecks this run under Live through one synchronous source-guarded effect.
-        pub(crate) fn with_current_prepared<T>(
-            &self,
-            channel: u64,
-            prepared: &Prepared,
-            effect: impl FnOnce() -> T,
-        ) -> Result<T, &'static str> {
-            self.with_submission(channel, |port| {
-                if !port.accepts_prepared(prepared) {
-                    return Err("stale_actor_reply");
-                }
-                Ok(effect())
-            })
-        }
-
-        /// Consumers must be bounded and synchronous, without re-entering Readiness.
-        #[cfg(test)]
-        pub(crate) fn with_prepared_reply<T>(
-            &self,
-            channel: u64,
-            reply: Reply,
-            consume: impl FnOnce(&Prepared) -> T,
-        ) -> Result<T, &'static str> {
-            self.with_submission(channel, |port| Ok(consume(&port.take_prepared(reply)?)))
-        }
-
-        /// Consumers must be bounded and synchronous, without re-entering Readiness.
-        pub(crate) fn with_closed_reply<T>(
-            &self,
-            channel: u64,
-            reply: Reply,
-            issue: impl FnOnce(&Closed) -> T,
-        ) -> Result<T, &'static str> {
-            self.with_submission(channel, |port| Ok(issue(&port.take_closed(reply)?)))
-        }
-    }
-
-    thread_local! {
-        static SPAWN: std::cell::RefCell<Option<Receiver>> = const { std::cell::RefCell::new(None) };
-    }
-
-    pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
-        struct Scope;
-        impl Drop for Scope {
-            fn drop(&mut self) {
-                SPAWN.with(|slot| slot.borrow_mut().take());
-            }
-        }
-        SPAWN.with(|slot| {
-            assert!(slot.borrow().is_none());
-            *slot.borrow_mut() = Some(receiver);
-        });
-        let _scope = Scope;
-        spawn()
-    }
-
-    pub(super) fn take_spawn_receiver() -> Option<Receiver> {
-        SPAWN.with(|slot| slot.borrow_mut().take())
-    }
-}
+pub(crate) mod codex_submission;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     fn project_operator_resumes(&mut self) {
@@ -705,18 +421,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
     }
 
+    fn utc_now(&self) -> chrono::DateTime<chrono::Utc> {
+        let elapsed =
+            chrono::Duration::from_std(self.clock.0.elapsed()).unwrap_or(chrono::Duration::MAX);
+        self.clock
+            .1
+            .checked_add_signed(elapsed)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    }
+
     fn observe_waiting(&mut self, restored: bool) {
         if self.writer.is_stopped() {
             return;
         }
         let now = tokio::time::Instant::now();
-        let elapsed =
-            chrono::Duration::from_std(now - self.clock.0).unwrap_or(chrono::Duration::MAX);
-        let utc = self
-            .clock
-            .1
-            .checked_add_signed(elapsed)
-            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
+        let utc = self.utc_now();
         let open = self
             .writer
             .store()
@@ -783,7 +502,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     fn delivery_allowed(&mut self) -> bool {
-        self.writer.delivery_allowed(!self.owed.is_empty())
+        let owing = !self.owed.is_empty() || self.writer.has_local_retry();
+        self.writer.delivery_allowed(owing)
     }
 
     /// Verified sources are restored apart from delivery permission, which each piece proves.
@@ -819,6 +539,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             match self.writer.deliver(item).await {
                 Step::Done => {
                     self.owed.pop_front();
+                    if self.writer.has_local_retry() {
+                        return;
+                    }
                 }
                 Step::LeaseBusy | Step::NoGateway | Step::Stopped | Step::Withheld => return,
             }
@@ -868,6 +591,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     /// Sources rotated away from whose cursor is not retired yet: O still reads each of them.
     fn unsettled(&mut self) -> Option<usize> {
+        if self.transitions.applying() {
+            return None;
+        }
         let store = self.writer.store();
         let rotation = store.rotation().ok()?;
         let retired = store.cursors().filter(|cursor| cursor.retired);
@@ -884,7 +610,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let channel = self.writer.channel();
         let notice = (self.notice).get_or_insert_with(|| self.bindings.subscribe(channel));
         let latest = *notice.borrow();
-        let (owed, unsealed) = (self.owed.len(), usize::from(self.deriver.has_unsealed()));
+        let (owed, unsealed) = (
+            self.owed.len() + usize::from(self.writer.has_local_retry()),
+            usize::from(self.deriver.has_unsealed()),
+        );
         let store = self.writer.store();
         let prepared = usize::from(store.ledger().unresolved().is_some());
         let rotation = store.rotation().ok()?;
@@ -939,6 +668,12 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
+#[cfg(test)]
+pub(crate) use transition::test_hooks as transition_hooks;
+#[cfg(test)]
+pub(crate) use transition_snapshot::{
+    execution_read, execution_sources, force_execution_for_tests,
+};
 
 #[cfg(test)]
 mod test_support {
@@ -963,6 +698,7 @@ mod test_support {
             verified: None,
             sources: Sources::new(channel, provider, Arc::clone(&bindings)),
             bindings,
+            transitions: transition::Transitions::new(None, watch::channel(false).1),
             notice: None,
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),
@@ -990,7 +726,13 @@ mod test_support {
         hold();
         actor.read_sources();
         actor.collect_settled();
-        actor.deliver_owed().await;
+        let now = actor.utc_now();
+        if actor.delivery_allowed() {
+            actor.writer.retry_local(now).await;
+        }
+        if !actor.writer.has_local_retry() {
+            actor.deliver_owed().await;
+        }
         assert_eq!(
             cursor(&mut actor),
             previous_cursor,
@@ -1011,3 +753,7 @@ mod test_support {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "p5a2_actor_tests.rs"]
+pub(crate) mod p5a2_tests;

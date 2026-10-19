@@ -250,6 +250,43 @@ pub(super) fn failed_synthetic_placeholder_cleanup_target(
     anchor_is_owned_placeholder.then_some(anchor_message_id)
 }
 
+/// For a Codex channel boot selected for turn mode, whether it is confirmed, read under the start
+/// lock a confirmation takes; the lock stays in `guard` through the persist or claim that follows.
+async fn codex_confirmed(
+    lock: &Arc<tokio::sync::Mutex<()>>,
+    guard: &mut Option<tokio::sync::OwnedMutexGuard<()>>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> bool {
+    // No confirmation reaches an unselected channel, and a waiting worker holds this lock for long.
+    if *provider != ProviderKind::Codex || !crate::services::tui_o::cutover::turn_selected(channel)
+    {
+        return false;
+    }
+    *guard = Some(Arc::clone(lock).lock_owned().await);
+    crate::services::tui_o::turn_mode::transcript_turns(channel)
+}
+
+/// Turn mode was confirmed while this observation waited: no Legacy turn starts for it, so its
+/// owned placeholder and its lease are released.
+async fn release_confirmed_observation(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    prompt: &ObservedTuiPrompt,
+    anchor_message_id: MessageId,
+    anchor_is_owned_placeholder: bool,
+) {
+    crate::services::tui_prompt_dedupe::clear_external_input_relay_lease_if_generation_matches(
+        &prompt.provider,
+        &prompt.tmux_session_name,
+        channel_id.get(),
+        prompt.external_input_lease_generation,
+    );
+    let (anchor, owned) = (anchor_message_id, anchor_is_owned_placeholder);
+    delete_failed_synthetic_owned_placeholder(shared, provider, channel_id, anchor, owned).await;
+}
+
 pub(super) async fn delete_failed_synthetic_owned_placeholder(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -359,11 +396,6 @@ pub(super) async fn resolve_tui_direct_synthetic_lifecycle_anchor(
         channel_id,
         Some((channel_id, notification_anchor_message_id)),
         false,
-        crate::services::tui_o::n1_observation::Context {
-            provider: &prompt.provider,
-            origin: "tui_direct_synthetic",
-            input_message_id: None,
-        },
     )
     .await;
     let anchor = synthetic_lifecycle_anchor_from_placeholder_result(
@@ -488,6 +520,10 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
         // an un-finalized prior turn persists a DURABLE pending-start and hands
         // the claim to a DETACHED per-channel worker (fresh EOF offset); the
         // common no-interleave case stays on the inline fast path.
+        let lock = super::super::tui_direct_pending_start::channel_lock(
+            provider.as_str(),
+            channel_id.get(),
+        );
         let prior = super::synthetic_start::synthetic_start_prior_turn_view(
             shared,
             &provider,
@@ -496,7 +532,16 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
             anchor_message_id.get(),
         )
         .await;
-        if super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view) {
+        let defer =
+            super::super::tui_direct_pending_start::should_defer_synthetic_turn_start(prior.view);
+        let mut confirming = None;
+        if codex_confirmed(&lock, &mut confirming, &provider, channel_id.get()).await {
+            let (anchor, owned) = (anchor_message_id, anchor_is_owned_placeholder);
+            release_confirmed_observation(shared, &provider, channel_id, prompt, anchor, owned)
+                .await;
+            return true;
+        }
+        if defer {
             deferred_synthetic_start = true;
             crate::services::tui_prompt_dedupe::hand_native_turn_to_worker(
                 prompt,
@@ -519,11 +564,10 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 "deferred TUI-direct synthetic turn-start off the observer loop; prior turn not yet finalized (durable record persisted, detached per-channel worker spawned)"
             );
         } else {
-            let lock = super::super::tui_direct_pending_start::channel_lock(
-                provider.as_str(),
-                channel_id.get(),
-            );
-            let _inline_claim_guard = lock.lock().await;
+            let _inline_claim_guard = match confirming.take() {
+                Some(guard) => guard,
+                None => Arc::clone(&lock).lock_owned().await,
+            };
             let (claim, source) =
                 super::synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
                     shared,
@@ -597,3 +641,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
     }
     deferred_synthetic_start
 }
+
+#[cfg(test)]
+#[path = "synthetic_start_wiring_codex_tests.rs"]
+mod codex_tests;

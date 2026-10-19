@@ -67,6 +67,13 @@
       ]
     },
     {
+      "path": "src/services/discord/session_relay_sink/routing.rs",
+      "decides": "whether the session-bound sink may own terminal delivery and the delivery lease it holds",
+      "guards": [
+        "named_target:t1-sink-terminal-handoff"
+      ]
+    },
+    {
       "path": "src/services/discord/tmux_watcher_registry/fences.rs",
       "decides": "the destructive watcher fence against a live delivery lease",
       "guards": [
@@ -143,6 +150,14 @@
     },
     {
       "path": "src/services/discord/catch_up.rs",
+      "decides": "the sweep order that shares retry/barrier state from phase 1 into phase 2 and re-arms open barriers last",
+      "guards": [
+        "entry_test:services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it",
+        "entry_test:services::discord::catch_up::classification_order_tests::queue_membership_alone_does_not_advance_the_phase2_checkpoint"
+      ]
+    },
+    {
+      "path": "src/services/discord/catch_up/phase2_sweep.rs",
       "decides": "when catch-up may advance the phase-2 checkpoint past a queued message",
       "guards": [
         "entry_test:services::discord::tui_prompt_relay::relay_e2e::queue_recovery_e2e::a_queued_message_holds_the_checkpoint_until_a_turn_dispatches_it",

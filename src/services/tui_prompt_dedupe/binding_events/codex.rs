@@ -6,6 +6,29 @@ use crate::services::codex_tui::session::codex_tui_rollout_paths_same;
 use crate::services::codex_tui::session::source_observation::VerifiedCodexHookSource;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
+// Provider workers inherit only a fixture's explicit test root, never the live runtime root.
+#[cfg(test)]
+fn events_dir() -> io::Result<Option<PathBuf>> {
+    Ok(super::events_dir()?.or_else(|| {
+        std::env::var_os("AGENTDESK_TEST_CODEX_BINDING_ROOT")
+            .map(|root| PathBuf::from(root).join(BINDING_EVENTS_DIR))
+    }))
+}
+
+#[cfg(test)]
+fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
+    Ok(events_dir()?.map(|root| root.join(format!("{channel}.log"))))
+}
+
+mod commit;
+mod terminal;
+#[cfg(test)]
+pub(crate) use commit::commit_claim;
+#[cfg(test)]
+pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
+pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
+pub(crate) use terminal::terminal_pending_at_seq;
+
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
     let mut events = binding_events_since(channel, 0)?;
     events.retain(|e| {
@@ -192,6 +215,8 @@ pub(crate) struct Ownership {
     pub context: BindingContext,
     pub claim: Claim,
     pub pending_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<DateTime<Utc>>,
     // A revalidated source may reuse eligibility without changing the exact Pending claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused_proof_seq: Option<u64>,
@@ -230,6 +255,12 @@ pub(crate) struct Claim {
 }
 
 impl Claim {
+    pub(crate) fn transition_from(&self, source: &SourceId) -> bool {
+        matches!(&self.evidence, ClaimEvidence::NativeHook { event, source: reason, .. }
+            if (event == "session_start" && matches!(reason.as_deref(), Some("resume" | "clear" | "compact" | "fork")))
+                || (event == "user_prompt_submit" && self.session_id == source.session_id))
+    }
+
     fn fresh(&self) -> bool {
         matches!(&self.evidence, ClaimEvidence::NativeHook { event, source, .. }
             if event == "user_prompt_submit" || (event == "session_start" && source.as_deref() == Some("startup")))
@@ -280,6 +311,7 @@ impl Claim {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaimRecord {
     pub seq: u64,
+    pub published_at: Option<DateTime<Utc>>,
     pub claim: Claim,
 }
 
@@ -396,7 +428,12 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
             }
             let (session, path) = match &event.new {
                 BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                    if (!proof.claim.eligible(&proof.context) && proof.reused_proof_seq.is_none())
+                    if (!proof.claim.eligible(&proof.context)
+                        && proof.reused_proof_seq.is_none()
+                        && !event
+                            .old
+                            .as_ref()
+                            .is_some_and(|old| proof.claim.transition_from(old)))
                         || !claim_path(&proof.context, &source.path)
                     {
                         return Err(invalid("ineligible Codex ownership proof"));
@@ -446,6 +483,31 @@ fn ownership_records(channel: u64) -> io::Result<Vec<Logged>> {
     Ok(read.records)
 }
 
+/// The first proof of an executed resume may resolve the native resume Pending naming its
+/// source (any other Pending still blocks it); generic candidate equality stays evidence-exact.
+fn initial_resume_resolves(
+    context: &BindingContext,
+    fold: &Fold,
+    pending: &ClaimRecord,
+    claim: &Claim,
+    source: &SourceId,
+) -> bool {
+    fold.verified.is_none()
+        && context.launch_mode == "resume"
+        && context.expected_native_session_id.as_ref() == Some(&claim.session_id)
+        && matches!(&claim.evidence, ClaimEvidence::ExplicitResume { executed_session_id }
+            if executed_session_id == &claim.session_id)
+        && source.session_id == claim.session_id
+        && pending.claim.session_id == claim.session_id
+        && pending
+            .claim
+            .path
+            .as_ref()
+            .is_none_or(|path| path == &source.path)
+        && matches!(&pending.claim.evidence, ClaimEvidence::NativeHook { event, source: Some(reason), .. }
+            if event == "session_start" && reason == "resume")
+}
+
 fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold> {
     let mut fold = Fold::default();
     for logged in records.iter().filter(|logged| {
@@ -467,7 +529,12 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
                 .pending
                 .iter()
                 .position(|pending| {
-                    pending.seq == seq && pending.claim.same_candidate(&ownership.claim)
+                    pending.seq == seq
+                        && (pending.claim.same_candidate(&ownership.claim)
+                            || (event.old.is_none()
+                                && ownership.reused_proof_seq.is_none()
+                                && matches!(&event.new, BindingTarget::Resolved { source, .. }
+                                    if initial_resume_resolves(context, &fold, pending, &ownership.claim, source))))
                 })
                 .ok_or_else(|| invalid("Codex resolution/rejection has no matching Pending"))?;
             fold.pending.remove(index);
@@ -483,19 +550,39 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
                 }
                 fold.pending.push(ClaimRecord {
                     seq: event.seq,
+                    published_at: ownership.published_at,
                     claim: ownership.claim.clone(),
                 });
             }
             BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
-                if fold.verified.as_ref().is_some_and(|p| {
+                if fold.verified.is_none() && !ownership.claim.eligible(context) {
+                    return Err(invalid("ineligible initial Codex ownership proof"));
+                }
+                let transition = fold.verified.as_ref().is_some_and(|p| {
                     p.source != *source
-                        || ownership.reused_proof_seq.is_some_and(|seq| seq != p.seq)
-                        || (!p.ownership.claim.same_candidate(&ownership.claim)
-                            && ownership.reused_proof_seq != Some(p.seq))
+                        && event.old.as_ref() == Some(&p.source)
+                        && ownership.claim.transition_from(&p.source)
+                        && ownership
+                            .published_at
+                            .is_some_and(|time| time > proof_time(p, records))
+                });
+                if fold.verified.as_ref().is_some_and(|p| {
+                    !transition
+                        && (p.source != *source
+                            || ownership.reused_proof_seq.is_some_and(|seq| seq != p.seq)
+                            || (!p.ownership.claim.same_candidate(&ownership.claim)
+                                && ownership.reused_proof_seq != Some(p.seq)))
                 }) || !fold.pending.is_empty()
-                    || !neutral_legacy(context, records, source, event.seq, |seq, observed| {
-                        recorded_native(seq, observed, source, &ownership.canonical_witnesses)
-                    })
+                    || !neutral_legacy(
+                        context,
+                        records,
+                        source,
+                        fold.verified.is_none(),
+                        event.seq,
+                        |seq, observed| {
+                            recorded_native(seq, observed, source, &ownership.canonical_witnesses)
+                        },
+                    )
                 {
                     return Err(invalid("conflicting Codex ownership proofs"));
                 }
@@ -541,6 +628,27 @@ pub(crate) fn proof_at_seq(
             _ => None,
         }
     }))
+}
+
+pub(crate) fn latest_ownership(
+    channel: u64,
+    tmux: &str,
+) -> io::Result<Option<(u64, String, DateTime<Utc>)>> {
+    let _logs = lock_logs();
+    if log_path(channel)?.is_none() {
+        return Ok(None);
+    }
+    Ok(ownership_records(channel)?
+        .into_iter()
+        .rev()
+        .find_map(|record| {
+            let ownership = record.codex_ownership?;
+            (ownership.context.tmux_session == tmux).then_some((
+                record.event.seq,
+                ownership.context.execution_nonce,
+                record.event.committed_at,
+            ))
+        }))
 }
 
 pub(crate) fn context_for_nonce(
@@ -672,6 +780,7 @@ fn neutral_legacy(
     context: &BindingContext,
     records: &[Logged],
     source: &SourceId,
+    initial_proof: bool,
     through_seq: u64,
     mut same_native: impl FnMut(u64, &SourceId) -> bool,
 ) -> bool {
@@ -684,6 +793,7 @@ fn neutral_legacy(
         let event = &logged.event;
         if event.execution_nonce.as_deref() != Some(&context.execution_nonce) {
             if context.launch_mode == "fresh"
+                && initial_proof
                 && named_before(std::slice::from_ref(event), event.seq, |id, _| {
                     id == source.session_id
                 })
@@ -713,177 +823,16 @@ fn neutral_legacy(
     true
 }
 
-/// Caller holds source authority; revalidate canonical/current context and descriptor inside `validate_current`.
-/// The callback must not reacquire the channel log mutex or publish runtime state.
-pub(crate) fn commit_claim(
-    context: &BindingContext,
-    claim: &Claim,
-    decision: Decision,
-    validate_current: impl FnOnce() -> io::Result<()>,
-) -> io::Result<Fold> {
-    let channel = ownership_context(context)?;
-    let mut failure = None;
-    commit_with(channel, |writer| {
-        let plan = (|| -> io::Result<Planned> {
-            validate_current()?;
-            let records = ownership_records(channel)?;
-            if records.len() as u64 != writer.last_seq {
-                return Err(invalid("Codex writer/history revision mismatch"));
-            }
-            let fold = fold_records(context, &records)?;
-            if uuid::Uuid::parse_str(&claim.session_id).is_err()
-                || claim
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| !claim_path(context, path))
-            {
-                return Err(invalid("invalid Codex native claim"));
-            }
-            let pending = fold.pending.iter().find(|p| p.claim.same_candidate(claim));
-            let mut canonical_witnesses = Vec::new();
-            let mut reused_proof_seq = None;
-            let verified = match &decision {
-                Decision::Verified(source) => {
-                    if !claim_path(context, &source.path)
-                        || source.session_id != claim.session_id
-                        || claim.path.as_ref().is_some_and(|path| path != &source.path)
-                        || !source_file_matches(source)
-                    {
-                        return Err(invalid("stale Codex claim descriptor"));
-                    }
-                    reused_proof_seq = fold
-                        .verified
-                        .as_ref()
-                        .filter(|proof| {
-                            pending.is_some()
-                                && proof.source == *source
-                                && proof.ownership.claim.same_source_candidate(claim, source)
-                        })
-                        .map(|proof| proof.seq);
-                    let same_proof = fold.verified.as_ref().is_some_and(|p| {
-                        p.source == *source
-                            && (p.ownership.claim.same_candidate(claim)
-                                || reused_proof_seq.is_some())
-                    });
-                    if same_proof && pending.is_none() {
-                        return Ok(Planned::Keep(Committed::Unchanged));
-                    }
-                    (claim.eligible(context) || reused_proof_seq.is_some())
-                        && (fold.verified.is_none() || same_proof)
-                        && fold.pending.iter().all(|p| p.claim.same_candidate(claim))
-                        && neutral_legacy(
-                            context,
-                            &records,
-                            source,
-                            writer.last_seq,
-                            |seq, observed| {
-                                let prior = fold
-                                    .verified
-                                    .as_ref()
-                                    .map(|proof| &proof.ownership.canonical_witnesses[..])
-                                    .unwrap_or_default();
-                                if !recorded_native(seq, observed, source, prior)
-                                    && !same_native(observed, source)
-                                {
-                                    return false;
-                                }
-                                if observed.path != source.path {
-                                    let witness = CanonicalWitness {
-                                        observation_seq: seq,
-                                        observed: observed.clone(),
-                                        source: source.clone(),
-                                    };
-                                    if !canonical_witnesses.contains(&witness) {
-                                        canonical_witnesses.push(witness);
-                                    }
-                                }
-                                true
-                            },
-                        )
-                }
-                _ => false,
-            };
-            let (new, pending_seq) = match decision {
-                Decision::Verified(source) if verified => (
-                    match pending {
-                        Some(p) => BindingTarget::Resolved {
-                            pending_seq: p.seq,
-                            source,
-                        },
-                        None => BindingTarget::Source(source),
-                    },
-                    pending.map(|p| p.seq),
-                ),
-                Decision::Rejected(reason) => (
-                    BindingTarget::Rejected {
-                        payload_session_id: claim.session_id.clone(),
-                        payload_transcript_path: claim
-                            .path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().into_owned()),
-                        reason,
-                    },
-                    pending.map(|p| p.seq),
-                ),
-                _ if pending.is_some() => return Ok(Planned::Keep(Committed::Unchanged)),
-                _ => (
-                    BindingTarget::Pending {
-                        payload_session_id: claim.session_id.clone(),
-                        payload_transcript_path: claim
-                            .path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().into_owned()),
-                    },
-                    None,
-                ),
-            };
-            let (hook_event, cause) = claim_event(claim);
-            let seq = writer.last_seq + 1;
-            let event = BindingEvent {
-                seq,
-                channel_id: channel,
-                provider: "codex".to_owned(),
-                tmux_session: context.tmux_session.clone(),
-                execution_nonce: Some(context.execution_nonce.clone()),
-                old: fold.verified.map(|p| p.source),
-                new,
-                cause,
-                parent_hint: None,
-                evidence: BindingEvidence {
-                    hook_event,
-                    received_at: Utc::now(),
-                },
-                committed_at: Utc::now(),
-            };
-            Ok(Planned::CodexAppend(
-                event,
-                Box::new(Ownership {
-                    schema: 1,
-                    seq,
-                    context: context.clone(),
-                    claim: claim.clone(),
-                    pending_seq,
-                    reused_proof_seq: verified.then_some(reused_proof_seq).flatten(),
-                    canonical_witnesses: if verified {
-                        canonical_witnesses
-                    } else {
-                        Vec::new()
-                    },
-                }),
-            ))
-        })();
-        match plan {
-            Ok(plan) => plan,
-            Err(error) => {
-                failure = Some(error);
-                Planned::Keep(Committed::Unchanged)
-            }
-        }
-    })?;
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    read_ownership(context)
+fn proof_time(proof: &VerifiedProof, records: &[Logged]) -> DateTime<Utc> {
+    proof.ownership.published_at.unwrap_or_else(|| {
+        records
+            .iter()
+            .find(|record| record.event.seq == proof.seq)
+            .expect("folded proof record")
+            .event
+            .evidence
+            .received_at
+    })
 }
 
 fn claim_event(claim: &Claim) -> (Option<String>, BindingCause) {

@@ -243,30 +243,9 @@ if run_check guards "TUI output shadow write-zero census"; then
 "$PYTHON" scripts/check_o_shadow_write_zero.py
 fi
 
-if run_check guards "N1 observation effect boundary"; then
-"$PYTHON" scripts/check_n1_observation_boundary.py
-"$PYTHON" -m unittest tests.test_n1_observation_boundary
-fi
-
-if run_check guards "N1 canary oracle input contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_oracle tests.test_n1_canary_collection
-"$PYTHON" tests/run_n1_canary_mutations.py
-"$PYTHON" tests/run_n1_canary_pg_fixture.py tests.test_n1_canary_pg
-fi
-
-if run_check guards "N1 native oracle contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_native tests.test_n1_canary_native_cli tests.test_n1_canary_native_wiring
-"$PYTHON" tests/run_n1_canary_native_mutations.py
-fi
-
-if run_check guards "N1 canary final audit contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_audit
-"$PYTHON" tests/run_n1_canary_audit_mutations.py
-fi
-
-if run_check guards "N1 canary producer capability contracts"; then
-"$PYTHON" -m unittest tests.test_n1_canary_producer
-"$PYTHON" tests/run_n1_canary_producer_mutations.py
+if run_check guards "hrot transition sender surface"; then
+"$PYTHON" scripts/check_hrot_sender_surface.py
+"$PYTHON" -m unittest tests.test_hrot_sender_surface
 fi
 
 if run_check guards "Alert dedupe/authority/routing wiring contract (#4448/#4449)"; then
@@ -299,6 +278,7 @@ fi
 if run_check guards "H2 tmux boundary measurer and admission self-tests"; then
 # Baseline gates skip until activation; driver/cfg canary and these unit tests already run in CI.
 "$PYTHON" -m unittest tests.test_h2_measure tests.test_h2_admission tests.test_h2_modmap tests.test_h2_cfg_compare tests.test_h2_cfg_collect tests.test_h2_session_driver tests.test_h2_session tests.test_h2_items
+"$PYTHON" -m unittest tests.test_h2_admission_carriers
 fi
 
 if run_check guards "Reachability row-independence + change-surface gate (#5071 T4-B1)"; then
@@ -358,6 +338,7 @@ if run_check guards "Durable frontier writer per-file call-site allowlist (#5071
 # measures each one.
 "$PYTHON" scripts/check_durable_frontier_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
+"$PYTHON" -m unittest tests.test_durable_frontier_writer_cfg_carriers
 fi
 
 if run_check guards "Input thread mapping census"; then
@@ -383,6 +364,13 @@ if run_check guards "Intake-outbox done writer per-file call-site allowlist (#50
 "$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites
 "$PYTHON" -m unittest tests.test_rust_lex
+fi
+
+if run_check guards "Run-owner raw owner-write allowlist"; then
+# Flags raw owner writes outside the run-owner guard's write module; the PG
+# contention tests, not this lexical scan, prove the guard serializes with cancel.
+"$PYTHON" scripts/check_run_owner_raw_writer_call_sites.py
+"$PYTHON" -m unittest tests.test_check_run_owner_raw_writer_call_sites
 fi
 
 if run_check guards "Comment-only change checker self-tests"; then
@@ -509,18 +497,20 @@ if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
 fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
-"$PYTHON" -m unittest tests.test_lane_source_parity
+"$PYTHON" -m unittest tests.test_lane_source_parity tests.test_lane_activation
 "$PYTHON" -m unittest tests.test_required_id_exception_fragments
 fi
 
+if run_check contracts "PR test selection plan (main runs every lane in full)"; then
+"$PYTHON" -m unittest tests.test_test_selection
+fi
+
 if run_check cargo "Test-target integrity gate (#5003/#5008)"; then
-# cargo exits 0 on zero filter matches, so a curated lane with the wrong
-# --lib/--bin/--test flag can run 0 tests while its required check stays
-# green. The gate consumes workflow and justfile command sites and is enforced
-# here. The unittest run below is the gate's own mutation proof.
+# Zero-match cargo is green; verify selectors and the shared compiled oracle.
+# Mutation tests retain the static/compiled and artifact fallback contracts.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
-"$PYTHON" -m unittest tests.test_target_empty_identity
+"$PYTHON" -m unittest tests.test_target_empty_identity tests.test_lib_test_artifact tests.test_lib_test_inventory_sharing tests.test_lib_inventory_fixture_environment
 AGENTDESK_CI_TIMEOUT_REPORT=1 bash scripts/ci/mem-measure.sh lib-inventory -- "$PYTHON" scripts/ci-timeout.py 1800 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_non_pg_test_filter
 fi
@@ -561,6 +551,10 @@ if run_check contracts "Process-global Mutex<()> poison-recovery gate (#5185)"; 
 # panics were PoisonError). A rule that only exists as prose is #5003.
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
+fi
+
+if run_check contracts "Flaky-retry verdict fixtures (dormant)"; then
+"$PYTHON" -m unittest tests.test_lane_retry_verdict
 fi
 
 if run_check contracts "Test ROOT file-reference policy"; then
@@ -732,11 +726,14 @@ if run_check contracts "Shell test suites (tests/*.sh)"; then
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
+  tests/test_cluster_deploy_peer_host_paths_6162.sh
   tests/test_cluster_deploy_peer_verdict_5189.sh
   tests/test_deploy_e2e_readers_gate_6577.sh
   tests/test_deploy_migration_floor_fail_forward_6090.sh
   tests/test_deploy_o_writer_rollback_guard_6325.sh
+  tests/test_deploy_rollback_policies_6355.sh
   tests/test_deploy_smoke_scope.sh
+  tests/test_deploy_smoke_runner_profile.sh
   tests/test_deploy_smoke_warn_scope_4511.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
   tests/test_deploy_smoke_turn_scenarios_6561.sh

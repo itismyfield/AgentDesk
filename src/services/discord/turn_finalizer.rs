@@ -54,8 +54,10 @@ pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // the `completion_signal_state` method and the watcher-backstop re-check below
 // reference them unqualified, byte-identical.
 use self::actor_state::{FinalizeMsg, LedgerEntry, PendingCompletionAdmission, Phase};
+#[cfg(test)]
+use self::completion_admission::CompletionAdmission;
 pub(in crate::services::discord) use self::completion_admission::CompletionAdmissionPlan;
-use self::completion_admission::{CompletionAdmission, publish_claimed_queue_eligible};
+use self::completion_admission::publish_claimed_queue_eligible;
 use self::completion_admission_actor::{
     apply_pending_completion_admission, handle_completion_admission_message,
     note_mailbox_release_after_finalize, take_exact_pending_completion_admission,
@@ -662,22 +664,13 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             &mut pending_admission,
                             exact_key,
                         );
-                        let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
-                            recovery_lease,
-                            phase: Phase::Pending,
-                            relay_owner,
-                            provider: provider.clone(),
-                            turn_key: key,
-                            terminal_deadline: None,
-                            watcher_backstop_deadline: arm_watcher_backstop
-                                .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP),
-                            watcher_backstop_probe_at: None,
-                            watcher_backstop_terminal_streak: 0,
-                            watcher_backstop_deadline_pulled: false,
-                            completion_admission: CompletionAdmission::new(
-                                completion_admission_plan,
-                            ),
-                            finalized_at: None,
+                        let deadline = arm_watcher_backstop
+                            .then(|| Instant::now() + WATCHER_REGISTER_BACKSTOP);
+                        let (lease, plan) = (recovery_lease, completion_admission_plan);
+                        let entry = ledger.entry(exact_key).or_insert_with(|| {
+                            LedgerEntry::registered(
+                                key, provider.clone(), relay_owner, lease, plan, deadline,
+                            )
                         });
                         if entry.phase != Phase::Finalized {
                             entry.relay_owner = relay_owner;
@@ -717,15 +710,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         event,
                         ctx,
                         evidence,
-                        input_permit,
                         shared,
                         ack,
                     } => {
                         cached_shared = Some(Arc::downgrade(&shared));
-                        // Move the serial actor state, not its authority, through worker cleanup.
-                        let mut owned_ledger = std::mem::take(&mut ledger);
-                        let mut owned_pending = std::mem::take(&mut pending_admission);
-                        let work = async move {
                         // #3866: the actor is a single, never-respawned task that
                         // owns finalize for the whole process. The crate unwinds
                         // (not `panic = "abort"`), so without this guard ONE panic
@@ -738,8 +726,8 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         // does not hang, and the loop survives to finalize the next
                         // turn.
                         let outcome = match AssertUnwindSafe(handle_terminal(
-                            &mut owned_ledger,
-                            &mut owned_pending,
+                            &mut ledger,
+                            &mut pending_admission,
                             key,
                             provider,
                             event,
@@ -760,17 +748,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                                 FinalizeOutcome::AlreadyFinalized
                             }
                         };
-                            (owned_ledger, owned_pending, outcome)
-                        };
-                        let (next_ledger, next_pending, outcome) =
-                            super::input_runtime::fence::effect::run(input_permit, work).await;
-                        ledger = next_ledger;
-                        pending_admission = next_pending;
                         let _ = ack.send(outcome);
                     }
                     FinalizeMsg::PolicyClose {
                         intent,
-                        input_permit,
                         shared,
                         ack,
                     } => {
@@ -786,17 +767,10 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             }
                         }
                         cached_shared = Some(Arc::downgrade(&shared));
-                        let mut owned_ledger = std::mem::take(&mut ledger);
-                        let work = async move {
-                            let outcome =
-                                handle_policy_close(&mut owned_ledger, *intent, &shared).await;
-                            (owned_ledger, outcome)
-                        };
+                        let work = handle_policy_close(&mut ledger, *intent, &shared);
                         #[cfg(test)]
                         let work = trace.settled(work);
-                        let (next_ledger, outcome) =
-                            super::input_runtime::fence::effect::run(input_permit, work).await;
-                        ledger = next_ledger;
+                        let outcome = work.await;
                         // Test seam: the committed close's ACK alone is lost.
                         #[cfg(test)]
                         if trace.lost(crate::services::turn_orchestrator::policy_close::test_hooks::Loss::Ack) {

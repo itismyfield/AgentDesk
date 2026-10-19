@@ -14,6 +14,9 @@ use std::time::Duration;
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
 
 #[cfg(test)]
+#[path = "exec_ops/circuit_evidence_tests.rs"]
+mod circuit_evidence_tests;
+#[cfg(test)]
 mod exec_allowlist_tests;
 #[cfg(test)]
 mod session_liveness_tests;
@@ -322,6 +325,15 @@ fn register_exec_ops_with_runner<'js>(
                             serde_json::json!({"ok": false, "error": error, "reason": reason})
                                 .to_string()
                         };
+                        let valid_target =
+                            crate::services::provider::ProviderKind::from_str(&provider)
+                                .is_some_and(|kind| kind.as_str() == provider)
+                                && channel_id
+                                    .parse::<u64>()
+                                    .is_ok_and(|channel| channel.to_string() == channel_id);
+                        if !valid_target {
+                            return refused("invalid inflight target", "Io");
+                        }
                         match crate::services::discord::policy_op::remove_row(&path) {
                             Outcome::Removed => {
                                 // Same removal log shape as the store's clears; the policy layer has no

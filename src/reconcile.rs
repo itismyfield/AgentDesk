@@ -770,20 +770,20 @@ async fn recover_orphan_typed_delivery_events_pg(pool: &PgPool) -> Result<usize>
     //    must cover every completed-delivery status the guard itself writes a
     //    notified key for (sent/fallback/duplicate/skipped), or those rows would
     //    keep reporting `missing_kv_meta`.
-    let notified_rebuilt = sqlx::query(&format!(
+    let notified_rebuilt = sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO kv_meta (key, value)
          SELECT 'dispatch_notified:' || src.dispatch_id, src.dispatch_id
            FROM ({latest_without_guard}) src
           WHERE src.status IN ('sent', 'fallback', 'duplicate', 'skipped')
          ON CONFLICT (key) DO NOTHING"
-    ))
+    )))
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)
     .map_err(|error| anyhow!("rebuild notified guard for guard-less completed events: {error}"))?;
 
     // 2. Finalize abandoned expired reservations whose guard key is already gone.
-    let reservations_failed = sqlx::query(&format!(
+    let reservations_failed = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE dispatch_delivery_events e
             SET status = 'failed',
                 error = COALESCE(e.error, 'delivery reservation expired before finalize'),
@@ -803,7 +803,7 @@ async fn recover_orphan_typed_delivery_events_pg(pool: &PgPool) -> Result<usize>
             AND src.status = 'reserved'
             AND src.reserved_until IS NOT NULL
             AND src.reserved_until <= NOW()"
-    ))
+    )))
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)

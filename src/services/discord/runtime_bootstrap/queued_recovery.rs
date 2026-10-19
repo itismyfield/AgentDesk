@@ -1,9 +1,16 @@
-//! Persisted turn and queue recovery shared by Gateway and REST worker runtimes.
+//! Persisted turn and queue recovery shared by Gateway and REST worker runtimes, and a standby
+//! holder's single-channel boot restore.
 use super::*;
+use crate::services::turn_orchestrator::{
+    load_channel_pending_dispatch_marker_checked, load_channel_pending_queue_checked,
+};
 
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
 mod s2a_tests;
+
+#[path = "queued_recovery_held.rs"]
+mod held;
 
 pub(super) async fn restore_worker_queues(shared: &Arc<SharedData>, provider: &ProviderKind) {
     let Some(http) = shared.serenity_http_or_token_fallback() else {
@@ -25,6 +32,20 @@ pub(super) async fn restore_queued_and_inflight_work(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
+    let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
+    held::spawn_retries(http, shared, provider, held);
+    stale_cards
+}
+
+/// The boot restore: its stale cards, and the channels whose merge failed with the rows they hold.
+async fn restore_and_hold(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+) -> (
+    Vec<(ChannelId, MessageId, MessageId)>,
+    Vec<held::HeldRestore>,
+) {
     // Restore pending intervention queues saved during previous SIGTERM
     // before inflight turn recovery. Drain-mode queue snapshots are the
     // source of truth for restart-gap user input; if inflight recovery
@@ -32,20 +53,16 @@ pub(super) async fn restore_queued_and_inflight_work(
     // persisted queue item look "already known" and incorrectly drop it.
     let (restored_queues, restored_overrides) = load_pending_queues(provider, &shared.token_hash);
     let restored_dispatch_markers = load_pending_dispatch_markers(provider, &shared.token_hash);
-    // Input-protected channels keep their files for the move or handback; nothing is installed.
-    let protected = |channel: ChannelId| {
-        crate::services::discord::input_runtime::fence::lookup(provider, channel.get()).is_some()
-    };
     let allowed_bot_ids_for_restore: Vec<u64> = {
         let settings = shared.settings.read().await;
         settings.allowed_bot_ids.clone()
     };
     let announce_bot_id_for_restore = super::resolve_announce_bot_user_id(shared).await;
+    // Channels whose merge could not read or write their queue; that input is not discarded.
+    let mut held = std::collections::HashMap::new();
+    let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
     // P1-1: Restore dispatch_role_overrides from queue snapshots
     for (thread_channel_id, alt_channel_id) in &restored_overrides {
-        if protected(*thread_channel_id) {
-            continue;
-        }
         if !matches!(
             resolve_runtime_channel_binding_status(http, *thread_channel_id).await,
             RuntimeChannelBindingStatus::Owned
@@ -61,9 +78,6 @@ pub(super) async fn restore_queued_and_inflight_work(
         let Some(alt_channel_id) = marker.restored_override else {
             continue;
         };
-        if protected(marker.channel_id) {
-            continue;
-        }
         if !matches!(
             resolve_runtime_channel_binding_status(http, marker.channel_id).await,
             RuntimeChannelBindingStatus::Owned
@@ -89,9 +103,6 @@ pub(super) async fn restore_queued_and_inflight_work(
         let mut skipped_duplicate = 0usize;
         let mut skipped_persist_error = 0usize;
         for (channel_id, items) in restored_queues {
-            if protected(channel_id) {
-                continue;
-            }
             if !matches!(
                 resolve_runtime_channel_binding_status(http, channel_id).await,
                 RuntimeChannelBindingStatus::Owned
@@ -123,10 +134,16 @@ pub(super) async fn restore_queued_and_inflight_work(
             if allowed_count == 0 {
                 continue;
             }
-            let result =
-                mailbox_merge_restored_queue_items(shared, provider, channel_id, allowed_items)
-                    .await;
+            let candidates = allowed_items.clone();
+            let merge =
+                mailbox_merge_restored_queue_items(shared, provider, channel_id, allowed_items);
+            let already = held.contains_key(&channel_id);
+            let (result, installed) =
+                held::guarded_merge(shared, provider, channel_id, already, merge).await;
             if let Some(error) = result.persistence_error {
+                let stale = &mut stale_cards_to_delete;
+                let entry = held::hold(&mut held, stale, channel_id, &error, installed);
+                entry.queue = Some(candidates);
                 // Merge-persist failed → the actor rolled the in-memory
                 // queue back. The live reconcile-window enqueue survives
                 // (it was persisted by its own `Enqueue` and lives in the
@@ -145,7 +162,7 @@ pub(super) async fn restore_queued_and_inflight_work(
         let skipped = skipped_unowned + skipped_sender + skipped_duplicate + skipped_persist_error;
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
-            "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate={skipped_duplicate}, persist_error={skipped_persist_error})"
+            "  [{ts}] 📋 FLUSH: restored {added} pending queue item(s) from disk (skipped {skipped}: unowned={skipped_unowned}, sender={skipped_sender}, duplicate_or_discarded={skipped_duplicate}, persist_error={skipped_persist_error})"
         );
     }
     // #2437 (#2427 C wire) boot-time generation
@@ -172,6 +189,8 @@ pub(super) async fn restore_queued_and_inflight_work(
         );
     }
 
+    #[cfg(test)]
+    held::pause_after_queue_merges().await;
     restore_inflight_turns(http, shared, provider).await;
 
     if !restored_dispatch_markers.is_empty() {
@@ -181,9 +200,6 @@ pub(super) async fn restore_queued_and_inflight_work(
         let mut skipped_duplicate = 0usize;
         let mut skipped_persist_error = 0usize;
         for marker in restored_dispatch_markers {
-            if protected(marker.channel_id) {
-                continue;
-            }
             if !matches!(
                 resolve_runtime_channel_binding_status(http, marker.channel_id).await,
                 RuntimeChannelBindingStatus::Owned
@@ -201,20 +217,27 @@ pub(super) async fn restore_queued_and_inflight_work(
                 skipped_sender += 1;
                 continue;
             }
-            let result = mailbox_merge_restored_dispatch_marker(
+            let (channel_id, alt) = (marker.channel_id, marker.restored_override);
+            let candidate = (marker.intervention.clone(), alt);
+            let merge = mailbox_merge_restored_dispatch_marker(
                 shared,
                 provider,
-                marker.channel_id,
+                channel_id,
                 marker.intervention,
-                marker.restored_override,
-            )
-            .await;
+                alt,
+            );
+            let already = held.contains_key(&channel_id);
+            let (result, installed) =
+                held::guarded_merge(shared, provider, channel_id, already, merge).await;
             if let Some(error) = result.persistence_error {
                 skipped_persist_error += 1;
+                let stale = &mut stale_cards_to_delete;
+                let entry = held::hold(&mut held, stale, channel_id, &error, installed);
+                entry.marker = Some(candidate);
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(
                     "  [{ts}] 📋 FLUSH: persist failed merging restored dispatch marker for channel {}: {error}",
-                    marker.channel_id
+                    channel_id
                 );
             } else if result.absorbed == 0 {
                 skipped_duplicate += 1;
@@ -234,10 +257,10 @@ pub(super) async fn restore_queued_and_inflight_work(
     // `restore_inflight_turns` so active turn ids are visible to mailbox
     // dedup; the placeholder live-queue filter then sees the final
     // restored queue state before kickoff.
-    let mut stale_cards_to_delete: Vec<(ChannelId, MessageId, MessageId)> = Vec::new();
     let mut restored_queued_placeholders =
         super::queued_placeholders_store::load_queued_placeholders(provider, &shared.token_hash);
-    restored_queued_placeholders.retain(|(channel, _), _| !protected(*channel));
+    // A held channel's undecided owners are not judged by the queued-only filter here.
+    restored_queued_placeholders.retain(|(channel_id, _), _| !held.contains_key(channel_id));
     if !restored_queued_placeholders.is_empty() {
         let live_queue_ids = collect_live_queue_message_ids(shared).await;
         let filter_outcome =
@@ -260,183 +283,169 @@ pub(super) async fn restore_queued_and_inflight_work(
                 "  [{ts}] 📋 FLUSH: loaded {live_count} live queued-placeholder candidate(s) from disk"
             );
         }
-        stale_cards_to_delete = filter_outcome.stale_cards;
+        stale_cards_to_delete.extend(filter_outcome.stale_cards);
         stale_cards_to_delete.extend(uninstalled);
     }
 
     // Inputs held by a person's draft get their pane protection and release watch back.
-    let mut live_queue_ids = collect_live_queue_message_ids(shared).await;
-    live_queue_ids.retain(|channel, _| !protected(*channel));
+    let live_queue_ids = collect_live_queue_message_ids(shared).await;
     super::turn_bridge::followup_requeue::rewatch_draft_holds(shared, provider, &live_queue_ids);
 
     // P1-2: Warn about legacy queue files that cannot be restored
     warn_legacy_pending_queue_files(provider);
 
-    stale_cards_to_delete
+    (stale_cards_to_delete, held.into_values().collect())
+}
+
+type Restore = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+type StandbyRestore = (
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<dyn Fn() -> Option<bool> + Send + Sync>,
+    Arc<dyn Fn() -> Restore + Send + Sync>,
+);
+
+/// A standby holder's port parts: its own restored flag, which the provider reconcile never sets,
+/// a read of the channel's persisted queue and marker, and the channel's boot restore.
+pub(super) fn standby_restore(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> StandbyRestore {
+    let restored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(test)]
+    let restored = match super::restore_mutant("reconcile_as_channel_restored") {
+        true => Arc::clone(&shared.restart.reconcile_done),
+        false => restored,
+    };
+    let (owner, token_hash) = (provider.clone(), shared.token_hash.clone());
+    let persisted = Arc::new(move || {
+        let channel = (channel != 0).then(|| ChannelId::new(channel))?;
+        persisted_input(&owner, &token_hash, channel)
+    });
+    let (shared, owner) = (Arc::clone(shared), provider.clone());
+    let run = Arc::new(move || -> Restore {
+        let (shared, provider) = (Arc::clone(&shared), owner.clone());
+        Box::pin(async move { restore_standby_channel(&shared, &provider, channel).await })
+    });
+    (restored, persisted, run)
+}
+
+/// Whether the channel's persisted queue or dispatch marker still holds input; `None` unreadable.
+fn persisted_input(provider: &ProviderKind, token_hash: &str, channel: ChannelId) -> Option<bool> {
+    let (queue, _) = load_channel_pending_queue_checked(provider, token_hash, channel).ok()?;
+    let marker =
+        load_channel_pending_dispatch_marker_checked(provider, token_hash, channel).ok()?;
+    Some(!queue.is_empty() || marker.is_some())
+}
+
+/// Restores one held channel's persisted input in the boot order: queue, inflight turn, marker,
+/// placeholders. `false` when a read, merge or install fails, or a restored row is left unrun.
+async fn restore_standby_channel(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: u64,
+) -> bool {
+    use crate::services::discord::mailbox_finish::try_restitution;
+    if channel == 0 || !super::herdr_runs_here(channel) {
+        return false;
+    }
+    let Some(http) = shared.serenity_http_or_token_fallback() else {
+        return false;
+    };
+    let (channel_id, token) = (ChannelId::new(channel), shared.token_hash.as_str());
+    let queue = load_channel_pending_queue_checked(provider, token, channel_id);
+    let marker = load_channel_pending_dispatch_marker_checked(provider, token, channel_id);
+    let placeholders = super::queued_placeholders_store::load_channel_queued_placeholders_checked(
+        provider, token, channel_id,
+    );
+    let row = super::inflight::load_channel_inflight_for_probe(provider, channel);
+    let (Ok((queue, queue_override)), Ok(marker), Ok(placeholders), Ok(row)) =
+        (queue, marker, placeholders, row)
+    else {
+        return false;
+    };
+    #[cfg(test)]
+    boot_restore_tests::paused(channel).await;
+    if !matches!(
+        resolve_runtime_channel_binding_status(&http, channel_id).await,
+        RuntimeChannelBindingStatus::Owned
+    ) {
+        return false;
+    }
+    let marker_override = marker.as_ref().and_then(|(_, alt)| *alt);
+    for alt in queue_override.into_iter().chain(marker_override) {
+        shared.dispatch.role_overrides.insert(channel_id, alt);
+    }
+    let allowed_bot_ids = shared.settings.read().await.allowed_bot_ids.clone();
+    let announce = super::resolve_announce_bot_user_id(shared).await;
+    let allowed = |item: &Intervention| {
+        let (author, bot) = (item.author_id.get(), item.author_is_bot);
+        super::is_allowed_turn_sender(&allowed_bot_ids, announce, author, bot, &item.text)
+    };
+    let persistence =
+        crate::services::discord::queue_persistence_context(shared, provider, channel_id);
+    let items: Vec<Intervention> = queue.into_iter().filter(|item| allowed(item)).collect();
+    if !items.is_empty() {
+        let merged = try_restitution(shared, channel_id, |h| {
+            let (items, p) = (items.clone(), persistence.clone());
+            async move { h.merge_restored_queue_items_or_refused(items, p).await }
+        });
+        if !matches!(merged.await, Ok(result) if result.persistence_error.is_none()) {
+            return false;
+        }
+    }
+    let Ok(before) = shared.mailbox(channel_id).try_snapshot().await else {
+        return false;
+    };
+    // A live turn of this process owns the row now; only a row left by the last process restores.
+    if let Some(state) = row.filter(|_| before.cancel_token.is_none()) {
+        let states = vec![state];
+        let restore = crate::services::discord::recovery_engine::restore_inflight_states(
+            &http, shared, provider, states,
+        );
+        Box::pin(restore).await;
+    }
+    let left = super::inflight::load_channel_inflight_for_probe(provider, channel);
+    let Ok(after) = shared.mailbox(channel_id).try_snapshot().await else {
+        return false;
+    };
+    // A held or unverified row left without a running turn is not restored.
+    let unrun = match left {
+        Ok(None) => false,
+        Ok(Some(_)) => after.cancel_token.is_none(),
+        Err(_) => true,
+    };
+    if unrun {
+        return false;
+    }
+    if let Some((marker, alt)) = marker.filter(|(item, _)| allowed(item)) {
+        let merged = try_restitution(shared, channel_id, |h| {
+            let (marker, p) = (marker.clone(), persistence.clone());
+            async move {
+                h.merge_restored_dispatch_marker_or_refused(marker, alt, p)
+                    .await
+            }
+        });
+        if !matches!(merged.await, Ok(result) if result.persistence_error.is_none()) {
+            return false;
+        }
+    }
+    let installed = super::queued_placeholders::install_channel_queued_placeholders_checked(
+        shared,
+        channel_id,
+        placeholders,
+    );
+    let Ok(stale) = installed.await else {
+        return false;
+    };
+    delete_stale_queued_placeholder_cards(&http, shared, &stale).await;
+    true
 }
 
 #[cfg(test)]
-#[path = "queued_recovery_fence_tests.rs"]
-mod fence_tests;
+#[path = "queued_recovery_boot_restore_tests.rs"]
+pub(super) mod boot_restore_tests;
 
 #[cfg(all(test, unix))]
 #[path = "queued_recovery_draft_tests.rs"]
 mod draft_tests;
-
-#[cfg(all(test, unix))]
-use crate::services::cluster::channel_home_port::scoped_restore::{
-    InflightObservation, RestoreContext, RestoreScope, RestoreStatus, RestoreWitness, mutant,
-};
-
-#[cfg(all(test, unix))]
-pub(crate) struct ScopedRestoreLane {
-    channel: u64,
-    serial: Arc<tokio::sync::Mutex<()>>,
-    current: Arc<std::sync::atomic::AtomicU64>,
-    witness: Arc<std::sync::Mutex<RestoreWitness>>,
-}
-#[cfg(all(test, unix))]
-impl ScopedRestoreLane {
-    pub(crate) fn new(channel: u64) -> Arc<Self> {
-        Arc::new(Self {
-            channel,
-            serial: Arc::default(),
-            current: Arc::default(),
-            witness: Arc::default(),
-        })
-    }
-    pub(crate) fn witness(&self) -> RestoreWitness {
-        self.witness.lock().unwrap().clone()
-    }
-    /// The owned task keeps serialization even if its caller abandons the join handle.
-    pub(crate) fn run<F, Fut>(
-        self: &Arc<Self>,
-        scope: RestoreScope,
-        generation: u64,
-        work: F,
-    ) -> tokio::task::JoinHandle<Result<(), String>>
-    where
-        F: FnOnce(ScopedRestoreAttempt) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
-    {
-        let lane = self.clone();
-        tokio::spawn(async move {
-            let guard = lane.serial.clone().lock_owned().await;
-            if scope.channel != lane.channel
-                || generation == 0
-                || generation <= lane.current.load(std::sync::atomic::Ordering::Acquire)
-            {
-                return Err("restore reservation is stale or foreign".into());
-            }
-            lane.current
-                .store(generation, std::sync::atomic::Ordering::Release);
-            *lane.witness.lock().unwrap() = RestoreWitness {
-                scope: Some(scope.clone()),
-                generation,
-                status: RestoreStatus::Restoring,
-                inflight: None,
-            };
-            let attempt = ScopedRestoreAttempt {
-                lane: lane.clone(),
-                _guard: guard,
-                next: 0,
-                context: RestoreContext {
-                    scope,
-                    generation,
-                    current: lane.current.clone(),
-                },
-            };
-            let result =
-                crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
-                    work(attempt),
-                )
-                .await;
-            if let Err(reason) = &result {
-                let mut witness = lane.witness.lock().unwrap();
-                if witness.generation == generation && witness.status != RestoreStatus::Restored {
-                    witness.status = RestoreStatus::Blocked(reason.clone().into());
-                }
-            }
-            result
-        })
-    }
-}
-#[cfg(all(test, unix))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstallStage {
-    Queue,
-    Inflight,
-    Marker,
-    Placeholder,
-}
-#[cfg(all(test, unix))]
-pub(crate) struct ScopedRestoreAttempt {
-    lane: Arc<ScopedRestoreLane>,
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    next: usize,
-    pub(crate) context: RestoreContext,
-}
-#[cfg(all(test, unix))]
-impl ScopedRestoreAttempt {
-    pub(crate) fn acknowledge(&mut self, stage: InstallStage) -> Result<(), String> {
-        self.context.check()?;
-        if [
-            InstallStage::Queue,
-            InstallStage::Inflight,
-            InstallStage::Marker,
-            InstallStage::Placeholder,
-        ]
-        .get(self.next)
-            != Some(&stage)
-        {
-            self.block("installation stage out of order");
-            return Err("installation stage out of order".into());
-        }
-        self.next += 1;
-        Ok(())
-    }
-    pub(crate) fn observe(&self, observation: InflightObservation) {
-        let mut witness = self.lane.witness.lock().unwrap();
-        if mutant("retained-restored")
-            && matches!(observation, InflightObservation::Retained { .. })
-        {
-            witness.status = RestoreStatus::Restored;
-        }
-        witness.inflight = Some(observation);
-    }
-    pub(crate) fn block(&self, reason: &str) {
-        self.lane.witness.lock().unwrap().status = RestoreStatus::Blocked(reason.into());
-    }
-    pub(crate) fn finish(&self) -> Result<RestoreWitness, String> {
-        self.context.check()?;
-        let mut witness = self.lane.witness.lock().unwrap();
-        if self.next != 4
-            || witness.inflight.is_none()
-            || !matches!(witness.status, RestoreStatus::Restoring)
-        {
-            witness.status =
-                RestoreStatus::Blocked("installation acknowledgements incomplete".into());
-            return Err("installation acknowledgements incomplete".into());
-        }
-        witness.status = RestoreStatus::Restored;
-        Ok(witness.clone())
-    }
-}
-#[cfg(all(test, unix))]
-impl Drop for ScopedRestoreAttempt {
-    fn drop(&mut self) {
-        let mut witness = self.lane.witness.lock().unwrap();
-        if witness.status == RestoreStatus::Restoring {
-            witness.status =
-                RestoreStatus::Blocked("restore task left installation incomplete".into());
-        }
-    }
-}
-
-#[cfg(all(test, unix))]
-#[path = "scoped_restore_lane_tests.rs"]
-mod scoped_restore_lane_tests;
-
-#[cfg(all(test, unix))]
-#[path = "scoped_inflight_restore_tests.rs"]
-mod scoped_inflight_restore_tests;

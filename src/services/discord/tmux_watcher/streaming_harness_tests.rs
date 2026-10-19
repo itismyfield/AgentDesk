@@ -38,17 +38,11 @@ mod n1a_turn_mode_tests;
 #[path = "o_seed_install_tests.rs"]
 mod o_seed_install_tests;
 
-#[path = "retired_host_tick_tests.rs"]
-mod retired_host_tick_tests;
-
-#[path = "retired_o_boundary_tests.rs"]
-mod retired_o_boundary_tests;
-
-#[path = "injected_watcher_tests.rs"]
-mod injected_watcher_tests;
-
 #[path = "o_capsule_origin_tests.rs"]
 mod o_capsule_origin_tests;
+
+#[path = "read_source_switch_tests.rs"]
+mod read_source_switch_tests;
 
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
 pub(super) const STATUS_PANEL_V2: &str = "ADK_STREAMING_HARNESS_STATUS_PANEL_V2";

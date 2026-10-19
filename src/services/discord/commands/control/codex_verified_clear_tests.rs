@@ -139,6 +139,24 @@ impl Fixture {
     }
 }
 
+impl Fixture {
+    /// The process and tmux session are gone with the spawn nonce the pin rested on, so the next
+    /// launch of this session is not held for its old incarnation's proof.
+    fn assert_ended_and_unpinned(&self) {
+        let tmux = &self.context.tmux_session;
+        assert!(!self.alive.load(Ordering::SeqCst), "the process ends");
+        let calls = self.fake.take_calls();
+        let killed = format!("kill-session -t ={tmux}:");
+        assert!(calls.contains(&killed), "{calls:?}");
+        assert!(
+            !dedupe::codex_verified_requires_proof(tmux),
+            "the pin is released"
+        );
+        let hold = crate::services::codex_tui::verified_hold::preflight(tmux, None);
+        assert!(hold.is_none(), "the next launch is not held");
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ =
@@ -156,7 +174,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 #[test]
-fn codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed() {
+fn codex_verified_clear_ends_the_incarnation_releases_its_pin_and_keeps_owed_output() {
     let fixture = Fixture::new("verified");
     let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, fixture.root.path())
         .unwrap()
@@ -174,6 +192,7 @@ fn codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed
         .unwrap();
     let mut owed = store.open_channel(&era, channel.get()).unwrap().unwrap();
     owed.append_ledger(LedgerEntry::Prepared {
+        local_retry: None,
         serial: 1,
         unit_key: UnitKey {
             channel_id: channel.get(),
@@ -220,49 +239,36 @@ fn codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed
                 })
             },
         ));
-        let before = shared.mailbox(channel).snapshot().await.active_turn_nonce;
         let http = Arc::new(serenity::Http::new(""));
-        let actual = clear_channel_session_state_fenced(
-            &http,
-            &shared,
-            &provider,
-            channel,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(actual.to_string(), VERIFIED_CODEX_RESET_REFUSAL);
-        let public = clear_channel_session_state(
-            &http,
-            &shared,
-            &provider,
-            channel,
-            "/clear",
-            SoftClearNotifyMode::Suppress,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(public.to_string(), VERIFIED_CODEX_RESET_REFUSAL);
-        assert_eq!(
-            shared.mailbox(channel).snapshot().await.active_turn_nonce,
-            before
+        let notify = SoftClearNotifyMode::Suppress;
+        let fenced = clear_channel_session_state_fenced(
+            &http, &shared, &provider, channel, "/clear", notify, None,
         );
-        assert!(!token.cancelled.load(Ordering::SeqCst));
+        fenced
+            .await
+            .expect("a verified incarnation is cleared like any other");
+        let public =
+            clear_channel_session_state(&http, &shared, &provider, channel, "/clear", notify);
+        public
+            .await
+            .expect("and cleared again from the public entry");
+        assert!(
+            token.cancelled.load(Ordering::SeqCst),
+            "the running turn stops"
+        );
         assert_eq!(
             clear_persist_failure_tests::queue_len(&shared, channel).await,
-            1
+            0
         );
         assert_eq!(
             clear_persist_failure_tests::session_state(&shared, channel).await,
-            (Some(clear_persist_failure_tests::SESSION_ID.into()), false)
+            (None, true)
         );
         tokio::task::yield_now().await;
         assert_eq!(
             starts.load(Ordering::SeqCst),
             0,
-            "next queue input is never scheduled"
+            "no discarded input is scheduled"
         );
     });
     assert_eq!(fs::read(ledger).unwrap(), owed_before);
@@ -270,7 +276,7 @@ fn codex_verified_clear_before_first_hook_preserves_output_nonce_marker_and_owed
         owed.ledger().unresolved().unwrap().1.payload,
         "owed before hook"
     );
-    fixture.assert_files_and_process_unchanged();
+    fixture.assert_ended_and_unpinned();
 }
 
 #[test]

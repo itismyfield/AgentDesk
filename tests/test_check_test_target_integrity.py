@@ -34,15 +34,28 @@ GOOD_COMMAND = "cargo test --lib high_risk_recovery:: -- --test-threads=1"
 # The generated arrays are proven only after this source in the command's own shell.
 SOURCED = f"source {integrity.NON_PG_FILTER_REL} && "
 # Generated skip values whose PG selection reaches the fixture lib: unsharded and
-# shard 1 through the module, shard 0 through `pg_` alone.
+# MODULE_CASE's shard through the module, every other shard through `pg_` alone.
 PG_SKIPS = ("_pg", "pg_", "postgres", "server::multinode_regression")
-PG_CASE = "server::multinode_regression::tests::pg_nested_case"
+MODULE_CASE = "server::multinode_regression::tests::nested_case"
+
+
+def _pg_cases() -> tuple[str, ...]:
+    """One `pg_` case for each shard but MODULE_CASE's."""
+    shard = integrity._membership().pg_test_shard
+    cases: dict[int, str] = {}
+    for index in range(1000):
+        case = f"server::multinode_regression::tests::pg_nested_case_{index}"
+        cases.setdefault(shard(case), case)
+    return tuple(case for index, case in sorted(cases.items()) if index != shard(MODULE_CASE))
+
+
+PG_CASES = _pg_cases()
 
 
 def write_generated_filter(root: Path, skips: tuple[str, ...] = PG_SKIPS,
-                           edit=lambda text: text, pg_case: str | None = PG_CASE) -> None:
+                           edit=lambda text: text, pg_cases: tuple[str, ...] = PG_CASES) -> None:
     """The checked-in filter with its generated region rendered for ``skips`` (so the
-    real PG derivation follows it), changed by ``edit``; ``pg_case`` joins the lib."""
+    real PG derivation follows it), changed by ``edit``; ``pg_cases`` join the lib."""
     contract = integrity._membership()
     lines = (REPO_ROOT / integrity.NON_PG_FILTER_REL).read_text("utf-8").splitlines()
     begin = lines.index(contract.NON_PG_SELECTION_BEGIN)
@@ -55,7 +68,7 @@ def write_generated_filter(root: Path, skips: tuple[str, ...] = PG_SKIPS,
     manifest = root / integrity.LIB_INVENTORY_MANIFEST_REL
     ids = integrity.load_lib_inventory_manifest(manifest)
     manifest.write_text(integrity.render_lib_inventory_manifest(
-        ids | {pg_case} if pg_case else ids), encoding="utf-8")
+        ids | set(pg_cases)), encoding="utf-8")
 
 
 def build_fixture_repo(root: Path, command: str, *,
@@ -112,7 +125,7 @@ def build_fixture_repo(root: Path, command: str, *,
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(integrity.render_lib_inventory_manifest({
         "high_risk_recovery::tests::recovery_case",
-        "server::multinode_regression::tests::nested_case",
+        MODULE_CASE,
         "route::redirected_impl::tests::redirected_case",
     }), encoding="utf-8")
     if integration_test:
@@ -1532,22 +1545,23 @@ class PgIncludeRestoration(unittest.TestCase):
         pg, run_only = self.PG, {"recipe": None}
         workflow, recipe = "ci-fixture.yml", "justfile"
         missing = ("_pg", "pg_", "postgres", "no_such_module")
-        zero = [(workflow, "pg-include-zero-match"), (recipe, "pg-include-zero-match")] + [(recipe, "pg-include-empty")] * 2
+        shards = integrity._membership().PG_SHARD_COUNT
+        zero = [(workflow, "pg-include-zero-match"), (recipe, "pg-include-zero-match")] + [(recipe, "pg-include-empty")] * shards
         normalized = pg.replace('"', "")
         for name, kwargs, kinds in (
                 ("every shard selects", {}, []),
-                # A workflow sources with the shard unset; a recipe may inherit 0 or 1.
-                ("shard 0 selects nothing", {"pg_case": None},
+                # A workflow sources with the shard unset; a recipe may inherit any shard.
+                ("only the module's shard selects", {"pg_cases": ()},
+                 [(recipe, "pg-include-empty")] * (shards - 1)),
+                ("the module's shard has no positive filter", {"skips": ("pg_", "postgres")},
                  [(recipe, "pg-include-empty")]),
-                ("shard 1 has no positive filter", {"skips": ("pg_", "postgres")},
-                 [(recipe, "pg-include-empty")]),
-                ("nothing selected", {"skips": missing, "pg_case": None}, zero),
-                ("allowlisted", {"skips": missing, "pg_case": None,
+                ("nothing selected", {"skips": missing, "pg_cases": ()}, zero),
+                ("allowlisted", {"skips": missing, "pg_cases": (),
                                  "allowlist": f"# reason: platform-gated\n{normalized}\n"}, zero),
                 # Another filter's tests cannot stand in for the generated selection's own.
                 ("other filter beside nothing", {"run": f"{pg} high_risk_recovery",
                                                  "recipe": f"{pg} high_risk_recovery",
-                                                 "skips": missing, "pg_case": None}, zero),
+                                                 "skips": missing, "pg_cases": ()}, zero),
                 ("other filter beside every shard", {"run": f"{pg} high_risk_recovery",
                                                      "recipe": f"{pg} high_risk_recovery"}, []),
                 # Restoring the array keeps every other run-time uncertainty.
@@ -1887,7 +1901,7 @@ mod after_string_brace {
             ), stderr="")
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"CARGO_PROFILE_TEST_DEBUG": "2", "I6184_SENTINEL": "kept"},
+            os.environ, {"ADK_LIB_TEST_ARTIFACT": "", "CARGO_PROFILE_TEST_DEBUG": "2", "I6184_SENTINEL": "kept"},
         ):
             root = Path(tmp)
             self._fixture(root)
@@ -2165,7 +2179,7 @@ mod after_string_brace {
         self.assertIn("entries=3", output.getvalue())
 
     def test_scanner_shrink_regeneration_is_rejected_by_cargo_backstop(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ADK_LIB_TEST_ARTIFACT=""):
             root = Path(tmp)
             (root / "src").mkdir()
             (root / "Cargo.toml").write_text(
@@ -2247,7 +2261,7 @@ mod after_string_brace {
         ])
 
     def test_sequential_git_merges_preserve_manifest_union(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ADK_LIB_TEST_ARTIFACT=""):
             fixture_root = Path(tmp)
             root = fixture_root / "repo"
             root.mkdir()

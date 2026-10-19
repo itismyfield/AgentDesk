@@ -3,6 +3,8 @@ use super::*;
 use crate::services::turn_orchestrator::registry_purge::retry_while_closed;
 use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
+#[cfg(unix)]
+pub(in crate::services::discord) mod codex_clear_compat;
 pub(super) mod kickoff;
 
 #[cfg(test)]
@@ -203,18 +205,12 @@ pub(super) async fn mailbox_take_next_soft_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let Ok(permit) = input_runtime::fence::effect::admit(provider, channel_id.get()) else {
-        return MailboxTakeNextSoftOutcome::default();
-    };
-    input_runtime::fence::effect::scope(
-        permit,
-        mailbox_take_soft_intervention(
-            shared,
-            provider,
-            channel_id,
-            None,
-            TakeHeadCondition::Unchecked,
-        ),
+    mailbox_take_soft_intervention(
+        shared,
+        provider,
+        channel_id,
+        None,
+        TakeHeadCondition::Unchecked,
     )
     .await
 }
@@ -224,27 +220,18 @@ pub(super) async fn mailbox_take_next_automatic_intervention(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let Ok(permit) = input_runtime::fence::effect::admit(provider, channel_id.get()) else {
-        return MailboxTakeNextSoftOutcome::default();
-    };
-    // Selection, feedback, and a capped-after-selection restore are one effect.
-    input_runtime::fence::effect::scope(
-        permit,
-        mailbox_take_admitted_automatic_intervention(shared, provider, channel_id),
-    )
-    .await
-}
-
-async fn mailbox_take_admitted_automatic_intervention(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) -> MailboxTakeNextSoftOutcome {
     // A turn-mode direct turn holds no token; a busy or unreadable transcript keeps the queue whole.
     if crate::services::tui_o::turn_mode::transcript_turns(channel_id.get()) {
         use super::turn_presence::activity::{Activity, activity_now};
+        use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
         let observed = activity_now(shared, provider, channel_id).await;
-        if observed.activity != Activity::Idle {
+        let cleared_canary_launch = observed.activity == Activity::Unknown
+            && observed.reason == "session_identity_unresolved"
+            && matches!(provider, ProviderKind::Codex)
+            && channel_id.get() == CANARY_CHANNEL
+            && crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_none()
+            && crate::services::tui_prompt_dedupe::clear_relaunch::relaunch_open(CANARY_TMUX);
+        if observed.activity != Activity::Idle && !cleared_canary_launch {
             tracing::info!(
                 provider = provider.as_str(),
                 channel_id = channel_id.get(),
@@ -325,8 +312,6 @@ async fn mailbox_take_admitted_automatic_intervention(
             }
             return result;
         };
-        #[cfg(test)]
-        input_effect_tests::after_selection(channel_id).await;
         if !intervention_became_capped(provider, channel_id, intervention) {
             return result;
         }
@@ -509,37 +494,11 @@ where
     Fut:
         std::future::Future<Output = crate::services::turn_orchestrator::RequeueInterventionResult>,
 {
-    use super::input_runtime::fence::{self, effect};
-    let permit = match effect::admit(provider, channel_id.get()) {
-        Ok(permit) => permit,
-        Err(failure) => {
-            use crate::services::turn_orchestrator::EnqueueRefusalReason as R;
-            let reason = match failure {
-                fence::Failure::Mode(mode) => R::InputModeFenced(mode),
-                fence::Failure::LockTimeout => R::LockTimeout,
-                fence::Failure::ActorUnreachable => R::ActorUnreachable,
-                _ => R::InputPersistence,
-            };
-            return MailboxEnqueueOutcome {
-                refusal_reason: Some(reason),
-                ..Default::default()
-            };
-        }
-    };
     let resolve = || Some(shared.mailbox(channel_id));
-    let Some((_, result)) = effect::scope(
-        permit.clone(),
-        retry_while_closed(channel_id, resolve, request),
-    )
-    .await
-    else {
+    let Some((_, result)) = retry_while_closed(channel_id, resolve, request).await else {
         return MailboxEnqueueOutcome::default();
     };
-    effect::scope(
-        permit,
-        super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events),
-    )
-    .await;
+    super::apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if let Some(error) = result.persistence_error.as_ref() {
         tracing::warn!(
             provider = provider.as_str(),

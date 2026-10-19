@@ -231,9 +231,9 @@ async fn native_write_is_all_or_nothing_and_partial_correlation_is_refused_pg() 
         ("legacy", "native_clear_generation = 1"),
         ("legacy", "native_clear_resolved_at = NOW()"),
     ] {
-        let error = sqlx::query(&format!(
+        let error = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE channel_session_clear_boundaries SET {set} WHERE channel_id = $1"
-        ))
+        )))
         .bind(channel)
         .execute(&pool)
         .await
@@ -339,37 +339,4 @@ fn record_and_classification_agree_on_every_row_shape() {
         let read = native_clear_record::from_row(row.clone()).map(|r| (r.resolved, r.superseded));
         assert_eq!(read, record, "{row:?}");
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn record_keeps_the_ticket_after_resolve_and_supersession_pg() {
-    let (db, pool) = create_pool().await;
-    assert_eq!(native_channel_clear_record(&pool, "r").await.unwrap(), None);
-    let g1 = native_clear(&pool, "r", "n1").await;
-    let read = |pool: PgPool| async move {
-        native_channel_clear_record(&pool, "r")
-            .await
-            .unwrap()
-            .unwrap()
-    };
-    let first = read(pool.clone()).await;
-    assert_eq!(
-        (first.generation, first.ticket, first.resolved),
-        (g1, Some(ticket("n1")), false)
-    );
-    assert_eq!(resolve(&pool, "r", g1).await, NativeClearResolve::Resolved);
-    let resolved = read(pool.clone()).await;
-    assert_eq!(
-        (resolved.ticket, resolved.resolved),
-        (Some(ticket("n1")), true)
-    );
-    let g2 = native_clear(&pool, "r", "n2").await;
-    legacy_clear(&pool, "r").await;
-    let superseded = read(pool.clone()).await;
-    assert_eq!(superseded.generation, g2);
-    assert_eq!(superseded.ticket, Some(ticket("n2")));
-    assert!(superseded.superseded && !superseded.resolved);
-    assert_eq!(state(&pool, "r").await, NativeClearBoundary::Superseded);
-    pool.close().await;
-    db.drop().await;
 }

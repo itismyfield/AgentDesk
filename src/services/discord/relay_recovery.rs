@@ -46,7 +46,6 @@ use super::{
 };
 use crate::services::provider::ProviderKind;
 
-#[path = "relay_recovery/apply.rs"]
 mod apply;
 #[path = "relay_recovery_auto_heal_apply.rs"]
 mod auto_heal_apply;
@@ -56,9 +55,10 @@ mod auto_heal_attempts;
 mod auto_heal_confirm;
 #[path = "relay_recovery_circuit_breaker.rs"]
 mod circuit_breaker;
+#[path = "relay_recovery_circuit_evidence.rs"]
+pub(in crate::services::discord) mod circuit_evidence;
 #[path = "relay_recovery_completion_footer.rs"]
 mod completion_footer;
-#[path = "relay_recovery/decision.rs"]
 mod decision;
 #[cfg(unix)]
 #[path = "relay_recovery/destructive_warrant.rs"]
@@ -75,11 +75,7 @@ pub(super) mod leaked_row_sweep;
 mod reattach_apply;
 #[path = "relay_recovery_circuit_alert_producer.rs"]
 mod relay_recovery_circuit_alert_producer;
-
 pub(super) use apply::*;
-pub(in crate::services::discord) use decision::*;
-pub(crate) use idle_tmux::*;
-
 use auto_heal_apply::apply_relay_recovery_plan;
 #[cfg(test)]
 use auto_heal_attempts::{
@@ -91,6 +87,8 @@ use auto_heal_attempts::{
     AUTO_HEAL_WINDOW_SECS, auto_heal_key, max_attempts_per_window_for_snapshot,
     remaining_auto_heal_attempts,
 };
+pub(in crate::services::discord) use decision::*;
+pub(crate) use idle_tmux::*;
 
 /// Protect probe and manual cleanup across the #4569 incident window: mailbox
 /// admission at 05:16:44.468 was misclassified at 05:16:47.320 (~2.9 seconds).
@@ -278,7 +276,6 @@ async fn run_relay_recovery_at(
         ),
         None => None,
     };
-
     let observed_before = std::time::Instant::now();
     let snapshot = match parsed_provider.as_ref() {
         Some(provider) => {
@@ -292,14 +289,13 @@ async fn run_relay_recovery_at(
         channel_id,
         provider: provider_filter.map(str::to_string),
     })?;
-
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
+    decision.evidence.tail_observation = snapshot.tail_observation;
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     decision.affected.mailbox_active_turn_nonce = snapshot.mailbox_active_turn_nonce.clone();
     decision.affected.observed_before = Some(observed_before);
     trace_relay_recovery_decision(&decision, apply);
-
     if !apply {
         return Ok(RelayRecoveryResponse {
             ok: true,
@@ -486,6 +482,7 @@ async fn auto_apply_relay_recovery_for_shared_at(
         snapshot.relay_stall_state
     };
     let mut decision = plan_relay_recovery(&planning_health, planning_stall_state, now_ms);
+    decision.evidence.tail_observation = snapshot.tail_observation;
     if source == RelayRecoveryApplySource::StallWatchdog
         && decision.relay_stall_state == RelayStallState::OrphanPendingToken
         && decision.auto_heal.skipped_reason == Some("orphan_token_within_admission_grace")
@@ -654,6 +651,7 @@ mod axis_b_tests {
         channel_id: u64,
     ) -> health::WatcherStateSnapshot {
         health::WatcherStateSnapshot {
+            tail_observation: Default::default(),
             provider: "codex".to_string(),
             attached: false,
             tmux_session: None,
@@ -789,6 +787,11 @@ mod axis_b_tests {
 
         for (source, allowed_warrant_binds, fixture_observations, fixture_verdicts) in [
             (include_str!("health/recovery.rs"), 0, 1, 3),
+            (include_str!("health/recovery/watchdog_pass.rs"), 0, 0, 0),
+            (include_str!("health/recovery/runtime_stop.rs"), 0, 0, 0),
+            (include_str!("health/recovery/inflight_repair.rs"), 0, 0, 0),
+            (include_str!("health/recovery/runtime_lookup.rs"), 0, 0, 0),
+            (include_str!("health/recovery/channel_runtime.rs"), 0, 0, 0),
             (
                 include_str!("health/recovery/watchdog_decisions.rs"),
                 1,
@@ -917,11 +920,11 @@ mod axis_b_tests {
         );
         for (source, needle) in [
             (
-                include_str!("health/recovery.rs"),
+                include_str!("health/recovery/watchdog_pass.rs"),
                 "AxisBSite::WatchdogStaleIdle",
             ),
             (
-                include_str!("health/recovery.rs"),
+                include_str!("health/recovery/watchdog_pass.rs"),
                 "AxisBSite::WatchdogExplicitBackground",
             ),
             (

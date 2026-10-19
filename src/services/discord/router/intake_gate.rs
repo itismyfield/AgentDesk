@@ -10,10 +10,10 @@ mod busy_duplicate_notice;
 pub(super) mod busy_inject;
 mod component_events;
 mod gate;
-pub(in crate::services::discord) mod ledger;
-use crate::services::discord::input_runtime::intake::admit::SourceKind;
+#[cfg(all(test, unix))]
+mod live_entry_tests;
 mod queue_effects;
-mod stale_turn;
+pub(super) mod stale_turn;
 
 pub(in crate::services::discord) use gate::should_process_turn_message;
 
@@ -27,8 +27,7 @@ use gate::{
 pub(in crate::services::discord::router) use queue_effects::should_schedule_post_enqueue_idle_drain;
 use queue_effects::{IntakeGateQueueEffects, render_visible_queued_ack};
 use stale_turn::{
-    mailbox_has_live_active_turn_or_cleanup_stale_proof, thread_guard_force_clean_stale_thread,
-    thread_guard_should_force_clean_stale_thread,
+    mailbox_has_live_active_turn_or_cleanup_stale_proof, thread_guard_release_stale_thread,
 };
 
 async fn append_pending_uploads(
@@ -746,19 +745,6 @@ pub(in crate::services::discord) async fn handle_event(
             if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
-            if !is_dm
-                && Box::pin(ledger::hold_live(
-                    &data.shared,
-                    &ctx.http,
-                    &data.provider,
-                    new_message,
-                    SourceKind::LiveMessage,
-                    None,
-                ))
-                .await?
-            {
-                return Ok(());
-            }
             let author_excluded_from_cancel_preservation =
                 live_sender_excluded_from_human_preservation(
                     &settings_snapshot.allowed_bot_ids,
@@ -878,8 +864,8 @@ pub(in crate::services::discord) async fn handle_event(
                         admitted_attachment_submission = Some(submission);
                     }
                     Err(nonlocal) => {
-                        super::finish_text_intake_admission(&deps, nonlocal, submission).await?;
-                        return Ok(());
+                        let finish = super::finish_nonlocal_attachment_admission;
+                        return finish(&deps, nonlocal, submission).await;
                     }
                 }
 
@@ -1144,21 +1130,14 @@ pub(in crate::services::discord) async fn handle_event(
                         // mirroring the stall-watchdog's conjunction so a
                         // quiet-but-live long turn (e.g. mid-Bash) is never
                         // mistaken for a dead dispatch.
-                        let stale_inflight = thread_guard_should_force_clean_stale_thread(
+                        let released = thread_guard_release_stale_thread(
                             &data.shared,
                             &data.provider,
                             thread_id,
                             chrono::Utc::now().timestamp(),
                         )
                         .await;
-                        if stale_inflight {
-                            thread_guard_force_clean_stale_thread(
-                                &data.shared,
-                                &data.provider,
-                                channel_id,
-                                thread_id,
-                            )
-                            .await;
+                        if released {
                             // Fall through to normal processing below.
                         } else {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1638,7 +1617,7 @@ pub(in crate::services::discord) async fn handle_event(
             };
             // A replay-deferred direct dispatch checkpoints only once its custody is settled.
             let settle_checkpoint = attachment_local_permit.is_none()
-                && super::checkpoint_waits_for_admission(channel_id);
+                && super::live_checkpoint_waits(&data.provider, channel_id);
             if !settle_checkpoint {
                 checkpoint();
             }

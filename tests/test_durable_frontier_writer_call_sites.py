@@ -104,11 +104,8 @@ class SourceContractTests(unittest.TestCase):
             guard.PINNED_TEST_ONLY_MODULE_FILES,
             guard._SKIP_PIN.PINNED_TEST_ONLY_MODULE_FILES,
         )
-        self.assertEqual(
-            guard.PINNED_TEST_ONLY_MODULE_FILES,
-            guard._SKIP_PIN.PINNED_BASENAME_TEST_FILES
-            | guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES,
-        )
+        self.assertIs(guard.PINNED_TEST_ONLY_MODULE_FILES,
+                      guard._SKIP_PIN.PINNED_RESOLVER_TEST_ONLY_FILES)
 
     def test_scan_root_is_all_of_src(self):
         """Narrowing the scan is the cheapest way to fake a green gate."""
@@ -560,8 +557,8 @@ class DiscriminationTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        write(root, "src/main.rs", "fn main() {}\n")
-        removed_path = "src/hidden_tests.rs"
+        write(root, "src/main.rs", "#[cfg(test)] mod helper;\nfn main() {}\n")
+        removed_path = "src/helper.rs"
         write(root, removed_path, "")
         canonical = frozenset({removed_path})
         mutations = {
@@ -590,8 +587,8 @@ class DiscriminationTests(unittest.TestCase):
     def test_census_survives_pin_comparison_bypass(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)
-        write(root, "src/main.rs", "fn main() {}\n")
-        write(root, "src/new_tests.rs", "")
+        write(root, "src/main.rs", "#[cfg(test)] mod helper;\nfn main() {}\n")
+        write(root, "src/helper.rs", "")
         original = guard._SKIP_PIN.skip_pin_drift
         guard._SKIP_PIN.skip_pin_drift = lambda *_args, **_kwargs: None
         try:
@@ -677,7 +674,11 @@ class DiscriminationTests(unittest.TestCase):
                 self.assertEqual(built.returncode, 0, built.stderr)
                 for ok, message in self.run_both_skip_gates(root, frozenset()):
                     self.assertFalse(ok, message)
-                    self.assertIn(f"scan-only (newly skipped): {child}", message)
+                    self.assertIn(
+                        "production module mounts basename test file"
+                        if name == "basename_production_mod" else f"scan-only (newly skipped): {child}",
+                        message,
+                    )
 
     def test_non_rs_path_variants_are_enumerated_and_rejected_by_both_gates(self):
         prelude = (
@@ -805,10 +806,10 @@ class DiscriminationTests(unittest.TestCase):
             "crate::db::intake_outbox::mark_done(); }\n"
         )
         write(root, "src/hidden_tests.rs", body)
-        for ok, message in self.run_both_skip_gates(root, {"src/hidden_tests.rs"}):
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
             self.assertTrue(ok, message)
         write(root, "src/production.rs", body)
-        for ok, message in self.run_both_skip_gates(root, {"src/hidden_tests.rs"}):
+        for ok, message in self.run_both_skip_gates(root, frozenset()):
             self.assertFalse(ok, message)
             self.assertIn("UNLISTED", message)
 
@@ -1301,9 +1302,7 @@ class DiscriminationTests(unittest.TestCase):
         try:
             ok, message = guard.check(
                 root,
-                pinned_test_only_files={
-                    "src/services/discord/outbound/delivery_record_tests.rs"
-                },
+                pinned_test_only_files=frozenset(),
             )
         finally:
             (

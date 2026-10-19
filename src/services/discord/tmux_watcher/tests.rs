@@ -5379,3 +5379,332 @@ mod a0_characterization_tests {
 #[cfg(unix)]
 #[path = "streaming_harness_tests.rs"]
 pub(super) mod streaming_harness_tests;
+
+#[cfg(unix)]
+#[test]
+fn s2a1_actor_commit_entry_preserves_outcomes_and_invalidates_only_delivered_movement() {
+    use crate::services::cluster::stream_relay::source_read_proof::tests::seal;
+    use crate::services::discord::turn_finalizer::TurnFinalizer;
+    use crate::services::discord::turn_finalizer::TurnKey;
+    use crate::services::discord::{DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
+    let _host = crate::config::pin_runtime_host_for_test();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        for (index, outcome) in [
+            LeaseOutcome::Delivered,
+            LeaseOutcome::Unknown,
+            LeaseOutcome::NotDelivered,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let channel = ChannelId::new(59_960_401 + index as u64);
+            let coord = shared.tmux_relay_coord(channel);
+            assert_eq!(
+                coord.frontier_tuple_for_tests(),
+                (0, 0, 0, false),
+                "new coordination cannot restore a certificate"
+            );
+            let session = format!("s2a1-actor-{index}");
+            let (_dir, seal) = seal(&session, 100);
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    coord.publish_confirmed_for_tests(100, 7, 0, Some(&seal))
+                ),
+                "Published"
+            );
+            let actor = TurnFinalizer::spawn();
+            let lease = shared.delivery_lease(channel);
+            let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 11, 0));
+            let holder = LeaseHolder::Watcher { instance_id: 1 };
+            assert!(lease.try_acquire(key.clone(), holder, 100, 300, 5_000));
+            assert!(
+                actor
+                    .commit_delivery(
+                        key,
+                        lease,
+                        holder,
+                        100,
+                        300,
+                        outcome,
+                        ProviderKind::Claude,
+                        session.clone(),
+                        shared.clone()
+                    )
+                    .await
+            );
+            let expected = if outcome == LeaseOutcome::Delivered {
+                (300, 7, 0, false)
+            } else {
+                (100, 7, 0, true)
+            };
+            assert_eq!(coord.frontier_tuple_for_tests(), expected);
+            crate::services::tmux_common::cleanup_session_temp_files(&session);
+        }
+    });
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod s2a1_frontier_tests {
+    use crate::services::cluster::stream_relay::source_read_proof::tests::{prefix, seal};
+    use crate::services::tmux_common as tc;
+    #[cfg(unix)]
+    #[test]
+    fn s2a1_watcher_entry_invalidates_movement_preserves_noop_and_generation_tuple() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        use crate::services::{discord, provider::ProviderKind};
+        use poise::serenity_prelude::ChannelId;
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(59_960_101);
+        let session = "s2a1-watcher-entry";
+        let coord = shared.tmux_relay_coord(channel);
+        let (_dir, proof) = seal(session, 200);
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(200, 7, 0, Some(&proof))
+            ),
+            "Published"
+        );
+        discord::tmux::advance_watcher_confirmed_end(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            100,
+            "s2a1_noop",
+        );
+        assert_eq!(coord.frontier_tuple_for_tests(), (200, 7, 0, true));
+        let reached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = reached.clone();
+        let watched = coord.clone();
+        coord.before_generation_for_tests(move || {
+            observed.set(true);
+            assert!(matches!(
+                watched.reset_state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+        });
+        crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(
+            session,
+        )
+        .expect("generation");
+        discord::tmux::advance_watcher_confirmed_end(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            300,
+            "s2a1_move",
+        );
+        assert!(
+            reached.get(),
+            "the real writer reaches the centralized commit"
+        );
+        assert_eq!(
+            coord.frontier_tuple_for_tests(),
+            (
+                300,
+                crate::services::discord::tmux::tmux_session_files::read_generation_file_mtime_ns(
+                    session
+                ),
+                0,
+                false
+            )
+        );
+        tc::cleanup_session_temp_files(session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn s2a1_late_small_equal_untyped_and_reversed_completion_have_distinct_outcomes() {
+        let _host = crate::config::pin_runtime_host_for_test();
+        use crate::services::discord::TmuxRelayCoord;
+        use poise::serenity_prelude::ChannelId;
+        let coord = TmuxRelayCoord::new(ChannelId::new(59_960_102));
+        let (_dir, full) = seal("s2a1-late-high", 300);
+        let high = prefix(&full, 200);
+        let small = prefix(&full, 100);
+        let (first_done, after_high) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let coord = &coord;
+            let small = &small;
+            scope.spawn(move || {
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        coord.publish_confirmed_for_tests(200, 7, 0, Some(&high))
+                    ),
+                    "Published"
+                );
+                first_done.send(()).expect("high completion");
+            });
+            scope.spawn(move || {
+                after_high.recv().expect("complete high before old small");
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        coord.publish_confirmed_for_tests(100, 7, 0, Some(small))
+                    ),
+                    "Preserved"
+                );
+            });
+        });
+        assert_eq!(coord.frontier_tuple_for_tests(), (200, 7, 0, true));
+        assert!(coord.certificate_prefix_is_current_for_tests());
+        coord.advance_untyped_frontier(300, Some(7));
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(100, 7, 0, Some(&small))
+            ),
+            "Unmeasured"
+        );
+        assert_eq!(
+            format!("{:?}", coord.publish_confirmed_for_tests(300, 7, 0, None)),
+            "Unmeasured"
+        );
+        assert_eq!(coord.frontier_tuple_for_tests(), (300, 7, 0, false));
+        let equal = prefix(&full, 300);
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(300, 7, 0, Some(&equal))
+            ),
+            "Published"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(300, 7, 1, Some(&equal))
+            ),
+            "Unmeasured"
+        );
+        crate::services::discord::tmux::tmux_session_files::stamp_session_generation_marker(
+            "s2a1-late-high",
+        )
+        .expect("managed source change");
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(100, 7, 0, Some(&small))
+            ),
+            "Unmeasured"
+        );
+        assert_eq!(coord.frontier_tuple_for_tests(), (300, 7, 0, false));
+        tc::cleanup_session_temp_files("s2a1-late-high");
+    }
+    #[test]
+    fn s2a1_sink_ordered_idle_entry_commits_durably_preserves_noop_and_refuses_old_generation() {
+        use crate::services::cluster::session_matcher::{
+            MatchedChannel, expected_rollout_path_for,
+        };
+        use crate::services::cluster::stream_relay::StreamFrame;
+        use crate::services::cluster::stream_relay::source_read_proof::tests::seal_with_frontier;
+        use crate::services::discord::{
+            self,
+            health::HealthRegistry,
+            session_relay_sink::{SessionBoundDiscordRelaySink, turn_parser::SessionRelayParser},
+        };
+        use crate::services::provider::ProviderKind;
+        use poise::serenity_prelude::ChannelId;
+        use std::sync::Arc;
+        let _host = crate::config::pin_runtime_host_for_test();
+        let channel = ChannelId::new(59_960_420);
+        let provider = ProviderKind::Claude;
+        let session = provider.build_tmux_session_name(&channel.get().to_string());
+        let output = expected_rollout_path_for(&session);
+        std::fs::write(&output, [b'x'; 512]).expect("source");
+        let generation =
+            discord::tmux::tmux_session_files::stamp_session_generation_marker(&session)
+                .expect("generation");
+        let shared = discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(channel);
+        let (_source, seal) = seal_with_frontier(&session, 128, (generation, 0));
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(128, generation, 0, Some(&seal))
+            ),
+            "Published"
+        );
+        let delivery = |frame_generation| {
+            let frame = StreamFrame {
+                session_name: session.clone(), binding: MatchedChannel { channel_id: channel.get().to_string(), agent_id: "s2a1".into(), provider: provider.clone(), expected_session_name: session.clone(), expected_rollout_path: output.clone() },
+                payload: "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"idle answer\"}]}}\n{\"type\":\"result\",\"result\":\"idle answer\"}\n".into(),
+                sequence: 1, terminal_consumed_end: None, turn_user_msg_id: 0, turn_started_at: String::new(), turn_start_offset: None, relay_range: Some((128,256)), relay_generation_mtime_ns: Some(frame_generation), relay_source_stamp: None, source_span: None, read_source: None,
+            };
+            SessionRelayParser::default()
+                .ingest_frame(&frame)
+                .pop()
+                .expect("terminal parsed")
+        };
+        let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
+        assert!(!sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &provider,
+            channel.get(),
+            &session,
+            &delivery(generation + 1)
+        ));
+        assert_eq!(coord.frontier_tuple_for_tests(), (128, generation, 0, true));
+        let candidate = delivery(generation);
+        assert!(!sink.idle_range_already_committed_before_transport(
+            &shared,
+            &provider,
+            channel.get(),
+            &session,
+            &candidate
+        ));
+        assert!(sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &provider,
+            channel.get(),
+            &session,
+            &candidate
+        ));
+        assert_eq!(
+            coord.frontier_tuple_for_tests(),
+            (256, generation, 0, false)
+        );
+        assert_eq!(
+            discord::outbound::delivery_record::delivered_frontier_end_current_generation(
+                &provider,
+                channel,
+                &session,
+                Some(512)
+            ),
+            256
+        );
+        assert!(sink.idle_range_already_committed_before_transport(
+            &shared,
+            &provider,
+            channel.get(),
+            &session,
+            &candidate
+        ));
+        let (_same, seal) = seal_with_frontier(&session, 256, (generation, 0));
+        assert_eq!(
+            format!(
+                "{:?}",
+                coord.publish_confirmed_for_tests(256, generation, 0, Some(&seal))
+            ),
+            "Published"
+        );
+        assert!(sink.advance_idle_range_after_confirmed_post(
+            &shared,
+            &provider,
+            channel.get(),
+            &session,
+            &candidate
+        ));
+        assert_eq!(coord.frontier_tuple_for_tests(), (256, generation, 0, true));
+        tc::cleanup_session_temp_files(&session);
+    }
+}

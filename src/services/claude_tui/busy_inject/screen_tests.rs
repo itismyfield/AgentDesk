@@ -1,6 +1,8 @@
-//! The rows Claude draws a paste into, against composers captured from Claude Code 2.1.293.
+//! The rows Claude draws a paste into, against composers captured from Claude Code 2.1.293, and
+//! the layout read under a box that carries a status line.
 
-use super::screen::{Drawn, drawn};
+use super::screen::{self, Composer, Drawn, Stash, drawn};
+use super::{Plan, Veto, judge_before_paste};
 use crate::services::tui_input::actor::gate::{own_draft, own_wrapped_draft};
 use crate::services::tui_o::shadow::ShadowProvider;
 
@@ -187,4 +189,93 @@ fn a_wrapped_paste_is_owned_only_in_the_rows_claude_draws() {
         &composer(&[&one, &two[1..], &three]),
         &predicted
     ));
+}
+
+/// Busy 46x37 panes captured from a live Claude pane with a five-row status line under the box:
+/// an empty composer, and the person's draft `js`. A toast sits right above both boxes.
+const BUSY: &str = include_str!("../../../../tests/fixtures/tui_input/claude-busy-statusline.ansi");
+const BUSY_DRAFT: &str =
+    include_str!("../../../../tests/fixtures/tui_input/claude-busy-statusline-draft.ansi");
+const TOAST: &str = "      \x1b[38;5;114m✔ Update installed · Restart to update\x1b[39m";
+
+/// The plan for a short Discord input under a live turn: the stashed draft rows, or none for
+/// a direct paste.
+fn plan(capture: &str) -> Result<Option<Vec<String>>, Veto> {
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    let busy_turn = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
+        {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
+    std::fs::write(transcript.path(), busy_turn).unwrap();
+    let text = super::frame("discord", "ann", "n1", "hello");
+    let plan = judge_before_paste(
+        capture,
+        transcript.path(),
+        &text,
+        Some((46, 37)),
+        super::TurnGate::BusyOnly,
+    )?;
+    Ok(match plan {
+        Plan::Direct(_) => None,
+        Plan::Stash(rows) => Some(rows),
+    })
+}
+
+#[test]
+fn a_busy_pane_with_a_status_line_under_the_box_plans_the_paste() {
+    assert_eq!(plan(BUSY), Ok(None));
+    assert_eq!(
+        plan(&BUSY_DRAFT.replace(TOAST, "")),
+        Ok(Some(vec!["js".to_string()]))
+    );
+    // A toast glyph no stash row was measured with keeps the stash unread, so the draft stays.
+    assert_eq!(plan(BUSY_DRAFT), Err(Veto::Draft));
+}
+
+#[test]
+fn only_status_rows_and_a_whole_footer_may_follow_the_box() {
+    let base = BUSY_DRAFT.replace(TOAST, "");
+    let rows: Vec<&str> = base.lines().collect();
+    let foot = rows.iter().rposition(|row| row.contains("⏵⏵")).unwrap();
+    // The captured rows with `new` spliced in at `at` in place of `cut` rows.
+    let read = |at: usize, cut: usize, new: &[&str]| {
+        let mut lines = rows.clone();
+        lines.splice(at..at + cut, new.iter().copied());
+        let got = screen::read(&(lines.join("\n") + "\n"));
+        (got.composer, got.stash)
+    };
+    let on = "  ⏵⏵ bypass permissions on";
+    let draft = Composer::Text(vec!["js".to_string()]);
+    let whole = (draft.clone(), Stash::AbsentInRecognizedLayout);
+    let unknown = (Composer::Unknown, Stash::Unknown);
+    assert_eq!(read(foot, 0, &[]), whole);
+    assert_eq!(read(foot - 5, 5, &[]), whole, "no status line");
+    for tail in [
+        "· 1 monitor",
+        "· 2 shells, 1 monitor",
+        "(shift+tab to cycle) · 4 monitors",
+    ] {
+        assert_eq!(read(foot, 1, &[&format!("{on} {tail}")]), whole, "{tail}");
+    }
+    // A cut, miscounted or other-mode footer.
+    for footer in [
+        format!("{on} · 4 monit"),
+        format!("{on} · 4"),
+        format!("{on} · 1 monitors"),
+        "  ⏵⏵ accept edits on · 4 monitors".to_string(),
+    ] {
+        assert_eq!(read(foot, 1, &[&footer]), unknown, "{footer}");
+    }
+    // A row between the box and the footer that is no status line, or a row under the footer.
+    let border = "─".repeat(46);
+    for (at, row) in [
+        (foot, border.as_str()),
+        (foot, "  ❯ x"),
+        (foot, "  │ Allow? │"),
+        (foot, "⏺ answer"),
+        (foot, ""),
+        (foot, on),
+        (foot + 1, "  Context left: 9%"),
+    ] {
+        assert_eq!(read(at, 0, &[row]), unknown, "{row}");
+    }
+    assert_eq!(read(foot, 0, &["  › stashed"]), (draft, Stash::Unknown));
 }

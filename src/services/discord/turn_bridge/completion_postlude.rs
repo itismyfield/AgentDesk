@@ -10,7 +10,6 @@ use super::*;
 mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
-pub(super) mod o_panel_below;
 
 pub(super) use contracts::{CompletionPostludeContext, CompletionPostludeState};
 
@@ -80,6 +79,7 @@ pub(super) async fn run_completion_postlude(
     let mut accumulated_memory_input_tokens = state.accumulated_memory_input_tokens;
     let mut accumulated_memory_output_tokens = state.accumulated_memory_output_tokens;
     let transport_error = state.transport_error;
+    let provider_failure = state.provider_failure;
     let api_friction_reports = state.api_friction_reports;
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
@@ -163,15 +163,11 @@ pub(super) async fn run_completion_postlude(
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
                     inflight_state.tmux_session_name.as_deref(),
                     completion_r0.permits_channel_effects(),
+                    provider_failure,
                 ),
             )
             .await;
         status_panel_completion_committed = committed;
-        let follow = committed && !single_message_panel_footer_mode;
-        if follow && completion_r0.permits_channel_effects() {
-            let owner = (&shared_owned, &gateway, &provider, channel_id);
-            o_panel_below::follow(owner, &inflight_state, &last_status_panel_text);
-        }
         terminal_projection_settled.release_completion_admission(
             &completion_guard,
             busy_requeue_outcome.take(),

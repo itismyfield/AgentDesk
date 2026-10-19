@@ -2,15 +2,14 @@ use super::*;
 
 /// Start the leader gateway runtime after health registration, restart-marker
 /// fencing, and optional intake-worker startup. This final `run_bot` tail owns
-/// framework/client construction, gateway-lease keepalive, the SIGTERM handler,
-/// and the gateway backend event loop, in that order.
+/// framework/client construction, gateway-lease keepalive and the gateway
+/// backend event loop, in that order.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_bot_start_gateway_runtime(
     token: &str,
     provider: ProviderKind,
     provider_for_error: ProviderKind,
     provider_for_framework: ProviderKind,
-    provider_for_shutdown: ProviderKind,
     startup_reconcile_remaining: Arc<std::sync::atomic::AtomicUsize>,
     startup_doctor_started: Arc<std::sync::atomic::AtomicBool>,
     health_registry: Arc<health::HealthRegistry>,
@@ -53,35 +52,12 @@ pub(super) async fn run_bot_start_gateway_runtime(
     let voice_receiver_for_setup = voice_receiver.clone();
 
     let slash_commands = run_bot_build_slash_commands();
+    // Only a gateway reaches here, so standby and REST runtimes never start the ingress shadow.
+    let ingress_shadow =
+        super::super::ingress_shadow::ShadowConfig::of(&crate::config::load_graceful());
 
     let framework = poise::Framework::builder()
-        .options(poise::FrameworkOptions {
-            commands: slash_commands,
-            command_check: Some(|ctx| {
-                Box::pin(async move {
-                    let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
-                    let allowed = provider_handles_channel(
-                        ctx.serenity_context(),
-                        &ctx.data().provider,
-                        &settings_snapshot,
-                        ctx.channel_id(),
-                    )
-                    .await;
-                    if !allowed {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::info!(
-                            "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
-                            ctx.command().name,
-                            ctx.channel_id(),
-                            ctx.data().provider.as_str()
-                        );
-                    }
-                    Ok(allowed)
-                })
-            }),
-            event_handler: |ctx, event, _framework, data| Box::pin(handle_event(ctx, event, data)),
-            ..Default::default()
-        })
+        .options(run_bot_framework_options(slash_commands))
         .setup(move |ctx, _ready, framework| {
             let shared_for_migrate = shared_clone.clone();
             let health_registry_for_setup = health_registry.clone();
@@ -89,6 +65,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
             let token_for_ready = token_owned.clone();
             let voice_config_for_setup = voice_config_for_setup.clone();
             let voice_receiver_for_setup = voice_receiver_for_setup.clone();
+            let ingress_shadow = ingress_shadow.clone();
             Box::pin(run_bot_framework_setup(
                 ctx,
                 _ready,
@@ -104,6 +81,7 @@ pub(super) async fn run_bot_start_gateway_runtime(
                 startup_reconcile_remaining,
                 startup_doctor_started,
                 api_port,
+                ingress_shadow,
             ))
         })
         .build();
@@ -130,13 +108,6 @@ pub(super) async fn run_bot_start_gateway_runtime(
         )
     });
 
-    // Graceful shutdown: on SIGTERM, persist queue/inflight/last_message state
-    // and quick-exit. tmux/TUI processes survive — the next dcserver instance
-    // rehydrates the channel bindings (see rehydrate_existing_claude_tui_bindings;
-    // polled every CLAUDE_IDLE_REHYDRATE_POLL_INTERVAL ≈ 5s) and resumes transcript
-    // tailing from the persisted last_offset.
-    run_bot_spawn_sigterm_handler(&shared, provider_for_shutdown);
-
     run_bot_run_gateway_backend(
         client,
         &provider_for_error,
@@ -149,4 +120,48 @@ pub(super) async fn run_bot_start_gateway_runtime(
         api_port,
     )
     .await;
+}
+
+/// The production framework options: slash commands, their channel guard and the event handler.
+pub(in crate::services::discord) fn run_bot_framework_options(
+    commands: Vec<poise::Command<Data, Error>>,
+) -> poise::FrameworkOptions<Data, Error> {
+    poise::FrameworkOptions {
+        commands,
+        command_check: Some(|ctx| {
+            Box::pin(async move {
+                let settings_snapshot = { ctx.data().shared.settings.read().await.clone() };
+                let allowed = provider_handles_channel(
+                    ctx.serenity_context(),
+                    &ctx.data().provider,
+                    &settings_snapshot,
+                    ctx.channel_id(),
+                )
+                .await;
+                if !allowed {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!(
+                        "  [{ts}] ⏭ CMD-GUARD: skipping /{} in channel {} for provider {}",
+                        ctx.command().name,
+                        ctx.channel_id(),
+                        ctx.data().provider.as_str()
+                    );
+                }
+                Ok(allowed)
+            })
+        }),
+        event_handler: |framework, event| {
+            // handle_event's only production caller, so every gateway event is observed before any branch.
+            super::super::ingress_shadow::observe(
+                framework.user_data.ingress_shadow.as_ref(),
+                event,
+            );
+            Box::pin(handle_event(
+                framework.serenity_context,
+                event,
+                framework.user_data,
+            ))
+        },
+        ..Default::default()
+    }
 }

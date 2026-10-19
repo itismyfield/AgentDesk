@@ -64,7 +64,7 @@ pub(crate) async fn execute_pg_transition_intent(
                         field = clock.set
                     )
                 };
-                sqlx::query(&sql)
+                sqlx::query(sqlx::AssertSqlSafe(sql))
                     .bind(card_id)
                     .execute(&mut **tx)
                     .await

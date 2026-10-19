@@ -40,7 +40,7 @@ fn recovery_output_path_with_tmux_fallback(
 }
 
 #[cfg(unix)]
-use super::herdr_before_start_restart::herdr_turn_held;
+use super::herdr_row_end::held_at_restore;
 
 #[path = "restore_inflight/kickoff_identity.rs"]
 mod kickoff_identity;
@@ -72,9 +72,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
-    let states = inflight::load_inflight_states_excluding(provider, |channel| {
-        crate::services::discord::input_runtime::fence::lookup(provider, channel).is_some()
-    });
+    let states = inflight::load_inflight_states(provider);
     observe_restore_inflight_snapshot(
         provider,
         &states,
@@ -84,18 +82,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         return;
     }
 
-    Box::pin(restore_inflight_states(
-        http, shared, provider, states, false,
-    ))
-    .await;
+    Box::pin(restore_inflight_states(http, shared, provider, states)).await;
 }
 
-async fn restore_inflight_states(
+pub(in crate::services::discord) async fn restore_inflight_states(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     states: Vec<inflight::InflightTurnState>,
-    resume_installed: bool,
 ) {
     let settings_snapshot = shared.settings.read().await.clone();
 
@@ -108,12 +102,6 @@ async fn restore_inflight_states(
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
     for mut state in states {
-        // An input-protected channel's row waits for its move or handback.
-        if crate::services::discord::input_runtime::fence::lookup(provider, state.channel_id)
-            .is_some()
-        {
-            continue;
-        }
         #[cfg(unix)]
         if super::herdr_before_start_restart::settle_receipt(http, shared, provider, &state).await {
             continue;
@@ -177,9 +165,9 @@ async fn restore_inflight_states(
             r.settle(http, shared, &state).await;
             continue;
         }
-        // A held Herdr turn ends only on its admitted terminal, never on a transcript read here.
+        // A held Herdr turn, or a restarted one its end pass reads later, skips the wrapper path.
         #[cfg(unix)]
-        if herdr_turn_held(provider, &state) {
+        if held_at_restore(provider, &state) {
             tracing::info!(
                 channel_id = state.channel_id,
                 "recovery kept a held Herdr turn"
@@ -2123,14 +2111,9 @@ async fn restore_inflight_states(
                 continue;
             }
         };
-        let candidate = Arc::new(CancelToken::from_persisted_turn_nonce(
+        let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
             state.turn_nonce.clone(),
         ));
-        let cancel_token = if resume_installed {
-            scoped_restore::installed_token(shared, channel_id, &state, candidate).await
-        } else {
-            candidate
-        };
         super::turn_bridge::bind_cancel_token_tmux_runtime(
             provider,
             &cancel_token,
@@ -2172,29 +2155,16 @@ async fn restore_inflight_states(
             restore_recovered_session_worktree(session, &state);
         }
 
-        let kickoff = if resume_installed {
-            scoped_restore::checked_kickoff(
-                shared,
-                provider,
-                channel_id,
-                cancel_token.clone(),
-                &state,
-            )
-            .await
-        } else {
-            mailbox_recovery_kickoff(
-                shared,
-                channel_id,
-                cancel_token.clone(),
-                kickoff_identity.request_owner,
-                kickoff_identity.user_message_id,
-            )
-            .await
-        };
+        let kickoff = mailbox_recovery_kickoff(
+            shared,
+            channel_id,
+            cancel_token.clone(),
+            kickoff_identity.request_owner,
+            kickoff_identity.user_message_id,
+        )
+        .await;
 
-        let resumed_same_episode = resume_installed
-            && kickoff == crate::services::turn_orchestrator::RecoveryKickoffResult::AlreadyActiveSameEpisode;
-        if !kickoff.activated_turn() && !resumed_same_episode {
+        if !kickoff.activated_turn() {
             continue;
         }
         // Consume outgoing planned-restart authority (identity-guarded readoption)
@@ -2779,10 +2749,3 @@ mod ready_without_output_tests;
 #[cfg(all(test, unix))]
 #[path = "restore_inflight/replay_hold_tests.rs"]
 mod replay_hold_tests;
-
-#[path = "restore_inflight/scoped_restore.rs"]
-mod scoped_restore;
-#[cfg(all(test, unix))]
-pub(in crate::services::discord) use scoped_restore::{
-    install_inflight_scoped, resume_inflight_scoped,
-};

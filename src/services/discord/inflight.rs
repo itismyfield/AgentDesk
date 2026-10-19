@@ -18,18 +18,15 @@ pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
 pub(in crate::services::discord) use host_recovery_guard::{
     KeyedTeardown, clear_channel_session, keyed_teardown, teardown_for_lookup, tmux_marker_is_known,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use host_recovery_guard::{marker_witness, with_inflight_row};
 #[cfg(test)]
 mod invariant_test_capture;
 mod model;
-pub(crate) mod read_only_owner_snapshot;
 #[cfg(test)]
-#[path = "inflight/restart_mark_fence_tests.rs"]
-mod restart_mark_fence_tests;
+pub(crate) mod read_only_owner_snapshot;
 pub(in crate::services::discord) mod terminal_delivery_evidence_loss;
-
-// #3479: the pure domain model moved to `model.rs`; re-export every public
-// item at its original visibility so existing `inflight::*` / `super::*`
-// references across the discord module resolve unchanged.
+// Re-export the domain model at its existing visibility for root and sibling callers.
 #[cfg(test)]
 pub(in crate::services::discord) use model::{COORDINATE_HOLD_PREFIX, RawTurnWitness};
 pub(in crate::services::discord) use model::{
@@ -47,9 +44,14 @@ impl InflightTurnState {
     }
 }
 
+#[cfg(test)]
+mod circuit_evidence_tests;
+mod circuit_removal;
 mod episode_guard;
 mod managed_submission;
 mod store;
+pub(super) use circuit_removal::InflightDeleteRequest;
+use circuit_removal::handoff_before_discard_locked;
 
 // #3479: the FS path layout + advisory-lock guard moved to `store.rs`.
 // `inflight_state_path` / `lock_inflight_state_path` are re-exported at the module-tree visibility so
@@ -73,13 +75,11 @@ pub(in crate::services::discord) use managed_submission::{
 pub(in crate::services::discord) use managed_submission::{SubmissionPhase, fault};
 pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
+pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
 #[cfg(test)]
 use store::second_handle_try_lock;
 pub(crate) use store::try_lock_inflight_state_path;
-pub(in crate::services::discord) use store::{BorrowedInflightRow, inflight_state_path};
-#[cfg(all(test, unix))]
-pub(crate) use store::{TryLockRefusal, try_lock_inflight_state_path_typed};
 
 // #3715 / #3835: the rebind-origin dead-watcher helpers, staleness predicates,
 // and stale data-row cleanup live in this capped sibling. Canonical lock sidecars
@@ -126,10 +126,7 @@ use self::removal::{
 pub(in crate::services::discord) use self::removal::{
     load_channel_inflight_for_probe, load_inflight_states_for_probe_from_root,
 };
-use self::removal::{
-    load_inflight_probe_from_root_excluding, load_inflight_states_from_root,
-    load_inflight_states_from_root_excluding,
-};
+use self::removal::{load_inflight_probe_from_root_excluding, load_inflight_states_from_root};
 pub(super) use self::removal::{log_inflight_remove, log_inflight_remove_for_path};
 #[cfg(test)]
 pub(in crate::services::discord) use self::restart_mark::short_pass_event_for_test;
@@ -150,10 +147,10 @@ use self::watcher_state::{
     persist_watcher_relay_watermark_locked_in_root, persist_watcher_stream_progress_locked_in_root,
 };
 
-// #3835: typed status-panel / current-message ownership writes (the #3077
-// panel-lifecycle race family) moved into a child module; re-exported below so
-// `inflight::*` paths stay byte-identical for discord-module callers.
+// Typed status-panel / current-message ownership writes, re-exported for `inflight::*` callers.
 mod ownership_ops;
+#[cfg(test)]
+pub(in crate::services::discord) use self::ownership_ops::clear_status_panel_if_owned_generation;
 pub(in crate::services::discord) use self::ownership_ops::{
     StatusPanelBindGuard, StatusPanelBindOutcome, StatusPanelClearGuard, bind_status_panel,
     clear_current_msg_if_matches, clear_status_panel_if_current,
@@ -181,9 +178,7 @@ pub(in crate::services::discord) use self::orphan_relay_reclaim::{
 // widened. The shared persist/validate primitives moved to `store.rs`.
 mod clear_store;
 #[allow(unused_imports)]
-pub(in crate::services::discord) use clear_store::{
-    operator_disposition_remove_borrowed, operator_disposition_remove_pinned,
-};
+pub(in crate::services::discord) use clear_store::operator_disposition_remove_pinned;
 mod save_store;
 
 // Shared persist/validate primitives (moved to `store.rs`): re-imported at the
@@ -225,8 +220,7 @@ pub(in crate::services::discord) use self::save_store::{
     save_inflight_state_if_identity_unchanged, save_inflight_state_if_matches_identity,
     save_stream_tick_state_if_bridge_authority,
     save_stream_tick_state_preserving_current_message_races,
-    stamp_claude_e_process_if_matches_identity, stamp_runtime_handoff_if_matches_identity,
-    touch_inflight_state_if_matches_identity,
+    stamp_runtime_handoff_if_matches_identity, touch_inflight_state_if_matches_identity,
 };
 // Explicit-root save seams reached only by the parent's / siblings' test modules.
 #[cfg(test)]
@@ -384,54 +378,11 @@ pub(super) fn load_inflight_states_for_sweep(
     out
 }
 
-/// Delete the inflight state file for a (provider, channel_id) pair if it
-/// still exists. Used by `placeholder_sweeper` to evict abandoned states
-/// after a final placeholder edit. Idempotent.
 pub(super) fn delete_inflight_state_file<'a>(
     request: impl Into<InflightDeleteRequest<'a>>,
     channel_id: u64,
 ) -> bool {
-    let request = request.into();
-    let provider = request.provider;
-    let channel = channel_id;
-    let outcome = 'decision: {
-        let Some(root) = inflight_runtime_root() else {
-            break 'decision InflightDeleteOutcome::Failed;
-        };
-        let path = inflight_state_path(&root, provider, channel);
-        let Ok(_lock) = lock_inflight_state_path(&path) else {
-            break 'decision InflightDeleteOutcome::Failed;
-        };
-        if receipt_protected_path(&path) && !receipt_mutant("delete") {
-            break 'decision InflightDeleteOutcome::ProtectedReceipt;
-        }
-        log_inflight_remove_for_path(provider, channel, "delete_inflight_state_file", &path);
-        match fs::remove_file(path) {
-            Ok(()) => InflightDeleteOutcome::Deleted,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                InflightDeleteOutcome::AlreadyAbsent
-            }
-            _ => InflightDeleteOutcome::Failed,
-        }
-    };
-    if let Some(result) = request.result {
-        result.set(outcome);
-    }
-    outcome == InflightDeleteOutcome::Deleted
-}
-
-// Preserve the bool API while returning its exact lock-held decision to cleanup callers.
-pub(super) struct InflightDeleteRequest<'a> {
-    provider: &'a ProviderKind,
-    result: Option<&'a std::cell::Cell<InflightDeleteOutcome>>,
-}
-impl<'a> From<&'a ProviderKind> for InflightDeleteRequest<'a> {
-    fn from(provider: &'a ProviderKind) -> Self {
-        Self {
-            provider,
-            result: None,
-        }
-    }
+    request.into().delete(channel_id)
 }
 
 fn now_string() -> String {
@@ -579,7 +530,7 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     if !path.exists() {
         return Outcome::Missing;
     }
-    let _lock = match store::try_lock_unfenced_inflight_state_path(path) {
+    let _lock = match store::try_lock_inflight_state_path_typed(path) {
         Ok(lock) => lock,
         Err(store::TryLockRefusal::Failed(error)) => return Outcome::Io(error),
         Err(_) => return Outcome::Busy,
@@ -591,6 +542,9 @@ pub(crate) fn remove_inflight_row_for_policy_op(path: &Path) -> PolicyOpRemoveOu
     };
     if raw_before_start_receipt(&String::from_utf8_lossy(&bytes)) {
         return Outcome::ProtectedReceipt;
+    }
+    if let Err(detail) = handoff_before_discard_locked(&_lock) {
+        return Outcome::Io(detail);
     }
     #[cfg(test)]
     policy_op_unlink_hook::before(path);
@@ -640,13 +594,25 @@ fn bump_save_generation_for_write(
     path: &Path,
     state: &mut InflightTurnState,
 ) -> Result<(), String> {
-    let content = fs::read_to_string(path).ok();
+    let content = match fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let existing = content
         .as_deref()
         .and_then(|content| serde_json::from_str::<InflightTurnState>(content).ok());
     if existing.is_none() && receipt_protected_path(path) {
         return Err("policy receipt row cannot be parsed".into());
     }
+    if existing.is_none()
+        && content
+            .as_deref()
+            .is_some_and(|raw| raw.contains("pending_circuit_evidence"))
+    {
+        return Err("circuit evidence row cannot be parsed".into());
+    }
+    super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
@@ -885,39 +851,6 @@ pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnS
         return Vec::new();
     };
     load_inflight_states_from_root(&root, provider)
-}
-
-pub(super) fn load_inflight_states_excluding(
-    provider: &ProviderKind,
-    exclude_channel: impl Fn(u64) -> bool,
-) -> Vec<InflightTurnState> {
-    let Some(root) = inflight_runtime_root() else {
-        return Vec::new();
-    };
-    load_inflight_states_from_root_excluding(&root, provider, exclude_channel)
-}
-
-#[cfg(test)]
-thread_local! {
-    pub(in crate::services::discord) static AFTER_EXCLUDING_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Option<u64> {
-    let providers = [
-        ProviderKind::Claude,
-        ProviderKind::Codex,
-        ProviderKind::Gemini,
-        ProviderKind::Qwen,
-        ProviderKind::Grok,
-        ProviderKind::Antigravity,
-    ];
-
-    providers
-        .iter()
-        .flat_map(load_inflight_states)
-        .filter(|state| state.channel_id == channel_id)
-        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
-        .map(|state| state.request_owner_user_id)
 }
 
 /// #2448: explicit completion signal published from the turn_bridge
@@ -2804,59 +2737,59 @@ mod stall_recovery_tests {
         );
     }
 
-    /// #2235: rows written by a newer binary may serialize an unknown
-    /// `runtime_kind` string. `deserialize_runtime_kind_tolerant` must
-    /// collapse the unknown value to `None` so the whole inflight row isn't
-    /// tossed as malformed JSON. The recovery engine layers the
-    /// version-aware silent-skip on top of this.
+    /// Removed wire kinds use the existing unknown-runtime policy without finalizer backfill.
     #[test]
     fn inflight_unknown_runtime_kind_string_deserializes_as_none() {
+        let content = include_str!(
+            "../../../tests/fixtures/discord_inflight/claude_e_adapter_v9_historical.json"
+        );
+        let (state, backfilled) =
+            super::parse_inflight_state_content_with_finalizer_backfill(content).unwrap();
+        assert_eq!(
+            (state.runtime_kind, state.runtime_kind_unknown_on_disk),
+            (None, true),
+            "removed wire kind must remain unknown rather than select a supported runtime"
+        );
+        assert!(
+            !backfilled,
+            "historical writer already supplied the finalizer ID"
+        );
+        assert_eq!(state.version, 9);
+        assert_eq!(state.finalizer_turn_id, 11);
+        let serialized = serde_json::to_value(&state).unwrap();
+        let raw: serde_json::Value = serde_json::from_str(content).unwrap();
+        let removed: Vec<_> = raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with("claude_e_"))
+            .collect();
+        assert_eq!(removed.len(), 3);
+        for field in removed {
+            assert!(
+                serialized.get(field).is_none(),
+                "removed field {field} must be ignored"
+            );
+        }
+
         let temp = TempDir::new().unwrap();
         let dir = temp.path().join(ProviderKind::Claude.as_str());
         std::fs::create_dir_all(&dir).unwrap();
-
-        // Seed a JSON row whose `runtime_kind` is a variant string this
-        // binary does not know about (`"future_runtime"`). Without the
-        // tolerant deserializer this row would be deleted as malformed by
-        // `load_inflight_states_from_root`.
-        let valid_state = InflightTurnState::new(
-            ProviderKind::Claude,
-            444,
-            Some("adk-claude".to_string()),
-            7,
-            8,
-            99,
-            "hello".to_string(),
-            Some("session-1".to_string()),
-            Some("AgentDesk-claude-adk-claude".to_string()),
-            Some("/tmp/out.jsonl".to_string()),
-            None,
-            0,
-        );
-        let mut value = serde_json::to_value(&valid_state).unwrap();
-        value["runtime_kind"] = serde_json::Value::String("future_runtime".to_string());
-        // Also bump the on-disk version to simulate a row authored by a
-        // newer binary, so the recovery-engine silent-skip guard would
-        // trigger downstream of this deserialization step.
-        value["version"] =
-            serde_json::Value::Number(serde_json::Number::from(super::INFLIGHT_STATE_VERSION + 1));
-        let path = dir.join("444.json");
-        std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
-
+        let path = dir.join(format!("{}.json", state.channel_id));
+        std::fs::write(&path, content).unwrap();
         let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
-        assert_eq!(loaded.len(), 1, "tolerant deser must keep the row");
-        assert_eq!(loaded[0].channel_id, 444);
-        assert!(
-            loaded[0].runtime_kind.is_none(),
-            "unknown variant must collapse to None"
+        assert_eq!(loaded.len(), 1, "actual loader must keep a historical row");
+        assert_eq!(loaded[0].channel_id, state.channel_id);
+        assert_eq!(
+            (
+                loaded[0].runtime_kind,
+                loaded[0].runtime_kind_unknown_on_disk
+            ),
+            (None, true)
         );
         assert!(
-            loaded[0].version > super::INFLIGHT_STATE_VERSION,
-            "version stays forward-marked for the recovery silent-skip guard"
-        );
-        assert!(
-            loaded[0].runtime_kind_unknown_on_disk,
-            "present-but-unknown runtime_kind must be distinguishable from legacy absent-field None"
+            path.exists(),
+            "historical row must not be discarded as malformed"
         );
     }
 

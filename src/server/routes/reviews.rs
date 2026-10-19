@@ -383,27 +383,27 @@ async fn recover_review_target_pg(
         )
     })?;
 
-    sqlx::query(
-        "UPDATE task_dispatches
-         SET context = $1,
-             status = $2,
-             result = CASE WHEN status = 'failed' THEN NULL ELSE result END,
-             completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
-             updated_at = NOW(),
-             last_stuck_alert_at = NULL
-         WHERE id = $3",
+    let updated = crate::db::auto_queue::run_owner_guard::update_review_recovery_row_on_pg_tx(
+        &mut tx,
+        &dispatch.id,
+        &new_context.to_string(),
+        &from_status,
+        to_status,
     )
-    .bind(new_context.to_string())
-    .bind(to_status)
-    .bind(&dispatch.id)
-    .execute(&mut *tx)
     .await
-    .map_err(|error| {
-        (
+    .map_err(|error| match error.into_db() {
+        Err(refusal) => (StatusCode::CONFLICT, refusal),
+        Ok(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("update review dispatch target: {error}"),
-        )
+        ),
     })?;
+    if updated == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            "review dispatch changed during recovery".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO dispatch_events (
@@ -464,6 +464,15 @@ async fn recover_review_target_pg(
         },
         "cleared_failure_markers": cleared_markers,
     }))
+}
+
+/// Runs the real recovery body so run-owner contention tests outside this module reach it.
+#[cfg(test)]
+pub(crate) async fn recover_review_target_pg_for_test(
+    pool: &sqlx::PgPool,
+    body: ReviewTargetRecoveryBody,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    recover_review_target_pg(pool, body).await
 }
 
 async fn update_decisions_pg(

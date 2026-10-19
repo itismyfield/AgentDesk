@@ -203,7 +203,7 @@ harness assignment/clearing sites:
 | `.github/workflows/ci-pr.yml:23-28` | Same wrapper, size, and GHA enablement; GHA mode is `READ_ONLY` for PRs and `READ_WRITE` otherwise. |
 | `.github/workflows/ci-pr.yml:919-920`, `.github/workflows/ci-pr.yml:997-998` | Hosted macOS jobs write empty `RUSTC_WRAPPER` and `SCCACHE_GHA_ENABLED` to `$GITHUB_ENV`. |
 | `.github/workflows/ci-nightly.yml:108-109` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
-| `.github/workflows/ci-macos-trusted.yml:54-55` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
+| `.github/workflows/ci-macos-trusted.yml:61-62` | Hosted macOS job writes the same empty pair to `$GITHUB_ENV`. |
 | `.github/workflows/ci-pr.yml:2010` | H2 module-map step env sets `RUSTC_WRAPPER=""`. |
 | `scripts/ci/h2_env.py:12-13`, `scripts/ci/h2_env.py:42`, `scripts/ci/h2_env.py:59-60` | H2 child env and emitted shell commands clear all four `WRAPPERS` keys, including `RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER`. |
 | `scripts/run_relay_authority_mutations.sh:204` | Mutation build command unsets `RUSTC_WRAPPER` with `env -u`. |
@@ -258,10 +258,13 @@ Key rows:
   have built the same deps.
 - `Non-cacheable calls` — build scripts, linker invocations, etc. These do not
   count against hit rate.
-- All-zero counters right after a build mean the stats query reached a fresh
-  server: the previous one exited on its idle timer (600s by default, reset only
-  by new requests). The Windows exact-targets runner defaults
-  `SCCACHE_IDLE_TIMEOUT=0` because its lib-test compile and test runs outlast it.
+- An all-zero block only shows that the queried server has recorded no requests
+  since its stats were last reset; it does not establish why an earlier server
+  exited or whether the build used that server. Capture stats in the same job
+  immediately after the build, and check that the build's wrapper and server
+  configuration point to that server.
+  The Windows exact-targets runner defaults `SCCACHE_IDLE_TIMEOUT=0` because
+  its lib-test compile and test runs outlast the usual 600s idle timeout.
 
 Reset stats between measurements:
 

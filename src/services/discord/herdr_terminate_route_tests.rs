@@ -193,16 +193,38 @@ struct Node {
     _switches: herdr::LiveSwitches,
 }
 
+/// What a `Node` stores: an attached execution, or a Pending one no attach ever took.
+#[derive(Clone, Copy)]
+enum Stored {
+    Bound,
+    NeverAttached,
+    WithoutEvidence,
+}
+
 impl Node {
     async fn bind(rig: &herdr::P11TerminationRig, token_hash: Option<&str>) -> Self {
+        Self::store(rig, token_hash, Stored::Bound).await
+    }
+
+    async fn store(
+        rig: &herdr::P11TerminationRig,
+        token_hash: Option<&str>,
+        stored: Stored,
+    ) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) =
             crate::services::discord::host_teardown_gate::test_support::runtime(&pool).await;
         let hash = token_hash.unwrap_or(&shared.token_hash).to_string();
         let key = format!("claude/{hash}/{}:AgentDesk-claude-act", herdr::NODE);
-        let state = herdr::HostedState::Bound;
-        let _switches = rig.bind(&pool, &hash, &key, state).await;
+        let _switches = match stored {
+            Stored::Bound => {
+                rig.bind(&pool, &hash, &key, herdr::HostedState::Bound)
+                    .await
+            }
+            Stored::NeverAttached => rig.bind_never_attached(&pool, &hash, &key).await,
+            Stored::WithoutEvidence => rig.bind_without_evidence(&pool, &hash, &key).await,
+        };
         Self {
             db,
             pool,
@@ -557,6 +579,108 @@ fn act_route_logs_result_once_pg() {
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(node.row().await, Some(retired));
         assert!(!herdr::held());
+        node.finish().await;
+    });
+}
+
+// A Pending execution no attach took, once a later turn's probe recorded its evidence, is ended by
+// an operator terminate as a bound one is: one close of its pane, then Retired.
+#[test]
+fn act_route_never_attached_pending_with_reprobed_evidence_retires_pg() {
+    let name = "act_route_never_attached_pending_with_reprobed_evidence_retires_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::store(&rig, None, Stored::NeverAttached).await;
+        assert!(!herdr::held(), "no attach took its hold");
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        assert_eq!(
+            (status, &reply["result"]),
+            (StatusCode::OK, &json!("retired")),
+            "{reply}"
+        );
+        assert_eq!(closes(&rig), 1);
+        let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+        assert_eq!(node.row().await, Some(retired));
+        node.finish().await;
+    });
+}
+
+// A Pending execution whose provider was never proven is refused for that with the switch on, and
+// for the switch with it off; neither closes anything, changes its row or drops the channel's queue.
+#[test]
+fn act_route_pending_without_launch_evidence_is_refused_for_it_pg() {
+    let name = "act_route_pending_without_launch_evidence_is_refused_for_it_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::store(&rig, None, Stored::WithoutEvidence).await;
+        let channel = super::ChannelId::new(CHANNEL);
+        super::test_queue::queue_original(&node.shared, channel).await;
+        let pending = Some((herdr::HostedState::Pending, herdr::EXECUTION.to_string()));
+        switch(false);
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        assert_eq!(
+            (status, &reply["result"]),
+            (StatusCode::CONFLICT, &json!("disabled"))
+        );
+        switch(true);
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        let refused = (
+            StatusCode::CONFLICT,
+            &json!("refused"),
+            &json!("missing launch evidence"),
+        );
+        assert_eq!((status, &reply["result"], &reply["detail"]), refused);
+        assert_eq!(closes(&rig), 0);
+        assert_eq!(node.row().await, pending);
+        let queued = super::test_queue::queued_texts(&node.shared, channel).await;
+        assert_eq!(queued, [super::test_queue::ORIGINAL]);
+        node.finish().await;
+    });
+}
+
+// A Pending execution with no recorded pane, as a lost create reply leaves it, is outside every
+// exit: terminate refuses it as another execution, retire finds no live row, its row stays as is.
+#[test]
+fn act_route_pending_without_a_recorded_pane_is_refused_pg() {
+    let Some((rig, runtime)) = rig_child("act_route_pending_without_a_recorded_pane_is_refused_pg")
+    else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::store(&rig, None, Stored::WithoutEvidence).await;
+        let unplaced = "UPDATE sessions SET hosted_execution = jsonb_set(hosted_execution, \
+            '{location}', 'null'::jsonb) WHERE session_key = $1 RETURNING hosted_execution";
+        let stored: Value = sqlx::query_scalar(unplaced)
+            .bind(&node.key)
+            .fetch_one(&node.pool)
+            .await
+            .unwrap();
+        let (status, reply) = node.terminate(herdr::EXECUTION).await;
+        let refused = (
+            StatusCode::CONFLICT,
+            &json!("refused"),
+            &json!("execution identity differs"),
+        );
+        assert_eq!((status, &reply["result"], &reply["detail"]), refused);
+        let retired = crate::cli::herdr::retire(&node.pool, CHANNEL).await;
+        let none =
+            crate::cli::herdr::RetireRefusal::NoRow("no single live herdr row of the channel");
+        assert_eq!(retired, Err(none));
+        let now: Value =
+            sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE session_key = $1")
+                .bind(&node.key)
+                .fetch_one(&node.pool)
+                .await
+                .unwrap();
+        assert_eq!(now, stored);
+        assert_eq!(closes(&rig), 0);
         node.finish().await;
     });
 }

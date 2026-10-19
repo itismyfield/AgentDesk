@@ -7,10 +7,10 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
-#[cfg(all(test, unix))]
-#[path = "task_supervisor/n4d_spawn_observation_tests.rs"]
-pub(in crate::services::discord) mod n4d_spawn_observation;
 pub(in crate::services::discord) mod watcher_completion;
+#[cfg(all(test, unix))]
+#[path = "task_supervisor/watcher_spawn_observation_tests.rs"]
+pub(in crate::services::discord) mod watcher_spawn_observation;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
     task_name: &'static str,
@@ -19,7 +19,9 @@ pub(in crate::services::discord) fn spawn_observed<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::spawn(async move {
+    // Boxed before the hand-off: unoptimized builds otherwise copy the whole future through
+    // tokio::spawn's own frame, which overflowed 2 MiB test threads on the turn-start path.
+    tokio::spawn(Box::pin(async move {
         match AssertUnwindSafe(future).catch_unwind().await {
             Ok(()) => {}
             Err(payload) => {
@@ -30,7 +32,7 @@ where
                 );
             }
         }
-    })
+    }))
 }
 
 pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
@@ -43,8 +45,9 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let future = Box::pin(future);
     #[cfg(all(test, unix))]
-    let observed = n4d_spawn_observation::submitted(&shared, &cancel);
+    let observed = watcher_spawn_observation::submitted(&shared, &cancel);
     #[cfg(all(test, unix))]
     let observed_task = observed.clone();
     let completion = watcher_completion::Registration::new(cancel.clone());
@@ -54,7 +57,21 @@ where
             tmux_session_name,
             cancel,
         };
-        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+        let outcome = AssertUnwindSafe(async {
+            #[cfg(unix)]
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                super::recovery_engine::producer_resume::ensure(
+                    cleanup_guard.shared.clone(),
+                    cleanup_guard.tmux_session_name.clone(),
+                    cleanup_guard.cancel.clone(),
+                ),
+            )
+            .await;
+            future.await;
+        })
+        .catch_unwind()
+        .await;
         drop(cleanup_guard);
         let result = match outcome {
             Ok(()) => watcher_completion::Outcome::Returned,
@@ -64,11 +81,11 @@ where
             }
         };
         #[cfg(all(test, unix))]
-        n4d_spawn_observation::finished(&observed_task, result);
+        watcher_spawn_observation::finished(&observed_task, result);
         completion.finish(result);
     });
     #[cfg(all(test, unix))]
-    n4d_spawn_observation::attach(&observed, task.abort_handle());
+    watcher_spawn_observation::attach(&observed, task.abort_handle());
     task
 }
 

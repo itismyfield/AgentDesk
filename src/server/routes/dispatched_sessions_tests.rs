@@ -480,7 +480,7 @@ impl Drop for TmuxEnv {
 }
 
 /// Runs one statement, binding every argument as nullable text.
-async fn exec(pool: &sqlx::PgPool, sql: &str, args: &[Option<&str>]) {
+async fn exec(pool: &sqlx::PgPool, sql: &'static str, args: &[Option<&str>]) {
     let query = args
         .iter()
         .fold(sqlx::query(sql), |query, arg| query.bind(*arg));
@@ -491,7 +491,7 @@ async fn exec(pool: &sqlx::PgPool, sql: &str, args: &[Option<&str>]) {
 async fn snapshot(pool: &sqlx::PgPool, table: &str, column: &str, ids: &[&str]) -> String {
     let query = format!("SELECT jsonb_agg(to_jsonb(t) ORDER BY t.{column})::text FROM {table} t");
     let query = format!("{query} WHERE t.{column} = ANY($1)");
-    let row = sqlx::query_scalar::<_, Option<String>>(&query).bind(ids);
+    let row = sqlx::query_scalar::<_, Option<String>>(sqlx::AssertSqlSafe(query)).bind(ids);
     row.fetch_one(pool).await.unwrap().unwrap_or_default()
 }
 
