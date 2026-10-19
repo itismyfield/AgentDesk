@@ -161,6 +161,55 @@ fn boot_restore_installs_a_bound_channels_queue_marker_override_and_placeholder(
     );
 }
 
+#[test]
+fn an_unanswered_mailbox_keeps_its_placeholder_and_an_answered_empty_one_does_not() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let store = super::super::queued_placeholders_store::save_channel_queued_placeholders;
+    let (owner, card) = (MessageId::new(6_046_901), MessageId::new(6_046_902));
+    let mut outcomes = Vec::new();
+    for (index, case) in ["closed", "reply_dropping", "empty"]
+        .into_iter()
+        .enumerate()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tmp.path(),
+        );
+        let (provider, shared) = (ProviderKind::Claude, make_shared_data_for_tests());
+        let channel = ChannelId::new(6_046_101 + 100 * index as u64);
+        store(&provider, &shared.token_hash, channel, &[(owner, card)]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let stale = runtime.block_on(async {
+            match case {
+                "closed" => shared.mailboxes.insert_unreachable_for_test(channel),
+                "reply_dropping" => shared.mailboxes.insert_reply_dropping_for_test(channel),
+                _ => drop(shared.mailbox(channel)),
+            }
+            let http = Arc::new(serenity::Http::new("Bot test-token"));
+            restore_queued_and_inflight_work(&http, &shared, &provider).await
+        });
+        let load = super::super::queued_placeholders_store::load_queued_placeholders;
+        let row = load(&provider, &shared.token_hash).contains_key(&(channel, owner));
+        let mapped = shared.queued.queued_placeholders.get(&(channel, owner));
+        let judged = stale.iter().any(|stale| stale.2 == card);
+        outcomes.push((case, judged, row, mapped.map(|entry| *entry)));
+    }
+    let kept = |case| (case, false, true, Some(card));
+    assert_eq!(
+        outcomes,
+        [
+            kept("closed"),
+            kept("reply_dropping"),
+            ("empty", true, false, None)
+        ],
+        "(case, judged stale, disk row, mapped card): an unmeasured queue keeps its card"
+    );
+}
+
 /// A boot restore run by `restore_around`, with the root it ran under kept until the test reads it.
 struct Restored {
     stale: Vec<(ChannelId, MessageId, MessageId)>,
@@ -307,54 +356,5 @@ fn a_queue_the_merge_cannot_read_keeps_its_file_and_placeholder() {
     assert!(
         cards.contains_key(&(id, MessageId::new(queued))),
         "the placeholder row is kept: {cards:?}"
-    );
-}
-
-#[test]
-fn an_unanswered_mailbox_keeps_its_placeholder_and_an_answered_empty_one_does_not() {
-    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let store = super::super::queued_placeholders_store::save_channel_queued_placeholders;
-    let (owner, card) = (MessageId::new(6_046_901), MessageId::new(6_046_902));
-    let mut outcomes = Vec::new();
-    for (index, case) in ["closed", "reply_dropping", "empty"]
-        .into_iter()
-        .enumerate()
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            tmp.path(),
-        );
-        let (provider, shared) = (ProviderKind::Claude, make_shared_data_for_tests());
-        let channel = ChannelId::new(6_046_101 + 100 * index as u64);
-        store(&provider, &shared.token_hash, channel, &[(owner, card)]);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let stale = runtime.block_on(async {
-            match case {
-                "closed" => shared.mailboxes.insert_unreachable_for_test(channel),
-                "reply_dropping" => shared.mailboxes.insert_reply_dropping_for_test(channel),
-                _ => drop(shared.mailbox(channel)),
-            }
-            let http = Arc::new(serenity::Http::new("Bot test-token"));
-            restore_queued_and_inflight_work(&http, &shared, &provider).await
-        });
-        let load = super::super::queued_placeholders_store::load_queued_placeholders;
-        let row = load(&provider, &shared.token_hash).contains_key(&(channel, owner));
-        let mapped = shared.queued.queued_placeholders.get(&(channel, owner));
-        let judged = stale.iter().any(|stale| stale.2 == card);
-        outcomes.push((case, judged, row, mapped.map(|entry| *entry)));
-    }
-    let kept = |case| (case, false, true, Some(card));
-    assert_eq!(
-        outcomes,
-        [
-            kept("closed"),
-            kept("reply_dropping"),
-            ("empty", true, false, None)
-        ],
-        "(case, judged stale, disk row, mapped card): an unmeasured queue keeps its card"
     );
 }
