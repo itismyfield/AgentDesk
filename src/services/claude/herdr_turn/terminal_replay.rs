@@ -201,7 +201,7 @@ pub(crate) fn ended_tail(
         && !tail.contains('\n')
         && serde_json::from_str::<serde_json::Value>(&tail).is_ok();
     let gone = || target.provider_absent() == Ok(true) && !target.execution_alive();
-    let ends = || ended_turn(&mut file, submitted_at, len) == Ok(EndedTurn::Terminal);
+    let mut ends = || ended_turn(&mut file, submitted_at, len) == Ok(EndedTurn::Terminal);
     (whole && gone() && ends()).then_some(tail)
 }
 

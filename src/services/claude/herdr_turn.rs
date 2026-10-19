@@ -807,7 +807,7 @@ pub(crate) fn herdr_terminal_frame(
 ) -> Option<StreamMessage> {
     let (tx, _rx) = std::sync::mpsc::channel();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let alive = move || std::time::Instant::now() < deadline;
+    let alive = move |_| (std::time::Instant::now() >= deadline).then(String::new);
     let read = read_to_provider_terminal(transcript, start, &tx, token, alive).ok()??;
     Some(read.frame(transcript, logical, start, token))
 }
@@ -899,7 +899,8 @@ fn read_to_provider_terminal(
         |file| opened.set(SourceFileIdentity::from_open_file(file)),
     )
     .map_err(|failure| failure.error)?;
-    if let (ReadOutputResult::SessionDied { offset }, Some((from, tail))) = (read, tail.take())
+    if let ReadOutputResult::SessionDied { offset } = read
+        && let Some((from, tail)) = tail.take()
         && offset == from
     {
         process(&tail, &mut lines);

@@ -334,7 +334,8 @@ fn the_turn_body_is_its_result_or_its_streamed_text() {
 }
 
 /// Once the writer is gone a final record without its newline counts only when it parses whole,
-/// in a Claude transcript and a Codex rollout alike; no torn tail leaves the source unread.
+/// in a Claude transcript and a Codex rollout alike; no torn tail leaves the source unread, but a
+/// source cut after its length was read is unread.
 #[test]
 fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
     use crate::services::claude::herdr_turn::{EndedTurn, ended_turn};
@@ -364,13 +365,19 @@ fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
             vec![user.clone(), text.clone()],
             &took[..took.len() / 2],
         ),
-        ("claude whole terminal", vec![user, text, stop], &took[..]),
+        (
+            "claude whole terminal",
+            vec![user.clone(), text.clone(), stop.clone()],
+            &took[..],
+        ),
         (
             "codex torn",
             started.to_vec(),
             &complete[..complete.len() / 2],
         ),
         ("codex whole terminal", started.to_vec(), &complete[..]),
+        ("claude cut", vec![user, text, stop], &took[..]),
+        ("codex cut", started.to_vec(), &complete[..]),
     ];
     let actor = Arc::new(crate::services::provider::CancelToken::new());
     let ended =
@@ -383,6 +390,10 @@ fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
         }
         write!(file, "{tail}").unwrap();
         let len = file.metadata().unwrap().len();
+        // The source is cut on the same descriptor after its length was read.
+        if case.ends_with("cut") {
+            file.set_len(len / 2).unwrap();
+        }
         read.push(match case.starts_with("claude") {
             true => (case, ended_turn(&mut file, input, len).ok()),
             false => (case, ended(&mut file, 0, len, &actor)),
@@ -395,6 +406,8 @@ fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
             ("claude whole terminal", Some(EndedTurn::Terminal)),
             ("codex torn", Some(EndedTurn::NoTerminal)),
             ("codex whole terminal", Some(EndedTurn::Terminal)),
+            ("claude cut", None),
+            ("codex cut", None),
         ]
     );
 }

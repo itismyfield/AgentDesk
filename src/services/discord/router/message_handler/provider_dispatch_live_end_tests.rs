@@ -1,5 +1,6 @@
 //! The row end pass over a live Herdr turn its executor still reads: a runtime of its own on the
 //! rig's registry, the channel's actor and this process's row, a Discord fake and a queued input.
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -195,6 +196,63 @@ impl LiveEnd {
         crate::services::discord::turn_bridge::stale_inflight_message("")
     }
 
+    /// The turn's own bridge over every frame its executor sent, from this process's row, and what
+    /// it reported.
+    pub(in crate::services::discord) fn bridge(
+        &self,
+        token: &Arc<CancelToken>,
+        frames: Vec<StreamMessage>,
+    ) -> Option<discord::turn_bridge::BridgeCompletionSignal> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        frames.into_iter().for_each(|frame| tx.send(frame).unwrap());
+        drop(tx);
+        let row = self.row().expect("the row the bridge starts from");
+        self.rt.block_on(async {
+            let http = self
+                .shared
+                .http
+                .cached_serenity_ctx
+                .get()
+                .unwrap()
+                .http
+                .clone();
+            let (shared, provider) = (self.shared.clone(), self.provider.clone());
+            let gateway = discord::gateway::DiscordGateway::new(http, shared, provider, None);
+            let (done, report) = tokio::sync::oneshot::channel();
+            let bridge = discord::TurnBridgeContext {
+                provider: self.provider.clone(),
+                gateway: Arc::new(gateway),
+                channel_id: self.channel,
+                user_msg_id: Some(MessageId::new(USER_MSG)),
+                user_text_owned: "질문".into(),
+                request_owner_name: "live-end".into(),
+                role_binding: None,
+                adk_session_key: None,
+                adk_session_name: None,
+                adk_session_info: None,
+                adk_cwd: None,
+                dispatch_id: None,
+                dispatch_kind: None,
+                memory_recall_usage: Default::default(),
+                context_window_tokens: 0,
+                context_compact_percent: 0,
+                current_msg_id: Some(MessageId::new(PLACEHOLDER)),
+                response_sent_offset: 0,
+                full_response: String::new(),
+                tmux_last_offset: None,
+                new_session_id: None,
+                defer_watcher_resume: false,
+                reuse_status_panel_message: false,
+                completion_tx: Some(done),
+                is_external_input_tui_direct: false,
+                inflight_state: row,
+            };
+            discord::spawn_turn_bridge(self.shared.clone(), token.clone(), rx, bridge);
+            let reported = tokio::time::timeout(Duration::from_secs(30), report).await;
+            reported.ok()?.ok()
+        })
+    }
+
     /// Waits for the idle kickoff to take the queued input.
     pub(in crate::services::discord) fn wait_taken(&self) -> Vec<bool> {
         self.rt.block_on(async {
@@ -280,7 +338,7 @@ async fn queued(
 /// input and a part of an answer, then `end` plays the provider's death and the end passes.
 fn claude_live_turn<R>(
     fx: &super::Fixture,
-    end: impl FnOnce(&LiveEnd, &Arc<CancelToken>) -> R,
+    end: impl FnOnce(LiveEnd, &Arc<CancelToken>) -> R,
 ) -> (Result<(), String>, Vec<StreamMessage>, Option<R>) {
     let record = fx.store_bound();
     let launcher = Arc::new(super::Launcher::default());
@@ -314,7 +372,7 @@ fn claude_live_turn<R>(
             (ProviderKind::Claude, super::CHANNEL, fx.logical()),
             &token,
         );
-        seen = Some(end(&live, &token));
+        seen = Some(end(live, &token));
     });
     (result, messages, seen)
 }
@@ -329,6 +387,50 @@ fn kill(fx: &super::Fixture) {
     fx.rig.show_panes(&[PANE]);
     fx.rig.foreground(&[SHELL]);
     fx.rig.provider_seen(&context, false);
+}
+
+/// The bound execution's SessionStart record of its transcript in the pane's log, as its launch
+/// left it; admission takes the turn's source from it.
+fn log_source(fx: &super::Fixture) {
+    use crate::services::tui_prompt_dedupe::binding_events as events;
+    use std::os::unix::fs::MetadataExt;
+    let binding =
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(fx.logical()).unwrap();
+    let meta = std::fs::metadata(&binding.output_path).unwrap();
+    let logged = events::binding_events_since(super::CHANNEL, 0).unwrap();
+    let now = chrono::Utc::now();
+    let event = events::BindingEvent {
+        seq: logged.last().map_or(1, |event| event.seq + 1),
+        channel_id: super::CHANNEL,
+        provider: "claude".into(),
+        tmux_session: fx.logical().into(),
+        execution_nonce: Some(super::NONCE.into()),
+        old: None,
+        new: events::BindingTarget::Source(events::SourceId {
+            session_id: binding.session_id.unwrap(),
+            path: binding.output_path.into(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }),
+        cause: events::BindingCause::Startup,
+        parent_hint: None,
+        evidence: events::BindingEvidence {
+            hook_event: Some("SessionStart".into()),
+            received_at: now,
+        },
+        committed_at: now,
+    };
+    let log = events::test_root()
+        .unwrap()
+        .join(events::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&log).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log.join(format!("{}.log", super::CHANNEL)))
+        .unwrap();
+    let line = format!("{}\n", serde_json::to_string(&event).unwrap());
+    std::io::Write::write_all(&mut file, line.as_bytes()).unwrap();
 }
 
 /// The runtime binding the turn's reader hands off through, as a watcher reads it.
@@ -450,6 +552,70 @@ fn a_terminal_flushed_as_the_provider_died_is_left_to_its_reader_pg() {
     );
 }
 
+/// A terminal the dying provider wrote without its newline is the reader's: the pass leaves it,
+/// the reader reads it to the file's end and its bridge settles the turn once and frees the channel.
+#[test]
+fn a_terminal_left_without_its_newline_is_settled_once_by_its_own_reader_pg() {
+    let fx = super::Fixture::new("liveraw", None);
+    let (result, messages, seen) = claude_live_turn(&fx, |live, token| {
+        live.route();
+        let (path, _) = handoff(&fx);
+        let answer = json!({"type": "assistant", "message": {"role": "assistant",
+            "stop_reason": "end_turn", "content": [{"type": "text", "text": "답"}]}});
+        super::append(Path::new(&path), &[answer]);
+        let done = json!({"type": "system", "subtype": "turn_duration"}).to_string();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, done.as_bytes()).unwrap();
+        kill(&fx);
+        live.pass(Duration::from_secs(3));
+        let left = (live.texts(), live.row().is_some(), fx.row());
+        (
+            left,
+            std::fs::metadata(&path).unwrap().len(),
+            token.clone(),
+            live,
+        )
+    });
+    let (left, len, token, live) = seen.expect("the turn reached its prompt");
+    assert_eq!(left, (Vec::new(), true, Some(HostedState::Bound)));
+    assert_eq!(result, Ok(()), "the reader joined");
+    let ends: Vec<u64> = messages
+        .iter()
+        .filter_map(|m| match m {
+            StreamMessage::ClaudeTuiTerminalDone {
+                complete_record_end,
+                ..
+            } => Some(*complete_record_end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [len], "one terminal, read to the file's end");
+    log_source(&fx);
+    let _registry = fx.rig.registry_on_this_thread();
+    let finalized = crate::services::discord::turn_bridge::BridgeCompletionSignal::Finalized;
+    assert_eq!(
+        live.bridge(&token, messages),
+        Some(finalized),
+        "settled once"
+    );
+    let settled = (live.row().is_none(), live.rt.block_on(live.held()));
+    assert_eq!(
+        settled,
+        (true, false),
+        "the bridge freed the row and the channel"
+    );
+    assert_eq!(live.wait_taken().len(), 1, "the queued input started once");
+    let texts = live.texts();
+    let delivered = texts.iter().any(|text| text.contains("답"));
+    assert!(
+        delivered && !texts.contains(&LiveEnd::notice()),
+        "{texts:?}"
+    );
+}
+
 /// After its execution ended, a turn the pass does not own, or whose source it cannot read, is
 /// left as it was; the unread source is logged once for the turn.
 #[test]
@@ -481,12 +647,12 @@ fn a_live_turn_the_pass_cannot_own_or_read_is_left_as_it_was_pg() {
         row.tui_terminal_kind = Some(NativeTerminalKind::Aborted);
         inflight::save_inflight_state(&row).unwrap();
         live.pass(Duration::from_secs(2));
-        let admitted = untouched(live);
+        let admitted = untouched(&live);
         row.tui_terminal_kind = None;
         inflight::save_inflight_state(&row).unwrap();
         nonce("successor-execution");
         live.pass(Duration::from_secs(2));
-        let successor = untouched(live);
+        let successor = untouched(&live);
         nonce(super::NONCE);
         let (path, _) = handoff(&fx);
         let kept = std::fs::read(&path).unwrap();
@@ -504,7 +670,7 @@ fn a_live_turn_the_pass_cannot_own_or_read_is_left_as_it_was_pg() {
             live.pass(Duration::from_secs(2));
             live.pass(Duration::from_secs(2));
         });
-        let unread = untouched(live);
+        let unread = untouched(&live);
         fx.cancel_now();
         let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         (
