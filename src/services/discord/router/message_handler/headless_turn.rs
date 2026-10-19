@@ -1006,14 +1006,6 @@ async fn start_reserved_headless_turn_admitted(
     let execution_pool = shared.pg_pool.clone();
     let producer_registration = original_registration.clone();
     let producer = {
-        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
-            shared.pg_pool.as_ref(),
-            &provider,
-            channel_id.get(),
-            adk_session_key.as_deref(),
-            tmux_session_name.as_deref(),
-        )
-        .await;
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
             channel_id.get(),
@@ -1021,6 +1013,14 @@ async fn start_reserved_headless_turn_admitted(
             remote_profile.is_some(),
             &turn_host,
             &cancel_token,
+        )
+        .await;
+        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
+            shared.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
         )
         .await;
         tokio::task::spawn_blocking(move || {

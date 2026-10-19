@@ -378,6 +378,13 @@ impl CanaryFixture {
         }
     }
 
+    fn warm_followup(&self, enabled: bool) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
+            std::ffi::OsStr::new(if enabled { "1" } else { "0" }),
+        )
+    }
+
     pub(in crate::services::discord) fn history(&self) -> PathBuf {
         self.root
             .path()

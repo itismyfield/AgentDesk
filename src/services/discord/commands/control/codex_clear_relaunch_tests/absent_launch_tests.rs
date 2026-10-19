@@ -130,11 +130,7 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, st
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
-    assert!(crate::config::shared_test_env_lock().try_lock().is_err());
-    let _warm = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
-        "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
-        std::ffi::OsStr::new(if warm { "1" } else { "0" }),
-    );
+    let _warm = fixture.warm_followup(warm);
     assert_eq!(
         crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
         warm

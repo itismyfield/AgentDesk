@@ -2315,14 +2315,6 @@ pub(super) async fn handle_text_message(
         let provider_for_blocking = provider.clone();
         let execution_pool = shared.pg_pool.clone();
         let producer_registration = original_registration.clone();
-        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
-            shared.pg_pool.as_ref(),
-            &provider,
-            channel_id.get(),
-            adk_session_key.as_deref(),
-            tmux_session_name.as_deref(),
-        )
-        .await;
         let codex_observation = super::provider_dispatch::observe_codex_turn(
             &provider,
             channel_id.get(),
@@ -2330,6 +2322,14 @@ pub(super) async fn handle_text_message(
             remote_profile.is_some(),
             &turn_host,
             &cancel_token,
+        )
+        .await;
+        let teardown_clearance = super::super::super::turn_teardown_clearance::for_turn(
+            shared.pg_pool.as_ref(),
+            &provider,
+            channel_id.get(),
+            adk_session_key.as_deref(),
+            tmux_session_name.as_deref(),
         )
         .await;
         tokio::task::spawn_blocking(move || {
