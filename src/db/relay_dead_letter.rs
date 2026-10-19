@@ -159,8 +159,6 @@ pub(crate) fn record_detached_reporting(
 /// claim is once per attempt, not once per row. A claim lost to a crash stays
 /// `'claimed'`; abandoned claims have no automatic recovery.
 ///
-/// Claimed for one attempt; settlement may return it to pending.
-pub(crate) const REDELIVERY_CLAIMED: &str = "claimed";
 /// The body was posted to the channel.
 pub(crate) const REDELIVERY_DELIVERED: &str = "delivered";
 /// Every byte of this row was already covered by a sibling row in the same plan.
@@ -171,6 +169,10 @@ pub(crate) const REDELIVERY_DECLINED: &str = "declined";
 /// a verdict about the body, so a later claim picks the row up again instead of
 /// retiring it unread.
 pub(crate) const REDELIVERY_PENDING: &str = "pending";
+
+/// Claimed for one attempt; settlement may return it to pending.
+#[cfg(test)]
+const REDELIVERY_CLAIMED: &str = "claimed";
 
 /// One row claimed for redelivery. `id` settles it; the rest reconstruct the body.
 #[derive(Clone, Debug)]
@@ -202,7 +204,7 @@ pub(crate) async fn claim_pending_redeliveries(
 ) -> Result<Vec<ClaimedDeadLetter>, sqlx::Error> {
     let rows: Vec<(i64, String, Option<String>, String, String)> = sqlx::query_as(
         "UPDATE relay_dead_letter
-            SET redelivery_state = $5,
+            SET redelivery_state = 'claimed',
                 redelivery_attempts = redelivery_attempts + 1
           WHERE id IN (
                 SELECT id
@@ -221,7 +223,6 @@ pub(crate) async fn claim_pending_redeliveries(
     .bind(min_age_secs)
     .bind(max_age_secs)
     .bind(limit)
-    .bind(REDELIVERY_CLAIMED)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -250,12 +251,11 @@ pub(crate) async fn settle_redelivery(
         "UPDATE relay_dead_letter
             SET redelivery_state = $2,
                 redelivered_at = CASE WHEN $2 = $3 THEN NULL ELSE NOW() END
-          WHERE id = $1 AND redelivery_state = $4",
+          WHERE id = $1 AND redelivery_state = 'claimed'",
     )
     .bind(id)
     .bind(state)
     .bind(REDELIVERY_PENDING)
-    .bind(REDELIVERY_CLAIMED)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
