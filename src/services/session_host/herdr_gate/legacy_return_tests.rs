@@ -119,13 +119,6 @@ fn legacy_return_end_requires_both_observations() {
     for pane in [
         PaneReading::Unreadable("no observation".into()),
         PaneReading::Present {
-            root: ProcessStamp {
-                pid: 200,
-                start: "different".into(),
-            },
-            provider: PaneProvider::Exited,
-        },
-        PaneReading::Present {
             root: r.expected.as_ref().unwrap().root.clone(),
             provider: PaneProvider::Execution(
                 r.expected.as_ref().unwrap().provider_process.clone(),
@@ -207,4 +200,117 @@ fn legacy_return_end_rejects_nonretired_incomplete_and_other_endpoint() {
         .unwrap_err(),
         ReturnEndRefusal::EndpointMismatch
     );
+}
+
+/// Reads each pid as its `RecordedProcess` names, against a record whose starts are
+/// `linux-ticks:<pid>`; a pid not named is unreadable. Counts the existence reads.
+struct PidOs(HashMap<u32, pane_probe::RecordedProcess>, AtomicU64);
+impl PidOs {
+    fn new(root: pane_probe::RecordedProcess, provider: pane_probe::RecordedProcess) -> Self {
+        Self(
+            HashMap::from([(100, root), (101, provider)]),
+            AtomicU64::new(0),
+        )
+    }
+}
+impl ProcessOs for PidOs {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        use pane_probe::RecordedProcess::{ProvenAbsent, Unreadable};
+        self.1.fetch_add(1, Ordering::SeqCst);
+        match self.0.get(&pid) {
+            Some(ProvenAbsent) => Ok(false),
+            None | Some(Unreadable) => Err(RestoreUnverified::ProcessUnreadable),
+            Some(_) => Ok(true),
+        }
+    }
+    fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        let ticks = match self.0.get(&pid) {
+            Some(pane_probe::RecordedProcess::ExactAlive) => pid,
+            Some(pane_probe::RecordedProcess::Replaced) => pid + 1_000,
+            _ => return Err(RestoreUnverified::ProcessUnreadable),
+        };
+        Ok(ProcessStart {
+            identity: StartIdentity::LinuxTicks(ticks.into()),
+            wall_clock: UNIX_EPOCH,
+        })
+    }
+    fn parent(&self, _: u32) -> Result<u32, RestoreUnverified> {
+        unreachable!()
+    }
+    fn environ(&self, _: u32) -> Result<Vec<String>, RestoreUnverified> {
+        unreachable!()
+    }
+    fn exec_path(&self, _: u32) -> Option<String> {
+        unreachable!()
+    }
+}
+
+fn timed(state: HostedState) -> HostedExecution {
+    let mut r = record(&owner("root-replaced"), "n1", state);
+    let expected = r.expected.as_mut().unwrap();
+    expected.root.start = "linux-ticks:100".into();
+    expected.provider_process.start = "linux-ticks:101".into();
+    r
+}
+
+/// The pane as a restarted server restores it: another shell, alone.
+fn other_shell(provider: PaneProvider) -> PaneReading {
+    let root = ProcessStamp {
+        pid: 200,
+        start: "linux-ticks:200".into(),
+    };
+    PaneReading::Present { root, provider }
+}
+
+// Another lone shell ends the execution only when its recorded root and provider are both proven
+// absent; a live, reused or unreadable one, another pane state or no launch evidence keeps it.
+#[test]
+fn root_replaced_requires_two_proven_absences() {
+    use pane_probe::RecordedProcess::{ExactAlive, ProvenAbsent, Replaced, Unreadable};
+    let r = timed(HostedState::Bound);
+    let ended = |root, provider, pane: &PaneReading| {
+        let os = PidOs::new(root, provider);
+        (confirmed_ended(&os, &r, pane), os.1.load(Ordering::SeqCst))
+    };
+    let restored = other_shell(PaneProvider::Exited);
+    assert!(ended(ProvenAbsent, ProvenAbsent, &restored).0);
+    for kept in [ExactAlive, Replaced, Unreadable] {
+        assert!(!ended(kept, ProvenAbsent, &restored).0, "root {kept:?}");
+        assert!(!ended(ProvenAbsent, kept, &restored).0, "provider {kept:?}");
+    }
+    let provider = r.expected.as_ref().unwrap().provider_process.clone();
+    let other_nonce = format!("{:?}", EvidenceGap::OtherNonce("n2".into()));
+    for pane in [
+        other_shell(PaneProvider::Execution(provider)),
+        other_shell(PaneProvider::Unverified(other_nonce)),
+        other_shell(PaneProvider::Unverified("NoneYet".into())),
+        PaneReading::Unreadable("snapshot from another server".into()),
+    ] {
+        assert!(!ended(ProvenAbsent, ProvenAbsent, &pane).0, "{pane:?}");
+    }
+    let mut unproven = r.clone();
+    unproven.expected = None;
+    let os = PidOs::new(ProvenAbsent, ProvenAbsent);
+    assert!(!confirmed_ended(&os, &unproven, &restored));
+    // A missing pane or the recorded root alone ends it as before, with no process read.
+    let own = PaneReading::Present {
+        root: r.expected.as_ref().unwrap().root.clone(),
+        provider: PaneProvider::Exited,
+    };
+    for pane in [PaneReading::Missing, own] {
+        assert_eq!(ended(ExactAlive, ExactAlive, &pane), (true, 0), "{pane:?}");
+    }
+}
+
+// A retired execution whose pane came back as another lone shell is a legacy return's end once
+// both recorded processes are proven absent, and not while its root lives.
+#[test]
+fn legacy_return_root_replaced_both_absent() {
+    use pane_probe::RecordedProcess::{ExactAlive, ProvenAbsent};
+    let r = timed(HostedState::Retired);
+    let restored = || other_shell(PaneProvider::Exited);
+    let end = RetiredEnd::from_reads(&r, restored(), &PidOs::new(ProvenAbsent, ProvenAbsent));
+    assert!(end.unwrap().matches(&r));
+    let alive = RetiredEnd::from_reads(&r, restored(), &PidOs::new(ExactAlive, ProvenAbsent));
+    assert_eq!(alive.unwrap_err(), ReturnEndRefusal::PaneUnverified);
 }

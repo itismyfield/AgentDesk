@@ -58,7 +58,7 @@ struct Server {
     conns: Arc<Mutex<BTreeMap<usize, Seen>>>,
     stop: Arc<AtomicBool>,
     version: Arc<Mutex<String>>,
-    close_reply: Arc<Mutex<Option<Value>>>,
+    replies: Arc<Mutex<HashMap<String, Value>>>,
     /// Once set, a close removes the pane from every later snapshot, as a last-pane close does.
     vanish_on_close: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -79,11 +79,11 @@ fn serve() -> Server {
     let conns = Arc::new(Mutex::new(BTreeMap::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let version = Arc::new(Mutex::new("0.9.3".into()));
-    let close_reply = Arc::new(Mutex::new(None));
+    let replies = Arc::<Mutex<HashMap<String, Value>>>::default();
     let vanish_on_close = Arc::new(AtomicBool::new(false));
     let gone = Arc::new(AtomicBool::new(false));
     let (state, stopped) = (conns.clone(), stop.clone());
-    let (hello_version, closed) = (version.clone(), close_reply.clone());
+    let (hello_version, scripted) = (version.clone(), replies.clone());
     let vanish = vanish_on_close.clone();
     let thread = thread::spawn(move || {
         let mut handlers = Vec::new();
@@ -95,10 +95,10 @@ fn serve() -> Server {
             };
             state.lock().unwrap().insert(index, Seen::default());
             let state = state.clone();
-            let (version, close_reply) = (hello_version.clone(), closed.clone());
+            let (version, replies) = (hello_version.clone(), scripted.clone());
             let pane = (vanish.clone(), gone.clone());
             handlers.push(thread::spawn(move || {
-                answer(stream, index, &state, &version, &close_reply, &pane)
+                answer(stream, index, &state, &version, &replies, &pane)
             }));
             index += 1;
         }
@@ -111,15 +111,15 @@ fn serve() -> Server {
         conns,
         stop,
         version,
-        close_reply,
+        replies,
         vanish_on_close,
         thread: Some(thread),
     }
 }
 
-/// `close_reply` is set only for a close request.
-fn reply(request: &Value, version: &str, close_reply: Option<Value>, gone: bool) -> Value {
-    if let Some(mut reply) = close_reply {
+/// `scripted` takes the default reply's place.
+fn reply(request: &Value, version: &str, scripted: Option<Value>, gone: bool) -> Value {
+    if let Some(mut reply) = scripted {
         reply["id"] = request["id"].clone();
         return reply;
     }
@@ -153,7 +153,7 @@ fn answer(
     index: usize,
     conns: &Mutex<BTreeMap<usize, Seen>>,
     version: &Mutex<String>,
-    close_reply: &Mutex<Option<Value>>,
+    replies: &Mutex<HashMap<String, Value>>,
     (vanish_on_close, gone): &(Arc<AtomicBool>, Arc<AtomicBool>),
 ) {
     let _ = stream.set_nonblocking(false);
@@ -166,11 +166,12 @@ fn answer(
     conns.lock().unwrap().get_mut(&index).unwrap().request = request.clone();
     if let Some(request) = request {
         let close = request["method"] == "pane.close";
-        let close_reply = close_reply.lock().unwrap().clone().filter(|_| close);
+        let method = request["method"].as_str().unwrap_or("");
+        let scripted = replies.lock().unwrap().get(method).cloned();
         let reply = reply(
             &request,
             &version.lock().unwrap(),
-            close_reply,
+            scripted,
             gone.load(Ordering::SeqCst),
         );
         if close && vanish_on_close.load(Ordering::SeqCst) {
@@ -186,6 +187,13 @@ fn answer(
 }
 
 impl Server {
+    /// Every later `method` request is answered `reply` whole, or as by default once it is `None`.
+    fn script(&self, method: &str, reply: Option<Value>) {
+        let mut replies = self.replies.lock().unwrap();
+        replies.remove(method);
+        replies.extend(reply.map(|reply| (method.to_string(), reply)));
+    }
+
     fn mutations(&self) -> Vec<Value> {
         self.conns()
             .into_iter()
@@ -1073,9 +1081,9 @@ fn m0_confirmation_required_no_escalation() {
     let rig = rig();
     let _switch = LiveTerminateSwitch::new();
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
-    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
+    rig.server.script("pane.close", Some(json!({"error": {
         "code": "confirmation_required", "message": "closing this pane would close a worktree group"
-    }}));
+    }})));
     let result = terminate(&target);
     let mutations = rig.server.mutations();
     assert_eq!(mutations.len(), 1);
@@ -1095,7 +1103,7 @@ fn m0_close_uncertain_reply_never_retries() {
         json!({"result": {"type": "future_close"}}),
         json!({"error": {"code": "other", "message": "unknown"}}),
     ] {
-        *rig.server.close_reply.lock().unwrap() = Some(body);
+        rig.server.script("pane.close", Some(body));
         assert!(matches!(
             terminate(&target),
             HerdrTerminateResult::Indeterminate(_)
@@ -1612,7 +1620,8 @@ fn m1_afterwrite_never_auto_retries_pg() {
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
     let os = ScriptedOs::new(launched_os(&rig), Ok(false));
-    *rig.server.close_reply.lock().unwrap() = Some(json!({"result": {"type": "future_close"}}));
+    let future = json!({"result": {"type": "future_close"}});
+    rig.server.script("pane.close", Some(future));
     block_on(async {
         let service = Service::start(&rig, pane, os.clone(), NONCE).await;
         assert!(matches!(
@@ -1649,9 +1658,9 @@ fn m1_confirmation_required_stops_pg() {
     let rig = rig();
     let pane = PaneLife::new(&rig, false, false);
     let os = ScriptedOs::new(launched_os(&rig), Ok(false));
-    *rig.server.close_reply.lock().unwrap() = Some(json!({"error": {
+    rig.server.script("pane.close", Some(json!({"error": {
         "code": "confirmation_required", "message": "closing this pane would close a worktree group"
-    }}));
+    }})));
     block_on(async {
         let service = Service::start(&rig, pane, os, NONCE).await;
         assert_eq!(
@@ -1969,6 +1978,7 @@ pub(crate) mod p11 {
     pub(crate) const NODE: &str = "mac-mini";
     pub(crate) const EXECUTION: &str = NONCE;
     pub(crate) const LAUNCHED_PANE: &str = LAUNCHED;
+    const FRESH: u32 = 11;
     pub(crate) use crate::db::dispatched_sessions::hosted_execution::HostedState;
 
     /// Re-runs test `path` in a child owning its boot section, O writer list and Herdr
@@ -1980,27 +1990,7 @@ pub(crate) mod p11 {
             return true;
         }
         let home = tempfile::tempdir().unwrap();
-        let config = home.path().join("config.toml");
-        std::fs::write(&config, CANONICAL_CONFIG).unwrap();
-        let old = std::time::SystemTime::now() - Duration::from_secs(3_600);
-        let file = std::fs::File::options().write(true).open(&config).unwrap();
-        file.set_modified(old).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture", "--test-threads=1"])
-            .env(TERMINATE_TEST_CHILD, name)
-            .env("HERDR_CONFIG_PATH", &config)
-            .env("XDG_CONFIG_HOME", home.path().join("xdg"))
-            .env_remove(crate::services::herdr_admission::ADMISSION_ENV)
-            .env(
-                crate::services::tui_o::cutover::test_override::CHILD_ENV,
-                "1",
-            )
-            .env(
-                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
-                format!("[[{channel},\"claude_tui\"]]"),
-            )
-            .output()
-            .unwrap();
+        let output = child_command(path, channel, home.path()).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -2233,6 +2223,16 @@ pub(crate) mod p11 {
             EndCheckPause { arrived, release }
         }
 
+        /// A restarted server restored the pane as shell `FRESH` alone.
+        pub(crate) fn restore_shell(&self) {
+            let os = FakeOs::launched(Vec::new()).starting(FRESH, &[start(2_000)]);
+            self.os.swap(Arc::new(os));
+            let info = json!({"pane_id": PANE, "shell_pid": FRESH,
+                "foreground_process_group_id": FRESH, "foreground_processes": [{"pid": FRESH}]});
+            let reply = json!({"result": {"type": "pane_process_info", "process_info": info}});
+            self.server.script("pane.process_info", Some(reply));
+        }
+
         /// Every write the server received, as `(method, pane_id)`, in order.
         pub(crate) fn writes(&self) -> Vec<(String, String)> {
             self.server
@@ -2412,7 +2412,7 @@ pub(crate) mod p11 {
                 "code": "confirmation_required",
                 "message": "closing this pane would close a worktree group"
             }});
-            *self.server.close_reply.lock().unwrap() = required.then_some(reply);
+            self.server.script("pane.close", required.then_some(reply));
             self.server
                 .vanish_on_close
                 .store(!required, Ordering::SeqCst);
