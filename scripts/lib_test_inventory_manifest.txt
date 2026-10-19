@@ -5481,6 +5481,7 @@ services::discord::placeholder_controller::queued_card_gate::tests::t4_merged_dr
 services::discord::placeholder_controller::queued_card_gate::tests::t6_bootstrap_stale_card_is_rekeyed_not_deleted_when_a_live_entry_is_cardless
 services::discord::placeholder_controller::queued_card_gate::tests::t7_gated_sites_hold_no_raw_destructive_call
 services::discord::placeholder_controller::queued_card_gate::tests::t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock
+services::discord::placeholder_controller::queued_card_gate::unanswered_tests::an_unanswered_mailbox_keeps_queued_cards_and_an_answered_empty_one_releases_them
 services::discord::placeholder_live_events::channel_visibility::tests::a_dm_hint_survives_failed_lookups_clears_and_a_new_session
 services::discord::placeholder_live_events::channel_visibility::tests::a_dm_hint_that_lands_during_a_lookup_outlives_its_expiry_and_its_answer
 services::discord::placeholder_live_events::channel_visibility::tests::a_failed_lookup_is_not_a_guild_observation
