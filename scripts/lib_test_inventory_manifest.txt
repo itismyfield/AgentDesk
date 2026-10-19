@@ -10381,6 +10381,10 @@ services::discord::turn_presence::activity::unbound::dormancy_tests::activation_
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::queued_input_drains_in_order_once_unrelated_sessions_remain_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::start_gate_and_deliver_start_once_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::unrelated_host_sessions_leave_a_session_less_channel_idle_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
@@ -10401,6 +10405,7 @@ services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_inv
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_marker_collection_does_not_create_runtime_directories
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_old_publication_is_rejected_after_a_new_read
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_registration_reads_preserve_precedence_and_permissions
+services::discord::turn_presence::activity::unbound::routine_owner::tests::routine_turn_channels_need_exact_started_records_pg
 services::discord::turn_presence::activity::unbound::tests::s1_hosted_absence_cannot_hide_related_inventory
 services::discord::turn_presence::activity::unbound::tests::s1_nameless_local_scope_requires_a_complete_empty_inventory
 services::discord::turn_presence::activity::unbound::tests::u_absent_logs_and_read_failures
@@ -10409,6 +10414,7 @@ services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
 services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg
 services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
 services::discord::turn_presence::activity::unbound::tests::u_local_row_identity_pg
+services::discord::turn_presence::activity::unbound::tests::u_outside_or_elsewhere_sessions_never_hide_own_evidence
 services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
 services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
 services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
