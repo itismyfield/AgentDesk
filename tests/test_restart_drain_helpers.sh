@@ -1010,6 +1010,72 @@ assert_eq "restart skill timeout returns 0" "0" "$rc"
 assert_eq "restart skill timeout does not require phase 2" "1" \
   "${AGENTDESK_RESTART_DRAIN_PERSISTENCE_NOT_REQUIRED:-missing}"
 
+# Self-hosted deploys re-run through a tmux helper whose environment is the tmux
+# server's, so the override must travel in the production helper script itself.
+eval "$(awk '/^_spawn_detached_helper[(][)] [{]$/ { p = 1 } p { print } p && /^}$/ { exit }' "$DEPLOY_SH")"
+declare -F _spawn_detached_helper >/dev/null || fail "production _spawn_detached_helper extracted"
+run_detached_operator_gate() {
+  local parent="$1" leftover="$2" case_dir="$S1_TMP/detached-$1-$2" helper
+  mkdir -p "$case_dir/scripts" "$case_dir/home" "$case_dir/release"
+  {
+    echo '#!/bin/bash'
+    echo 'set -uo pipefail'
+    printf '. %q\n' "$DEFAULTS_SH"
+    echo 'guard_no_foreign_active_turns_or_warn() { return 0; }'
+    echo '_launchd_job_state() { echo running; }'
+    printf 'PATH=%q:$PATH AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 request_restart_drain_mode_or_fail release running.label 0 %q deploy-release >/dev/null 2>&1 || exit 90\n' \
+      "$TMP_FIXTURE_DIR/bin_fail" "$case_dir/release"
+    echo 'RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"'
+    printf 'ADK_REL=%q\n' "$case_dir/release"
+    echo '_release_runtime_is_serving() { return 0; }'
+    echo 'wait_for_restart_persistence_or_fail() { echo phase-2-ran; return 1; }'
+    printf 'eval "$(<%q)"\n' "$S1_TMP/durability-region.sh"
+  } >"$case_dir/scripts/deploy-release.sh"
+  chmod +x "$case_dir/scripts/deploy-release.sh"
+  (
+    if [ "$parent" = unset ]; then
+      unset AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED
+    else
+      export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED="$parent"
+    fi
+    # shellcheck disable=SC2329
+    tmux() { printf '%s\n' "${@: -1}" >"$case_dir/helper-path"; }
+    ADK_REL="$case_dir/adk" REPO="$case_dir" SCRIPT_DIR="$case_dir/scripts"
+    REPORT_CHANNEL_ID=1 REPORT_PROVIDER=claude DEPLOY_DELAY_SECS=0 DEPLOY_TEST_MODE=0
+    POST_DEPLOY_SMOKE_SCOPE=full DEPLOY_LOCK_FILE=x DEPLOY_LOCK_TIMEOUT_SECS=1
+    DEPLOY_PEER_VERDICT_TIMEOUT_SECS=1 DEPLOY_PEER_VERDICT_POLL_INTERVAL_SECS=1 BUNDLE_ID=x PLIST_REL=x
+    _spawn_detached_helper >/dev/null 2>&1
+  )
+  helper=$(cat "$case_dir/helper-path" 2>/dev/null || true)
+  set +e
+  if [ "$leftover" = none ]; then
+    env -i PATH=/usr/bin:/bin HOME="$case_dir/home" /bin/bash "$helper"
+  else
+    env -i PATH=/usr/bin:/bin HOME="$case_dir/home" \
+      AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED="$leftover" /bin/bash "$helper"
+  fi
+  DETACHED_RC=$?
+  set -e
+  DETACHED_OUT=$(cat "$case_dir"/adk/runtime/self_hosted_deploy/*.log 2>/dev/null || true)
+}
+
+run_detached_operator_gate 1 none
+assert_eq "detached helper keeps the operator override" "0" "$DETACHED_RC"
+case "$DETACHED_OUT" in
+  *phase-2-ran*) fail "detached override does not wait for persistence (got: $DETACHED_OUT)" ;;
+  *'skipped by operator override AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1'*)
+    pass "detached helper names the operator override" ;;
+  *) fail "detached helper names the operator override (got: $DETACHED_OUT)" ;;
+esac
+for parent in unset 0; do
+  run_detached_operator_gate "$parent" 1
+  assert_eq "parent=$parent detached helper ignores a leftover tmux override" "1" "$DETACHED_RC"
+  case "$DETACHED_OUT" in
+    *phase-2-ran*) pass "parent=$parent detached helper enters the phase-2 wait" ;;
+    *) fail "parent=$parent detached helper enters the phase-2 wait (got: $DETACHED_OUT)" ;;
+  esac
+done
+
 # A rollback-era runtime may leave only the fixed compatibility index while its
 # same-nonce canonical pending marker is still linked. Execute the production
 # post-proof cleanup region, then enter the public request path: retaining that
