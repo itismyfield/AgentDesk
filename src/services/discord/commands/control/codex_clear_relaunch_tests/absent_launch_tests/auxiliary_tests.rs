@@ -253,12 +253,17 @@ fn terminal(path: &std::path::Path, turn: &str, text: &str) {
     for row in [
         json!({"type":"response_item","payload":{"type":"message","role":"assistant",
             "content":[{"type":"output_text","text":text}]}}),
-        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":text}}),
         json!({"type":"event_msg","payload":{"type":"composer_ready","turn_id":turn}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn,"last_agent_message":text}}),
     ] {
         writeln!(output, "{row}").unwrap();
     }
     output.flush().unwrap();
+    assert_eq!(
+        crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(path),
+        crate::services::tui_turn_state::TuiTurnState::Idle,
+        "the terminal fixture must be idle to the existing hosted readiness classifier",
+    );
 }
 
 async fn wait_completion(token: &Arc<CancelToken>) {

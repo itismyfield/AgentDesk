@@ -1489,6 +1489,12 @@ fn execute_streaming_local_tui_tmux(
     )
 }
 
+#[cfg(unix)]
+fn remove_failed_tui_launch_files(owner: &str, script: &str) {
+    let _ = std::fs::remove_file(owner);
+    let _ = std::fs::remove_file(script);
+}
+
 /// Resolve the rollout-tail result for the Codex Direct TUI launch.
 ///
 /// - `Ok(Some(result))` — tail succeeded; proceed to post-tail emission.

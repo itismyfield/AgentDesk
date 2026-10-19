@@ -827,6 +827,8 @@ jobs:
               - 'src/services/discord/admin_host_guard.rs'
               - 'src/services/discord/busy_followup_retry_store/**'
               - 'src/services/discord/catch_up/**'
+              - 'src/services/discord/codex_absence.rs'
+              - 'src/services/discord/codex_absence/**'
               - 'src/services/discord/commands/**'
               - 'src/services/discord/delivery_lease_cell.rs'
               - 'src/services/discord/destructive_cancel_gate.rs'

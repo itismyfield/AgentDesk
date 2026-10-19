@@ -46,6 +46,17 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
         "Hold(\"owner_unresolved\")"
     );
     fixture.fake.take_calls();
+    let taken = crate::services::discord::queue_dispatch::mailbox_take_next_automatic_intervention(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+    )
+    .await;
+    assert!(taken.persistence_error.is_none(), "{taken:?}");
+    assert!(
+        taken.into_intervention().is_none(),
+        "absence must not grant queue admission past unproved foreign ownership"
+    );
     assert!(!kickoff(&fixture, &api).await);
     assert_eq!(queue_identities(&fixture).await, identities);
     let snapshot = fixture.shared.mailbox(channel).snapshot().await;

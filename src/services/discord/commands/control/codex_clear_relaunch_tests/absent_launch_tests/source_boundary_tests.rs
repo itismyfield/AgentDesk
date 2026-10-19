@@ -42,6 +42,8 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, SnapshotBody)> {
 }
 
 fn mark_absent(fixture: &CanaryFixture) {
+    fixture.fake.enable_fixture_launch();
+    crate::services::platform::tmux::invalidate_availability_cache();
     fixture.fake.mark_missing();
     fixture.alive.store(false, Ordering::SeqCst);
     crate::services::session_backend::remove_process_session(CANARY_TMUX);
@@ -95,10 +97,20 @@ async fn owned_absence_preserves_source_authority_and_all_evidence_pg() {
         Some("b1-source-boundary-host"),
     )
     .await;
-    mark_absent(&fixture);
+    fixture.fake.enable_fixture_launch();
+    crate::services::platform::tmux::invalidate_availability_cache();
+    fixture.fake.mark_missing();
+    assert!(crate::services::session_backend::process_session_pid(CANARY_TMUX).is_some());
     let observation =
         crate::services::discord::codex_absence::readiness(CANARY_CHANNEL, CANARY_TMUX)
             .expect("absence has no inflight row");
+    let with_pid = snapshot(fixture.root.path());
+    assert!(
+        dedupe::clear_relaunch::absent_capture(CANARY_TMUX, &observation).is_none(),
+        "a tracked process PID must independently refuse absent launch permission",
+    );
+    assert_eq!(snapshot(fixture.root.path()), with_pid);
+    mark_absent(&fixture);
     assert_eq!(
         dedupe::binding_context::observe_spawn_nonce_marker(CANARY_TMUX),
         SpawnNonceMarker::Known(fixture.context.execution_nonce.clone()),

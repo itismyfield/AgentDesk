@@ -1,4 +1,5 @@
 use super::super::super::mailbox_finish::unwind_unstarted_turn;
+use super::provider_dispatch::producer_panic;
 use super::*;
 use crate::services::discord::live_bridge::register_without_requeue as register_headless_original;
 
@@ -1076,22 +1077,7 @@ async fn start_reserved_headless_turn_admitted(
                         let _ = tx.send(message);
                     }
                 }
-                Err(panic_info) => {
-                    let msg = if let Some(value) = panic_info.downcast_ref::<String>() {
-                        value.clone()
-                    } else if let Some(value) = panic_info.downcast_ref::<&str>() {
-                        value.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!("  [headless streaming] PANIC: {}", msg);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: format!("Internal error (panic): {}", msg),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
-                }
+                Err(info) => drop(tx.send(producer_panic("headless streaming", info))),
             }
         })
     };

@@ -2673,7 +2673,8 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
                 ("src/services/tmux_common.rs", 1, ENTRY),
                 ("src/services/claude/tui_session_launch.rs", 1, SWEEP),
                 ("src/services/claude.rs", 1, SWEEP),
-                ("src/services/codex.rs", 2, SWEEP),
+                ("src/services/codex.rs", 1, SWEEP),
+                ("src/services/codex/absence_launch.rs", 1, SWEEP),
                 ("src/services/qwen/session_lifecycle.rs", 1, SWEEP),
                 (
                     "src/services/discord/router/message_handler/provider_isolation.rs",
@@ -2734,8 +2735,8 @@ fn name_only_teardown_calls_stay_on_the_reviewed_list() {
             Sweep::C1Gated,
         ),
         (
-            "src/services/codex.rs",
-            "execute_streaming_local_tui_tmux",
+            "src/services/codex/absence_launch.rs",
+            "execute_observed",
             Sweep::ExistingTuiPath,
         ),
         (

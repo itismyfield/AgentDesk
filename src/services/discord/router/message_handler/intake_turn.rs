@@ -1,5 +1,6 @@
 use super::super::super::queue_marker;
 use super::super::super::turn_view_reconciler::note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt;
+use super::provider_dispatch::producer_panic;
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
@@ -2380,22 +2381,7 @@ pub(super) async fn handle_text_message(
                         let _ = tx.send(message);
                     }
                 }
-                Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!("  [streaming] PANIC: {}", msg);
-                    let _ = tx.send(StreamMessage::Error {
-                        message: format!("Internal error (panic): {}", msg),
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: None,
-                    });
-                }
+                Err(info) => drop(tx.send(producer_panic("streaming", info))),
             }
         });
 

@@ -156,6 +156,24 @@ fn claude_legacy_probe(channel: u64) -> Option<Result<(), String>> {
     slot.take().map(|(_, probe)| probe())
 }
 
+/// User and headless workers report panic failures through the same bridge message.
+pub(super) fn producer_panic(scope: &str, info: Box<dyn std::any::Any + Send>) -> StreamMessage {
+    let message = if let Some(value) = info.downcast_ref::<String>() {
+        value.clone()
+    } else if let Some(value) = info.downcast_ref::<&str>() {
+        value.to_string()
+    } else {
+        "unknown panic".to_string()
+    };
+    tracing::error!("  [{}] PANIC: {}", scope, message);
+    StreamMessage::Error {
+        message: format!("Internal error (panic): {}", message),
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+    }
+}
+
 /// The bridge message for a provider `Err`. A prompt held before submit sends none, so the
 /// bridge keeps the Waiting row instead of finishing the turn as a provider failure.
 pub(super) fn producer_error(

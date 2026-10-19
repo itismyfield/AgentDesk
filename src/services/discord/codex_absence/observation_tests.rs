@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::config::{Config, ProviderConfig, TestEnvVarGuard};
-use crate::services::discord::inflight::read_only_owner_snapshot::save_actual_episode_for_tests;
+use crate::services::discord::save_actual_episode_for_tests;
 use crate::services::provider_hosting::{TEST_CONFIG_LOCK, install_provider_hosting_config};
 use crate::services::provider_teardown::tests::test_support::FakeTmux;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;

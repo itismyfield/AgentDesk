@@ -294,8 +294,7 @@ pub(super) fn execute_observed(
 
     if !tmux_result.status.success() {
         let stderr = String::from_utf8_lossy(&tmux_result.stderr);
-        let _ = std::fs::remove_file(&owner_path);
-        let _ = std::fs::remove_file(&script_path);
+        remove_failed_tui_launch_files(&owner_path, &script_path);
         crate::services::tui_prompt_dedupe::remove_discord_originated_prompt(
             ProviderKind::Codex.as_str(),
             tmux_session_name,

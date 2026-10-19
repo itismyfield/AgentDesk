@@ -1637,6 +1637,9 @@ services::discord::commands::control::clear_entry_tests::text_clear_commits_and_
 services::discord::commands::control::clear_persist_failure_tests::a_clear_commits_its_transcript_boundary_whatever_its_queue_write_did_pg
 services::discord::commands::control::clear_persist_failure_tests::a_clear_whose_boundary_write_fails_still_resets_the_session_and_process_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_restored_head_reaches_fresh_provider_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_off_with_stale_session_reaches_fresh_provider_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_off_without_session_reaches_fresh_provider_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::absent_pin_warm_on_without_session_reaches_fresh_provider_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_after_boot_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::actual_n2_and_warm_q2_survive_transport_loss_in_memory_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::auxiliary_tests::policy_tests::ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow_pg

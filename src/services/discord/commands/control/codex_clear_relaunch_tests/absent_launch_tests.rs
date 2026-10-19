@@ -42,7 +42,7 @@ async fn absent_pin_restored_head_reaches_fresh_provider_pg() {
         "::absent_pin_restored_head_reaches_fresh_provider_pg"
     );
     if isolated(test) {
-        restored_head_reaches_provider(HistoricalMarker::Absent).await;
+        restored_head_reaches_provider(HistoricalMarker::Absent, true, true).await;
     }
 }
 
@@ -53,7 +53,7 @@ async fn owned_pin_memory_restored_head_reaches_fresh_provider_pg() {
         "::owned_pin_memory_restored_head_reaches_fresh_provider_pg"
     );
     if isolated(test) {
-        restored_head_reaches_provider(HistoricalMarker::OwnedMemory).await;
+        restored_head_reaches_provider(HistoricalMarker::OwnedMemory, true, true).await;
     }
 }
 
@@ -64,7 +64,37 @@ async fn owned_pin_boot_restored_head_reaches_fresh_provider_pg() {
         "::owned_pin_boot_restored_head_reaches_fresh_provider_pg"
     );
     if isolated(test) {
-        restored_head_reaches_provider(HistoricalMarker::OwnedBoot).await;
+        restored_head_reaches_provider(HistoricalMarker::OwnedBoot, true, true).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn absent_pin_warm_off_with_stale_session_reaches_fresh_provider_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::absent_pin_warm_off_with_stale_session_reaches_fresh_provider_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::Absent, false, true).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn absent_pin_warm_off_without_session_reaches_fresh_provider_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::absent_pin_warm_off_without_session_reaches_fresh_provider_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::Absent, false, false).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn absent_pin_warm_on_without_session_reaches_fresh_provider_pg() {
+    if isolated(concat!(
+        module_path!(),
+        "::absent_pin_warm_on_without_session_reaches_fresh_provider_pg"
+    )) {
+        restored_head_reaches_provider(HistoricalMarker::Absent, true, false).await;
     }
 }
 
@@ -95,10 +125,29 @@ async fn restore_disk_head(fixture: &mut CanaryFixture) -> QueueIdentity {
     identity
 }
 
-async fn restored_head_reaches_provider(marker: HistoricalMarker) {
+async fn restored_head_reaches_provider(marker: HistoricalMarker, warm: bool, stale: bool) {
     let mut fixture =
         CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
             .await;
+    let _warm = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+        "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
+        std::ffi::OsStr::new(if warm { "1" } else { "0" }),
+    );
+    assert_eq!(
+        crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
+        warm
+    );
+    if !stale {
+        fixture
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get_mut(&serenity::ChannelId::new(CANARY_CHANNEL))
+            .unwrap()
+            .session_id = None;
+    }
     assert_eq!(fixture.context.host.as_deref(), Some("b1-absent-test-host"));
     assert_eq!(
         dedupe::binding_context::stable_host_identity(),
@@ -125,6 +174,20 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker) {
         api.port
     ));
     let _cli = fixture.cold_cli();
+    let (request_tx, request_rx) = mpsc::channel();
+    let _request_setup = crate::services::discord::codex_absence::test_setup::install(
+        CANARY_CHANNEL,
+        Box::new(move |_| {
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+            )
+            .unwrap()
+            .expect("actual provider entry must own its admitted inflight row");
+            request_tx.send(row.session_id).unwrap();
+            Box::new(())
+        }),
+    );
     let old_history = fs::read(fixture.history()).unwrap();
     let old_rollout = fixture
         .context
@@ -262,6 +325,13 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker) {
         "{marker:?}: real provider must cold-launch the restored head once; actual calls={calls:?}"
     );
     let new = new.expect("a provider hold is not a fresh launch");
+    assert_eq!(
+        request_rx
+            .try_recv()
+            .expect("actual provider entry observed"),
+        stale.then(|| NATIVE_ID.to_owned()),
+        "the warm/stale matrix must reach the driver with its requested selector"
+    );
     assert_eq!(new.launch_mode, "fresh");
     assert_eq!(new.source_policy.as_deref(), Some("verified"));
     assert!(new.expected_native_session_id.is_none());
@@ -299,6 +369,28 @@ async fn restored_head_reaches_provider(marker: HistoricalMarker) {
     )
     .unwrap();
     assert!(disk.is_empty());
-    assert_one_completed_response(&api.take());
+    let sent = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut sent = Vec::new();
+        loop {
+            sent.extend(api.take());
+            let completed = sent.iter().any(|call| {
+                let mut parts = call.splitn(3, ' ');
+                let method = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default();
+                let body = parts.next().unwrap_or_default();
+                matches!(method, "POST" | "PATCH")
+                    && path.contains(&format!("/channels/{CANARY_CHANNEL}/messages"))
+                    && serde_json::from_str::<serde_json::Value>(body)
+                        .is_ok_and(|value| value["content"] == "clear relaunch completed")
+            });
+            if completed {
+                break sent;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the completed bridge must publish its final response");
+    assert_one_completed_response(&sent);
     guard.finish();
 }
