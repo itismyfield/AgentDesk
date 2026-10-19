@@ -5,6 +5,7 @@ use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout
 use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
 
+mod idle_replace_tests;
 mod stream_frame_fixtures;
 use stream_frame_fixtures::{frame, ranged_frame, terminal_frame};
 
@@ -19,18 +20,11 @@ pub(super) fn terminal_frame_offset(
     turn_start_offset: Option<u64>,
 ) -> StreamFrame {
     StreamFrame {
-        session_name: binding.expected_session_name.clone(),
-        binding: binding.clone(),
-        payload: payload.to_string(),
-        sequence,
         terminal_consumed_end: Some(consumed_end),
         turn_user_msg_id,
         turn_started_at: turn_started_at.to_string(),
         turn_start_offset,
-        relay_range: None,
-        relay_generation_mtime_ns: None,
-        relay_source_stamp: None,
-        source_span: None,
+        ..frame(binding, payload, sequence)
     }
 }
 

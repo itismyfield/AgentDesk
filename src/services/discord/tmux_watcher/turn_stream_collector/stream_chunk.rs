@@ -7,6 +7,7 @@ pub(super) struct StreamChunkState<'a> {
     pub(super) watcher_provider: &'a ProviderKind,
     pub(super) tmux_session_name: &'a str,
     pub(super) channel_id: ChannelId,
+    pub(super) watcher_instance_id: u64,
     pub(super) watcher_thread_channel_id: Option<u64>,
     pub(super) source_authority: WatcherSourceAuthority,
     pub(super) retained_source: bool,
@@ -60,6 +61,7 @@ pub(super) fn process_stream_chunk(
         watcher_provider,
         tmux_session_name,
         channel_id,
+        watcher_instance_id,
         watcher_thread_channel_id,
         source_authority,
         retained_source,
@@ -168,6 +170,7 @@ pub(super) fn process_stream_chunk(
         chunk_buffer_start_offset,
         outcome.pre_turn_bytes_skipped,
         authority,
+        watcher_instance_id,
     );
     let streaming_terminal_fence = watcher_terminal_commit_fence(
         outcome.found_result,

@@ -788,6 +788,7 @@ src/
 │   │   ├── stream_relay/
 │   │   │   ├── tests/
 │   │   │   │   └── shutdown_tests.rs
+│   │   │   ├── frame.rs
 │   │   │   ├── frame_admission.rs
 │   │   │   ├── identity.rs
 │   │   │   ├── shutdown.rs
@@ -1377,6 +1378,7 @@ src/
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
 │   │   │   │   ├── codex_relay_generation.rs
+│   │   │   │   ├── codex_relay_generation_tests.rs
 │   │   │   │   └── codex_spawn.rs
 │   │   │   ├── restore_inflight/
 │   │   │   │   ├── host_probe_tests.rs
@@ -1413,6 +1415,7 @@ src/
 │   │   │   ├── phase_policy.rs
 │   │   │   ├── rebind_runtime.rs
 │   │   │   ├── recovery_completion_outcome_tests.rs
+│   │   │   ├── relay_output_replacements.rs
 │   │   │   ├── restore_inflight.rs
 │   │   │   ├── restore_persist_outcome.rs
 │   │   │   ├── routing_orphan.rs
@@ -1648,8 +1651,11 @@ src/
 │   │   │   │   ├── recovery.rs
 │   │   │   │   └── watcher.rs
 │   │   │   ├── tests/
+│   │   │   │   ├── idle_replace_tests.rs
 │   │   │   │   └── stream_frame_fixtures.rs
 │   │   │   ├── turn_parser/
+│   │   │   │   ├── read_source_marks.rs
+│   │   │   │   ├── read_source_tests.rs
 │   │   │   │   └── resend_dedupe_tests.rs
 │   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs
@@ -1805,6 +1811,7 @@ src/
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── read_source_switch_tests.rs
 │   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
@@ -2182,8 +2189,11 @@ src/
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
 │   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_review_tests.rs
 │   │   │   │   │   ├── live_tests.rs
+│   │   │   │   │   ├── routine_owner.rs
+│   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   └── unit_tests.rs
 │   │   │   │   ├── tail.rs
 │   │   │   │   ├── tail_switch_tests.rs
@@ -2196,6 +2206,7 @@ src/
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── supervisor.rs
+│   │   │   ├── supervisor_deadline_tests.rs
 │   │   │   └── supervisor_tests.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs

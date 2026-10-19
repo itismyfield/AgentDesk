@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::super::session_matcher::MatchedChannel;
 use super::{
-    QueuePushResult, RelayFrameQueue, RelayMetrics, RelaySendOutcome, RelayTurnIdentity,
-    SourceStamp, StreamFrame, TerminalCommitFence, encode_sequence_marker,
+    QueuePushResult, ReadSource, RelayFrameQueue, RelayMetrics, RelaySendOutcome,
+    RelayTurnIdentity, SourceStamp, StreamFrame, TerminalCommitFence, encode_sequence_marker,
 };
 
 /// Owned input envelope before the relay assigns its queue sequence and routing snapshot.
@@ -25,6 +25,8 @@ pub struct RelayFrameRequest {
     pub stamp: Option<SourceStamp>,
     /// #5948 (I18): see [`StreamFrame::source_span`].
     pub span: Option<(u64, u64)>,
+    /// See [`StreamFrame::read_source`].
+    pub read_source: Option<ReadSource>,
 }
 
 pub(super) fn try_send_frame_inner(
@@ -43,6 +45,7 @@ pub(super) fn try_send_frame_inner(
         generation: relay_generation_mtime_ns,
         stamp: relay_source_stamp,
         span: source_span,
+        read_source,
     } = request;
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -72,6 +75,7 @@ pub(super) fn try_send_frame_inner(
         relay_generation_mtime_ns,
         relay_source_stamp,
         source_span,
+        read_source,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {

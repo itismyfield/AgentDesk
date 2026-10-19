@@ -69,6 +69,8 @@ mod tmux_probe;
 mod analytics_transcript;
 #[path = "recovery_engine/rebind_runtime.rs"]
 mod rebind_runtime;
+#[path = "recovery_engine/relay_output_replacements.rs"]
+pub(in crate::services::discord) mod relay_output_replacements;
 #[path = "recovery_engine/state_extractors.rs"]
 mod state_extractors;
 // #3834: behavior-preserving extraction of the manual-rebind recovery path

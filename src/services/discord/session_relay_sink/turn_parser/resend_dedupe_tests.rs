@@ -42,6 +42,7 @@ fn spanned(binding: &MatchedChannel, payload: &str, sequence: u64, start: u64) -
         relay_generation_mtime_ns: None,
         relay_source_stamp: None,
         source_span: Some((start, start.saturating_add(payload.len() as u64))),
+        read_source: None,
     }
 }
 

@@ -254,6 +254,8 @@ struct Snapshot {
     exact: HostedLookup,
     canonical: HostedLookup,
     owners: BTreeMap<String, Option<u64>>,
+    /// Recorded routine turn channels of the sessions no watcher owns.
+    routines: Result<BTreeMap<String, u64>, String>,
     ports: Arc<LivePorts>,
 }
 impl Snapshot {
@@ -337,6 +339,7 @@ impl Snapshot {
             exact,
             canonical,
             owners: BTreeMap::new(),
+            routines: Ok(BTreeMap::new()),
             ports,
         })
     }
@@ -372,6 +375,13 @@ impl Snapshot {
                 (name, owner)
             })
             .collect();
+        let unowned: Vec<String> = (before.owners.iter())
+            .filter(|(_, owner)| owner.is_none())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
+        let routines = routine_owner::routine_turn_channels;
+        before.routines = routines(pool, &shared.token_hash, channel.get(), &unowned).await;
         let after = Self::collect(shared, provider, channel, ports).await?;
         Ok((before, inventory, after))
     }
@@ -382,6 +392,16 @@ impl Snapshot {
             && self.files.same(&other.files)
             && self.exact == other.exact
             && self.canonical == other.canonical
+    }
+    /// Watcher owners, with the recorded routine turn channel of a session no watcher owns.
+    fn effective_owners(&self) -> BTreeMap<String, Option<u64>> {
+        let routines = self.routines.as_ref().ok();
+        (self.owners.iter())
+            .map(|(name, owner)| {
+                let routine = routines.and_then(|routines| routines.get(name).copied());
+                (name.clone(), owner.or(routine))
+            })
+            .collect()
     }
     fn memory_current(&self) -> bool {
         let Some(shared) = self.shared.upgrade() else {
@@ -435,6 +455,7 @@ impl Snapshot {
         };
         if !before.same_inputs(&next)
             || !self.same_inputs(&next)
+            || before.routines != self.routines
             || !namespace.same_namespace(&fresh)
             || namespace.inventory != fresh.inventory
             || !fresh.current()
@@ -676,7 +697,8 @@ async fn collect(
         Snapshot::collect_pair(shared, provider, channel, ports).await?;
     let candidates = snapshot.files.candidates.clone();
     let scope = snapshot.scope(shared);
-    let verdict = decide_unbound(candidates, scope, &namespace.inventory, &snapshot.owners);
+    let owners = snapshot.effective_owners();
+    let verdict = decide_unbound(candidates, scope, &namespace.inventory, &owners);
     if !snapshot.same_inputs(&next) {
         return Ok((
             observed(Activity::Unknown, "superseded"),
@@ -700,3 +722,7 @@ pub(in crate::services::discord::turn_presence::activity) mod tests;
 #[cfg(test)]
 #[path = "live_review_tests.rs"]
 pub(super) mod review_tests;
+
+#[cfg(test)]
+#[path = "live_owner_tests.rs"]
+mod owner_tests;

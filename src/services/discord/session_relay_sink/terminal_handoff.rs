@@ -82,6 +82,14 @@ impl SessionBoundDiscordRelaySink {
             None => parser.ingest_frame(frame),
         }
     }
+
+    fn drop_stale_read_source(&self, frame: &StreamFrame) -> bool {
+        self.by_session.lock().is_ok_and(|sessions| {
+            sessions
+                .get(&frame.session_name)
+                .is_some_and(|parser| parser.drop_stale_read_source(frame))
+        })
+    }
 }
 
 #[async_trait]
@@ -113,6 +121,13 @@ impl RelaySink for SessionBoundDiscordRelaySink {
             // Native turn boundaries belong to codex_idle_rollout. Retain this
             // physical range until that owner commits; it can contain two turns.
             return Ok(RelaySinkOutcome::TerminalNotDelivered);
+        }
+        // A superseded watcher's frame never earns a native re-read or a delivery.
+        if self.drop_stale_read_source(frame) {
+            return Ok(match frame.terminal_consumed_end {
+                Some(_) => RelaySinkOutcome::TerminalNotDelivered,
+                None => RelaySinkOutcome::FrameAccepted,
+            });
         }
         let native_response = recover_native_frame_response(frame)?;
         // #3041 P1-3 R5 (codex — REVERT R4 fence-gating of the outcome): a result-bearing

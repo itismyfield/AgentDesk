@@ -538,6 +538,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     // target is produced (the `outcome.sequence.map` below yields `None`).
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
     let source_span = source_authority.and_then(|authority| authority.source_span);
+    let read_source = source_authority.and_then(SupervisorFrameSourceAuthority::read_source);
     let outcome = match terminal {
         Some(fence) => producer.try_send_terminal_frame_with_source(
             payload,
@@ -545,6 +546,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
             source_span,
+            read_source,
         ),
         None => producer.try_send_frame_with_source(
             payload,
@@ -552,6 +554,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
             source_span,
+            read_source,
         ),
     };
     if !outcome.is_alive() {

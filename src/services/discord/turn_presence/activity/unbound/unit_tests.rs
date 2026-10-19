@@ -381,7 +381,7 @@ fn u_candidate_conflicts() {
     assert_eq!(
         decide(
             candidates(Some("current"), &[], vec![], None),
-            &["unowned"],
+            &["AgentDesk-claude-unowned"],
             &BTreeMap::new()
         ),
         Verdict::Hold("owner_unresolved")
@@ -419,6 +419,48 @@ fn u_candidate_conflicts() {
             Verdict::Hold("identity_unresolved")
         );
     }
+}
+
+/// A host session outside AgentDesk's namespace, or one a routine ran in another channel, is not
+/// this channel's; the same name still holds once this channel's own evidence names or owns it.
+#[test]
+fn u_outside_or_elsewhere_sessions_never_hide_own_evidence() {
+    let routine = "AgentDesk-claude-routine-brief---counsel";
+    let owned = |owner: u64| [(routine.to_string(), Some(owner))].into_iter().collect();
+    let current = || candidates(Some("current"), &[], vec![], None);
+    let observed = [
+        decide(current(), &["claude"], &BTreeMap::new()),
+        decide(current(), &["claude", routine], &owned(CHANNEL + 1)),
+        decide(current(), &[routine], &BTreeMap::new()),
+        decide(
+            current(),
+            &["claude", "AgentDesk-codex-x"],
+            &BTreeMap::new(),
+        ),
+        decide(current(), &[routine], &owned(CHANNEL)),
+        decide(
+            candidates(Some("current"), &[], vec![event(1, "claude", 1)], None),
+            &["claude"],
+            &BTreeMap::new(),
+        ),
+        decide(
+            candidates(Some("current"), &[], vec![], Some(row(CHANNEL, "claude"))),
+            &["claude"],
+            &BTreeMap::new(),
+        ),
+    ];
+    assert_eq!(
+        observed,
+        [
+            Verdict::Absent(Absence::LocalInventory),
+            Verdict::Absent(Absence::LocalInventory),
+            Verdict::Hold("owner_unresolved"),
+            Verdict::Hold("owner_unresolved"),
+            Verdict::Hold("watcher_unbound"),
+            Verdict::Hold("watcher_unbound"),
+            Verdict::Hold("identity_unresolved"),
+        ]
+    );
 }
 
 #[test]

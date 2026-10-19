@@ -5856,6 +5856,7 @@ services::discord::queue_dispatch::codex_clear_compat::tests::compat_pinned_disa
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_rejects_wrong_target_unreadable_history_and_corrupt_watermark_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_transient_boundary_error_reevaluates_on_next_kick_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::compat_transient_probe_failure_reevaluates_without_new_input_pg
+services::discord::queue_dispatch::codex_clear_compat::tests::compat_without_core_session_and_unresolved_workspace_parks_original_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_boot_kickoff_launches_the_original_input_once_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_boot_kickoff_without_restored_core_session_launches_once_pg
 services::discord::queue_dispatch::codex_clear_compat::tests::legacy_compat_keeps_original_queue_and_retirement_is_idempotent_pg
@@ -6150,6 +6151,9 @@ services::discord::recovery_engine::manual_rebind::post_work_evidence_tests::tmu
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::absent_inflight_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::another_raw_rollout_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::cancelled_raw_successor_does_not_skip_gap_to_a_later_floor
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_rebuilds_the_new_turn_into_a_new_relay_file
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::crossed_turn_rebind_writer_rebuilds_the_new_turn_at_the_chosen_offset
+services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::default_override_rebind_reuses_healthy_matching_raw_incumbent
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::matching_raw_canonical_alias_keeps_saved_coordinates
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::normalized_cursor_still_uses_normalized_plan
 services::discord::recovery_engine::manual_rebind::raw_cursor_keep_tests::rebind_keeps_matching_raw_incumbent_and_delivers_new_tail
@@ -6189,6 +6193,7 @@ services::discord::recovery_engine::phase_policy::tests::ownerless_live_restores
 services::discord::recovery_engine::phase_policy::tests::planned_restart_ownerless_live_inflight_with_restore_anchor_can_reattach_watcher
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_absent_root
 services::discord::recovery_engine::phase_policy::tests::planned_restart_restores_present_root
+services::discord::recovery_engine::rebind_runtime::codex_relay_generation::tests::truncating_prepare_restarts_the_relay_in_a_new_file
 services::discord::recovery_engine::rebind_runtime::tests::active_usage_snapshot_is_non_renderable_in_rebind_output
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_adopted_transcript_session_id_follows_transcript_stem
 services::discord::recovery_engine::rebind_runtime::tests::claude_rebind_with_legacy_runtime_marker_does_not_adopt_transcript_as_claude_tui
@@ -7417,6 +7422,7 @@ services::discord::session_relay_sink::tests::idle_jsonl_user_event_consumption_
 services::discord::session_relay_sink::tests::idle_range_commit_requires_current_generation_and_persists_frontier
 services::discord::session_relay_sink::tests::idle_relay_allows_later_large_backlog_chunk_after_session_init_seen
 services::discord::session_relay_sink::tests::idle_relay_delivers_suffix_when_init_is_in_committed_prefix
+services::discord::session_relay_sink::tests::idle_replace_tests::idle_cursor_restarts_a_rebind_replaced_relay_at_zero
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_fails_when_another_holder_owns_range
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_self_heals_an_expired_prior_holder
 services::discord::session_relay_sink::tests::inflight_sink_marker::acquire_sets_leased_sink_marker
@@ -7467,6 +7473,15 @@ services::discord::session_relay_sink::tests::terminal_delivery_route_skips_brid
 services::discord::session_relay_sink::tests::terminal_lease_coordinate_prefers_fence_then_idle_range_then_degenerate
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_inflightless_sink_post_4277
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_file_that_repeats_the_turn_appends_instead_of_replacing
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_newer_files_native_terminal_replaces_instead_of_appending
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_partial_record_on_one_file_never_joins_the_next_files_first_record
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_partial_record_resumes_when_its_file_returns
+services::discord::session_relay_sink::turn_parser::read_source_tests::a_superseded_native_terminal_is_not_delivered_and_never_reread
+services::discord::session_relay_sink::turn_parser::read_source_tests::newer_watcher_on_another_file_delivers_its_bytes_in_the_open_turn
+services::discord::session_relay_sink::turn_parser::read_source_tests::returning_to_an_earlier_file_restores_its_watermark
+services::discord::session_relay_sink::turn_parser::read_source_tests::successor_on_the_same_file_keeps_the_resend_watermark
+services::discord::session_relay_sink::turn_parser::read_source_tests::superseded_watcher_frames_never_reach_the_open_turn
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_gap_or_a_disagreeing_span_folds_the_payload_whole
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_generation_change_clears_the_resend_watermark
 services::discord::session_relay_sink::turn_parser::resend_dedupe_tests::a_partially_suppressed_resend_increments_the_counter_too
@@ -8296,6 +8311,7 @@ services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stre
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::retired_post_stream_exit_releases_only_its_own_slot_without_legacy_work
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::terminal_commit_keeps_the_watcher_on_a_session_not_confirmed_dead
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::post_stream_exit_host_tests::watcher_exit_tears_down_only_a_confirmed_local_tmux_death_pg
+services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::read_source_switch_tests::crossed_rebind_relay_reaches_discord_once_below_the_old_watermark
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_after_a_normal_exit_baseline_pg
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::pane_death_clear_against_a_same_identity_successor_baseline
 services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::streaming_baseline_tests::planned_drain_pinned_row_baseline
@@ -8406,6 +8422,7 @@ services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::
 services::discord::tmux::tmux_watcher::turn_identity::pane_dead_identity_tests::watcher_skips_status_panel_creation_when_v2_disabled
 services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::forwarded_span_names_the_suffix_the_buffer_ends_with
 services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::rewind_replay_keeps_file_coordinates_and_the_sink_suppresses_the_resend
+services::discord::tmux::tmux_watcher::turn_stream_collector::chunk_forward::tests::watcher_forward_carries_opened_fd_identity_without_stamp
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_ignores_synthetic_headless_panel_handle
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_off_and_equal_epoch_are_inert
 services::discord::tmux::tmux_watcher::two_message_panel::tests::completion_guard_supersedes_only_newer_epoch_for_owned_panel
@@ -10381,6 +10398,10 @@ services::discord::turn_presence::activity::unbound::dormancy_tests::activation_
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::queued_input_drains_in_order_once_unrelated_sessions_remain_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::start_gate_and_deliver_start_once_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::unrelated_host_sessions_leave_a_session_less_channel_idle_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
@@ -10401,6 +10422,7 @@ services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_inv
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_marker_collection_does_not_create_runtime_directories
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_old_publication_is_rejected_after_a_new_read
 services::discord::turn_presence::activity::unbound::live::tests::s1_unbound_registration_reads_preserve_precedence_and_permissions
+services::discord::turn_presence::activity::unbound::routine_owner::tests::routine_turn_channels_need_exact_started_records_pg
 services::discord::turn_presence::activity::unbound::tests::s1_hosted_absence_cannot_hide_related_inventory
 services::discord::turn_presence::activity::unbound::tests::s1_nameless_local_scope_requires_a_complete_empty_inventory
 services::discord::turn_presence::activity::unbound::tests::u_absent_logs_and_read_failures
@@ -10409,6 +10431,7 @@ services::discord::turn_presence::activity::unbound::tests::u_fallback_only_live
 services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg
 services::discord::turn_presence::activity::unbound::tests::u_legacy_inflight_read_only
 services::discord::turn_presence::activity::unbound::tests::u_local_row_identity_pg
+services::discord::turn_presence::activity::unbound::tests::u_outside_or_elsewhere_sessions_never_hide_own_evidence
 services::discord::turn_presence::activity::unbound::tests::u_restored_owner_only_live
 services::discord::turn_presence::activity::unbound::tests::u_unbound_none_requires_complete_adapter
 services::discord::turn_presence::supervisor::tests::a_mailbox_token_keeps_presence_from_typing
@@ -10421,6 +10444,11 @@ services::discord::turn_presence::supervisor::tests::a_slow_send_holds_only_its_
 services::discord::turn_presence::supervisor::tests::an_idle_queue_is_woken_on_the_transition_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::an_overtaken_reading_is_never_published
 services::discord::turn_presence::supervisor::tests::busy_types_at_once_then_every_eight_seconds_and_idle_stops_it
+services::discord::turn_presence::supervisor::tests::deadline_tests::a_429_keeps_the_retry_backoff_and_idle_cancels_it
+services::discord::turn_presence::supervisor::tests::deadline_tests::a_slow_channel_does_not_delay_another_channels_idle_or_generation
+services::discord::turn_presence::supervisor::tests::deadline_tests::exactly_ten_seconds_between_successes_is_accepted_without_overlapping_sends
+services::discord::turn_presence::supervisor::tests::deadline_tests::idle_fences_a_due_mailbox_wait_and_old_generation_cannot_restart_typing
+services::discord::turn_presence::supervisor::tests::deadline_tests::slow_activity_reads_do_not_starve_successful_typing_deadlines
 services::discord::turn_presence::supervisor::tests::only_confirmed_channels_are_supervised_and_reported
 services::discord::turn_presence::supervisor::tests::unknown_for_a_minute_notices_once_per_half_hour
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg

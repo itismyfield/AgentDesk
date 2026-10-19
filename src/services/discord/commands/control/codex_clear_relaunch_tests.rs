@@ -370,7 +370,10 @@ rows = [
 path = pathlib.Path(context['provider_root']) / ('rollout-' + identity + '.jsonl')
 path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
 (root / 'fresh-argv.json').write_text(json.dumps(sys.argv[1:]))
-(root / 'fresh-context').write_text(str(context_path))
+# The test polls fresh-context, so it must never be visible half-written.
+fresh = root / 'fresh-context.tmp'
+fresh.write_text(str(context_path))
+os.replace(fresh, root / 'fresh-context')
 PY
 "#)).unwrap();
         fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
@@ -576,7 +579,7 @@ async fn clear_and_first_input(test: &str, external_inventory: bool, without_cor
     if external_inventory {
         fixture
             .fake
-            .add_unwatched_inventory("external-e51-unwatched");
+            .add_unwatched_inventory("AgentDesk-codex-external-e51-unwatched");
     }
     if without_core {
         fixture.shared.core.lock().await.sessions.remove(&channel);
