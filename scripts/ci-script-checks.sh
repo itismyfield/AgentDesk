@@ -272,6 +272,7 @@ fi
 
 if run_check guards "Destructive call-site per-file ratchet (#5071 T3-A4)"; then
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
+git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 fi
 
