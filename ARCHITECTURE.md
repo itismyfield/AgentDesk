@@ -191,6 +191,8 @@ src/
 │   │   ├── retention.rs
 │   │   ├── storage_stats.rs
 │   │   └── tests.rs
+│   ├── relay_dead_letter/
+│   │   └── migration_tests.rs
 │   ├── replay_disposition/
 │   │   ├── write/
 │   │   │   └── start.rs
@@ -864,6 +866,7 @@ src/
 │   │   │   ├── child_binding_tests.rs
 │   │   │   ├── discovery.rs
 │   │   │   ├── following_source.rs
+│   │   │   ├── following_source_tests.rs
 │   │   │   ├── handoff.rs
 │   │   │   ├── legacy_selection.rs
 │   │   │   ├── options.rs
@@ -1062,6 +1065,7 @@ src/
 │   │   │   │   └── zombie_reclaim.rs
 │   │   │   ├── relay_auto_heal/
 │   │   │   │   ├── orphan_token_tests.rs
+│   │   │   │   ├── producer_resume_pass.rs
 │   │   │   │   └── retired_redrive_tests.rs
 │   │   │   ├── snapshot/
 │   │   │   │   └── relay_probe.rs
@@ -1380,10 +1384,18 @@ src/
 │   │   │   │   ├── raw_cursor_keep_tests.rs
 │   │   │   │   ├── test_barriers.rs
 │   │   │   │   └── watcher_claim.rs
+│   │   │   ├── producer_resume/
+│   │   │   │   ├── custody.rs
+│   │   │   │   ├── entry_tests.rs
+│   │   │   │   ├── proof.rs
+│   │   │   │   ├── proof_tests.rs
+│   │   │   │   ├── witness.rs
+│   │   │   │   └── writer.rs
 │   │   │   ├── rebind_runtime/
 │   │   │   │   ├── codex_relay_generation.rs
 │   │   │   │   ├── codex_relay_generation_tests.rs
-│   │   │   │   └── codex_spawn.rs
+│   │   │   │   ├── codex_spawn.rs
+│   │   │   │   └── normalized_writer.rs
 │   │   │   ├── restore_inflight/
 │   │   │   │   ├── host_probe_tests.rs
 │   │   │   │   ├── kickoff_identity.rs
@@ -1418,6 +1430,7 @@ src/
 │   │   │   ├── o_recovery_cut_tests.rs
 │   │   │   ├── output_path_detect.rs
 │   │   │   ├── phase_policy.rs
+│   │   │   ├── producer_resume.rs
 │   │   │   ├── rebind_runtime.rs
 │   │   │   ├── recovery_completion_outcome_tests.rs
 │   │   │   ├── relay_output_replacements.rs
@@ -1577,6 +1590,7 @@ src/
 │   │   │   │   ├── tui_followup.rs
 │   │   │   │   ├── turn_context.rs
 │   │   │   │   ├── turn_lifecycle.rs
+│   │   │   │   ├── turn_mark_admission_tests.rs
 │   │   │   │   ├── typing_indicator.rs
 │   │   │   │   ├── voice_announcement_route.rs
 │   │   │   │   ├── voice_announcement_scope.rs
@@ -2201,6 +2215,7 @@ src/
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
+│   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── live.rs
 │   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_review_tests.rs
@@ -2924,6 +2939,7 @@ src/
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
 │   │   │   ├── host_codex_takeover_tests.rs
+│   │   │   ├── host_codex_turn_mark_tests.rs
 │   │   │   ├── host_first_init_tests.rs
 │   │   │   ├── host_home_tests.rs
 │   │   │   ├── host_io_tests.rs

@@ -1,5 +1,6 @@
 //! Concrete Unbound reads and their publication identity; no start or cleanup authority.
 use super::super::{Activity, LivePorts, Observed, Watch, lock, observed};
+use super::hold_leaf::{self, HoldLeaf};
 use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
@@ -500,7 +501,7 @@ impl Snapshot {
                     ..hold("unused")
                 }
             } else {
-                hold("identity_unresolved")
+                hold("current_unresolved")
             };
         };
         for (candidate, trace) in &self.files.traces {
@@ -517,7 +518,7 @@ impl Snapshot {
                 )
                 || matches!(trace.runtime, Ok(Some(RuntimeHandoffKind::ProcessBackend)))
             {
-                return hold("identity_unresolved");
+                return hold("foreign_candidate_trace");
             }
         }
         let Some(trace) = self.files.traces.get(name) else {
@@ -658,10 +659,11 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let result = collect(shared, provider, channel, ports).await;
-    let (mut answer, snapshot, namespace) = match result {
-        Ok((answer, snapshot, namespace)) => (answer, Some(snapshot), Some(namespace)),
+    let (mut answer, snapshot, namespace, hold) = match result {
+        Ok((answer, snapshot, namespace, hold)) => (answer, Some(snapshot), Some(namespace), hold),
         Err(_) => (
             observed(Activity::Unknown, "session_probe_failed"),
+            None,
             None,
             None,
         ),
@@ -680,6 +682,7 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
     if stamp.publish(&watch, || ()).await.is_none() {
         answer = observed(Activity::Unknown, "superseded");
     }
+    hold_leaf::settle(channel.get(), answer.reason, hold.as_ref());
     let inputs = stamp
         .snapshot
         .as_ref()
@@ -692,27 +695,41 @@ async fn collect(
     provider: &ProviderKind,
     channel: ChannelId,
     ports: Arc<LivePorts>,
-) -> Result<(Observed, Snapshot, Observation), String> {
+) -> Result<(Observed, Snapshot, Observation, Option<HoldLeaf>), String> {
     let (snapshot, namespace, next) =
         Snapshot::collect_pair(shared, provider, channel, ports).await?;
     let candidates = snapshot.files.candidates.clone();
     let scope = snapshot.scope(shared);
     let owners = snapshot.effective_owners();
-    let verdict = decide_unbound(candidates, scope, &namespace.inventory, &owners);
+    let verdict = decide_unbound(candidates.clone(), scope, &namespace.inventory, &owners);
     if !snapshot.same_inputs(&next) {
         return Ok((
             observed(Activity::Unknown, "superseded"),
             snapshot,
             namespace,
+            None,
         ));
     }
-    let answer = match verdict {
-        Verdict::Absent(_) => observed(Activity::Idle, "no_session"),
-        Verdict::Hold("watcher_unbound") => observed(Activity::Unknown, "watcher_unbound"),
-        Verdict::Hold("probe_failed") => observed(Activity::Unknown, "session_probe_failed"),
-        Verdict::Hold(_) => observed(Activity::Unknown, "session_identity_unresolved"),
+    let (exact, canonical) = (&snapshot.exact, &snapshot.canonical);
+    let (answer, hold) = match verdict {
+        Verdict::Absent(_) => (observed(Activity::Idle, "no_session"), None),
+        Verdict::Hold("watcher_unbound") => (observed(Activity::Unknown, "watcher_unbound"), None),
+        Verdict::Hold("probe_failed") => {
+            (observed(Activity::Unknown, "session_probe_failed"), None)
+        }
+        Verdict::Hold(leaf) => (
+            observed(Activity::Unknown, "session_identity_unresolved"),
+            Some(HoldLeaf::of(
+                leaf,
+                &candidates,
+                exact,
+                canonical,
+                &namespace.inventory,
+                &owners,
+            )),
+        ),
     };
-    Ok((answer, snapshot, namespace))
+    Ok((answer, snapshot, namespace, hold))
 }
 
 #[cfg(test)]

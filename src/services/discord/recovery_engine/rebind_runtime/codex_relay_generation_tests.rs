@@ -34,3 +34,46 @@ fn truncating_prepare_restarts_the_relay_in_a_new_file() {
     let entries = std::fs::read_dir(dir.path()).unwrap().count();
     assert_eq!(entries, 1, "no staging file is left behind");
 }
+
+#[test]
+fn ensure_absent_reserves_once_without_advancing_a_healthy_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join("resume.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    assert!(!present(&path));
+    let (gate, generation) = ensure_absent(&path).unwrap();
+    assert_eq!(generation, 1);
+    assert!(ensure_absent(&path).is_none());
+    assert_eq!(*gate.lock().unwrap_or_else(|p| p.into_inner()), generation);
+    let (manual, next) = prepare(&path, false).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&gate, &manual));
+    assert_eq!(next, generation + 1);
+    drop((gate, manual));
+    assert!(!present(&path));
+    let held = std::sync::Arc::new(std::sync::Barrier::new(17));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(17));
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            let (path, held, release) = (path.clone(), held.clone(), release.clone());
+            std::thread::spawn(move || {
+                held.wait();
+                let reservation = ensure_absent(&path);
+                release.wait();
+                reservation.is_some()
+            })
+        })
+        .collect();
+    held.wait();
+    release.wait();
+    assert_eq!(
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .filter(|reserved| *reserved)
+            .count(),
+        1
+    );
+}

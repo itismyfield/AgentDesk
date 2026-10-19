@@ -5,6 +5,9 @@ use super::*;
 use crate::config::Config;
 use std::collections::BTreeMap;
 
+#[path = "host_codex_turn_mark_tests.rs"]
+mod turn_mark;
+
 /// The boot snapshot of `channel` reserved for late adoption and selected for turn mode.
 fn reserve(channel: u64) -> test_override::ChannelsGuard {
     let pending = |_: &_, _| Ok(BTreeMap::from([(channel, Adoption::Pending)]));

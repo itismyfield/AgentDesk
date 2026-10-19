@@ -2,6 +2,7 @@ id: E-60
 title: O 본문 → 성공 도구 카드 → 본문 → 턴 요약
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-pipe, claude-tui]
 isolation: required
 durable_delivery_probe: true

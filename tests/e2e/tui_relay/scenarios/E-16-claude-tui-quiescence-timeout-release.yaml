@@ -2,6 +2,7 @@ id: E-16
 title: Claude TUI completion-quiescence release accepts an immediate follow-up
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-tui]
 isolation: required
 acceptance_criteria:

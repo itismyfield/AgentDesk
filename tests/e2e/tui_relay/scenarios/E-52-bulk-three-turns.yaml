@@ -2,6 +2,7 @@ id: E-52
 title: 일괄 활성화 연속 3턴, 본문 순서와 퇴역 상태 표시 재출현 확인
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 steps:

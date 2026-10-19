@@ -33,18 +33,17 @@ enum Use {
 
 /// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy, whose send
 /// stays counted until the answer's guard drops. Callers outside it are pinned in the census.
+#[track_caller]
 pub(crate) fn o_owns_tui_output_for_channel_reserving(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
-    decide(channel_id, Use::Body, || kind)
-}
-
-fn o_owns_tui_output_for_channel_tmux_reserving(
-    channel_id: u64,
-    session: Option<&str>,
-) -> Result<BodyClaimed, IdentityError> {
-    decide(channel_id, Use::Body, || session_kind(session))
+    decide_from(
+        channel_id,
+        Use::Body,
+        Some(std::panic::Location::caller()),
+        || kind,
+    )
 }
 
 /// Test builds: the raw claim's answer alone, its send counted as finished at once.
@@ -61,7 +60,7 @@ pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
-    o_owns_tui_output_for_channel_tmux_reserving(channel_id, session).map(|claimed| claimed.owned)
+    decide(channel_id, Use::Body, || session_kind(session)).map(|claimed| claimed.owned)
 }
 
 /// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
@@ -85,6 +84,7 @@ pub(crate) struct BodyClaim<'a> {
     channel_id: u64,
     kind: KindOf<'a>,
     direct: bool,
+    origin: &'static std::panic::Location<'static>,
 }
 
 #[derive(Clone, Copy)]
@@ -94,21 +94,25 @@ enum KindOf<'a> {
 }
 
 impl<'a> BodyClaim<'a> {
+    #[track_caller]
     pub(crate) fn new(channel_id: u64, kind: Option<RuntimeHandoffKind>) -> Self {
         let kind = KindOf::Known(kind);
         Self {
             channel_id,
             kind,
             direct: true,
+            origin: std::panic::Location::caller(),
         }
     }
 
+    #[track_caller]
     pub(crate) fn tmux(channel_id: u64, session: Option<&'a str>) -> Self {
         let kind = KindOf::Tmux(session);
         Self {
             channel_id,
             kind,
             direct: true,
+            origin: std::panic::Location::caller(),
         }
     }
 
@@ -120,10 +124,10 @@ impl<'a> BodyClaim<'a> {
     fn claim(self) -> Result<BodyClaimed, IdentityError> {
         let channel_id = self.channel_id;
         let claimed = match self.kind {
-            KindOf::Known(kind) => o_owns_tui_output_for_channel_reserving(channel_id, kind),
-            KindOf::Tmux(session) => {
-                o_owns_tui_output_for_channel_tmux_reserving(channel_id, session)
-            }
+            KindOf::Known(kind) => decide_from(channel_id, Use::Body, Some(self.origin), || kind),
+            KindOf::Tmux(session) => decide_from(channel_id, Use::Body, Some(self.origin), || {
+                session_kind(session)
+            }),
         }?;
         let owned = o_keeps_body(channel_id, claimed.owned, self.direct);
         Ok(BodyClaimed { owned, ..claimed })
@@ -220,12 +224,21 @@ fn decide(
     usage: Use,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
+    decide_from(channel_id, usage, None, resolve_kind)
+}
+
+fn decide_from(
+    channel_id: u64,
+    usage: Use,
+    origin: Option<&'static std::panic::Location<'static>>,
+    resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
+) -> Result<BodyClaimed, IdentityError> {
     let enabled = super::writer_enabled();
     if !enabled {
         return Ok(legacy());
     }
     let evaluate = |snapshot: Option<&BootChannels>| {
-        decide_with_snapshot(enabled, snapshot, channel_id, usage, resolve_kind)
+        decide_with_snapshot(enabled, snapshot, channel_id, usage, origin, resolve_kind)
     };
     #[cfg(test)]
     let result = super::test_override::with_channels(evaluate);
@@ -258,6 +271,7 @@ fn decide_with_snapshot(
     snapshot: Option<&BootChannels>,
     channel_id: u64,
     usage: Use,
+    origin: Option<&'static std::panic::Location<'static>>,
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
@@ -288,7 +302,10 @@ fn decide_with_snapshot(
         return Ok(legacy());
     };
     Ok(match usage {
-        Use::Body => candidate.claim_body(channel_id),
+        Use::Body => match origin {
+            Some(origin) => candidate.claim_body_from(channel_id, origin),
+            None => candidate.claim_body(channel_id),
+        },
         Use::Peek => BodyClaimed {
             owned: candidate.peek().owned(),
             send: None,

@@ -2,6 +2,7 @@ id: E-61
 title: O 턴 중 재시작 뒤 본문 보존과 요약 정확히 1
 agent_mode: real_live
 coverage_class: live
+# Manual execution specification; not run in CI. Conditional post-deploy subset (E-1/E-35/E-50/E-51): see README.md.
 cells: [claude-pipe, claude-tui]
 isolation: required
 destructive: true

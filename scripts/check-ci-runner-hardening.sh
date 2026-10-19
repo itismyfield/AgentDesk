@@ -686,7 +686,7 @@ script_check_shard_jobs.each do |job_id, shard|
     "name" => "Script checks runner (#{shard})",
     "needs" => "changes",
     "runs-on" => "ubuntu-latest",
-    "timeout-minutes" => "30",
+    "timeout-minutes" => "45",
     "steps" => [
       {"uses" => "actions/checkout@v4", "with" => {"fetch-depth" => "0"}},
       {"name" => "Setup Python for script checks", "uses" => "actions/setup-python@v5", "with" => {"python-version" => "3.11"}},
@@ -696,7 +696,7 @@ script_check_shard_jobs.each do |job_id, shard|
     ],
   }
   unless raw_jobs.is_a?(Hash) && raw_jobs[job_id] == expected_raw_shard_job
-    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 30, no permissions/env/defaults/if/continue-on-error)"
+    warn "#{path}: Script checks shard job #{job_id} must retain the exact fixed job surface (raw YAML scalars; checkout/setup/install/run inventory, action refs, timeout-minutes 45, no permissions/env/defaults/if/continue-on-error)"
     exit 1
   end
   shard_execution = effective_execution(document, job_id, expected_raw_shard_job["steps"].length - 1)

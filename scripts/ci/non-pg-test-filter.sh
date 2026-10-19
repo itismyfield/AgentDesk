@@ -32,6 +32,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
+  --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests

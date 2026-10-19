@@ -653,7 +653,7 @@ keep_reason = "Completion draining, terminal response selection, and identity-gu
 file = "src/services/discord/tmux_watcher.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
-decompose_issue = "#4712"
+decompose_issue = "#4229"
 
 [[entry]]
 # #3834 r2: restart-path scan moved out of the recovery_engine root, but the
