@@ -813,7 +813,6 @@ NON_PG_FILTER_REPLAY=(
   services::discord::turn_presence::activity::tests::s1_read_now_unbound_invalidates_the_same_bound_watch_before_core_await
   services::discord::turn_presence::activity::tests::the_boot_kickoff_loop_arms_only_turn_mode_channels_it_could_not_start
   services::discord::turn_presence::activity::unbound::dormancy_tests::activation_candidates_counter_crosses_the_blocking_worker
-  services::discord::turn_presence::activity::unbound::live::owner_tests::unresolved_hold_leaf_is_logged_once_per_transition_pg
   services::discord::turn_presence::activity::unbound::live::review_tests::s1e_runtime_marker_restore_preserves_legacy_and_canonical_priority
   services::discord::turn_presence::activity::unbound::tests::s1_hosted_absence_cannot_hide_related_inventory
   services::discord::turn_presence::activity::unbound::tests::s1_nameless_local_scope_requires_a_complete_empty_inventory
