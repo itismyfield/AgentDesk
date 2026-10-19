@@ -433,11 +433,7 @@ async fn stale_after_text_preserves_body_without_replay_pg() {
         let messages = vec![text("partial answer"), error(&message)];
         let end = bridge_turn(case, Request::Protected(&facts), messages).await;
         assert_held(&end, "activity after start");
-        assert_eq!(
-            end.shown,
-            ["partial answer"],
-            "no guidance replaces the body: {end:?}"
-        );
+        assert_body_and_summary(&end.shown, "partial answer", true);
     }
 }
 
@@ -528,11 +524,7 @@ async fn recovered_started_attempt_cannot_bypass_replay_hold_pg() {
     )
     .await;
     assert_held(&end, "recovery sentinel after start");
-    assert_eq!(
-        end.shown,
-        ["partial"],
-        "the body stays with no continue notice: {end:?}"
-    );
+    assert_body_and_summary(&end.shown, "partial", true);
 }
 
 // Ordinary completion follows only a committed ordinary classification of the provider's own
@@ -559,7 +551,7 @@ async fn normal_terminal_is_classified_before_ordinary_completion_pg() {
         Some("sid-next"),
         "ordinary writeback: {end:?}"
     );
-    assert_eq!(end.shown, ["answer"], "{end:?}");
+    assert_body_and_summary(&end.shown, "answer", true);
     assert!(!end.barred, "{end:?}");
 
     let twice = seen(&[
