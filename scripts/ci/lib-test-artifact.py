@@ -126,6 +126,8 @@ def validate(directory, root=ROOT):
     root = root.resolve()
     metadata = json.loads((directory / "metadata.json").read_text())
     expected = _contract(root)
+    # Failed-job reruns reuse successful producers from earlier attempts.
+    expected.pop("run_attempt")
     if {key: metadata.get(key) for key in expected} != expected:
         raise ValueError("artifact checkout/build/run contract mismatch")
     if metadata.get("checksums") != {name: _checksum(directory / name) for name in FILES}:
