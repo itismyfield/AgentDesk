@@ -87,7 +87,7 @@ fn input_effect_probe(
     let terminal = || {
         sender
             .send(StreamMessage::Done {
-                result: "NO_REPLY".into(),
+                result: tests::take_result(turn.channel_id),
                 session_id: Some("input-effect-provider".into()),
             })
             .map_err(|error| error.to_string())
@@ -640,8 +640,50 @@ mod idle_stash_tests;
 pub(super) mod producer_error_test_support;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    static INPUT_RESULT: std::sync::Mutex<Option<(u64, String)>> = std::sync::Mutex::new(None);
+
+    pub(in crate::services::discord::router::message_handler) struct ResultReset(u64);
+
+    impl Drop for ResultReset {
+        fn drop(&mut self) {
+            let mut result = INPUT_RESULT.lock().unwrap_or_else(|p| p.into_inner());
+            if result
+                .as_ref()
+                .is_some_and(|(channel, _)| *channel == self.0)
+            {
+                result.take();
+            }
+        }
+    }
+
+    pub(in crate::services::discord::router::message_handler) fn set_result(
+        channel: u64,
+        result: String,
+    ) -> ResultReset {
+        assert!(
+            INPUT_RESULT
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .replace((channel, result))
+                .is_none()
+        );
+        ResultReset(channel)
+    }
+
+    pub(super) fn take_result(channel: u64) -> String {
+        let mut result = INPUT_RESULT.lock().unwrap_or_else(|p| p.into_inner());
+        if result
+            .as_ref()
+            .is_some_and(|(probed, _)| *probed == channel)
+        {
+            result.take().unwrap().1
+        } else {
+            "NO_REPLY".into()
+        }
+    }
 
     #[test]
     fn agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation() {

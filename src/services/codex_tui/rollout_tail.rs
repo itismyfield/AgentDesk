@@ -216,7 +216,9 @@ pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     .map(|result| result.0)
 }
 
-pub(crate) use following_source::{tail_fixed_recovery_rollout, tail_recovery_rollout_for_tmux};
+pub(crate) use following_source::{
+    FixedRecoverySource, tail_fixed_recovery_rollout, tail_recovery_rollout_for_tmux,
+};
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
 pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(

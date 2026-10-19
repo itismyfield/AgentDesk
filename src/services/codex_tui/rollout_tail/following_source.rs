@@ -2,9 +2,24 @@
 
 use super::*;
 
+type RecordWitness = Box<dyn FnMut(u64, &[u8]) -> Result<(), String> + Send>;
+pub(crate) struct FixedRecoverySource {
+    pub(crate) file: std::fs::File,
+    pub(crate) ready: Option<std::sync::mpsc::Sender<()>>,
+    pub(crate) observe: Option<RecordWitness>,
+}
+impl From<std::fs::File> for FixedRecoverySource {
+    fn from(file: std::fs::File) -> Self {
+        Self {
+            file,
+            ready: None,
+            observe: None,
+        }
+    }
+}
 enum RolloutSource {
     Follow,
-    FixedOpened(std::fs::File),
+    FixedOpened(FixedRecoverySource),
 }
 
 pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
@@ -29,7 +44,7 @@ pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
 }
 
 pub(crate) fn tail_fixed_recovery_rollout(
-    file: std::fs::File,
+    source: FixedRecoverySource,
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<String>,
@@ -39,7 +54,8 @@ pub(crate) fn tail_fixed_recovery_rollout(
 ) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
     if own_turn.is_empty()
         || session_id.as_deref().is_none_or(str::is_empty)
-        || !file
+        || !source
+            .file
             .metadata()
             .map_err(|error| error.to_string())?
             .is_file()
@@ -47,7 +63,7 @@ pub(crate) fn tail_fixed_recovery_rollout(
         return Err("fixed recovery needs a regular source, session and turn".into());
     }
     tail_source(
-        RolloutSource::FixedOpened(file),
+        RolloutSource::FixedOpened(source),
         (rollout_path, start_offset, session_id),
         &sender,
         cancel_token,
@@ -80,10 +96,13 @@ pub(super) fn tail_rollout_file_until_assistant_response_with_pane_busy_probe<
     )
 }
 
-fn validate_fixed_record(line: &[u8], turn: &str) -> Result<(), String> {
+fn validate_fixed_record(line: &[u8], turn: &str, session: Option<&str>) -> Result<(), String> {
     let record: serde_json::Value = serde_json::from_slice(line)
         .map_err(|error| format!("invalid fixed recovery record: {error}"))?;
     let payload = &record["payload"];
+    if record["type"] == "session_meta" && payload["id"].as_str() != session {
+        return Err("fixed recovery reached a foreign session".into());
+    }
     let scoped = record["type"] == "turn_context"
         || (record["type"] == "event_msg"
             && matches!(
@@ -130,8 +149,11 @@ fn tail_source<L: Into<PaneLiveness>>(
             )
         })
         .flatten();
-    let mut file = if let RolloutSource::FixedOpened(file) = source {
-        file
+    let (mut ready, mut observe) = (None, None);
+    let mut file = if let RolloutSource::FixedOpened(source) = source {
+        ready = source.ready;
+        observe = source.observe;
+        source.file
     } else if let Some(pin) = source_pin.clone() {
         let Some(opened) = pin.open(cancel_token.as_deref(), start_offset) else {
             return Ok((
@@ -205,6 +227,11 @@ fn tail_source<L: Into<PaneLiveness>>(
     let accept = parser::RecordAcceptance::new(cancel_token.as_ref());
     let accept = accept.with_own_turn(own_turn.as_deref(), &mut state);
 
+    if let Some(ready) = ready {
+        ready
+            .send(())
+            .map_err(|_| "fixed recovery caller cancelled")?;
+    }
     if fixed && seek_offset > 0 {
         sender.send(StreamMessage::Init {
             session_id: state
@@ -552,7 +579,11 @@ fn tail_source<L: Into<PaneLiveness>>(
                         validate_fixed_record(
                             &line,
                             own_turn.as_deref().ok_or("fixed recovery needs a turn")?,
+                            state.session_id.as_deref(),
                         )?;
+                    }
+                    if let Some(observe) = observe.as_mut() {
+                        observe(seek_offset + state.bytes_read, &line)?;
                     }
                     state.record(line.len());
                     if process_rollout_line_bytes(&line, &sender, &mut state) {

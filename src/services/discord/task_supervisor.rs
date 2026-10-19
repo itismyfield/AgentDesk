@@ -45,6 +45,7 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let future = Box::pin(future);
     #[cfg(all(test, unix))]
     let observed = watcher_spawn_observation::submitted(&shared, &cancel);
     #[cfg(all(test, unix))]
@@ -56,7 +57,21 @@ where
             tmux_session_name,
             cancel,
         };
-        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+        let outcome = AssertUnwindSafe(async {
+            #[cfg(unix)]
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                super::recovery_engine::producer_resume::ensure(
+                    cleanup_guard.shared.clone(),
+                    cleanup_guard.tmux_session_name.clone(),
+                    cleanup_guard.cancel.clone(),
+                ),
+            )
+            .await;
+            future.await;
+        })
+        .catch_unwind()
+        .await;
         drop(cleanup_guard);
         let result = match outcome {
             Ok(()) => watcher_completion::Outcome::Returned,

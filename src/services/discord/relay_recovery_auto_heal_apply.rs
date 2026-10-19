@@ -271,7 +271,7 @@ async fn apply_admitted_relay_recovery_plan(
         status = apply_result.status,
         confirmation = ?confirmation,
         remaining_attempts = decision.auto_heal.remaining_attempts,
-        removed_thread_proofs = apply_result.removed_thread_proofs,
+        reattach_error = ?apply_result.reattach_error, removed_thread_proofs = apply_result.removed_thread_proofs,
         removed_mailbox_token = apply_result.removed_mailbox_token,
         "relay recovery auto-heal attempt completed"
     );

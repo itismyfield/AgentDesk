@@ -67,6 +67,9 @@ mod tmux_probe;
 // spawn-cwd derivation) into a leaf module.
 #[path = "recovery_engine/analytics_transcript.rs"]
 mod analytics_transcript;
+#[cfg(unix)]
+#[path = "recovery_engine/producer_resume.rs"]
+pub(in crate::services::discord) mod producer_resume;
 #[path = "recovery_engine/rebind_runtime.rs"]
 mod rebind_runtime;
 #[path = "recovery_engine/relay_output_replacements.rs"]

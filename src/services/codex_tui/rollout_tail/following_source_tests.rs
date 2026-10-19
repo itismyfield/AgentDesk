@@ -27,7 +27,7 @@ fn run(
 ) {
     let (tx, rx) = mpsc::channel();
     let result = tail_fixed_recovery_rollout(
-        file.reopen().unwrap(),
+        file.reopen().unwrap().into(),
         file.path(),
         origin,
         Some("session".into()),
@@ -132,7 +132,7 @@ fn fixed_reader_ignores_quiet_deadline_and_pane_death() {
     });
     let (tx, rx) = mpsc::channel();
     let (result, _) = tail_source(
-        RolloutSource::FixedOpened(file.reopen().unwrap()),
+        RolloutSource::FixedOpened(file.reopen().unwrap().into()),
         (file.path(), 0, Some("session".into())),
         &tx,
         Some(cancel),
@@ -206,7 +206,7 @@ fn fixed_reader_pins_open_descriptor_across_path_replacement() {
     std::fs::write(&path, "{broken}\n").unwrap();
     let (tx, rx) = mpsc::channel();
     tail_fixed_recovery_rollout(
-        opened,
+        opened.into(),
         &path,
         0,
         Some("session".into()),

@@ -1,12 +1,14 @@
 #[path = "rebind_runtime/codex_spawn.rs"]
-mod codex_spawn;
+pub(super) mod codex_spawn;
 pub(super) use codex_spawn::spawn_codex_tui_rebind_relay_output;
 
 use super::*;
 use crate::services::discord::host_liveness::{not_dead, observe_liveness};
 
 #[path = "rebind_runtime/codex_relay_generation.rs"]
-mod codex_relay_generation;
+pub(super) mod codex_relay_generation;
+#[path = "rebind_runtime/normalized_writer.rs"]
+pub(super) mod normalized_writer;
 use codex_relay_generation::{
     CodexRebindRelayGenerationGate, prepare as prepare_codex_rebind_relay_generation,
     write_message as write_codex_rebind_normalized_message,
@@ -473,10 +475,6 @@ fn write_codex_rebind_normalized_stream_for_generation(
     if !source_allowed() {
         return Err("Codex relay writer lacks source proof or permission".into());
     }
-    let mut already_relayed_response = already_relayed_response;
-    let mut known_response_for_done = already_relayed_response.clone();
-    let mut already_normalized_replay_events =
-        std::collections::VecDeque::from(already_normalized_replay_events);
     {
         let current_generation = relay_generation_gate
             .lock()
@@ -493,53 +491,27 @@ fn write_codex_rebind_normalized_stream_for_generation(
         .append(true)
         .open(relay_path)
         .map_err(|error| format!("open {}: {error}", relay_path.display()))?;
-    for message in receiver {
-        if !source_allowed() {
-            return Err("Codex relay writer source proof or permission changed".into());
-        }
-        let Some(message) =
-            codex_rebind_message_after_relayed_prefix(message, &mut already_relayed_response)
-        else {
-            continue;
-        };
-        if let crate::services::agent_protocol::StreamMessage::Done { result, .. }
-        | crate::services::agent_protocol::StreamMessage::CodexTuiTerminalDone {
-            result, ..
-        } = &message
-            && let Some(suffix) = codex_rebind_done_result_suffix(&known_response_for_done, result)
-        {
-            let suffix_message = crate::services::agent_protocol::StreamMessage::Text {
-                content: suffix.clone(),
-            };
+    normalized_writer::write_stream(
+        receiver,
+        already_relayed_response,
+        already_normalized_replay_events,
+        || {
+            if !source_allowed() {
+                return Err("Codex relay writer source proof or permission changed".into());
+            }
+            Ok(())
+        },
+        |message, replay| {
             write_codex_rebind_normalized_message(
                 &mut output,
                 relay_path,
-                suffix_message,
-                &mut already_normalized_replay_events,
+                message,
+                replay,
                 relay_generation_gate,
                 relay_generation,
-            )?;
-            known_response_for_done.push_str(&suffix);
-        }
-        let forwarded_text = match &message {
-            crate::services::agent_protocol::StreamMessage::Text { content } => {
-                Some(content.clone())
-            }
-            _ => None,
-        };
-        write_codex_rebind_normalized_message(
-            &mut output,
-            relay_path,
-            message,
-            &mut already_normalized_replay_events,
-            relay_generation_gate,
-            relay_generation,
-        )?;
-        if let Some(text) = forwarded_text {
-            known_response_for_done.push_str(&text);
-        }
-    }
-    Ok(())
+            )
+        },
+    )
 }
 
 fn codex_rebind_done_result_suffix(known_response: &str, result: &str) -> Option<String> {
@@ -665,7 +637,7 @@ fn codex_rebind_message_after_relayed_prefix(
     Some(crate::services::agent_protocol::StreamMessage::Text { content })
 }
 
-fn codex_rebind_stream_message_json(
+pub(super) fn codex_rebind_stream_message_json(
     message: crate::services::agent_protocol::StreamMessage,
 ) -> Option<serde_json::Value> {
     match message {
