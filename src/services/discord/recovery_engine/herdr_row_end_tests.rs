@@ -34,6 +34,24 @@ fn on(
     HOOKS.lock().unwrap().push((point, Arc::new(hook)));
 }
 
+/// `hook` at `point` until the guard drops, for a scenario outside this module.
+pub(in crate::services::discord) fn on_while(
+    point: &'static str,
+    hook: impl Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+) -> Hooked {
+    on(point, hook);
+    Hooked(point)
+}
+
+pub(in crate::services::discord) struct Hooked(&'static str);
+
+impl Drop for Hooked {
+    fn drop(&mut self) {
+        let point = self.0;
+        HOOKS.lock().unwrap().retain(|(at, _)| *at != point);
+    }
+}
+
 const CHANNEL: u64 = 5_340_871_001;
 const NONCE: &str = "turn-row-end";
 const PRIOR: u64 = 4;

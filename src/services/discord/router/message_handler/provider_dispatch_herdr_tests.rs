@@ -1379,3 +1379,6 @@ fn coldstop_execute_fresh_pending_bound_closed_arm_releases_hold_pg() {
         );
     }
 }
+
+#[path = "provider_dispatch_live_end_tests.rs"]
+pub(super) mod live_end;

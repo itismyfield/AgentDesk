@@ -44,6 +44,9 @@ impl LateOs {
 }
 
 impl ProcessOs for LateOs {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        self.now()?.exists(pid)
+    }
     fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
         self.now()?.parent(pid)
     }
@@ -66,6 +69,28 @@ type OnSend = Arc<Mutex<Option<Box<dyn FnMut(&Value) + Send>>>>;
 
 /// Prefixes an answer that takes its method's place once a pane write arrives.
 const AFTER_SEND: &str = "after-send:";
+
+/// A launched pane's processes that also answer whether each exists: the provider as `alive`
+/// says, every other one present.
+struct Seen(FakeOs, bool);
+
+impl ProcessOs for Seen {
+    fn exists(&self, pid: u32) -> Result<bool, RestoreUnverified> {
+        Ok(pid != PROVIDER || self.1)
+    }
+    fn parent(&self, pid: u32) -> Result<u32, RestoreUnverified> {
+        self.0.parent(pid)
+    }
+    fn start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+        self.0.start(pid)
+    }
+    fn environ(&self, pid: u32) -> Result<Vec<String>, RestoreUnverified> {
+        self.0.environ(pid)
+    }
+    fn exec_path(&self, pid: u32) -> Option<String> {
+        self.0.exec_path(pid)
+    }
+}
 
 pub(crate) struct HerdrRig {
     path: PathBuf,
@@ -249,6 +274,12 @@ impl HerdrRig {
         } else {
             os
         };
+        *self.os.0.lock().unwrap() = Some(Arc::new(os));
+    }
+
+    /// The pane runs the launch at `context`, and its provider process is seen to exist or not.
+    pub(crate) fn provider_seen(&self, context: &Path, alive: bool) {
+        let os = Seen(FakeOs::launched(env_naming(context)), alive);
         *self.os.0.lock().unwrap() = Some(Arc::new(os));
     }
 

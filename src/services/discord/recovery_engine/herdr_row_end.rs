@@ -527,4 +527,4 @@ mod live;
 
 #[cfg(test)]
 #[path = "herdr_row_end_tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

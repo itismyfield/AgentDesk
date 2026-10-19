@@ -54,6 +54,8 @@ pub(super) async fn end_live(
     let read = || read_ended(provider, &state, &turn.token);
     let early = mutant("prb-read-before-end").then(read);
     let retire = execution_gone(pool, &shared.token_hash, provider, &row, &nonce).await?;
+    #[cfg(test)]
+    super::tests::hook("live_after_end").await;
     let (kind, held, actor) = (provider.clone(), state.clone(), turn.token.clone());
     let late = || tokio::task::spawn_blocking(move || read_ended(&kind, &held, &actor));
     let read = match early {
