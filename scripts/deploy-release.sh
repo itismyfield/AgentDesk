@@ -1584,8 +1584,8 @@ _resolve_deploy_peers() {
 _deploy_peer_env_prelude() {
     printf 'AGENTDESK_DEPLOY_PEER_INVOCATION=1'
     local name value
-    # AGENTDESK_DEPLOY_BINARY is deliberately absent: it names a host-local path, so
-    # each peer builds from its own verified source with the provenance gates enabled.
+    # Host-local paths (binary, repo, root, lock) are deliberately absent: the peer resolves
+    # its own, so it builds its synced checkout under the root its verdict is read from.
     for name in \
         AGENTDESK_CODESIGN_IDENTITY \
         AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN \
@@ -1596,7 +1596,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_DEPLOY_FAST \
         AGENTDESK_DEPLOY_HEALTH_DELAY_SECS \
         AGENTDESK_DEPLOY_HEALTH_RETRIES \
-        AGENTDESK_DEPLOY_LOCK_FILE \
         AGENTDESK_DEPLOY_PEERS \
         AGENTDESK_DEPLOY_PEERS_FILE \
         AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP \
@@ -1619,8 +1618,6 @@ _deploy_peer_env_prelude() {
         AGENTDESK_BUNDLE_ID \
         AGENTDESK_DCSERVER_LABEL \
         AGENTDESK_PLIST_REL \
-        AGENTDESK_ROOT_DIR \
-        AGENTDESK_REPO_DIR \
         OBSIDIAN_VAULT_ROOT \
         AGENTDESK_OBSIDIAN_AGENTS_SRC
     do
@@ -2033,7 +2030,8 @@ echo \"\$port\"")"'')"; then
     fi
     peer_log_path="$peer_adk_rel/logs/deploy-release.cluster-${expected_repo_head}.$$.log"
     peer_manifest_path="$peer_adk_rel/runtime/release-source.json"
-    remote_deploy_command="${remote_cd_command} && ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
+    # The child builds the checkout the cd above selected and pre-synced, whatever the peer login env says.
+    remote_deploy_command="${remote_cd_command} && AGENTDESK_REPO_DIR=\"\$PWD\" ${env_prelude} AGENTDESK_DEPLOY_LOG=$(printf '%q' "$peer_log_path") bash scripts/deploy-release.sh${quoted_args}"
 
     # Operator-private routines are excluded from the repo (.gitignore:50), so the
     # peer's own `git fetch` above cannot deliver them. Push them before the peer
