@@ -423,24 +423,24 @@ async fn exercise_status_panel_ledger_failure_4891(watcher_tail: bool) {
             effects.iter().filter(|(m, _)| *m == Method::DELETE).count(),
             0
         );
-        if action == "already" {
+        if action != "edit" {
             assert!(
                 effects.is_empty(),
-                "already committed must not send or edit"
+                "committed panels and retired fallbacks must not send or edit"
             );
         } else {
             assert_eq!(effects.len(), 1);
-            assert_eq!(
-                effects[0].0,
-                if action == "send" {
-                    Method::POST
-                } else {
-                    Method::PATCH
-                }
-            );
+            assert_eq!(effects[0].0, Method::PATCH);
             assert!(effects[0].1["content"].as_str().unwrap().contains("완료"));
         }
-        assert!(text.contains("완료"));
+        if action == "send" {
+            assert!(
+                text.is_empty(),
+                "retired fallback must leave cached text untouched"
+            );
+        } else {
+            assert!(text.contains("완료"));
+        }
     }
     server.abort();
 }

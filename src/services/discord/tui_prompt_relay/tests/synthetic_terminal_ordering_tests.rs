@@ -421,11 +421,17 @@ fn terminal_ordering_fixture(
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(after.cancel_token.is_none(), "A releases only after successful publication");
                 if source_race.is_some() {
-                    let published_traffic = gateway.bodies.lock().unwrap().len();
-                    assert_eq!(published_traffic, streamed_before_terminal + 1,
-                        "one confirmed publication settles the pending body past the \
-                         {streamed_before_terminal} pre-terminal streaming edit(s); \
-                         gateway traffic: {}", gateway.traffic_dump());
+                    let published_bodies = gateway.bodies.lock().unwrap().clone();
+                    let published_sites = gateway.sites.lock().unwrap().clone();
+                    let terminal_bodies = &published_bodies[streamed_before_terminal..];
+                    let terminal_sites = &published_sites[streamed_before_terminal..];
+                    assert_eq!(terminal_sites, ["replace_message_with_outcome", "send_message"],
+                        "one terminal body edit precedes one standalone summary; gateway traffic: {}",
+                        gateway.traffic_dump());
+                    assert_eq!(terminal_bodies.len(), 2, "one body and one summary only");
+                    assert_eq!(terminal_bodies[0], body, "terminal publication preserves the exact body");
+                    assert!(terminal_bodies[1].starts_with("-# ✅ ") && !terminal_bodies[1].contains('\n'),
+                        "completion summary is a separate single line: {:?}", terminal_bodies[1]);
                 }
                 assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());

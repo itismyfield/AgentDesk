@@ -311,7 +311,10 @@ mod tests {
         assert!(rendered.contains("Subagent completed"));
         assert!(rendered.contains("Read-only review complete."));
         assert!(rendered.contains("VERDICT: CLEAN"));
-        assert!(rendered.ends_with("⠙ 계속 처리 중"));
+        assert_eq!(
+            rendered,
+            "✅ Subagent completed\n\nRead-only review complete.\nVERDICT: CLEAN"
+        );
         assert!(!rendered.contains("<subagent_notification>"));
         assert!(!rendered.contains("</subagent_notification>"));
         assert!(!rendered.contains("agent_path"));
