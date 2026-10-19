@@ -333,7 +333,7 @@ fn u_candidate_conflicts() {
             &[],
             &BTreeMap::new()
         ),
-        Verdict::Hold("identity_unresolved")
+        Verdict::Hold("candidate_conflict")
     );
     let c = candidates(
         Some("current"),
@@ -376,7 +376,7 @@ fn u_candidate_conflicts() {
     );
     assert_eq!(
         decide(Ok(inflight), &[], &BTreeMap::new()),
-        Verdict::Hold("identity_unresolved")
+        Verdict::Hold("candidate_inflight")
     );
     assert_eq!(
         decide(
@@ -416,7 +416,7 @@ fn u_candidate_conflicts() {
                 &Inventory::Sessions(vec![]),
                 &BTreeMap::new()
             ),
-            Verdict::Hold("identity_unresolved")
+            Verdict::Hold("scope_mismatch")
         );
     }
 }
@@ -458,7 +458,7 @@ fn u_outside_or_elsewhere_sessions_never_hide_own_evidence() {
             Verdict::Hold("owner_unresolved"),
             Verdict::Hold("watcher_unbound"),
             Verdict::Hold("watcher_unbound"),
-            Verdict::Hold("identity_unresolved"),
+            Verdict::Hold("candidate_inflight"),
         ]
     );
 }
@@ -530,7 +530,7 @@ fn u_legacy_inflight_read_only() {
             &[],
             &BTreeMap::new()
         ),
-        Verdict::Hold("identity_unresolved")
+        Verdict::Hold("candidate_inflight")
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     let after = std::fs::metadata(&path).unwrap();
@@ -647,7 +647,7 @@ async fn u_local_row_identity_pg() {
             HostKindMarker::Absent,
             &Ok(None)
         ),
-        Scope::Hold("identity_unresolved")
+        Scope::Hold("exact_canonical_mismatch")
     );
     let other_key = format!("claude/{TOKEN}/foreign:other");
     inflight::seed_session_row_keyed(&pool, &other_key, CHANNEL + 1, None).await;
@@ -662,7 +662,7 @@ async fn u_local_row_identity_pg() {
             HostKindMarker::Absent,
             &Ok(None)
         ),
-        Scope::Hold("identity_unresolved")
+        Scope::Hold("exact_canonical_mismatch")
     );
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
         .bind(&key)
@@ -686,7 +686,7 @@ async fn u_local_row_identity_pg() {
             HostKindMarker::Absent,
             &Ok(None)
         ),
-        Scope::Hold("identity_unresolved")
+        Scope::Hold("exact_canonical_mismatch")
     );
     let missing = HostedLookup::Missing;
     let no_row = evidence(&missing, &key, &owner.logical_key);

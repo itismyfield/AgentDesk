@@ -309,6 +309,10 @@ async fn read_now(
         None => unbound::herdr_bound::admitted(shared, provider, channel).await,
         bound => bound,
     };
+    #[cfg(unix)]
+    if bound.is_some() {
+        unbound::hold_leaf::rearm(channel.get());
+    }
     let target = match bound {
         Some(session) => Target::Bound(session),
         None => {
