@@ -866,7 +866,7 @@ exit 101
 
 
 class MutationPathFilterContractTests(unittest.TestCase):
-    """The unconditional mutation job filters its setup and execution steps.
+    """The verified-skip mutation job filters its setup and execution steps.
     The filter must cover all mutated sources, judges, and fixture owners."""
 
     maxDiff = None
@@ -939,9 +939,9 @@ class MutationPathFilterContractTests(unittest.TestCase):
         job = yaml.safe_load((REPO_ROOT / PR_WORKFLOW).read_text(encoding="utf-8"))["jobs"][
             MUTATION_JOB
         ]
-        # The mutation job must run independently of path-filter job results.
-        self.assertNotIn("if", job)
-        self.assertNotIn("needs", job)
+        # Only a verified docs/comment skip can suppress the mutation runner.
+        self.assertEqual(job["needs"], "changes")
+        self.assertEqual(job["if"], "${{ !cancelled() && needs.changes.outputs.rust_tests_skip != 'true' }}")
         gated = {
             step["name"]: step["if"]
             for step in job["steps"]
