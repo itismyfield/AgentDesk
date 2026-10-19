@@ -176,7 +176,7 @@ impl LiveEnd {
         let before = std::fs::read(&path).unwrap();
         let (shared, provider, channel) = (&self.shared, &self.provider, self.channel);
         let (active, refusal) = self.rt.block_on(async {
-            use crate::services::discord::router::intake_gate::stale_turn::queue_guard_active;
+            use crate::services::discord::router::thread_guard_test_api::queue_guard_active;
             let refusal =
                 discord::admin_host_guard::turn_release_refusal(shared, provider, channel);
             let refusal = refusal.await;
