@@ -3,6 +3,39 @@
 use super::super::CanaryFixture;
 use super::*;
 
+pub(super) fn persisted_queue_bytes(fixture: &CanaryFixture) -> Vec<u8> {
+    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
+        .unwrap()
+        .join("codex")
+        .join(&fixture.shared.token_hash)
+        .join(format!("{CANARY_CHANNEL}.json"));
+    fs::read(path).unwrap()
+}
+
+pub(super) fn payload_snapshot(
+    queue: &[crate::services::turn_orchestrator::Intervention],
+) -> Vec<(std::time::Instant, serde_json::Value)> {
+    queue.iter().map(|item| {
+        let sources: Vec<_> = item.source_message_queued_generations.iter().map(|source| json!({
+            "message_id": source.message_id.get(), "queued_generation": source.queued_generation,
+            "enqueued_at_epoch_us": source.enqueued_at_epoch_us, "preserve_on_cancel": source.preserve_on_cancel,
+            "route": source.route,
+        })).collect();
+        let segments: Vec<_> = item.source_text_segments.iter().map(|part| json!({
+            "message_id": part.message_id.get(), "text": part.text,
+        })).collect();
+        (item.created_at, json!({
+            "author_id": item.author_id.get(), "author_is_bot": item.author_is_bot,
+            "message_id": item.message_id.get(), "queued_generation": item.queued_generation,
+            "source_message_ids": item.source_message_ids.iter().map(|id| id.get()).collect::<Vec<_>>(),
+            "source_message_queued_generations": sources, "source_text_segments": segments,
+            "text": item.text, "mode": format!("{:?}", item.mode), "reply_context": item.reply_context,
+            "has_reply_boundary": item.has_reply_boundary, "merge_consecutive": item.merge_consecutive,
+            "pending_uploads": item.pending_uploads, "voice_announcement": item.voice_announcement,
+        }))
+    }).collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Refusal {
     OtherSpawnNonce,
@@ -186,6 +219,15 @@ async fn restored_head_stays_held(refusal: Refusal) {
     }
     assert!(dedupe::evict_dead_tmux_mirror(CANARY_TMUX));
     let identity = restore_disk_head(&mut fixture).await;
+    let queue_before = persisted_queue_bytes(&fixture);
+    let payload_before = payload_snapshot(
+        &fixture
+            .shared
+            .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
+            .snapshot()
+            .await
+            .intervention_queue,
+    );
     let nonce_before = fs::read(&nonce_path).unwrap();
     let ownership_before = fs::read(&ownership_path).unwrap();
     let history_before = fs::read(fixture.history()).unwrap();
@@ -208,6 +250,8 @@ async fn restored_head_stays_held(refusal: Refusal) {
         );
     }
     let after = fixture.shared.mailbox(channel).snapshot().await;
+    assert_eq!(payload_snapshot(&after.intervention_queue), payload_before);
+    assert_eq!(persisted_queue_bytes(&fixture), queue_before);
     assert_eq!(after.intervention_queue.len(), 1);
     assert_eq!(QueueIdentity::of(&after.intervention_queue[0]), identity);
     assert!(after.cancel_token.is_none() && after.pending_user_dispatch.is_none());

@@ -58,9 +58,7 @@ pub(super) async fn restore_instructions(
     })
     .await
     .expect("the previous provider task must release SharedData before simulated restore");
-    Arc::get_mut(&mut fixture.shared)
-        .expect("restore occurs without a live turn")
-        .mailboxes = ChannelMailboxRegistry::default();
+    fixture.shared.mailboxes.remove_fixture_for_test(channel);
     let restored = fixture
         .shared
         .mailbox(channel)
@@ -82,6 +80,68 @@ async fn queue_identities(fixture: &CanaryFixture) -> Vec<QueueIdentity> {
         .iter()
         .map(QueueIdentity::of)
         .collect()
+}
+
+async fn warm_diagnostic(fixture: &CanaryFixture, context: &BindingContext) {
+    let channel = serenity::ChannelId::new(CANARY_CHANNEL);
+    let source = context
+        .provider_root
+        .as_ref()
+        .unwrap()
+        .join(format!("rollout-{NEW_NATIVE_ID}.jsonl"));
+    let source_allowed = dedupe::codex_verified_source_allowed(
+        CANARY_TMUX,
+        source.to_str().unwrap(),
+        Some(NEW_NATIVE_ID),
+    );
+    let input_blocked = dedupe::codex_verified_input_blocked(CANARY_TMUX);
+    let launch_blocked = dedupe::clear_relaunch::launch_blocked(CANARY_TMUX);
+    let fold = p5::codex::read_ownership(context)
+        .map(|fold| {
+            (
+                fold.verified
+                    .map(|proof| (proof.seq, proof.source.session_id)),
+                fold.pending.len(),
+                fold.conflicted,
+            )
+        })
+        .map_err(|error| error.to_string());
+    let core = fixture
+        .shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get(&channel)
+        .map(|session| {
+            (
+                session.current_path.clone(),
+                session.session_id.clone(),
+                session.channel_name.clone(),
+            )
+        });
+    let host_deferred = crate::services::discord::host_defer_gate::channel_session_deferred(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        CANARY_CHANNEL,
+        CANARY_TMUX,
+    )
+    .await;
+    let marker = fs::read(crate::services::tmux_common::session_temp_path(
+        CANARY_TMUX,
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    ))
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    eprintln!(
+        "B1_WARM_SEED source_allowed={source_allowed} input_blocked={input_blocked} launch_blocked={launch_blocked} hold_detail={} host_deferred={host_deferred} core={core:?} fold={fold:?} marker={marker:?} native_state={:?} cwd_matches={}",
+        dedupe::codex_verified_hold_detail(CANARY_TMUX),
+        crate::services::codex_tui::rollout_tail::observe_rollout_turn_state(&source),
+        crate::services::codex_tui::rollout_tail::rollout_file_matches_cwd(
+            &source,
+            fixture.root.path()
+        )
+    );
 }
 
 pub(super) async fn recorder(
@@ -393,6 +453,7 @@ async fn full_fifo(recover: Option<bool>) {
         Activity::Idle,
         "actual N2 terminal must be idle before warm Q2: {settled:?}"
     );
+    warm_diagnostic(&fixture, &n2).await;
     let warm_started = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if let Ok(prompt) = warm_entered.try_recv() {
@@ -429,8 +490,14 @@ async fn full_fifo(recover: Option<bool>) {
         )
         .await;
         let binding = dedupe::runtime_binding_for_tmux_session(CANARY_TMUX);
+        let mut effects = std::collections::BTreeMap::new();
+        for call in fixture.fake.take_calls() {
+            *effects
+                .entry(call.split_whitespace().next().unwrap_or("empty").to_owned())
+                .or_insert(0_usize) += 1;
+        }
         eprintln!(
-            "B1_Q2_NO_PROVIDER activity={observed:?} park={parked:?} readiness_blocked={readiness} binding={binding:?} queue={:?} token={} pending={:?} recovery={:?} effects={:?}",
+            "B1_Q2_NO_PROVIDER activity={observed:?} park={parked:?} readiness_blocked={readiness} binding={binding:?} queue={:?} token={} pending={:?} recovery={:?} effect_counts={effects:?}",
             snapshot
                 .intervention_queue
                 .iter()
@@ -439,7 +506,6 @@ async fn full_fifo(recover: Option<bool>) {
             snapshot.cancel_token.is_some(),
             snapshot.pending_user_dispatch,
             snapshot.recovery_started_at,
-            fixture.fake.take_calls()
         );
         if let Some(token) = snapshot.cancel_token {
             token.cancelled.store(true, Ordering::SeqCst);

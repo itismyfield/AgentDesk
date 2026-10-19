@@ -22,8 +22,6 @@ mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
 mod tui_session_launch;
-#[cfg(all(test, unix))]
-use tui_session_launch::prepare_codex_tui_incarnation;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]

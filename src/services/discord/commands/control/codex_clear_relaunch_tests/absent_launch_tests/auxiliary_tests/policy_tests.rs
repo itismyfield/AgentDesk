@@ -1,6 +1,7 @@
 //! Entry refusals, rollback policy and post-tail errors retain their existing authority.
 
 use super::super::super::CanaryFixture;
+use super::super::negative_tests::{payload_snapshot, persisted_queue_bytes};
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
@@ -28,6 +29,15 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
     fixture.shared.core.lock().await.sessions.remove(&channel);
     let identities =
         restore_instructions(&mut fixture, vec![instruction(CANARY_CHANNEL + 111, Q1)]).await;
+    let queue_before = persisted_queue_bytes(&fixture);
+    let payload_before = payload_snapshot(
+        &fixture
+            .shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .intervention_queue,
+    );
     let history = fs::read(fixture.history()).unwrap();
     assert_eq!(
         activity::tests::unbound_verdict_for_tests(&fixture.shared, &ProviderKind::Codex, channel)
@@ -39,6 +49,11 @@ async fn unproved_foreign_inventory_never_kicks_restored_head_pg() {
     assert!(!kickoff(&fixture, &api).await);
     assert_eq!(queue_identities(&fixture).await, identities);
     let snapshot = fixture.shared.mailbox(channel).snapshot().await;
+    assert_eq!(
+        payload_snapshot(&snapshot.intervention_queue),
+        payload_before
+    );
+    assert_eq!(persisted_queue_bytes(&fixture), queue_before);
     assert!(snapshot.cancel_token.is_none() && snapshot.pending_user_dispatch.is_none());
     let (disk, _) = crate::services::turn_orchestrator::load_channel_pending_queue_checked(
         &ProviderKind::Codex,
@@ -154,7 +169,36 @@ async fn ambient_shadow_absence_pins_verified_but_explicit_clear_restores_shadow
         Some("shadow"),
         "explicit clear takes precedence over historical absence policy"
     );
-    publish_named(&fixture, &n3, THIRD_NATIVE_ID);
+    let n3_path = n3
+        .provider_root
+        .as_ref()
+        .unwrap()
+        .join(format!("rollout-{THIRD_NATIVE_ID}.jsonl"));
+    let envelope = HookBindingEnvelope {
+        context: CapturedContext::Captured(n3.clone()),
+        observed: ObservedHookProcess::default(),
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+    let _ = observe_binding_hook(
+        "codex",
+        "session-start",
+        Some(THIRD_NATIVE_ID),
+        Some(THIRD_NATIVE_ID),
+        &json!({"session_id":THIRD_NATIVE_ID,"transcript_path":n3_path,"source":"startup"}),
+        &headers,
+    );
+    // Explicit clear restores the existing Shadow consumer path for this launch.
+    assert!(dedupe::codex_verified_source_allowed(
+        CANARY_TMUX,
+        n3_path.to_str().unwrap(),
+        Some(THIRD_NATIVE_ID),
+    ));
+    terminal(
+        &n3_path,
+        "shadow-after-explicit-clear",
+        "shadow relaunch completed",
+    );
     wait_completion(&next.token).await;
     wait_idle(&fixture).await;
     next.finish();

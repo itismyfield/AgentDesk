@@ -119,7 +119,7 @@ impl InflightObs {
 }
 
 #[cfg(test)]
-mod tests;
+mod observation_tests;
 
 #[cfg(test)]
 pub(crate) mod test_setup;
