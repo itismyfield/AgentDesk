@@ -11,6 +11,8 @@ pub mod slot_predicate;
 pub mod slots;
 
 #[cfg(test)]
+mod run_admission_pg_tests;
+#[cfg(test)]
 mod run_completion_contract_tests;
 #[cfg(test)]
 mod run_completion_pg_tests;
