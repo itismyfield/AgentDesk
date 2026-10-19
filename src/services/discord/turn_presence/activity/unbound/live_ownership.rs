@@ -189,6 +189,10 @@ impl OwnerInputs {
             .iter()
             .all(|(name, observed)| nonce(name) == *observed)
     }
+
+    pub(super) fn nonces_valid<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> bool {
+        names.all(|name| matches!(self.nonces.get(name), Some(Ok(_))))
+    }
 }
 
 pub(super) fn epoch() -> Result<u64, String> {

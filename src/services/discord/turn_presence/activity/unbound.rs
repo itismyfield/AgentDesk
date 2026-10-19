@@ -31,6 +31,7 @@ enum Origin {
     Core,
     Fallback,
     Binding(u64),
+    Canonical,
     Inflight,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -191,6 +191,7 @@ struct Files {
     seq: u64,
     seq_watch: tokio::sync::watch::Receiver<u64>,
     traces: BTreeMap<String, LocalTrace>,
+    recovered: Option<String>,
 }
 impl Files {
     fn collect(
@@ -235,6 +236,7 @@ impl Files {
                 seq,
                 seq_watch,
                 traces,
+                recovered: None,
             })
         })
     }
@@ -245,6 +247,36 @@ impl Files {
             && self.row_identity == other.row_identity
             && self.seq == other.seq
             && self.traces == other.traces
+            && self.recovered == other.recovered
+    }
+
+    fn binding_only(&self) -> bool {
+        matches!(self.row, Ok(None))
+            && self.candidates.as_ref().is_ok_and(|candidates| {
+                candidates.current.is_none()
+                    && !candidates.conflict
+                    && !candidates.inflight
+                    && !candidates.names.is_empty()
+                    && candidates
+                        .names
+                        .iter()
+                        .all(|c| matches!(c.origin, Origin::Binding(_)))
+            })
+    }
+
+    fn recover(&mut self, name: &str) -> Result<(), String> {
+        if !self.binding_only() {
+            return Err("canonical recovery inputs changed".into());
+        }
+        let candidates = self.candidates.as_mut().map_err(|error| error.clone())?;
+        candidates.current = Some(name.into());
+        candidates.names.push(Candidate {
+            name: name.into(),
+            origin: Origin::Canonical,
+        });
+        self.traces.insert(name.into(), local_trace(name));
+        self.recovered = Some(name.into());
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -258,6 +290,7 @@ struct Snapshot {
     files: Files,
     exact: HostedLookup,
     canonical: HostedLookup,
+    canonical_target: Option<Result<canonical_target::CanonicalTarget, String>>,
     owners: BTreeMap<String, Option<u64>>,
     ownership: Option<ownership::OwnerInputs>,
     ports: Arc<LivePorts>,
@@ -290,7 +323,7 @@ impl Snapshot {
             basis.clone(),
             config.clone(),
         );
-        let files = tokio::task::spawn_blocking(move || {
+        let mut files = tokio::task::spawn_blocking(move || {
             Files::collect(
                 &worker_provider,
                 channel.get(),
@@ -304,6 +337,16 @@ impl Snapshot {
         #[cfg(test)]
         review_tests::after_files(channel.get()).await;
         let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
+        let canonical_target = if files.binding_only()
+            && local_registration(&config, channel.get(), provider)
+        {
+            Some(canonical_target::collect(pool, provider, &shared.token_hash, channel.get()).await)
+        } else {
+            None
+        };
+        if let Some(Ok(target)) = &canonical_target {
+            files.recover(&target.name)?;
+        }
         let name = files
             .candidates
             .as_ref()
@@ -342,6 +385,7 @@ impl Snapshot {
             files,
             exact,
             canonical,
+            canonical_target,
             owners: BTreeMap::new(),
             ownership: None,
             ports,
@@ -390,11 +434,34 @@ impl Snapshot {
             && self.files.same(&other.files)
             && self.exact == other.exact
             && self.canonical == other.canonical
+            && self.canonical_target == other.canonical_target
             && match (&self.ownership, &other.ownership) {
                 (Some(old), Some(new)) => old.same(new),
                 (None, None) => true,
                 _ => false,
             }
+    }
+    fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
+        let candidates = self.files.candidates.clone();
+        let verdict = decide_unbound(
+            candidates,
+            self.scope(shared),
+            inventory,
+            &self.effective_owners(),
+        );
+        if matches!(verdict, Verdict::Absent(_))
+            && self.files.recovered.is_some()
+            && !self.ownership.as_ref().is_some_and(|owners| {
+                self.files
+                    .candidates
+                    .as_ref()
+                    .is_ok_and(|c| owners.nonces_valid(c.names.iter().map(|c| c.name.as_str())))
+            })
+        {
+            Verdict::Hold("probe_failed")
+        } else {
+            verdict
+        }
     }
     fn effective_owners(&self) -> BTreeMap<String, Option<u64>> {
         self.owners.clone()
@@ -455,7 +522,7 @@ impl Snapshot {
             return false;
         }
         // Re-read files after the last DB/inventory await; final publication has no await.
-        let Ok(files) = Files::collect(
+        let Ok(mut files) = Files::collect(
             &self.provider,
             self.channel.get(),
             self.basis.as_deref(),
@@ -464,6 +531,12 @@ impl Snapshot {
         ) else {
             return false;
         };
+        // Reattach the pinned target after rereading original candidates; no DB await follows.
+        if let Some(name) = &self.files.recovered {
+            if files.recover(name).is_err() {
+                return false;
+            }
+        }
         self.files.same(&files) && self.memory_current()
     }
     fn scope(&self, shared: &SharedData) -> HostScope {
@@ -570,6 +643,8 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     snapshot: Option<Snapshot>,
     namespace: Option<Observation>,
 }
+#[path = "canonical_target.rs"]
+mod canonical_target;
 #[path = "live_ownership.rs"]
 mod ownership;
 #[path = "live_publication.rs"]
@@ -651,9 +726,8 @@ async fn collect(
     let (snapshot, namespace, next) =
         Snapshot::collect_pair(shared, provider, channel, ports).await?;
     let candidates = snapshot.files.candidates.clone();
-    let scope = snapshot.scope(shared);
     let owners = snapshot.effective_owners();
-    let verdict = decide_unbound(candidates.clone(), scope, &namespace.inventory, &owners);
+    let verdict = snapshot.verdict(shared, &namespace.inventory);
     if !snapshot.same_inputs(&next) {
         return Ok((
             observed(Activity::Unknown, "superseded"),
@@ -695,3 +769,7 @@ pub(super) mod review_tests;
 #[cfg(test)]
 #[path = "live_owner_tests.rs"]
 mod owner_tests;
+
+#[cfg(test)]
+#[path = "stale_binding_tests.rs"]
+mod stale_binding_tests;

@@ -18,12 +18,7 @@ pub(in crate::services::discord::turn_presence::activity) async fn verdict_for_t
     }
     Ok(format!(
         "{:?}",
-        decide_unbound(
-            snapshot.files.candidates.clone(),
-            snapshot.scope(shared),
-            &namespace.inventory,
-            &snapshot.owners,
-        )
+        snapshot.verdict(shared, &namespace.inventory)
     ))
 }
 
