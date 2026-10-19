@@ -428,11 +428,7 @@ mod hosted {
 
         drop(full);
         tokio::time::sleep(Duration::from_secs(35)).await;
-        assert_eq!(
-            port.owed().await,
-            owed(3),
-            "two bodies and their opening mark"
-        );
+        assert_eq!(port.owed().await, owed(2), "the resumed actor's real count");
         assert_eq!(scene.ready.rotation_unsettled(O), Some(0));
         scene.gate.acquired();
         scene.until(|scene| scene.io.posts.to(O).len() == 2).await;
