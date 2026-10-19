@@ -198,7 +198,8 @@ fn clear_root_replaced_retires_without_close_pg() {
             clear_channel_session_state(&http, &shared, &provider, channel, "/clear", notify);
         let reply = clear.await.expect("a clear always commits").reply();
 
-        assert_eq!(reply, super::super::commands::SESSION_CLEARED_RESPONSE);
+        let cleared = super::super::commands::SESSION_CLEARED_RESPONSE;
+        assert_eq!(reply, format!("{cleared}\n대기 메시지 0건을 비웠어요."));
         assert!(rig.writes().is_empty(), "the restored shell is not closed");
         let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
         assert_eq!(herdr::row(&pool, &key).await, Some(retired));
