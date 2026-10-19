@@ -10427,6 +10427,11 @@ services::discord::turn_presence::supervisor::tests::a_slow_send_holds_only_its_
 services::discord::turn_presence::supervisor::tests::an_idle_queue_is_woken_on_the_transition_and_every_half_minute
 services::discord::turn_presence::supervisor::tests::an_overtaken_reading_is_never_published
 services::discord::turn_presence::supervisor::tests::busy_types_at_once_then_every_eight_seconds_and_idle_stops_it
+services::discord::turn_presence::supervisor::tests::deadline_tests::a_429_keeps_the_retry_backoff_and_idle_cancels_it
+services::discord::turn_presence::supervisor::tests::deadline_tests::a_slow_channel_does_not_delay_another_channels_idle_or_generation
+services::discord::turn_presence::supervisor::tests::deadline_tests::exactly_ten_seconds_between_successes_is_accepted_without_overlapping_sends
+services::discord::turn_presence::supervisor::tests::deadline_tests::idle_fences_a_due_mailbox_wait_and_old_generation_cannot_restart_typing
+services::discord::turn_presence::supervisor::tests::deadline_tests::slow_activity_reads_do_not_starve_successful_typing_deadlines
 services::discord::turn_presence::supervisor::tests::only_confirmed_channels_are_supervised_and_reported
 services::discord::turn_presence::supervisor::tests::unknown_for_a_minute_notices_once_per_half_hour
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg
