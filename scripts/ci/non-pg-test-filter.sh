@@ -130,6 +130,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::queue_dispatch::codex_clear_compat::tests
   --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
+  --skip services::discord::recovery_engine::herdr_row_end::tests::rig
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests

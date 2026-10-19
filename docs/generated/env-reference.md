@@ -12,7 +12,7 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 123
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 124
 - Platform and third-party variables: 29
 
 ## AgentDesk variables
@@ -31,6 +31,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
+| `ADK_HERDR_ROW_END_MUTANT` | `src/services/discord/inflight/clear_store/herdr_row_end.rs`, `src/services/discord/recovery_engine/herdr_row_end.rs` | The receipt recheck, which only a test build's mutant turns off. |
 | `ADK_IMSG_OBLIGATIONS` | `src/services/imsg_reply/mod.rs` | Cache the kill switch once so activation requires a process restart. |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs`, `src/services/discord/tui_prompt_relay/relay_e2e/mod.rs` |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
