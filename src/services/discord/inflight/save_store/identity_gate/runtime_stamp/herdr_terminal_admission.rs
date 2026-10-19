@@ -103,6 +103,13 @@ impl HerdrFrame {
                 return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
             }
             fresh.tui_terminal_kind = Some(self.kind);
+            // The bridge ends on this kind before any runtime handoff, so the row names its TUI
+            // here: the body's owner is judged from it.
+            fresh.runtime_kind = fresh.runtime_kind.or(match self.provider {
+                ProviderKind::Claude => Some(RuntimeHandoffKind::ClaudeTui),
+                ProviderKind::Codex => Some(RuntimeHandoffKind::CodexTui),
+                _ => None,
+            });
             let persisted = persist_under_lock_with_snapshot(
                 &root,
                 &path,
@@ -118,6 +125,7 @@ impl HerdrFrame {
             }
             baseline.clone_from(&persisted);
             local.tui_terminal_kind = persisted.tui_terminal_kind;
+            local.runtime_kind = persisted.runtime_kind;
             local.save_generation = persisted.save_generation;
             Ok(self.kind)
         })
