@@ -89,6 +89,10 @@ fn fixed_reader_rejects_foreign_openers_before_content() {
         json!({"type": "turn_context", "payload": {}}),
         record(json!({"type": "task_complete", "turn_id": "foreign"})),
         record(json!({"type": "turn_aborted", "turn_id": "foreign"})),
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant",
+            "turn_id":"foreign","content":[{"type":"output_text","text":"foreign direct prose"}]}}),
+        json!({"type":"response_item","turn_id":"foreign","payload":{"type":"function_call",
+            "call_id":"foreign-tool","name":"foreign","arguments":"{}"}}),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write_records(

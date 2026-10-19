@@ -103,6 +103,12 @@ fn validate_fixed_record(line: &[u8], turn: &str, session: Option<&str>) -> Resu
     if record["type"] == "session_meta" && payload["id"].as_str() != session {
         return Err("fixed recovery reached a foreign session".into());
     }
+    if crate::services::agent_protocol::codex_payload_turn_id(payload)
+        .or_else(|| record.get("turn_id").and_then(serde_json::Value::as_str))
+        .is_some_and(|id| id != turn)
+    {
+        return Err("fixed recovery reached a foreign or unnamed turn".into());
+    }
     let scoped = record["type"] == "turn_context"
         || (record["type"] == "event_msg"
             && matches!(

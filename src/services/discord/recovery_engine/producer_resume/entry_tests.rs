@@ -41,6 +41,40 @@ fn normalized_text(text: &str) -> Value {
     json!({"type":"assistant","message":{"content":[{"type":"text","text":text}]}})
 }
 
+fn saved_prefix_bodies() -> (Vec<String>, String) {
+    let frozen_bodies = (0..8)
+        .map(|index| {
+            let marker = format!(
+                "{}FROZEN_{index}_SENT|",
+                if index == 0 {
+                    "SAVED_FROZEN_PREFIX|"
+                } else {
+                    ""
+                }
+            );
+            let bytes = if index == 0 { 4_227 } else { 4_226 };
+            let padding = bytes - marker.len() - 1;
+            let body = format!(
+                "{marker}{}{}\n",
+                "가".repeat(padding / 3),
+                "x".repeat(padding % 3)
+            );
+            assert_eq!(body.len(), bytes);
+            assert_eq!(body.chars().count(), if index == 0 { 1_433 } else { 1_420 });
+            body
+        })
+        .collect::<Vec<_>>();
+    let current_body = format!(
+        "SAVED_CURRENT_TAIL|é{}{}\n",
+        "가".repeat(161),
+        "c".repeat(336)
+    );
+    assert_eq!(frozen_bodies.iter().map(String::len).sum::<usize>(), 33_809);
+    assert_eq!(current_body.len(), 841);
+    assert_eq!(current_body.chars().count(), 518);
+    (frozen_bodies, current_body)
+}
+
 struct Fixture {
     channel: ChannelId,
     shared: Arc<SharedData>,
@@ -53,6 +87,8 @@ struct Fixture {
     prefix: Vec<u8>,
     prefix_identity: (u64, u64),
     body_prefix: String,
+    frozen_bodies: Vec<String>,
+    current_body: String,
     final_body: String,
     binding_before: Option<TuiRuntimeBinding>,
     marker_path: PathBuf,
@@ -65,6 +101,7 @@ struct Fixture {
     supervisor_shutdown: Arc<AtomicBool>,
     session_bound: bool,
     _rest: discord::shared_state::test_rest::Guard,
+    _live: crate::services::session_host::test_support::InjectedLivenessGuard,
     _env: crate::config::TestEnvVarGuard,
     _o_channels: crate::config::TestEnvVarGuard,
     _root: tempfile::TempDir,
@@ -84,6 +121,10 @@ impl Fixture {
         let channel = ChannelId::new(channel);
         let tmux =
             ProviderKind::Codex.build_tmux_session_name(&format!("resume-entry-{}", channel.get()));
+        let live = crate::services::session_host::test_support::InjectedLivenessGuard::set(
+            crate::services::session_host::HostSessionRef::tmux(&tmux),
+            crate::services::session_host::HostLiveness::Live,
+        );
         let raw = root.path().join("rollout-entry.jsonl");
         let wrapper = PathBuf::from(crate::services::tmux_common::session_temp_path(
             &tmux, "jsonl",
@@ -91,9 +132,11 @@ impl Fixture {
         let generation = crate::services::tmux_common::session_temp_path(&tmux, "generation");
         std::fs::write(generation, b"entry-fixture-generation").unwrap();
         // Preserve the incident byte counts while omitting prompt/tool contents.
-        let body_prefix = format!("SAVED_FROZEN_PREFIX|{}\n", "가".repeat(11_543));
+        let (frozen_bodies, current_body) = saved_prefix_bodies();
+        let body_prefix = format!("{}{}", frozen_bodies.concat(), current_body);
         let final_body = format!("TERMINAL|{}", "f".repeat(690));
         assert_eq!(body_prefix.len(), 34_650);
+        assert_eq!(body_prefix.get(33_809..), Some(current_body.as_str()));
         assert_eq!(final_body.len(), 699);
         let timestamp = (chrono::Utc::now() - chrono::Duration::seconds(10)).to_rfc3339();
         let mut native = vec![
@@ -180,6 +223,8 @@ impl Fixture {
         row.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         row.full_response = body_prefix.clone();
         row.response_sent_offset = 33_809;
+        row.current_msg_len = current_body.chars().count();
+        assert_eq!(row.current_msg_len, 518);
         row.streaming_rollover_frozen_msg_ids = (10..18).map(|i| channel.get() + i).collect();
         row.set_relay_owner_kind(RelayOwnerKind::Watcher);
         inflight::save_inflight_state(&row).unwrap();
@@ -216,6 +261,14 @@ impl Fixture {
         let http_fail = Arc::new(AtomicBool::new(false));
         let failed_requests = Arc::new(AtomicU64::new(0));
         let (fail, failures) = (http_fail.clone(), failed_requests.clone());
+        let saved_current_id = row.current_msg_id;
+        let saved_current_body = current_body.clone();
+        let saved_frozen = row
+            .streaming_rollover_frozen_msg_ids
+            .iter()
+            .copied()
+            .zip(frozen_bodies.iter().cloned())
+            .collect::<Vec<_>>();
         let gateway = MockDiscord::start_with(Arc::new(move |method, path| {
             if fail.load(Ordering::Acquire) && method != axum::http::Method::DELETE {
                 failures.fetch_add(1, Ordering::AcqRel);
@@ -239,9 +292,21 @@ impl Fixture {
                 .next()
                 .and_then(|id| id.parse().ok())
                 .unwrap_or(channel.get() + 100);
+            let content = if method == axum::http::Method::GET && path.contains("/messages/") {
+                if id == saved_current_id {
+                    saved_current_body.as_str()
+                } else {
+                    saved_frozen
+                        .iter()
+                        .find(|(saved_id, _)| *saved_id == id)
+                        .map_or("", |(_, body)| body.as_str())
+                }
+            } else {
+                ""
+            };
             Some((
                 200,
-                message_json(id, channel.get(), 1, "", "2026-10-19T00:00:00+00:00"),
+                message_json(id, channel.get(), 1, content, "2026-10-19T00:00:00+00:00"),
             ))
         }))
         .await;
@@ -274,6 +339,8 @@ impl Fixture {
             prefix,
             prefix_identity,
             body_prefix,
+            frozen_bodies,
+            current_body,
             final_body,
             binding_before,
             marker_path,
@@ -286,10 +353,31 @@ impl Fixture {
             supervisor_shutdown,
             session_bound,
             _rest: rest,
+            _live: live,
             _env: env,
             _o_channels: o_channels,
             _root: root,
         }
+    }
+
+    async fn ensure_ready(&self) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let outcome = super::ensure(
+                    self.shared.clone(),
+                    self.handle.tmux_session_name.clone(),
+                    self.handle.cancel.clone(),
+                )
+                .await;
+                if outcome == super::ResumeOutcome::WriterReady {
+                    break;
+                }
+                assert_eq!(outcome, super::ResumeOutcome::RetryLater);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("producer must initialize after transient lock contention");
     }
 
     fn append_final(&self) {
@@ -465,8 +553,86 @@ impl Fixture {
         })
         .await
         .expect("existing watcher must deliver, durably commit and settle original actor");
+        let requests = self.gateway.successful_requests_for(self.channel.get());
+        let saved_markers = self
+            .frozen_bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let marker = format!("FROZEN_{index}_SENT|");
+                assert!(body.contains(&marker));
+                marker
+            })
+            .chain(["SAVED_FROZEN_PREFIX|".into(), "SAVED_CURRENT_TAIL|".into()])
+            .collect::<Vec<_>>();
+        let expected_current = format!("{}{}", self.current_body, self.final_body);
+        for request in &requests {
+            let (method, rest) = request.split_once(' ').unwrap();
+            let (path, body) = rest.split_once(' ').unwrap_or((rest, ""));
+            let parts = path.split('/').collect::<Vec<_>>();
+            let message_id = parts.windows(2).find_map(|pair| {
+                (pair[0] == "messages")
+                    .then(|| pair[1].parse::<u64>().ok())
+                    .flatten()
+            });
+            if matches!(method, "PATCH" | "DELETE") {
+                assert!(
+                    message_id
+                        .is_none_or(|id| !self.row.streaming_rollover_frozen_msg_ids.contains(&id)),
+                    "frozen message must remain unchanged: {request}"
+                );
+            }
+            if method == "POST" {
+                assert!(
+                    saved_markers.iter().all(|marker| !body.contains(marker)),
+                    "saved body cannot be posted as a new message: {request}"
+                );
+            }
+            if method == "PATCH" && message_id == Some(self.row.current_msg_id) {
+                let payload: Value = serde_json::from_str(body).expect("current-body PATCH JSON");
+                if let Some(content) = payload.get("content") {
+                    let content = content
+                        .as_str()
+                        .expect("current-body PATCH cannot clear saved text");
+                    assert!(
+                        content == self.current_body || content == expected_current,
+                        "old current body may remain unchanged or gain only the native final: {request}"
+                    );
+                }
+            }
+        }
+        let mutations: Vec<_> = requests
+            .iter()
+            .filter(|r| r.starts_with("POST ") || r.starts_with("PATCH "))
+            .collect();
+        assert!(
+            mutations
+                .iter()
+                .all(|r| !r.contains("SAVED_FROZEN_PREFIX|")),
+            "a saved frozen prefix must never be reposted: {mutations:?}"
+        );
+        assert_eq!(
+            mutations
+                .iter()
+                .filter(|r| r.contains(&self.final_body))
+                .count(),
+            1,
+            "the 699-byte native final must appear in exactly one Discord mutation: {mutations:?}"
+        );
         let receipt = delivery_record::read_record(&ProviderKind::Codex, self.channel.get())
-            .expect("durable receipt");
+            .unwrap_or_else(|| {
+                let coord = self.shared.tmux_relay_coord(self.channel);
+                panic!(
+                    "durable receipt missing: path={:?} root={} frontier={:?} disk_generation={} coord_generation={} completed={:?} claude_record={:?} requests={requests:?}",
+                    delivery_record::delivery_record_path(&ProviderKind::Codex, self.channel.get()),
+                    self._root.path().display(),
+                    self.shared.relay_frontier_token(self.channel),
+                    delivery_record::current_generation_mtime_ns(&self.handle.tmux_session_name),
+                    coord.confirmed_end_generation_mtime_ns.load(Ordering::Acquire),
+                    completed_turn_ledger::read_ledger(&ProviderKind::Codex, self.channel.get()),
+                    delivery_record::read_record(&ProviderKind::Claude, self.channel.get()),
+                )
+            });
         assert!(
             receipt
                 .confirmed_deliveries
@@ -492,30 +658,11 @@ impl Fixture {
             !self.token.cancelled.load(Ordering::Acquire),
             "successful revival must not cancel original turn"
         );
-        let requests = self.gateway.requests_for(self.channel.get());
-        let mutations: Vec<_> = requests
-            .iter()
-            .filter(|r| r.starts_with("POST ") || r.starts_with("PATCH "))
-            .collect();
-        assert!(
-            mutations
-                .iter()
-                .all(|r| !r.contains("SAVED_FROZEN_PREFIX|")),
-            "a saved frozen prefix must never be reposted: {mutations:?}"
-        );
-        assert_eq!(
-            mutations
-                .iter()
-                .filter(|r| r.contains(&self.final_body))
-                .count(),
-            1,
-            "the 699-byte native final must appear in exactly one Discord mutation: {mutations:?}"
-        );
     }
 
     fn mutations(&self) -> Vec<String> {
         self.gateway
-            .requests_for(self.channel.get())
+            .successful_requests_for(self.channel.get())
             .into_iter()
             .filter(|request| request.starts_with("POST ") || request.starts_with("PATCH "))
             .collect()
@@ -548,8 +695,19 @@ impl Fixture {
         );
     }
 
+    fn cancel_current_watcher(&self) -> bool {
+        self.shared
+            .tmux_watchers
+            .cancel_and_remove_channel_if_current(
+                &self.channel,
+                &self.handle.tmux_session_name,
+                &self.handle.output_path,
+                &self.handle.cancel,
+            )
+    }
+
     async fn stop(mut self) {
-        self.handle.cancel.store(true, Ordering::Release);
+        let _ = self.cancel_current_watcher();
         if let Some(task) = self.watcher.take() {
             task.abort();
             let _ = task.await;
@@ -563,7 +721,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.handle.cancel.store(true, Ordering::Release);
+        let _ = self.cancel_current_watcher();
         if let Some(task) = &self.watcher {
             task.abort();
         }
@@ -699,15 +857,7 @@ async fn r2_periodic_revives_live_incumbent_despite_fresh_row_and_open_circuit()
 async fn r6_contention_retains_event_order_and_clear_blocks_old_output() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let f = Box::pin(Fixture::new(7_139_106, false)).await;
-    assert_eq!(
-        super::ensure(
-            f.shared.clone(),
-            f.handle.tmux_session_name.clone(),
-            f.handle.cancel.clone()
-        )
-        .await,
-        super::ResumeOutcome::WriterReady
-    );
+    f.ensure_ready().await;
     let row_path = inflight::inflight_state_path(
         &inflight::inflight_runtime_root().unwrap(),
         &ProviderKind::Codex,
@@ -915,16 +1065,7 @@ async fn r6_live_publication_stops_on_episode_cancel_reset_or_source_guard_chang
         let f = Box::pin(Fixture::new(7_139_120 + index as u64, false)).await;
         let coord = f.shared.tmux_relay_coord(f.channel);
         coord.advance_untyped_frontier(100, None);
-        assert_eq!(
-            super::ensure(
-                f.shared.clone(),
-                f.handle.tmux_session_name.clone(),
-                f.handle.cancel.clone()
-            )
-            .await,
-            super::ResumeOutcome::WriterReady,
-            "{change}"
-        );
+        f.ensure_ready().await;
         match change {
             "successor" | "current_msg" | "owner" => {
                 let root = inflight::inflight_runtime_root().unwrap();
@@ -941,7 +1082,11 @@ async fn r6_live_publication_stops_on_episode_cancel_reset_or_source_guard_chang
                 }
                 std::fs::write(path, serde_json::to_vec(&row).unwrap()).unwrap();
             }
-            "cancel" => f.handle.cancel.store(true, Ordering::Release),
+            "cancel" => {
+                assert!(f.cancel_current_watcher());
+                assert!(f.handle.cancel.load(Ordering::Acquire));
+                assert!(!f.shared.tmux_watchers.contains_key(&f.channel));
+            }
             "epoch" => {
                 f.handle.pause_epoch.fetch_add(1, Ordering::AcqRel);
             }
