@@ -5180,6 +5180,7 @@ services::discord::outbound::completed_turn_ledger::tests::prune_drops_entries_p
 services::discord::outbound::completed_turn_ledger::tests::prune_only_removes_evidence_t_s6_6035
 services::discord::outbound::completed_turn_ledger::tests::settled_user_msg_ids_of_absent_ledger_is_empty
 services::discord::outbound::completed_turn_ledger::tests::zero_user_msg_id_is_a_no_op_sentinel
+services::discord::outbound::confirmation::terminal_notice_tests::turn_end_summary_spends_one_physical_post_and_consumes_every_response
 services::discord::outbound::delivery::tests::dispatch_v3_empty_content_posts_zero_width_placeholder
 services::discord::outbound::delivery::tests::dispatch_v3_envelope_retries_minimal_fallback_after_length_error
 services::discord::outbound::delivery::tests::shared_deduper_blocks_same_key_across_producers

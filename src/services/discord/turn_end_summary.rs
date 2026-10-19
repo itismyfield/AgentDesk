@@ -222,8 +222,11 @@ pub(in crate::services::discord) async fn post_live<G: TurnGateway + ?Sized>(
     }
     // An error may follow a successful POST, so the attempt remains consumed even on cancellation.
     let text = render(summary.outcome, summary.elapsed_ms, summary.context_pct);
-    if let Err(error) = gateway.send_message(summary.key.channel_id, &text).await {
-        tracing::warn!(channel = summary.key.channel_id.get(), provider = provider.as_str(), %error,
+    if let Err(error) =
+        super::outbound::confirmation::send_terminal_notice(gateway, summary.key.channel_id, &text)
+            .await
+    {
+        tracing::warn!(channel_id = summary.key.channel_id.get(), provider = provider.as_str(), %error,
             "Legacy terminal summary was not confirmed; it will not be replayed");
     }
     SENT.lock()

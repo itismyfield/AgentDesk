@@ -1228,6 +1228,8 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── confirmation/
+│   │   │   │   └── terminal_notice_tests.rs
 │   │   │   ├── delivery_obligation/
 │   │   │   │   ├── state/
 │   │   │   │   │   ├── proof_access.rs
