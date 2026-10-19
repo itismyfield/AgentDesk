@@ -96,6 +96,17 @@ class LibTestArtifactTests(unittest.TestCase):
                             for argv in self.executed))
         self.assertEqual(self.executed[2][1:], ["recovery", "--test-threads=1"])
 
+    def test_previous_attempt_serves_binary_and_inventory_without_fallback(self):
+        self.prepare()
+        os.environ["GITHUB_RUN_ATTEMPT"] = "3"
+        self.assertEqual(artifact.run(["cargo", "test", "--lib", "alpha"], self.root), 0)
+        self.assertEqual(artifact.validated_inventory(self.root), PLAIN)
+        self.assertEqual(artifact.validated_inventory(self.root, ignored=True), IGNORED)
+        self.assertEqual(self.executed, [[str(self.directory / "lib-tests"), "alpha"]])
+        self.assertEqual(self.builds, 1)
+        metadata = json.loads((self.directory / "metadata.json").read_text())
+        self.assertEqual(metadata["run_attempt"], "2")
+
     def test_missing_producer_or_download_falls_back(self):
         command = ["cargo", "test", "--lib", "--", "--list"]
         for directory in (None, str(self.directory)):
@@ -110,10 +121,11 @@ class LibTestArtifactTests(unittest.TestCase):
 
     def test_contract_mismatches_fall_back(self):
         self.prepare()
+        os.environ["GITHUB_RUN_ATTEMPT"] = "3"
         original = (self.directory / "metadata.json").read_text()
         mutants = {"sha": "b" * 40, "root": "/other/checkout", "host": "other-host",
                    "rust": "1.94.0", "profile": "release", "features": "all",
-                   "run_id": "other-run", "run_attempt": "1", "flags": {},
+                   "run_id": "other-run", "flags": {},
                    "build": ["cargo", "test", "--all-features"]}
         command = ["cargo", "test", "--lib"]
         for key, value in mutants.items():
