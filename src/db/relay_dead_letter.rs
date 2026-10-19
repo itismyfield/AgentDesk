@@ -157,7 +157,7 @@ pub(crate) fn record_detached_reporting(
 /// [`claim_pending_redeliveries`] moves it to `'claimed'` and only a settle leaves
 /// that state. Settling back to `'pending'` makes the row claimable again, so a
 /// claim is once per attempt, not once per row. A claim lost to a crash stays
-/// `'claimed'`; automatic recovery of abandoned claims is still open (#6009).
+/// `'claimed'`; abandoned claims have no automatic recovery.
 ///
 /// Claimed for one attempt; settlement may return it to pending.
 pub(crate) const REDELIVERY_CLAIMED: &str = "claimed";
