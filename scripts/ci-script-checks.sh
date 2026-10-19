@@ -350,6 +350,7 @@ if run_check guards "TUI O writer census: Legacy send sites and cutover gates"; 
 # per-file count; the script docstring declares its lexical limits.
 "$PYTHON" scripts/check_tui_o_writer_census.py
 "$PYTHON" -m unittest tests.test_check_tui_o_writer_census
+"$PYTHON" -m unittest tests.test_terminal_notice_census
 "$PYTHON" -m unittest tests.test_retired_panel_boot_wiring
 fi
 
