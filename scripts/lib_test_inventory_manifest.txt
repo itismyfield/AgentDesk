@@ -5936,6 +5936,7 @@ services::discord::queue_io::queued_head_inject::tests::auto::s3_an_unreadable_t
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
+services::discord::queue_io::queued_head_inject::tests::s2b_a_head_whose_author_is_not_named_stays_queued_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving_pg
@@ -13189,6 +13190,7 @@ services::tui_prompt_dedupe::handoff::tests::an_expired_handoff_publishes_its_he
 services::tui_prompt_dedupe::handoff::tests::an_old_handoff_snapshot_keeps_its_original_expiry
 services::tui_prompt_dedupe::handoff::tests::an_older_record_of_the_origin_text_leaves_the_handoff_unbound
 services::tui_prompt_dedupe::injected_steer_tests::a_rollout_row_seen_after_the_hook_is_still_known_once_the_ledger_forgets
+services::tui_prompt_dedupe::injected_steer_tests::an_inject_header_opens_a_turn_only_when_its_record_hands_it_over
 services::tui_prompt_dedupe::injected_steer_tests::an_input_in_another_turn_joins_its_owner_or_takes_the_direct_path_once
 services::tui_prompt_dedupe::injected_steer_tests::an_input_joining_its_target_turn_publishes_nothing
 services::tui_prompt_dedupe::injected_steer_tests::an_input_quoting_an_idle_header_is_settled_by_the_ledger

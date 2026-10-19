@@ -151,7 +151,7 @@ pub(crate) struct Request<'a> {
     pub transcript: &'a Path,
     pub source: &'a str,
     pub author: &'a str,
-    /// The author's name as the idle header shows it.
+    /// The author's name as Discord shows it.
     pub name: &'a str,
     pub nonce: &'a str,
     pub text: &'a str,

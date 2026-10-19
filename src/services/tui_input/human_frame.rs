@@ -47,6 +47,20 @@ pub(crate) fn author_name(name: &str, id: impl std::fmt::Display) -> String {
     sanitized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The name Discord shows for a person: the server nickname, else the global display name, else
+/// the username.
+pub(crate) fn display_name<'a>(
+    nick: Option<&'a str>,
+    global_name: Option<&'a str>,
+    username: &'a str,
+) -> &'a str {
+    [nick, global_name]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or(username)
+}
+
 /// The idle name with no control character or `·`, cut to a bounded length; applying it twice
 /// changes nothing, so a header read back rebuilds to the same bytes.
 fn header_name(name: &str, author: &str) -> String {

@@ -327,6 +327,56 @@ pub(crate) async fn register_inject_runtime(
     shared
 }
 
+/// A fake Discord API for this thread while it lives: every channel is in server 1, whose members
+/// are all nicknamed `nick`, and every Discord message is `writer`'s.
+pub(crate) struct NameRest {
+    _rest: crate::services::discord::shared_state::test_rest::Guard,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for NameRest {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+pub(crate) async fn name_rest(nick: &'static str, writer: u64) -> NameRest {
+    use axum::response::IntoResponse;
+    use serde_json::json;
+    let user = |id: &str| json!({"id": id, "username": "username", "discriminator": "0"});
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| async move {
+        let path = uri.path();
+        if let Some(id) = path.strip_prefix("/api/v10/guilds/1/members/") {
+            let member = json!({"user": user(id), "nick": nick, "roles": [], "deaf": false,
+                "mute": false, "flags": 0});
+            return axum::Json(member).into_response();
+        }
+        let rest = path.strip_prefix("/api/v10/channels/").unwrap_or_default();
+        if let Some((channel, id)) = rest.split_once("/messages/") {
+            let message = json!({"id": id, "channel_id": channel, "author": user(&writer.to_string()),
+                "content": "", "timestamp": "2026-07-26T00:00:00.000000+00:00",
+                "edited_timestamp": null, "tts": false, "mention_everyone": false, "mentions": [],
+                "mention_roles": [], "attachments": [], "embeds": [], "pinned": false, "type": 0});
+            return axum::Json(message).into_response();
+        }
+        let channel = json!({"id": rest, "type": 0, "name": "inject", "guild_id": "1",
+            "position": 0, "permission_overwrites": [], "nsfw": false, "parent_id": null});
+        axum::Json(channel).into_response()
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = poise::serenity_prelude::HttpBuilder::new("inject-test-token")
+        .proxy(proxy)
+        .ratelimiter_disabled(true)
+        .build();
+    let rest = crate::services::discord::shared_state::test_rest::install(Arc::new(http));
+    NameRest {
+        _rest: rest,
+        server,
+    }
+}
+
 /// `<delivery> <reason> [veto=..]` for compact expectations.
 async fn deliver(registry: &HealthRegistry, channel: u64) -> String {
     deliver_text(registry, channel, "status?").await

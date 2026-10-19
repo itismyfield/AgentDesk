@@ -129,10 +129,9 @@ pub(super) fn already_taken(
 pub(super) struct LiveText<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) parent: Option<ChannelId>,
-    pub(super) message_id: MessageId,
-    /// The author; the queue entry a handback becomes carries its id and bot mark, and the
-    /// paste names it as the idle header does.
-    pub(super) author: &'a serenity::User,
+    /// The message; a handback's queue entry carries its id and author, and the paste names the
+    /// author as Discord shows them.
+    pub(super) message: &'a serenity::Message,
     pub(super) author_is_allowed_automation: bool,
     pub(super) text: &'a str,
     pub(super) reply_context: Option<&'a str>,
@@ -165,10 +164,10 @@ fn body(live: &LiveText<'_>) -> String {
 fn handback(live: &LiveText<'_>) -> (crate::services::turn_orchestrator::Intervention, String) {
     let spec = SoftInterventionSpec {
         channel_id: live.channel_id,
-        author_id: live.author.id,
-        author_is_bot: live.author.bot,
+        author_id: live.message.author.id,
+        author_is_bot: live.message.author.bot,
         author_is_allowed_automation: live.author_is_allowed_automation,
-        message_id: live.message_id,
+        message_id: live.message.id,
         text: live.text.to_string(),
         reply_context: live.reply_context.map(str::to_string),
         has_reply_boundary: live.has_reply_boundary,
@@ -176,7 +175,7 @@ fn handback(live: &LiveText<'_>) -> (crate::services::turn_orchestrator::Interve
         pending_uploads: Default::default(),
         voice_announcement: None,
     };
-    let turn = format!("discord:{}:{}", live.channel_id, live.message_id);
+    let turn = format!("discord:{}:{}", live.channel_id, live.message.id);
     (spec.into_intervention(), turn)
 }
 
@@ -187,11 +186,11 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         return false;
     }
     #[cfg(test)]
-    test_support::note_offer(live.message_id.get()).await;
+    test_support::note_offer(live.message.id.get()).await;
     if !offerable(live, &data.shared) {
         return false;
     }
-    let message = live.message_id;
+    let message = live.message.id;
     let Some(guard) = inject_disposition::claim_source(&data.provider, message, Instant::now())
     else {
         return false;
@@ -200,8 +199,8 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         channel_id: live.channel_id,
         provider: data.provider.clone(),
         text: body(live),
-        author_id: live.author.id.get(),
-        source: format!("discord:{}:{}", live.channel_id, live.message_id),
+        author_id: live.message.author.id.get(),
+        source: format!("discord:{}:{}", live.channel_id, live.message.id),
         metadata: None,
         channel_name_hint: None,
     };
@@ -210,12 +209,26 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         message,
         handback,
         guard,
-        name: live.author.name.clone(),
+        name: shown_name(live.message).to_string(),
     };
     let attempt = inject_human_input(&data.shared, &request, origin).await;
     #[cfg(test)]
     test_support::note_outcome(message.get(), &attempt);
     settle(ctx, data, live, attempt).await
+}
+
+/// The sender's name as this message shows it in Discord.
+fn shown_name(message: &serenity::Message) -> &str {
+    let nick = message
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.as_deref());
+    let author = &message.author;
+    crate::services::tui_input::human_frame::display_name(
+        nick,
+        author.global_name.as_deref(),
+        &author.name,
+    )
 }
 
 async fn settle(
@@ -225,7 +238,7 @@ async fn settle(
     attempt: InjectAttempt,
 ) -> bool {
     let shared = &data.shared;
-    let (channel, message) = (live.channel_id, live.message_id);
+    let (channel, message) = (live.channel_id, live.message.id);
     let reaction = match attempt {
         InjectAttempt::NotSent(veto) => {
             tracing::info!(

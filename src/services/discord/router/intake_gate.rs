@@ -1245,8 +1245,7 @@ pub(in crate::services::discord) async fn handle_event(
             let live = busy_inject::LiveText {
                 channel_id,
                 parent,
-                message_id: new_message.id,
-                author: &new_message.author,
+                message: new_message,
                 author_is_allowed_automation: author_excluded_from_cancel_preservation,
                 text,
                 reply_context: reply_context.as_deref(),

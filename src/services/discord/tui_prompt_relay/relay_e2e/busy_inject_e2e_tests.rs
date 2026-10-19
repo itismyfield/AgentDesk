@@ -158,10 +158,27 @@ fn in_memory(message: u64) -> Option<InjectionOutcome> {
     disposition::terminal(Some(&ProviderKind::Claude), MessageId::new(message), now)
 }
 
-/// A turn mid-run takes the text under the author's idle name and id: pasted once, marked 📥, the
-/// checkpoint past it, nothing queued or started, and recorded where a restart finds it.
+/// A turn mid-run takes the text under the name Discord shows (nickname, else global name, else
+/// username) and the id: pasted once, marked 📥, nothing queued or started, recorded for a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
+    for (nick, global_name) in [
+        (Some("Ops Lead"), Some("Won Chang")),
+        (None, Some("Won Chang")),
+    ] {
+        let busy = busy().await;
+        let message = fresh_id();
+        let mut sent = user_message(message, "status?");
+        sent.author.global_name = global_name.map(str::to_string);
+        let member = serde_json::json!({ "nick": nick, "roles": [] });
+        sent.member = Some(Box::new(serde_json::from_value(member).unwrap()));
+        busy.rt.h.spawn_message(sent).await.unwrap().unwrap();
+        let buffer = busy.pane.read("buffer").unwrap_or_default();
+        busy.rt.finish().await;
+        let shown = nick.or(global_name).unwrap();
+        let header = format!("[User: {shown} (ID: {USER_ID}) · 📱 v1 mode=inject source=");
+        assert!(buffer.starts_with(&header), "{buffer}");
+    }
     let busy = busy().await;
     let rt = &busy.rt;
     let message = fresh_id();

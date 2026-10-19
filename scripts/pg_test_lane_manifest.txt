@@ -1770,6 +1770,7 @@ services::discord::queue_io::queued_head_inject::tests::auto::s3_an_unreadable_t
 services::discord::queue_io::queued_head_inject::tests::auto::s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg
 services::discord::queue_io::queued_head_inject::tests::auto::s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_a_definite_not_sent_releases_the_head_even_if_the_row_changes_after_the_effect_pg
+services::discord::queue_io::queued_head_inject::tests::s2b_a_head_whose_author_is_not_named_stays_queued_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_input_with_a_failed_consume_commit_keeps_unknown_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_acknowledged_owner_keeps_unknown_when_same_path_binding_changes_pg
 services::discord::queue_io::queued_head_inject::tests::s2b_actor_rechecks_both_gates_and_the_admitted_channel_before_reserving_pg

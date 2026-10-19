@@ -109,7 +109,7 @@ pub(crate) enum Origin {
         message: MessageId,
         handback: Box<(Intervention, String)>,
         guard: SourceGuard,
-        /// The author's name as the idle header for this message shows it.
+        /// The author's name as Discord shows it for this message.
         name: String,
     },
 }
