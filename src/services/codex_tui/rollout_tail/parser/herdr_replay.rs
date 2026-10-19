@@ -8,6 +8,7 @@ use super::{
     promote_own_task_complete_fallback_text,
 };
 use crate::services::agent_protocol::NativeTerminalKind;
+#[cfg(unix)]
 use crate::services::claude::herdr_turn::EndedTurn;
 use crate::services::provider::CancelToken;
 use crate::services::provider::herdr_before_start::mutant;
@@ -42,6 +43,7 @@ impl super::RolloutRecordDecoder {
     }
 
     /// The same replay read for what ended the turn. `None` when the file cannot be read.
+    #[cfg(unix)]
     pub(crate) fn replay_ended_herdr_turn(
         file: &mut std::fs::File,
         start: u64,
