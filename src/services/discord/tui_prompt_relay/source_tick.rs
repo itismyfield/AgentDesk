@@ -1,5 +1,6 @@
 //! Source discovery runs even when Legacy body delivery cannot run.
 use super::*;
+use crate::services::discord::recovery_engine::herdr_row_end::row_end_pass;
 use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
 
 pub(super) const CLAUDE_IDLE_FRESH_TRANSCRIPT_LOOKBACK_BYTES: u64 = 65_536;
@@ -25,6 +26,8 @@ pub(super) async fn claude_rehydrate_source_phase(
 ) {
     let now = tokio::time::Instant::now();
     if now >= *next_rehydrate {
+        // Rows a restart left behind are picked before the bindings; their end runs on its own task.
+        row_end_pass(shared, &ProviderKind::Claude).await;
         // Pane probes block; keep the existing pass on the blocking pool.
         let shared_for_rehydrate = shared.clone();
         let rehydrate_result = tokio::task::spawn_blocking(move || {
@@ -111,6 +114,7 @@ pub(super) async fn codex_source_phase(
 ) -> Vec<CodexResolvedSource> {
     let now = tokio::time::Instant::now();
     if now >= *next_rehydrate {
+        row_end_pass(shared, &ProviderKind::Codex).await;
         let shared_for_rehydrate = shared.clone();
         super::codex_idle_rollout::codex_discovery_pass(move || {
             #[cfg(test)]

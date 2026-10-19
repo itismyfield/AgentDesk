@@ -274,10 +274,18 @@ pub(crate) async fn admit_text_intake(
     }
     // Before any routing or Postgres-less local fallback: an O channel runs only on its gateway.
     let (provider, destination) = (submission.provider.as_str(), submission.request.channel_id);
-    // A delegated channel's home row decides first, in the router; without Postgres it holds here.
-    let home_first = deps.shared.pg_pool.is_some()
-        && crate::services::cluster::channel_home::registered(&destination.get().to_string())
-            .is_some();
+    // A channel with a home row, or a local gate, is decided by the router's home read; an
+    // unreadable row goes there too and is refused. Without Postgres it holds here.
+    let home_first = match deps.shared.pg_pool.as_ref() {
+        None => false,
+        Some(_) if crate::services::cluster::channel_home::registered(&channel_id).is_some() => {
+            true
+        }
+        Some(pool) => !matches!(
+            crate::db::o_channel_homes::read_home(pool, &channel_id).await,
+            Ok(None)
+        ),
+    };
     if !home_first
         && let IntakeRoute::Hold(detail) =
             intake_route::route_for_placement(provider, destination.get())

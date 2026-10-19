@@ -383,3 +383,65 @@ fn a_herdr_clear_with_a_retired_execution_ends_the_managed_tmux_pg() {
         db.drop().await;
     });
 }
+
+const HERDR_NEVER_ATTACHED_CHANNEL: u64 = 1_479_671_305_341_200_003;
+
+// A clear ends a never-attached Pending with recorded evidence when the switch is on; with it off
+// nothing is closed or retired and the end is unconfirmed, yet the queue is still dropped.
+#[test]
+fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
+    use crate::services::session_host::herdr_termination_rig as herdr;
+    let path = concat!(
+        module_path!(),
+        "::a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg"
+    );
+    if !herdr::in_child(path, HERDR_NEVER_ATTACHED_CHANNEL) {
+        return;
+    }
+    let rig = herdr::P11TerminationRig::boot(HERDR_NEVER_ATTACHED_CHANNEL);
+    let install = rig.thread_installer();
+    install();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .on_thread_start(install)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _root = crate::config::TestRuntimeRootGuard::new();
+        let (db, pool) = postgres().await;
+        let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let channel = ChannelId::new(HERDR_NEVER_ATTACHED_CHANNEL);
+        let provider = ProviderKind::Claude;
+        map_channel(&shared, channel, "p11-clear").await;
+        let key = super::super::super::adk_session::build_adk_session_key;
+        let key = key(&shared, channel, &provider, None)
+            .await
+            .expect("session key");
+        let switches = rig
+            .bind_never_attached(&pool, &shared.token_hash, &key)
+            .await;
+        let pending = (herdr::HostedState::Pending, herdr::EXECUTION.to_string());
+
+        switches.set_terminate(None);
+        seed_backlog(&shared, &provider, channel).await;
+        let reply = clear(&shared, &provider, channel).await;
+        assert!(reply.contains(END_UNCONFIRMED), "{reply}");
+        assert!(rig.writes().is_empty(), "no pane is closed");
+        assert_eq!(herdr::row(&pool, &key).await, Some(pending));
+        assert_eq!(
+            queue_len(&shared, channel).await,
+            0,
+            "the clear drops the queue"
+        );
+
+        switches.set_terminate(Some(true));
+        let reply = clear(&shared, &provider, channel).await;
+        assert_eq!(reply, SESSION_CLEARED_RESPONSE);
+        assert_eq!(rig.writes().len(), 1, "one close reaches the pane");
+        let retired = (herdr::HostedState::Retired, herdr::EXECUTION.to_string());
+        assert_eq!(herdr::row(&pool, &key).await, Some(retired));
+        pool.close().await;
+        db.drop().await;
+    });
+}

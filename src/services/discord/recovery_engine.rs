@@ -69,6 +69,8 @@ mod tmux_probe;
 mod analytics_transcript;
 #[path = "recovery_engine/rebind_runtime.rs"]
 mod rebind_runtime;
+#[path = "recovery_engine/relay_output_replacements.rs"]
+pub(in crate::services::discord) mod relay_output_replacements;
 #[path = "recovery_engine/state_extractors.rs"]
 mod state_extractors;
 // #3834: behavior-preserving extraction of the manual-rebind recovery path
@@ -124,6 +126,9 @@ pub(in crate::services::discord) mod herdr_admitted_restart;
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_before_start_restart.rs"]
 mod herdr_before_start_restart;
+#[cfg(unix)]
+#[path = "recovery_engine/herdr_row_end.rs"]
+pub(in crate::services::discord) mod herdr_row_end;
 // Unix only, like the `tmux::execution_identity` comparison it calls.
 #[cfg(unix)]
 #[path = "recovery_engine/herdr_reader.rs"]

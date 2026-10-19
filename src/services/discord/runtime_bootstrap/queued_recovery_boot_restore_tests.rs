@@ -1,11 +1,52 @@
 //! Boot restore merges bound channels' persisted queues (with or without a dispatch marker),
 //! reinstalls the role override, and judges the queued placeholder.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::*;
 use crate::services::discord::make_shared_data_for_tests;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
-fn item(id: u64) -> Intervention {
+/// A test's pause of a standby channel's restore, taken before it reads the channel's binding.
+pub(crate) struct Pause {
+    entered: AtomicBool,
+    go: tokio::sync::Semaphore,
+}
+
+impl Pause {
+    pub(crate) fn entered(&self) -> bool {
+        self.entered.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn release(&self) {
+        self.go.add_permits(1);
+    }
+}
+
+static PAUSES: Mutex<Vec<(u64, Arc<Pause>)>> = Mutex::new(Vec::new());
+
+/// Pauses the channel's next standby restore once, until the returned pause is released.
+pub(crate) fn pause(channel: u64) -> Arc<Pause> {
+    let (entered, go) = (AtomicBool::new(false), tokio::sync::Semaphore::new(0));
+    let pause = Arc::new(Pause { entered, go });
+    PAUSES.lock().unwrap().push((channel, Arc::clone(&pause)));
+    pause
+}
+
+pub(super) async fn paused(channel: u64) {
+    let armed = {
+        let mut armed = PAUSES.lock().unwrap();
+        let at = armed.iter().position(|(armed, _)| *armed == channel);
+        at.map(|at| armed.remove(at).1)
+    };
+    if let Some(pause) = armed {
+        pause.entered.store(true, Ordering::SeqCst);
+        drop(pause.go.acquire().await);
+    }
+}
+
+pub(crate) fn item(id: u64) -> Intervention {
     Intervention {
         author_id: UserId::new(7),
         author_is_bot: false,
@@ -117,5 +158,154 @@ fn boot_restore_installs_a_bound_channels_queue_marker_override_and_placeholder(
     assert!(
         stale_cards.iter().any(|card| card.0.get() == legacy),
         "the bound channel's placeholder is judged: {stale_cards:?}"
+    );
+}
+
+/// A boot restore run by `restore_around`, with the root it ran under kept until the test reads it.
+struct Restored {
+    stale: Vec<(ChannelId, MessageId, MessageId)>,
+    token: String,
+    memory: Vec<u64>,
+    _root: (crate::config::TestEnvVarGuard, tempfile::TempDir),
+}
+
+/// Runs the boot restore of a bound channel holding `[queued]` and a placeholder for it,
+/// with `between` run after the boot read and before the merge.
+fn restore_around<F: std::future::Future<Output = ()>>(
+    channel: u64,
+    queued: u64,
+    between: impl FnOnce(Arc<SharedData>, std::path::PathBuf) -> F,
+) -> Restored {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        tmp.path(),
+    );
+    let provider = ProviderKind::Claude;
+    bind_channels(tmp.path(), [channel, channel + 50]);
+    let shared = make_shared_data_for_tests();
+    let (id, token) = (ChannelId::new(channel), shared.token_hash.clone());
+    let save = crate::services::turn_orchestrator::save_channel_queue;
+    save(&provider, &token, id, &[item(queued)], None).unwrap();
+    let card = (MessageId::new(queued), MessageId::new(queued + 1));
+    super::super::queued_placeholders_store::save_channel_queued_placeholders(
+        &provider,
+        &token,
+        id,
+        &[card],
+    );
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = root
+        .join(provider.as_str())
+        .join(&token)
+        .join(format!("{channel}.json"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (stale, memory) = runtime.block_on(async {
+        // The restore reads the queue files, then waits on the settings this guard holds.
+        let settings = shared.settings.write().await;
+        let (http, task_shared) = (
+            Arc::new(serenity::Http::new("Bot test-token")),
+            shared.clone(),
+        );
+        let restore = tokio::spawn(async move {
+            restore_queued_and_inflight_work(&http, &task_shared, &ProviderKind::Claude).await
+        });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        between(shared.clone(), path.clone()).await;
+        drop(settings);
+        let stale = restore.await.unwrap();
+        let queue = shared.mailbox(id).snapshot().await.intervention_queue;
+        (
+            stale,
+            queue.iter().map(|item| item.message_id.get()).collect(),
+        )
+    });
+    let _root = (_env, tmp);
+    Restored {
+        stale,
+        token,
+        memory,
+        _root,
+    }
+}
+
+/// The message ids the channel's queue file holds.
+fn disk_ids(token: &str, channel: u64) -> Vec<u64> {
+    let mut queues =
+        crate::services::turn_orchestrator::load_pending_queues(&ProviderKind::Claude, token).0;
+    let queue = queues.remove(&ChannelId::new(channel)).unwrap_or_default();
+    queue.iter().map(|item| item.message_id.get()).collect()
+}
+
+#[test]
+fn a_queue_cleared_while_boot_restore_waits_is_not_restored() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (channel, queued) = (6_258_301_u64, 6_258_311_u64);
+    let restored = restore_around(channel, queued, |shared, _| async move {
+        let id = ChannelId::new(channel);
+        let context = crate::services::discord::queue_persistence_context;
+        let persistence = context(&shared, &ProviderKind::Claude, id);
+        shared.mailbox(id).clear(persistence).await;
+    });
+    assert!(restored.memory.is_empty(), "Q is not merged back");
+    assert_eq!(
+        disk_ids(&restored.token, channel),
+        Vec::<u64>::new(),
+        "Q is not written back"
+    );
+    assert!(
+        restored.stale.iter().any(|card| card.1.get() == queued),
+        "the cleared item's card is stale: {:?}",
+        restored.stale
+    );
+}
+
+#[test]
+fn a_queue_the_merge_cannot_read_keeps_its_file_and_placeholder() {
+    let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let (channel, queued) = (6_258_401_u64, 6_258_411_u64);
+    let (id, provider) = (ChannelId::new(channel), ProviderKind::Claude);
+    let load = crate::services::turn_orchestrator::load_channel_pending_queue_checked;
+    let torn = br#"[{"message_id": 6258411, "te"#;
+    let restored = restore_around(channel, queued, |shared, path| async move {
+        // The boot read already holds Q; the file the merge reads is torn.
+        std::fs::write(&path, torn).unwrap();
+        let read = load(&ProviderKind::Claude, &shared.token_hash, id);
+        assert!(read.is_err(), "the fixture makes the merge's read fail");
+    });
+    let token = restored.token.as_str();
+    assert!(
+        load(&provider, token, id).is_err(),
+        "the file still cannot be read"
+    );
+    assert!(
+        restored.memory.is_empty(),
+        "Q is not merged: {:?}",
+        restored.memory
+    );
+    let root = crate::services::discord::runtime_store::discord_pending_queue_root().unwrap();
+    let path = root
+        .join(provider.as_str())
+        .join(token)
+        .join(format!("{channel}.json"));
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        torn,
+        "the file's bytes are left as they were"
+    );
+    assert!(
+        !restored.stale.iter().any(|card| card.1.get() == queued),
+        "an unread queue's card is not deleted: {:?}",
+        restored.stale
+    );
+    let cards = super::super::queued_placeholders_store::load_queued_placeholders(&provider, token);
+    assert!(
+        cards.contains_key(&(id, MessageId::new(queued))),
+        "the placeholder row is kept: {cards:?}"
     );
 }

@@ -197,6 +197,17 @@ class CensusGateTests(unittest.TestCase):
                 )
                 self.assert_fails_with("gate: cutover helper in R-EVID file src/services/discord/outbound/delivery_record.rs")
 
+    def test_helper_in_r_evid_child_file_fails_even_with_updated_counts(self) -> None:
+        self.maps.pop("R_EVID")
+        rel = "src/services/discord/outbound/delivery_record/frontier.rs"
+        for kind, helper in (("claim", "o_owns_tui_output"), ("peek", "peek_o_owns_tui_output")):
+            with self.subTest(kind=kind):
+                self.write(rel, f"pub fn read_receipt() -> bool {{ {helper}(kind) || lookup_receipt() }}\n")
+                self.maps["EXPECTED_GATES"][rel] = (f"read_receipt:{kind}",)
+                self.assert_fails_with(
+                    "gate: cutover helper in R-EVID file src/services/discord/outbound/delivery_record/frontier.rs"
+                )
+
     def test_gate_count_change_needs_the_map_in_the_same_change(self) -> None:
         self.write("src/services/discord/sink.rs", CUT_FILE + "fn g() { claim_then_send(c, s); }\n")
         self.assert_fails_with("has ['deliver:claim', 'g:claim'], expected ['deliver:claim']")

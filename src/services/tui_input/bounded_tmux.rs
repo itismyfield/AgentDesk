@@ -102,7 +102,7 @@ pub(super) fn spawn_with_budget(
         let child = command.spawn().map_err(BoundedTmuxError::Spawn)?;
         let cleanup = platform::run(child, budget.min(Duration::from_secs(5)));
         #[cfg(test)]
-        if super::transition::mutant("cleanup_wait") {
+        if super::mutant("cleanup_wait") {
             let (start, started) = tokio::sync::oneshot::channel();
             return Ok(Pending {
                 cleanup: handle.spawn(async move {
@@ -208,7 +208,7 @@ mod platform {
 
         async fn terminate(&mut self) -> (bool, bool) {
             #[cfg(test)]
-            if super::super::transition::mutant("kill_reap") {
+            if super::super::mutant("kill_reap") {
                 self.owned = false;
                 return (false, false);
             }
@@ -233,7 +233,7 @@ mod platform {
             if self.owned {
                 self.kill();
                 #[cfg(test)]
-                if super::super::transition::mutant("drop_reap") {
+                if super::super::mutant("drop_reap") {
                     let _ = self.reap();
                     return;
                 }
@@ -288,7 +288,7 @@ mod platform {
         let deadline = Instant::now() + budget;
         async move {
             #[cfg(test)]
-            let deadline = if super::super::transition::mutant("deadline_wait") {
+            let deadline = if super::super::mutant("deadline_wait") {
                 Instant::now() + budget
             } else {
                 deadline

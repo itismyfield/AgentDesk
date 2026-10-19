@@ -123,7 +123,7 @@ pub(super) fn run_bot_build_shared_data(
                 crate::services::discord::placeholder_controller::PlaceholderController::default(),
             ),
             placeholder_live_events: Arc::new(
-                crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::default(),
+                crate::services::discord::placeholder_live_events::PlaceholderLiveEvents::with_tool_activity_display(crate::config::load_graceful().placeholder.tool_activity_display),
             ),
             placeholder_live_events_enabled,
             status_panel_v2_enabled,

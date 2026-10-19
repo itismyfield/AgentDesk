@@ -4,7 +4,7 @@
  *
  * Hooks:
  *   onSessionStatusChange — dispatch session 상태 → card 상태 동기화
- *   onDispatchCompleted   — 완료 검증 (PM Decision Gate) + review 진입
+ *   onDispatchCompleted   — 완료 처리 + review 진입
  *   onCardTransition      — 상태별 부수효과 (dispatch 생성, PMD 알림 등)
  *   onCardTerminal        — completed_at 기록 + 자동큐 진행
  *
@@ -226,7 +226,7 @@ var rules = {
     // `complete_dispatch` → `OnDispatchCompleted`).
   },
 
-  // ── Dispatch Completed — PM Decision Gate ─────────────────
+  // ── Dispatch Completed — review 진입 ─────────────────────
   onDispatchCompleted: function(payload) {
     var dispatches = agentdesk.db.query(
       "SELECT id, kanban_card_id, to_agent_id, dispatch_type, chain_depth, created_at, result, context, status FROM task_dispatches WHERE id = ?",
@@ -273,7 +273,7 @@ var rules = {
     // #3605 (T2) + #3594 (T3): scope-assessment dispatch completed. First record
     // the depth on the card metadata (T2 recorder, fail-safe to "full"). This is
     // a side-path (the card never advanced to in_progress on attach — see
-    // transition.rs skip_kickoff), so completion must NOT flow into the PM gate /
+    // transition.rs skip_kickoff), so completion must NOT flow into the
     // review / XP lifecycle below. T3 then ACTIVATES the recorded depth to gate
     // the next stage instead of returning inert:
     //   direct    → create the implementation dispatch directly (skip plan).
@@ -458,7 +458,7 @@ var rules = {
       agentdesk.log.info("[kanban] " + card.id + " " + dispatch.dispatch_type + " noop completion recorded — routing through review flow");
     }
 
-    // Rework dispatches — skip gate, go directly to review
+    // Rework dispatches — no XP, go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.kanban.setStatus(card.id, reviewState);
       agentdesk.log.info("[kanban] " + card.id + " rework done → " + reviewState);
@@ -477,61 +477,7 @@ var rules = {
       );
     }
 
-    // ── PM Decision Gate ──
-    // Skip gate if dispatch context has skip_gate flag (e.g., PMD manual review)
-    var pmGateEnabled = agentdesk.config.get("pm_decision_gate_enabled");
-    if (dispatchContext.skip_gate) {
-      agentdesk.log.info("[pm-gate] Skipped for card " + card.id + " (skip_gate flag)");
-    } else if (pmGateEnabled !== false && pmGateEnabled !== "false") {
-      var reasons = [];
-
-      // Check 1: DoD completion
-      // Format: { items: ["task1", "task2"], verified: ["task1"] }
-      // All items must be in verified to pass.
-      if (card.deferred_dod_json) {
-        var dod = card.deferred_dod_json;
-        var items = dod && Array.isArray(dod.items) ? dod.items : [];
-        var verified = dod && Array.isArray(dod.verified)
-          ? dod.verified
-          : (dod && typeof dod.verified === "undefined" ? [] : null);
-        if (items.length > 0 && verified) {
-          var unverified = 0;
-          for (var i = 0; i < items.length; i++) {
-            if (verified.indexOf(items[i]) === -1) unverified++;
-          }
-          if (unverified > 0) {
-            reasons.push("DoD 미완료: " + (items.length - unverified) + "/" + items.length);
-          }
-        }
-      }
-
-      // Minimum work duration heuristic was intentionally removed.
-      // Unified-thread / turn-bridge completions can legitimately finalize with
-      // short measured wall-clock even when real work already happened, which
-      // created false PM escalations (#257, #261, #262). PM alerts must be
-      // reserved for objective failure signals, not timing heuristics.
-
-      if (reasons.length > 0) {
-        // Check if the only failure is DoD — give agent 15 min to complete it
-        var dodOnly = reasons.length === 1 && reasons[0].indexOf("DoD 미완료") === 0;
-        if (dodOnly) {
-          // DoD 미완료만 → awaiting_dod (15분 유예, timeouts.js [D]가 만료 시 dilemma_pending)
-          agentdesk.kanban.setStatus(card.id, reviewState);
-          agentdesk.kanban.setReviewStatus(card.id, "awaiting_dod", {awaiting_dod_at: "now"});
-          // #117: sync canonical review state
-          agentdesk.reviewState.sync(card.id, "awaiting_dod");
-          agentdesk.log.warn("[pm-gate] Card " + card.id + " → review(awaiting_dod): " + reasons[0]);
-          return;
-        }
-        // Other gate failures → dilemma_pending
-        var gateReason = reasons.join("; ");
-        escalateToManualIntervention(card.id, gateReason, { review: true });
-        agentdesk.log.warn("[pm-gate] Card " + card.id + " → dilemma_pending: " + gateReason);
-        return;
-      }
-    }
-
-    // ── Gate passed → always review (counter-model review) ──
+    // ── Completion → counter-model review ──
     agentdesk.kanban.setStatus(card.id, reviewState);
     agentdesk.log.info("[kanban] " + card.id + " → " + reviewState);
   },

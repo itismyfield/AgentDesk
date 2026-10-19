@@ -258,7 +258,7 @@ pub(super) async fn handle_delivery_epilogue(
         // the two gate sites.
         #[cfg(unix)]
         {
-            let tui_transport_error_skip_gate = claude_tui_followup_pre_submit_requeue_candidate
+            let skip_tui_quiescence = claude_tui_followup_pre_submit_requeue_candidate
                 || (transport_error
                     && bridge_tui_transport_error_should_skip_quiescence(
                         &provider,
@@ -268,7 +268,7 @@ pub(super) async fn handle_delivery_epilogue(
                     ));
             let bridge_gate_outcome = if terminal_delivery_committed
                 && !preserve_inflight_for_cleanup_retry
-                && !tui_transport_error_skip_gate
+                && !skip_tui_quiescence
             {
                 if let Some(outcome) = bridge_tui_gate_outcome_early {
                     outcome
@@ -285,7 +285,7 @@ pub(super) async fn handle_delivery_epilogue(
                     super::super::super::tmux::TuiCompletionGateOutcome::NotGated
                 }
             } else {
-                if terminal_delivery_committed && tui_transport_error_skip_gate {
+                if terminal_delivery_committed && skip_tui_quiescence {
                     tracing::info!(
                         provider = %provider.as_str(),
                         channel_id = channel_id.get(),
@@ -342,14 +342,12 @@ pub(super) async fn handle_delivery_epilogue(
             && !delivery_response.trim().is_empty()
             && let Some(user_msg_id) = user_msg_id
         {
-            tv_done(
-                &shared_owned,
-                channel_id,
-                user_msg_id,
-                inflight_generation,
-                "done",
-            )
-            .await;
+            // A delivered provider failure notice marks the request failed, not done.
+            if ctx.provider_failure {
+                tv_fail(&shared_owned, channel_id, user_msg_id, inflight_generation, "fail").await;
+            } else {
+                tv_done(&shared_owned, channel_id, user_msg_id, inflight_generation, "done").await;
+            }
         }
 
         td_warn(

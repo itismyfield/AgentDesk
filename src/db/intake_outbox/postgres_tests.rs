@@ -597,10 +597,8 @@ async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
     let sweep = tokio::spawn(async move {
         sweep_failed_pre_accept_once(&sweep_pool, "leader-1", 5, 60, None).await
     });
-
-    // Wait for the sweep to block on the held worker row itself. Probing the
-    // source with NOWAIT can miss the short interval between locking the source
-    // and reaching this re-check, making the test depend on probe timing.
+    // The old FOR UPDATE NOWAIT probe could lock rotated_id, making the sweep's
+    // FOR UPDATE ... SKIP LOCKED pick later_id. Observe the held worker row instead.
     let wait_for_worker_lock = async {
         loop {
             let blocked: bool = sqlx::query_scalar(
@@ -630,7 +628,6 @@ async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
         let sweep_result = sweep.await.expect("join sweep after missing lock wait"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
         panic!("sweep never waited for capability update; result={sweep_result:?}"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] postgres module
     }
-
     capability_update
         .commit()
         .await
@@ -644,7 +641,6 @@ async fn issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
             source_id: rotated_id
         }
     );
-
     let after: (String, Option<String>, chrono::DateTime<chrono::Utc>) =
         sqlx::query_as("SELECT status,last_error,updated_at FROM intake_outbox WHERE id=$1")
             .bind(rotated_id)

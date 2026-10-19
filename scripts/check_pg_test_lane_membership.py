@@ -1067,7 +1067,8 @@ def _cargo_commands(
 _ROOT_UNSET = ["env", "-u", "AGENTDESK_ROOT_DIR"]
 _ARTIFACT_RUN = ["python3", "scripts/ci/lib-test-artifact.py", "run", "--"]
 # The run_test_lane.py options CI passes, each with the argparse value it accepts.
-_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*"}
+_RUN_TEST_LANE_OPTIONS = {"--lane": r"[^-].*", "--max-summaries": r"[1-9][0-9]*", "--skip": r"[^-].*",
+                          "--expected-ids": r"scripts/ci/[\w.-]+\.txt"}
 
 
 def _prefix_template(words: list[str]) -> bool:

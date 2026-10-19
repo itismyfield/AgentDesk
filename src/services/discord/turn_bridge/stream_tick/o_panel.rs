@@ -3,6 +3,10 @@
 
 use super::super::*;
 
+#[cfg(test)]
+#[path = "body_footer_rollover_tests.rs"]
+mod body_footer_rollover_tests;
+
 /// The status-only frame: spinner, last tool and turn times, with no body.
 pub(super) fn status_frame(
     shared: &SharedData,
@@ -26,7 +30,10 @@ pub(super) fn status_frame(
 
 /// The frame's last-tool label without its spinner; None before the turn's first tool.
 fn tool_label(frame: &str) -> Option<&str> {
-    let label = frame[frame.find("마지막 도구 (")?..].lines().next()?;
+    let start = frame
+        .find("마지막 도구 (")
+        .or_else(|| frame.find("도구 "))?;
+    let label = frame[start..].lines().next()?;
     (label != "마지막 도구 (아직 없음)").then_some(label)
 }
 
@@ -62,3 +69,7 @@ pub(super) async fn refresh_o_status_panel(
     *last_edit_text = frame;
     true
 }
+
+#[cfg(test)]
+#[path = "o_tool_activity_tests.rs"]
+mod tool_activity_tests;

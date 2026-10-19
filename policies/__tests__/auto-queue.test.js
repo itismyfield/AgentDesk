@@ -795,6 +795,39 @@ test("auto-queue phase-gate completion logs refusal instead of claiming completi
   assert.match(state.logs.warn.join("\n"), /did not mark run run-refused completed/);
 });
 
+test("auto-queue derived finalize reports the writer's blocked reason without a resume fallback", () => {
+  const { module, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
+    autoQueueComplete() {
+      return { ok: true, changed: false, outcome: "blocked", blocked_reason: "user_cancelled_entry" };
+    }
+  });
+
+  assert.equal(module.finalizeRunWithoutPhaseGate("run-held"), false);
+  assert.deepEqual(state.autoQueueCompletes, [
+    { runId: "run-held", reason: "finalize_without_phase_gate", options: {} }
+  ]);
+  assert.deepEqual(state.autoQueueResumes, []);
+  assert.equal(state.autoQueueActivations.length, 0);
+  assert.equal(state.queries.length, 0, "readiness is judged by the Rust writer, not by policy SQL");
+  assert.match(state.logs.info.join("\n"), /blocked:user_cancelled_entry/);
+});
+
+test("auto-queue phase-gate completion clears the grace window first and accepts an already terminal run", () => {
+  const { module, state } = loadPolicy("policies/lib/auto-queue-lifecycle.js", {
+    autoQueueComplete() {
+      return { ok: true, changed: false, outcome: "already_terminal", blocked_reason: null };
+    }
+  });
+
+  assert.equal(module.completeRunAndNotify("run-terminal"), true);
+  assert.deepEqual(Array.from(state.executions, (execution) => execution.sql), [
+    "UPDATE auto_queue_runs SET phase_gate_grace_until = NULL WHERE id = ?"
+  ]);
+  assert.deepEqual(Array.from(state.executions[0].params), ["run-terminal"]);
+  assert.deepEqual(state.autoQueueResumes, []);
+  assert.equal(state.autoQueueActivations.length, 0);
+});
+
 test("auto-queue rotates saturated active runs in bounded tick sweep", () => {
   const { policy, state } = loadPolicy("policies/auto-queue.js", {
     dbQuery: createSqlRouter([

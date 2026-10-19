@@ -167,7 +167,6 @@ async fn cancelled_anchor_is_rechecked_on_later_slow_backstop_cycle() {
 }
 
 use super::cancel_backstop_test_support as support;
-use crate::services::discord::health::legacy_supervision::RetiredForTest;
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::discord::turn_finalizer::{GuardedFinishResidue, TurnKey};
 use crate::services::discord::zombie_foreground_release::cancel_backstop_test_support as release_support;
@@ -635,68 +634,6 @@ async fn matching_residue_inserted_after_terminal_evidence_preserves_its_owner()
     assert_eq!(
         shared.restart.deferred_hook_backlog.load(Ordering::Relaxed),
         1
-    );
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn backstop_refuses_an_already_retired_channel() {
-    let root = tempfile::tempdir().unwrap();
-    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let _tmux = missing_tmux_fixture(&root);
-    let shared = make_shared_data_for_tests();
-    let channel = ChannelId::new(6_016_213_101);
-    let (token, _) = anchor_fixture(&shared, channel, true, false).await;
-    let queue_before = format!(
-        "{:?}",
-        shared.mailbox(channel).snapshot().await.intervention_queue
-    );
-    let _retired = RetiredForTest::new("claude", channel.get());
-    let (kicks, _hook) = record_kicks(channel);
-    arm(&shared, channel).await;
-    fire(channel).await;
-    assert_owner_kept(&shared, channel, &token, &queue_before).await;
-    assert_eq!(kicks.load(Ordering::SeqCst), 0);
-    assert!(
-        !root.path().join("tmux.calls").exists(),
-        "retired channels cannot reach terminal probing"
-    );
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn retirement_after_terminal_evidence_prevents_backstop_mutation() {
-    let root = tempfile::tempdir().unwrap();
-    let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-    let _tmux = missing_tmux_fixture(&root);
-    let shared = make_shared_data_for_tests();
-    let channel = ChannelId::new(6_016_213_400);
-    let (token, _) = anchor_fixture(&shared, channel, true, false).await;
-    let queue_before = format!(
-        "{:?}",
-        shared.mailbox(channel).snapshot().await.intervention_queue
-    );
-    let barrier = release_support::install_release_pause(channel);
-    let (kicks, _hook) = record_kicks(channel);
-    arm(&shared, channel).await;
-    let before = support::completed_fires(channel);
-    tokio::time::advance(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY).await;
-    barrier.wait(Duration::from_secs(10)).await;
-    assert!(
-        std::fs::read_to_string(root.path().join("tmux.calls"))
-            .unwrap()
-            .contains("has-session"),
-        "retirement is introduced after the actual Release evidence"
-    );
-    let _retired = RetiredForTest::new("claude", channel.get());
-    barrier.release();
-    wait_observation("retired evidence candidate completed", || {
-        support::completed_fires(channel) > before
-    })
-    .await;
-    assert_owner_kept(&shared, channel, &token, &queue_before).await;
-    assert_eq!(kicks.load(Ordering::SeqCst), 0);
-    assert!(
-        shared.restart.deferred_hook_channels.contains_key(&channel),
-        "the denied mutation preserves the recovery request alongside its source queue"
     );
 }
 

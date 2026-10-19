@@ -318,8 +318,8 @@ pub(super) async fn run_bot_run_gateway_backend(
 }
 
 #[cfg(test)]
-#[path = "shutdown_input_fence_tests.rs"]
-mod input_fence_tests;
+#[path = "shutdown_sigterm_tests.rs"]
+mod sigterm_tests;
 
 #[cfg(test)]
 #[path = "home_lifecycle_tests.rs"]

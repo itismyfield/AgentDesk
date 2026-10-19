@@ -106,15 +106,15 @@ mod dispatch_terminal_sync_pg_tests {
     use super::{
         ENTRY_STATUS_DONE, ENTRY_STATUS_FAILED, ENTRY_STATUS_SKIPPED, ENTRY_STATUS_USER_CANCELLED,
         EntryStatusUpdateOptions, PhaseGateStateWrite, SlotAllocation,
-        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg, complete_run_on_pg,
-        finalize_completed_dispatch_terminal_entry_on_pg_tx, pause_run_on_pg,
-        record_consultation_dispatch_on_pg, record_entry_dispatch_failure_on_pg, resume_run_on_pg,
-        save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
+        allocate_slot_for_group_agent_pg, clear_phase_gate_state_on_pg,
+        finalize_completed_dispatch_terminal_entry_on_pg_tx, finalize_run_if_ready_pg,
+        pause_run_on_pg, record_consultation_dispatch_on_pg, record_entry_dispatch_failure_on_pg,
+        resume_run_on_pg, save_phase_gate_state_on_pg, slot_has_active_dispatch_pg,
         slot_has_recent_terminal_auto_queue_dispatch_pg, sync_dispatch_terminal_entries_on_pg_tx,
         update_entry_status_on_pg, update_entry_status_on_pg_tx,
     };
     use crate::db::auto_queue::runs::acquire_run_advisory_xact_lock_on_pg_tx;
-    use crate::db::auto_queue::runs::complete_run_after_activate_on_pg;
+    use crate::db::auto_queue::runs::{RunCompletionBlockedReason, RunCompletionOutcome};
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use chrono::{DateTime, Utc};
     use sqlx::{Connection, PgConnection, PgPool, Row};
@@ -470,9 +470,8 @@ mod dispatch_terminal_sync_pg_tests {
         pg_db.drop().await;
     }
 
-    /// Manual completion now intentionally rejects runnable entries. This
-    /// terminal fixture preserves the resource-cleanup/card-preservation
-    /// purpose of the older test while recording that strengthened contract.
+    /// Derived completion refuses a pending gate instead of deleting it; once
+    /// the gate is gone it completes, cleans resources and preserves the card.
     #[tokio::test]
     async fn postgres_auto_queue_policy_complete_preserves_card_and_cleans_resources_pg() {
         let pg_db = TestPostgresDb::create().await;
@@ -503,20 +502,31 @@ mod dispatch_terminal_sync_pg_tests {
         .await
         .expect("seed policy completion entry");
 
-        assert!(
-            complete_run_on_pg(&pool, "run-1")
+        assert_eq!(
+            finalize_run_if_ready_pg(&pool, "run-1")
                 .await
-                .expect("complete run")
+                .expect("gated completion"),
+            RunCompletionOutcome::Blocked(RunCompletionBlockedReason::BlockingPhaseGate)
+        );
+        assert_eq!(run_status(&pool, "run-1").await, "active");
+        assert_eq!(
+            slot_run(&pool, "agent-1", 0).await.as_deref(),
+            Some("run-1")
+        );
+        assert_eq!(count_message_outbox(&pool).await, 0);
+
+        sqlx::query("DELETE FROM auto_queue_phase_gates WHERE run_id = 'run-1'")
+            .execute(&pool)
+            .await
+            .expect("pass the gate");
+        assert_eq!(
+            finalize_run_if_ready_pg(&pool, "run-1")
+                .await
+                .expect("complete run"),
+            RunCompletionOutcome::Completed
         );
         assert_eq!(run_status(&pool, "run-1").await, "completed");
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
-        let gate_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates WHERE run_id = 'run-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("count phase gates");
-        assert_eq!(gate_count, 0);
         assert_eq!(count_message_outbox(&pool).await, 1);
         let card = sqlx::query_as::<_, (String, Option<String>, i64)>(
             "SELECT status, review_notes, review_round::BIGINT
@@ -540,7 +550,7 @@ mod dispatch_terminal_sync_pg_tests {
     }
 
     #[tokio::test]
-    async fn postgres_activate_completion_uses_protocol_without_notification_pg() {
+    async fn postgres_activate_tail_completion_queues_notification_once_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = setup_pool(&pg_db).await;
         seed_entry(
@@ -551,14 +561,22 @@ mod dispatch_terminal_sync_pg_tests {
         )
         .await;
 
-        assert!(
-            complete_run_after_activate_on_pg(&pool, "run-1")
+        assert_eq!(
+            finalize_run_if_ready_pg(&pool, "run-1")
                 .await
-                .expect("complete drained activate run")
+                .expect("complete drained activate run"),
+            RunCompletionOutcome::Completed
         );
         assert_eq!(run_status(&pool, "run-1").await, "completed");
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
-        assert_eq!(count_message_outbox(&pool).await, 0);
+        assert_eq!(count_message_outbox(&pool).await, 1);
+        assert_eq!(
+            finalize_run_if_ready_pg(&pool, "run-1")
+                .await
+                .expect("repeat completion"),
+            RunCompletionOutcome::AlreadyTerminal
+        );
+        assert_eq!(count_message_outbox(&pool).await, 1);
 
         pool.close().await;
         pg_db.drop().await;
@@ -609,9 +627,10 @@ mod dispatch_terminal_sync_pg_tests {
             .await
             .expect("release run token");
         assert!(
-            complete_run_on_pg(&pool, "run-1")
+            finalize_run_if_ready_pg(&pool, "run-1")
                 .await
                 .expect("recovery completion")
+                .is_completed()
         );
         assert_eq!(run_status(&pool, "run-1").await, "completed");
         assert_eq!(slot_run(&pool, "agent-1", 0).await, None);
@@ -675,7 +694,7 @@ mod dispatch_terminal_sync_pg_tests {
 
         let complete_pool = pool.clone();
         let completion =
-            tokio::spawn(async move { complete_run_on_pg(&complete_pool, "run-1").await });
+            tokio::spawn(async move { finalize_run_if_ready_pg(&complete_pool, "run-1").await });
         wait_for_run_advisory_waiter(&mut attach_conn).await;
 
         sqlx::query("COMMIT")
@@ -687,7 +706,10 @@ mod dispatch_terminal_sync_pg_tests {
             .expect("completion should finish after attach commit")
             .expect("join completion task")
             .expect("completion result");
-        assert!(!changed);
+        assert_eq!(
+            changed,
+            RunCompletionOutcome::Blocked(RunCompletionBlockedReason::RunnableEntry)
+        );
         assert_eq!(run_status(&pool, "run-1").await, "active");
         assert_eq!(
             slot_run(&pool, "agent-1", 0).await.as_deref(),
@@ -756,9 +778,10 @@ mod dispatch_terminal_sync_pg_tests {
         let pool = setup_pool(&pg_db).await;
 
         assert!(
-            complete_run_on_pg(&pool, "run-1")
+            finalize_run_if_ready_pg(&pool, "run-1")
                 .await
                 .expect("complete run before stale allocation")
+                .is_completed()
         );
         let allocation = allocate_slot_for_group_agent_pg(&pool, "run-1", 0, "agent-1")
             .await

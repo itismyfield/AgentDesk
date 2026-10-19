@@ -81,6 +81,8 @@ pub(crate) enum InjectionMsg {
     },
     /// A queued head's claim or settlement; see `queued_head.rs`.
     Head(super::queued_head::HeadMsg),
+    /// A held boot restore's settle probe; see `dispatch_reservation/held_settle.rs`.
+    Held(super::dispatch_reservation::held_settle::HeldSettleMsg),
 }
 
 impl InjectionMsg {
@@ -100,6 +102,10 @@ impl InjectionMsg {
             Self::Head(msg) => {
                 msg.refuse(error);
                 "QueuedHead"
+            }
+            Self::Held(msg) => {
+                msg.refuse(error);
+                "HeldSettle"
             }
         }
     }
@@ -131,6 +137,7 @@ pub(super) fn step(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: 
             let _ = reply.send(());
         }
         InjectionMsg::Head(msg) => super::queued_head::step(state, channel_id, msg),
+        InjectionMsg::Held(msg) => msg.step(state, channel_id),
     }
 }
 

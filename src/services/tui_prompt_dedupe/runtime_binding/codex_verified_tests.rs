@@ -1850,61 +1850,8 @@ fn canary_actual_native_tail_identity_mismatch_diagnostic_preserves_cursors() {
     assert_eq!(fs::read(h.marker()).unwrap(), marker);
 }
 
-#[test]
-fn canary_hold_diagnostic_preserves_expired_state_when_launch_context_is_unavailable() {
-    let h = Fixture::canary();
-    h.header(ID, false);
-    h.send("session-start", ID, Value::Null, None);
-    h.assert_proof();
-    let before_fold = h.fold();
-    let before_marker = fs::read(h.marker()).unwrap();
-    let before_nonce = dedupe::binding_context::observe_spawn_nonce_marker(&h.context.tmux_session);
-    let (before_channel, before_binding) = {
-        let mut state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = state.aged_stamp_for_tests(SESSION_MAPPING_TTL + std::time::Duration::from_secs(1));
-        let expired = Instant::now() - SESSION_MAPPING_TTL - std::time::Duration::from_secs(1);
-        let channel = state
-            .channel_by_tmux
-            .get_mut(&h.context.tmux_session)
-            .unwrap();
-        channel.recorded_at = expired;
-        let before_channel = (channel.value, channel.recorded_at);
-        let binding = state
-            .runtime_by_tmux
-            .get_mut(&h.context.tmux_session)
-            .unwrap();
-        binding.recorded_at = expired;
-        (before_channel, (binding.value.clone(), binding.recorded_at))
-    };
-    fs::remove_file(&h.canonical).unwrap();
-    for _ in 0..5 {
-        assert_eq!(
-            codex_verified_hold_reason(&h.context.tmux_session),
-            "verified_unavailable"
-        );
-        let state = STATE.lock().unwrap_or_else(|p| p.into_inner());
-        let channel = state
-            .channel_by_tmux
-            .get(&h.context.tmux_session)
-            .expect("a diagnostic must not purge the expired channel mapping");
-        let binding = state
-            .runtime_by_tmux
-            .get(&h.context.tmux_session)
-            .expect("a diagnostic must not purge the expired runtime binding");
-        assert_eq!((channel.value, channel.recorded_at), before_channel);
-        assert_eq!(
-            (&binding.value, binding.recorded_at),
-            (&before_binding.0, before_binding.1)
-        );
-    }
-    assert_eq!(h.raw(), Some(before_binding.0));
-    assert_eq!(h.fold(), before_fold);
-    assert_eq!(fs::read(h.marker()).unwrap(), before_marker);
-    assert_eq!(
-        dedupe::binding_context::observe_spawn_nonce_marker(&h.context.tmux_session),
-        before_nonce
-    );
-}
+#[path = "codex_verified_hold_detail_tests.rs"]
+mod hold_detail_tests;
 
 #[test]
 fn s2b1b_p2_snapshot_rejects_a_valid_successor_incarnation() {

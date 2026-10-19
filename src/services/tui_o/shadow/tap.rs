@@ -1,16 +1,11 @@
-//! Shared output-track settings, including the retired shadow section.
-
 use serde::{Deserialize, Serialize};
 
 use crate::services::tui_o::repost::config::RepostConfig;
-
-use super::ShadowConfig;
 
 /// The `tui_o:` config section; absent means every output-track feature is off.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TuiOConfig {
-    pub shadow: ShadowConfig,
     pub writer: WriterChannelsConfig,
     pub turn: crate::services::tui_o::turn_mode::TurnConfig,
     /// Operator channel for writer alarms; absent keeps them to health and logs.

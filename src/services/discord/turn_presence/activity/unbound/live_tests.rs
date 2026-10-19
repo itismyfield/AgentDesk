@@ -3,6 +3,30 @@ use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::make_shared_data_for_tests;
 use std::time::Duration;
 
+pub(in crate::services::discord::turn_presence::activity) async fn verdict_for_tests(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<String, String> {
+    let ports = Arc::new(LivePorts {
+        root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
+    });
+    let (snapshot, namespace, next) =
+        Snapshot::collect_pair(shared, provider, channel, ports).await?;
+    if !snapshot.same_inputs(&next) {
+        return Err("superseded".into());
+    }
+    Ok(format!(
+        "{:?}",
+        decide_unbound(
+            snapshot.files.candidates.clone(),
+            snapshot.scope(shared),
+            &namespace.inventory,
+            &snapshot.owners,
+        )
+    ))
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn s1_unbound_invalidates_before_waiting_for_core() {
     let _root = TestRuntimeRootGuard::new();

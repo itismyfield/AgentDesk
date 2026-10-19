@@ -29,6 +29,7 @@ use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
 mod first_init;
+mod hosting;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
@@ -385,6 +386,8 @@ pub struct ManagedWriterHandle {
     settled: Arc<AtomicBool>,
     stop: StopOnDrop,
     host: JoinHandle<()>,
+    keep: Arc<AtomicBool>,
+    ready: hosting::Ready,
 }
 
 struct StopOnDrop {
@@ -438,6 +441,8 @@ impl ManagedWriterHandle {
             settled,
             stop,
             host,
+            keep: _,
+            ready: _,
         } = self;
         stop.signal.send_replace(true);
         let settle = tokio::spawn(async move {
@@ -485,7 +490,9 @@ pub fn start_managed<I: HostIo>(
         let Some(claim) = readiness.claim(channel) else {
             continue;
         };
+        let keep = Arc::new(AtomicBool::new(false));
         let reservation = candidate.late_cleanup_guard(channel, runtime_root.clone());
+        let reservation = reservation.map(|guard| guard.kept_by(Arc::clone(&keep)));
         if let Some(reason) = home_availability::refusal(channel) {
             hold(&io.alarms(), channel, reason.as_str());
             drop(reservation);
@@ -512,6 +519,7 @@ pub fn start_managed<I: HostIo>(
         let authority = Arc::clone(&gate);
         let settled = Arc::clone(&claim.settled);
         let (stop, stopping) = watch::channel(false);
+        let ready = hosting::ready_probe(&io, channel, provider, &candidate);
         let io = Arc::clone(&io);
         let host = tokio::spawn(async move {
             host_channel(
@@ -539,6 +547,8 @@ pub fn start_managed<I: HostIo>(
                 armed: true,
             },
             host,
+            keep,
+            ready,
         });
     }
     tasks

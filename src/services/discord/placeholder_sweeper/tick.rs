@@ -134,7 +134,7 @@ mod tests {
     use crate::services::discord::abandon_request_store::{
         self, AbandonEpisodeIdentity, AbandonRecord,
     };
-    use crate::services::discord::health::legacy_supervision::test_support::{
+    use crate::services::discord::health::test_support::{
         Answer, MockDiscord, age_file, message_json, seed_backfill_row, tree_fingerprint,
     };
     use crate::services::discord::inflight::{InflightTurnState, save_inflight_state};

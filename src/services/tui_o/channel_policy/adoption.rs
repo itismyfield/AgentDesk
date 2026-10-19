@@ -4,8 +4,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 #[cfg(test)]
 pub(crate) mod body_check;
@@ -65,6 +65,9 @@ pub(crate) struct Candidate {
     sends: Arc<LegacySends>,
     /// Immutable boot origin, shared by every clone, distinct from ordinary Deferred retries.
     late_origin: bool,
+    /// The binding seq a late reservation baselines on: fixed by its first host's first read and
+    /// kept for every host that takes the reservation over.
+    late_boundary: Arc<OnceLock<u64>>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
     #[cfg(test)]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
@@ -76,6 +79,7 @@ impl Candidate {
             state: Arc::new(Mutex::new(state)),
             sends: Arc::default(),
             late_origin: false,
+            late_boundary: Arc::default(),
             #[cfg(test)]
             bodiless: Arc::default(),
         }
@@ -92,6 +96,16 @@ impl Candidate {
         self.late_origin
     }
 
+    /// The late reservation's binding boundary, once fixed.
+    pub(crate) fn late_boundary(&self) -> Option<u64> {
+        self.late_boundary.get().copied()
+    }
+
+    /// Fixes the boundary `judge` returns unless one is fixed already, and returns the fixed one.
+    pub(crate) fn fix_late_boundary(&self, judge: impl FnOnce() -> u64) -> u64 {
+        *self.late_boundary.get_or_init(judge)
+    }
+
     pub(crate) fn late_cleanup_guard(
         &self,
         channel: u64,
@@ -101,6 +115,7 @@ impl Candidate {
             candidate: self.clone(),
             channel,
             runtime_root,
+            keep: Arc::default(),
         })
     }
 
@@ -209,10 +224,28 @@ pub(crate) struct LateReservationGuard {
     candidate: Candidate,
     channel: u64,
     runtime_root: Option<PathBuf>,
+    /// Set before a stop whose successor host takes the reservation over, so this one keeps it.
+    keep: Arc<AtomicBool>,
+}
+
+impl LateReservationGuard {
+    /// Leaves the reservation as it is when `keep` was set by the time the host ends.
+    pub(crate) fn kept_by(mut self, keep: Arc<AtomicBool>) -> Self {
+        self.keep = keep;
+        self
+    }
 }
 
 impl Drop for LateReservationGuard {
     fn drop(&mut self) {
+        #[cfg(test)]
+        let kept = self.keep.load(Ordering::SeqCst)
+            && std::env::var("ADK_S3B_MUTANT").ok().as_deref() != Some("stop_settles_reservation");
+        #[cfg(not(test))]
+        let kept = self.keep.load(Ordering::SeqCst);
+        if kept {
+            return;
+        }
         let mut state = self.candidate.lock();
         if !matches!(*state, Adoption::Pending | Adoption::Deferred) {
             return;

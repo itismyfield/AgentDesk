@@ -35,7 +35,6 @@ pub async fn startup_reseed(pool: &PgPool, config: &Config) -> Result<(), String
     apply_kv_seed_actions(pool, &config_default_seed_actions(config)).await?;
     upsert_kv_meta(pool, "server_port", &config.server.port.to_string()).await?;
     crate::services::settings::seed_runtime_config_defaults_pg(pool, config).await?;
-    crate::server::routes::escalation::seed_escalation_defaults_pg(pool, config).await?;
 
     for repo_id in normalized_repo_ids(&config.github.repos) {
         register_repo(pool, &repo_id).await?;

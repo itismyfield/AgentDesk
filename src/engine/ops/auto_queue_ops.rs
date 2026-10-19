@@ -363,8 +363,7 @@ fn complete_run_raw(
     }
 
     // Options remain parse-validated for host API compatibility, but no option
-    // controls slot release. Canonical completion always releases slots inside
-    // the same transaction as the run status change.
+    // controls slot release or gate deletion: this is derived completion only.
     let _opts_value: serde_json::Value = match serde_json::from_str(opts_json) {
         Ok(value) => value,
         Err(error) => {
@@ -379,13 +378,15 @@ fn complete_run_raw(
     };
     let run_id_owned = run_id.to_string();
     let result = run_async_bridge_pg(pool, move |pool| async move {
-        crate::db::auto_queue::complete_run_on_pg(&pool, &run_id_owned).await
+        crate::db::auto_queue::finalize_run_if_ready_pg(&pool, &run_id_owned).await
     });
 
     match result {
-        Ok(changed) => serde_json::json!({
+        Ok(outcome) => serde_json::json!({
             "ok": true,
-            "changed": changed,
+            "changed": outcome.is_completed(),
+            "outcome": outcome.as_str(),
+            "blocked_reason": outcome.blocked_reason().map(|reason| reason.as_str()),
         })
         .to_string(),
         Err(error) => serde_json::json!({
@@ -713,13 +714,11 @@ mod tests {
         .expect("seed wrapper entries");
         sqlx::query(
             "INSERT INTO auto_queue_phase_gates (run_id, phase, status)
-             VALUES
-                ('wrapper-refused', 0, 'pending'),
-                ('wrapper-success', 0, 'pending')",
+             VALUES ('wrapper-refused', 0, 'pending')",
         )
         .execute(&pool)
         .await
-        .expect("seed wrapper phase gates");
+        .expect("seed wrapper phase gate");
         pool
     }
 
@@ -777,6 +776,16 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            refused.get("outcome").and_then(|value| value.as_str()),
+            Some("blocked")
+        );
+        assert_eq!(
+            refused
+                .get("blocked_reason")
+                .and_then(|value| value.as_str()),
+            Some("blocking_phase_gate")
+        );
+        assert_eq!(
             wrapper_run_state(&pool, "wrapper-refused", 0).await,
             ("active".to_string(), Some("wrapper-refused".to_string()), 1,)
         );
@@ -795,6 +804,10 @@ mod tests {
         assert_eq!(
             completed.get("changed").and_then(|value| value.as_bool()),
             Some(true)
+        );
+        assert_eq!(
+            completed.get("outcome").and_then(|value| value.as_str()),
+            Some("completed")
         );
         assert_eq!(
             wrapper_run_state(&pool, "wrapper-success", 1).await,

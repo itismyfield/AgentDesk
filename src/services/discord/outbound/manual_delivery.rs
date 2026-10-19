@@ -27,6 +27,8 @@ use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
+#[cfg(test)]
+mod discord_units_tests;
 mod headless_nonce;
 #[cfg(test)]
 mod production_nonce_tests;
@@ -411,7 +413,7 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         None
     };
 
-    let content_len = content.chars().count();
+    let content_len = crate::services::discord::formatting::discord_message_units(content);
     if content_len > DISCORD_HARD_LIMIT_CHARS {
         // Compatibility shim: v3 text delivery does not yet own attachment
         // upload or manual chunk-posting for over-2k `/api/discord/send` payloads.
@@ -498,7 +500,7 @@ pub(super) async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
         None
     };
 
-    let content_len = content.chars().count();
+    let content_len = crate::services::discord::formatting::discord_message_units(content);
     if content_len > DISCORD_HARD_LIMIT_CHARS {
         // Compatibility shim: keep the existing attachment/chunk behavior for
         // oversize DM payloads while v3 owns the DM channel resolution.
@@ -752,8 +754,8 @@ async fn deliver_chunked_manual_notification<C: ManualOutboundClient>(
 #[cfg(test)]
 mod manual_v3_delivery_tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
+    use super::discord_units_tests::MockManualOutboundClient;
     use crate::services::discord::health::{HealthRegistry, handle_send};
 
     #[test]
@@ -788,51 +790,6 @@ mod manual_v3_delivery_tests {
             "🔔"
         );
         assert_eq!(manual_delivery_log_emoji("provider"), "📨");
-    }
-
-    #[derive(Clone, Default)]
-    struct MockManualOutboundClient {
-        posts: Arc<Mutex<Vec<String>>>,
-        post_targets: Arc<Mutex<Vec<String>>>,
-        dm_resolutions: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl DiscordOutboundClient for MockManualOutboundClient {
-        async fn post_message(
-            &self,
-            target_channel: &str,
-            content: &str,
-        ) -> Result<String, DispatchMessagePostError> {
-            let mut posts = self.posts.lock().unwrap();
-            self.post_targets
-                .lock()
-                .unwrap()
-                .push(target_channel.to_string());
-            posts.push(content.to_string());
-            Ok(format!("message-{}", posts.len()))
-        }
-
-        async fn resolve_dm_channel(
-            &self,
-            user_id: &str,
-        ) -> Result<String, DispatchMessagePostError> {
-            self.dm_resolutions
-                .lock()
-                .unwrap()
-                .push(user_id.to_string());
-            Ok("9876".to_string())
-        }
-    }
-
-    impl ManualOutboundClient for MockManualOutboundClient {
-        async fn post_text_attachment(
-            &self,
-            _target_channel: &str,
-            _content: &str,
-            _summary: Option<&str>,
-        ) -> Result<String, DispatchMessagePostError> {
-            Ok("attachment-message-1".to_string())
-        }
     }
 
     // Contract: a custody notice for a DM under a long runtime root is one post from the provider

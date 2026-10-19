@@ -469,6 +469,7 @@ fn s2a_terminal_sources_drop_only_the_recorded_generation() {
             SourceMessageTextSegment::new(head.message_id, "submitted H"),
             SourceMessageTextSegment::new(mixed.message_id, "new B"),
         ];
+        super::tests::plant(TOKEN, channel, &mixed);
         assert!(
             handle
                 .merge_restored_queue_items(vec![mixed], ctx())

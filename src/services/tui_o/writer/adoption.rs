@@ -245,7 +245,9 @@ pub(crate) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&So
                 pending.retain(|waiting| waiting.seq != *resolves_seq);
                 bound.push(source);
             }
-            BindingRecord::Rejected { .. } => {}
+            BindingRecord::Rejected { closes, .. } => {
+                pending.retain(|waiting| Some(waiting.seq) != *closes);
+            }
         }
     }
     if let Some(seq) = pending.iter().map(|waiting| waiting.seq).min() {
@@ -649,13 +651,13 @@ fn past_of<'a>(bound: &[&'a SourceId]) -> Vec<&'a SourceId> {
     past
 }
 
-/// A source other than `current` that the log bound after `seq`; Legacy may still owe output
-/// from it, read while it was current.
+/// A source other than `current` that the log bound after `seq`, with the seq binding it; Legacy
+/// may still owe output from it, read while it was current.
 pub fn rotated<'a>(
     events: &'a [BindingEvent],
     seq: u64,
     current: &SourceId,
-) -> Option<&'a SourceId> {
+) -> Option<(&'a SourceId, u64)> {
     let bound = |event: &'a BindingEvent| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -664,8 +666,9 @@ pub fn rotated<'a>(
         | BindingRecord::Resolved { source, .. } => Some(source),
         _ => None,
     };
-    let later = events.iter().filter(|event| event.seq > seq);
-    later.filter_map(bound).find(|source| *source != current)
+    let mut later = (events.iter().filter(|event| event.seq > seq))
+        .filter_map(|event| bound(event).map(|source| (source, event.seq)));
+    later.find(|(source, _)| *source != current)
 }
 
 /// The source a binding log binds now and its tmux session; none while the log refuses.
@@ -835,3 +838,7 @@ mod tests;
 #[cfg(test)]
 #[path = "late_pin_tests.rs"]
 mod late_pin_tests;
+
+#[cfg(all(test, unix))]
+#[path = "adoption_terminal_tests.rs"]
+mod terminal_tests;

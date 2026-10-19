@@ -65,6 +65,9 @@ mod query;
 mod route_generate;
 #[path = "route_types.rs"]
 mod route_types;
+#[cfg(test)]
+#[path = "run_completion_activate_pg_tests.rs"]
+mod run_completion_activate_pg_tests;
 #[path = "slot_routes.rs"]
 mod slot_routes;
 #[path = "view.rs"]

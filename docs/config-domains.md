@@ -12,7 +12,7 @@ This document is the operator-side index for the three domains. The precedence a
 | **dashboard** (company settings) | The dashboard UI and any caller that owns the merged company-settings JSON document | `kv_meta['settings']` | n/a — this surface IS the override | Full-replace contract. No YAML baseline. Hidden keys (e.g. `roomThemes`) survive only if callers re-merge them. |
 | **bot-settings** | Discord bot bindings, agent roster, channel→agent routing, default per-bot behavior | `agentdesk.yaml` (`discord:`, `agents[].channels`) | None at runtime; defaults are read-only metadata derived from the YAML | Legacy `bot_settings.json` and `role_map.json` are migration inputs only. The dashboard "bot defaults" view is read-only over this YAML. |
 
-A surface that doesn't fit one of the three domains (escalation override, onboarding/secrets) is a separate, dedicated store — see the surface matrix in `adr-settings-precedence.md`.
+A surface that doesn't fit one of the three domains (onboarding/secrets) is a separate, dedicated store — see the surface matrix in `adr-settings-precedence.md`.
 
 ## Domain 1 — `runtime-config`
 

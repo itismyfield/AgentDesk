@@ -7,6 +7,9 @@ use std::collections::VecDeque;
 use super::super::tmux::{WatcherToolState, process_watcher_lines};
 use super::task_notification_context;
 
+mod read_source_marks;
+use read_source_marks::{Admission, ReadSourceMarks};
+
 pub(in crate::services::discord) struct SessionRelayParser {
     buffer: String,
     stream_state: StreamLineState,
@@ -35,6 +38,9 @@ pub(in crate::services::discord) struct SessionRelayParser {
     /// not. Cross-delivery duplicates stay the send point's job (the delivered
     /// content fingerprint and the committed-range re-gate).
     turn_source_end: Option<u64>,
+    /// Other read files' watermarks and partial records; `buffer` and
+    /// `turn_source_end` describe the active read file only.
+    read_source_marks: ReadSourceMarks,
 }
 
 impl Default for SessionRelayParser {
@@ -53,6 +59,7 @@ impl Default for SessionRelayParser {
             buffer_source_segments: VecDeque::new(),
             relay_source_stamp: None,
             turn_source_end: None,
+            read_source_marks: ReadSourceMarks::default(),
         }
     }
 }
@@ -63,6 +70,11 @@ impl SessionRelayParser {
         frame: &StreamFrame,
         response: &str,
     ) -> Vec<SessionRelayDelivery> {
+        // The canonical body replaces the turn, so a newer file switches by the
+        // ordinary admission below instead of appending.
+        if self.drop_stale_read_source(frame) {
+            return Vec::new();
+        }
         self.buffer.clear();
         self.reset_turn();
         let mut terminal = frame.clone();
@@ -85,6 +97,22 @@ impl SessionRelayParser {
     ) -> Vec<SessionRelayDelivery> {
         self.frames_observed = self.frames_observed.saturating_add(1);
         self.last_sequence = frame.sequence;
+        match self.read_source_marks.classify(frame.read_source) {
+            Admission::DropStale => {
+                self.record_stale_read_source(frame);
+                return Vec::new();
+            }
+            Admission::Switch(to) => {
+                self.record_read_source_switch(frame);
+                self.read_source_marks.switch(
+                    to,
+                    &mut self.buffer,
+                    &mut self.buffer_source_segments,
+                    &mut self.turn_source_end,
+                );
+            }
+            Admission::Fold => self.read_source_marks.note_folded(frame.read_source),
+        }
         if let Some(generation) = frame.relay_generation_mtime_ns {
             if self
                 .source_generation_mtime_ns
@@ -286,6 +314,49 @@ impl SessionRelayParser {
         );
     }
 
+    /// A frame a superseded watcher read from a file the open turn has left: it
+    /// must not reach the turn, a native re-read, or a delivery. Logs and counts it.
+    pub(super) fn drop_stale_read_source(&self, frame: &StreamFrame) -> bool {
+        let stale = self.read_source_marks.classify(frame.read_source) == Admission::DropStale;
+        if stale {
+            self.record_stale_read_source(frame);
+        }
+        stale
+    }
+
+    fn record_stale_read_source(&self, frame: &StreamFrame) {
+        tracing::warn!(
+            provider = frame.binding.provider.as_str(),
+            channel_id = %frame.binding.channel_id,
+            tmux_session = %frame.session_name,
+            sequence = frame.sequence,
+            read_source = ?frame.read_source,
+            source_span = ?frame.source_span,
+            reason = "stale_read_source",
+            "session-bound relay parser dropped a superseded watcher's frame"
+        );
+        crate::services::observability::metrics::record_relay_stale_source_frame_dropped(
+            frame.binding.channel_id.parse::<u64>().unwrap_or(0),
+            frame.binding.provider.as_str(),
+        );
+    }
+
+    fn record_read_source_switch(&self, frame: &StreamFrame) {
+        tracing::info!(
+            provider = frame.binding.provider.as_str(),
+            channel_id = %frame.binding.channel_id,
+            tmux_session = %frame.session_name,
+            sequence = frame.sequence,
+            read_source = ?frame.read_source,
+            turn_source_end = ?self.turn_source_end,
+            "session-bound relay parser switched the open turn to another read file"
+        );
+        crate::services::observability::metrics::record_relay_read_source_switched(
+            frame.binding.channel_id.parse::<u64>().unwrap_or(0),
+            frame.binding.provider.as_str(),
+        );
+    }
+
     /// #5948 (I18): the resend watermark, for tests that pin sink parser state
     /// across the two watcher rewind paths.
     #[cfg(test)]
@@ -343,6 +414,7 @@ impl SessionRelayParser {
         }
         self.relay_source_stamp = None;
         self.turn_source_end = None;
+        self.read_source_marks.reset_turn();
     }
 }
 
@@ -364,5 +436,7 @@ pub(in crate::services::discord) struct SessionRelayDelivery {
     pub(super) relay_source_stamp: Option<SourceStamp>,
 }
 
+#[cfg(all(test, unix))]
+mod read_source_tests;
 #[cfg(test)]
 mod resend_dedupe_tests;
