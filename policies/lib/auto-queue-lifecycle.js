@@ -117,7 +117,13 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
   // exits below; `_createPhaseGateDispatches` leaves the gate in place (the
   // pending phase-gate row itself now guards the run via
   // `runHasBlockingPhaseGate`).
-  beginPhaseGateGraceWindow(runId);
+  if (!beginPhaseGateGraceWindow(runId)) {
+    // The run completed before this continuation: no phase gate or next group may follow.
+    autoQueueLog("warn", "Run " + runId + " is completed or gone; skipping its phase gate and continuation", {
+      run_id: runId
+    });
+    return;
+  }
 
   var effectiveDonePhase = (donePhase !== null && donePhase !== undefined) ? donePhase : -1;
 

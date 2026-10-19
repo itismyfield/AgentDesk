@@ -13,11 +13,16 @@ pub(crate) struct NewRunEntry<'a> {
     pub(crate) phase: Option<i64>,
 }
 
-/// Create a pending CLI run and queue the card as its first entry.
+/// Create a pending CLI run and queue the card as its first entry. Both commit together, so
+/// no other connection sees the run while it is still empty and could complete it.
 pub(crate) async fn add_card_to_new_run_pg(
     pool: &sqlx::PgPool,
     entry: &NewRunEntry<'_>,
 ) -> Result<Value, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin postgres auto-queue add: {e}"))?;
     let run_id = {
         let created_run_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
@@ -29,7 +34,7 @@ pub(crate) async fn add_card_to_new_run_pg(
         .bind(&created_run_id)
         .bind(entry.repo_id)
         .bind(entry.agent_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("create postgres auto-queue run: {e}"))?;
         created_run_id
@@ -43,10 +48,13 @@ pub(crate) async fn add_card_to_new_run_pg(
     )
     .bind(&run_id)
     .bind(entry.card_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .unwrap_or(false);
     if already_queued {
+        tx.commit()
+            .await
+            .map_err(|e| format!("commit postgres auto-queue add: {e}"))?;
         return Ok(json!({
             "ok": true,
             "already_queued": true,
@@ -62,7 +70,7 @@ pub(crate) async fn add_card_to_new_run_pg(
          )",
     )
     .bind(entry.card_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .unwrap_or(false);
     if has_active_dispatch {
@@ -84,7 +92,7 @@ pub(crate) async fn add_card_to_new_run_pg(
         )
         .bind(&run_id)
         .bind(effective_thread_group)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await
         .unwrap_or(0)
     };
@@ -103,9 +111,12 @@ pub(crate) async fn add_card_to_new_run_pg(
     .bind(effective_thread_group)
     .bind(entry.phase.unwrap_or(0))
     .bind(format!("manual CLI add from status {}", entry.card_status))
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("insert postgres auto-queue entry: {e}"))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("commit postgres auto-queue add: {e}"))?;
 
     Ok(json!({
         "ok": true,
