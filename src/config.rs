@@ -598,8 +598,7 @@ impl AgentChannel {
     /// Returns the configured prompt-cache TTL selector in minutes, but only
     /// for the retained 5/60 buckets. Subscription Claude automatically
     /// requests the 1h TTL without an env override, so this value is currently
-    /// inert for native sessions; forwarding it to claude-e remains an
-    /// unimplemented gap documented in `docs/claude-e-rollout/`.
+    /// inert for native sessions.
     pub fn cache_ttl_minutes(&self) -> Option<u32> {
         match self {
             Self::Legacy(_) => None,
@@ -623,9 +622,8 @@ pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
 /// `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything
 /// else (including the variable being unset) returns `None`. The Discord
 /// resolver still carries this value through the existing config chain, but
-/// native subscription Claude already auto-requests the 1h TTL (no env is
-/// needed), and claude-e forwarding is not implemented yet; see
-/// `docs/claude-e-rollout/`.
+/// native subscription Claude already auto-requests the 1h TTL without an env
+/// override.
 pub fn default_cache_ttl_minutes_from_env() -> Option<u32> {
     let raw = std::env::var("AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES").ok()?;
     let parsed = raw.trim().parse::<u32>().ok()?;
@@ -697,8 +695,7 @@ pub struct AgentChannelConfig {
     /// Retained Anthropic prompt-cache TTL selector (#1088). Only `5` or `60`
     /// minutes are valid. Subscription Claude automatically requests the 1h
     /// TTL without an env override, so this field is currently inert for
-    /// native sessions. Forwarding it to claude-e is an unimplemented gap;
-    /// see `docs/claude-e-rollout/`.
+    /// native sessions.
     #[serde(
         default,
         alias = "cacheTtlMinutes",
