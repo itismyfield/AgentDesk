@@ -46,6 +46,22 @@ if [[ "$MODE" == "fixture" && ! -x "$FIXTURE_RUNNER" ]]; then
   exit 2
 fi
 
+if ! CRATE_NAME="$(python3 - "$REPO_ROOT/Cargo.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as manifest:
+    name = tomllib.load(manifest)["package"]["name"]
+if not isinstance(name, str) or not name.strip():
+    raise SystemExit("ERROR package name must be a non-empty string")
+print(name)
+PY
+)"; then
+  printf 'ERROR could not read Cargo.toml [package].name\n' >&2
+  exit 2
+fi
+readonly CRATE_NAME
+
 readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
 readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
 # #5457 moved the S4 fence layer out of `tmux_watcher_registry.rs` into this
@@ -211,9 +227,9 @@ run_target() {
   fi
   cat "$stdout_log" >>"$log"
   if [[ "$MODE" == "cargo" ]]; then
-    compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
-    if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
-      printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
+    compile_count="$(grep -Fc "Compiling $CRATE_NAME v" "$log" || true)"
+    if [[ "$compile_count" != "1" ]] || grep -Fq "Fresh $CRATE_NAME v" "$log"; then
+      printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh %s\n' "$mutation" "$compile_count" "$CRATE_NAME" >&2
       cat "$log" >&2
       return 96
     fi
@@ -228,7 +244,7 @@ run_target() {
   # above with the same compiling=1 fresh=0 values a real kill produces. Judge on
   # the log of this same single invocation. Do not add a second cargo call: a
   # preceding `cargo check` would make this run Fresh and trip the cache proof.
-  if grep -Fq 'could not compile `agentdesk`' "$log"; then
+  if grep -Fq "could not compile \`$CRATE_NAME\`" "$log"; then
     printf 'MUTATION_ORACLE mutation=%s compile_ok=no tests_passed=0 tests_failed=0\n' "$mutation"
     printf 'ERROR mutation=%s status=BUILD-BROKEN rc=%d target=%s (mutant did not compile)\n' "$mutation" "$rc" "$target" >&2
     cat "$log" >&2
@@ -399,8 +415,8 @@ register_mutation \
 
 register_mutation \
   M8 "$TERMINAL_HANDOFF" \
-  'Err(error) => return Err(error),' \
-  'Err(_error) => { terminal_not_delivered = true; }' \
+  $'terminal_not_delivered = true;\n                }\n                Err(error) => return Err(error),' \
+  $'terminal_not_delivered = true;\n                }\n                Err(_error) => { terminal_not_delivered = true; }' \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
 
 register_mutation \
