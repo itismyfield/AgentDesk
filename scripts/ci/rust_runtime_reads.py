@@ -13,7 +13,10 @@ from dataclasses import dataclass
 
 from rust_include_reads import CODE, LITERAL, decode, git_bytes, group_end, pieces, read_blobs, tokens, tree_sites
 
-READ_NAMES = frozenset({"read", "read_to_string", "read_to_end", "read_dir", "open"})
+READ_NAMES = frozenset({
+    "read", "read_to_string", "read_to_end", "read_dir", "open", "exists", "try_exists",
+    "is_file", "is_dir", "metadata", "symlink_metadata", "canonicalize", "copy", "File",
+})
 SCENARIO_READER = "src/services/discord/tui_prompt_relay/tests/scenario_census_e2e.rs"
 
 
@@ -126,10 +129,11 @@ def concat_literals(path: str, toks: list[tuple[str, str, int]]) -> list[tuple[s
     return out
 
 
-def scan(path: str, text: str, changed: set[str]) -> list[str]:
+def scan(path: str, text: str, changed: set[str], path_changes: set[str] | None = None) -> list[str]:
+    path_changes = path_changes or set()
     toks = runtime_tokens(text)
     names = {value for kind, value, _ in toks if kind == CODE}
-    if not names & READ_NAMES:
+    if not path_changes and not names & READ_NAMES:
         return []
     literals = [(literal_path(value), line) for kind, raw, line in toks
                 if kind == LITERAL and (value := decode(raw)) is not None]
@@ -137,7 +141,7 @@ def scan(path: str, text: str, changed: set[str]) -> list[str]:
     values = {value for value, _ in literals}
     enumerated = enumeration_literals(toks) if "read_dir" in names else set()
     hits = []
-    for changed_path in sorted(changed):
+    for changed_path in sorted(changed | path_changes):
         parts = changed_path.split("/")
         basename = parts[-1]
         ancestors = {"/".join(parts[:end]) for end in range(1, len(parts))}
@@ -148,27 +152,35 @@ def scan(path: str, text: str, changed: set[str]) -> list[str]:
         directory = next(((value, line) for value, line in literals
                           if "read_dir" in names and value in ancestors
                           and ("/" in value or value in enumerated)), None)
-        if direct or joined or directory:
+        if (changed_path in path_changes and (direct or joined)) or (names & READ_NAMES and (direct or joined or directory)):
             _value, line = direct or directory or next(item for item in literals if item[0] == basename)
             hits.append(f"{path}:{line} runtime reader may read {changed_path}")
     return hits
 
 
-def runtime_readers(root: str, rev: str, changed: set[str], yaml_inplace: set[str]) -> list[str]:
+def runtime_readers(root: str, rev: str, changed: set[str], yaml_inplace: set[str],
+                    path_changes: set[str] | None = None) -> list[str]:
     """Blocking readers; git/lexer failures propagate so callers must fail closed.
 
     ``yaml_inplace`` must contain only M YAML paths already proven token-identical
     by the caller. The pinned reader filters out all non-YAML directory entries.
+    ``path_changes`` holds A/D/R/C old and new paths: any Rust literal reference
+    blocks those changes even when the filesystem helper cannot be identified.
     """
+    path_changes = path_changes or set()
+    changed = changed | path_changes
     if not changed:
         return []
     splices = {site for site in tree_sites(root, rev) if site.macro == "include"}
     unresolved = sorted(site.describe() for site in splices if site.target is None)
     if unresolved:
         return [f"{site}: unresolved Rust splice may contain runtime readers" for site in unresolved]
-    listed = git_bytes(root, "grep", "-l", "-z", "--full-name", "-E", "|".join(sorted(READ_NAMES)),
-                       rev, "--", "*.rs", ok=(0, 1))
-    paths = {item.decode().removeprefix(f"{rev}:") for item in listed.split(b"\0") if item}
+    if path_changes:
+        listed = git_bytes(root, "ls-tree", "-r", "-z", "--name-only", rev)
+        paths = {item.decode() for item in listed.split(b"\0") if item.endswith(b".rs")}
+    else:
+        listed = git_bytes(root, "grep", "-l", "-z", "--full-name", "-w", "-E", "|".join(sorted(READ_NAMES)), rev, "--", "*.rs", ok=(0, 1))
+        paths = {item.decode().removeprefix(f"{rev}:") for item in listed.split(b"\0") if item}
     paths.update(site.target for site in splices if site.target and not site.target.endswith(".rs"))
     pinned = [path for path, pin in PARSE_ONLY_READERS.items()
               if any(name.startswith(pin.directory + "/") for name in changed)]
@@ -186,5 +198,5 @@ def runtime_readers(root: str, rev: str, changed: set[str], yaml_inplace: set[st
                     continue
                 candidates = changed - {name for name in scoped
                                         if not name.endswith(".yaml") or name in yaml_inplace}
-        blockers.extend(scan(path, text, candidates))
+        blockers.extend(scan(path, text, candidates, path_changes & candidates))
     return blockers

@@ -164,12 +164,12 @@ def regular_files(rev: str, paths: set[str]) -> bool:
     return all(modes.get(path) in ("100644", "100755") for path in paths)
 
 
-def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str]]:
-    """(comment_only, its refusals, judge log, library sweep may skip, sweep notes)."""
+def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[str], str, bool, list[str], bool]:
+    """(comment_only, refusals, judge log, sweep may skip, sweep notes, no Rust edits)."""
     if not SHA.match(base) or not SHA.match(head):
-        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, []
+        return False, [f"base/head are not full SHAs: {base!r} {head!r}"], "", False, [], False
     if yaml is None:
-        return False, ["PyYAML unavailable"], "", False, []
+        return False, ["PyYAML unavailable"], "", False, [], False
     judge = subprocess.run(
         [sys.executable, str(JUDGE), base, head, "--allow-non-rust"],
         check=False, capture_output=True, text=True,
@@ -201,7 +201,7 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
                 except Exception as error:
                     reasons.append(f"{path}: YAML scan/parse failed: {error!r}")
     if not verdict or reasons:
-        return False, reasons, judge_log, False, []
+        return False, reasons, judge_log, False, [], False
     try:
         from rust_include_reads import tree_sites
 
@@ -210,42 +210,45 @@ def evaluate(base: str, head: str, raw_filters: str | None) -> tuple[bool, list[
         readers = include_readers(changed, sites)
         notes = [*readers, f"scanned {len(sites)} include calls in the base and head trees"]
     except Exception as error:  # a scan that cannot finish falls back to the full run
-        return False, [f"include scan error: {error!r}"], judge_log, False, []
+        return False, [f"include scan error: {error!r}"], judge_log, False, [], False
     data_paths = {path for path in changed if not path.endswith(".rs")}
     if any(site.reads(path) for site in sites for path in data_paths):
-        return False, readers, judge_log, False, notes
+        return False, readers, judge_log, False, notes, False
     try:
         from rust_runtime_reads import runtime_readers
 
         yaml_inplace = {new for status, old, new in entries if status == "M" and old == new and new.endswith((".yaml", ".yml"))}
+        path_changes = {path for status, old, new in entries if status in {"A", "D", "R", "C"}
+                        for path in (old, new) if path in data_paths}
         runtime = sorted({reason for rev in {base, merge_base, head}
-                          for reason in runtime_readers(str(REPO_ROOT), rev, data_paths, yaml_inplace)})
+                          for reason in runtime_readers(str(REPO_ROOT), rev, data_paths, yaml_inplace, path_changes)})
         if runtime:
-            return False, runtime, judge_log, False, notes
+            return False, runtime, judge_log, False, notes, False
     except Exception as error:
-        return False, [f"runtime reader scan error: {error!r}"], judge_log, False, notes
-    return True, [], judge_log, not readers, notes
+        return False, [f"runtime reader scan error: {error!r}"], judge_log, False, notes, False
+    return True, [], judge_log, not readers, notes, not any(path.endswith(".rs") for path in changed)
 
 
 def main() -> int:
     try:
-        verdict, reasons, judge_log, skip_sweep, sweep_notes = evaluate(
+        verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = evaluate(
             os.environ.get("BASE_SHA", ""),
             os.environ.get("HEAD_SHA", ""),
             os.environ.get("FILTER_OUTPUTS"),
         )
     except Exception as error:  # every failure falls back to the full run
-        verdict, reasons, judge_log, skip_sweep, sweep_notes = False, [f"gate error: {error!r}"], "", False, []
+        verdict, reasons, judge_log, skip_sweep, sweep_notes, no_rust = False, [f"gate error: {error!r}"], "", False, [], False
 
     value = "true" if verdict else "false"
     skip = "true" if verdict and skip_sweep else "false"
+    lint = "true" if verdict and skip_sweep and no_rust else "false"
     judge_lines = judge_log.splitlines()
     if len(judge_lines) > SUMMARY_LINE_LIMIT:
         judge_lines = judge_lines[:SUMMARY_LINE_LIMIT] + ["... (truncated)"]
     report = [f"yaml_available={str(yaml is not None).lower()} version={getattr(yaml, '__version__', 'unavailable')}",
               f"comment_only={value}", *(f"- {reason}" for reason in reasons)]
     if verdict:
-        report += [f"rust_tests_skip={skip}", *(f"- {note}" for note in sweep_notes)]
+        report += [f"rust_tests_skip={skip}", f"rust_lint_skip={lint}", *(f"- {note}" for note in sweep_notes)]
     report += ["", "check_comment_only_change.py:", *(judge_lines or ["<not run>"])]
     print("\n".join(report))
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -255,7 +258,7 @@ def main() -> int:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with open(output_path, "a", encoding="utf-8") as output:
-            output.write(f"comment_only={value}\nrust_tests_skip={skip}\n")
+            output.write(f"comment_only={value}\nrust_tests_skip={skip}\nrust_lint_skip={lint}\n")
     return 0
 
 

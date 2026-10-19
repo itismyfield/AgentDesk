@@ -40,10 +40,10 @@ jobs:
       high_risk_recovery: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || steps.filter.outputs.high_risk_recovery }}
       pg_db: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && 'false' || (steps.filter.outputs.pg_db == 'true' || steps.filter.outputs.rust_or_policy == 'true') && 'true' || 'false' }}
       rust_tests_skip: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'true' || 'false' }}
-      rust_or_policy: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
+      rust_or_policy: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
       # Include readers retain the compile and library lanes.
       rust_tests: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_or_policy }}
-      rust_compile: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_tests_skip == 'true' && 'false' || steps.filter.outputs.rust_compile }}
+      rust_compile: ${{ steps.comment_only.outcome == 'success' && steps.comment_only.outputs.comment_only == 'true' && steps.comment_only.outputs.rust_lint_skip == 'true' && 'false' || steps.filter.outputs.rust_compile }}
       # True when a relay-state-contract anchor file, the contract doc, or the
       # sync gate itself changed. Used to run the compile-existence half
       # (`lint`, whose clippy compiles the `relay_state_contract_refs` blocks)

@@ -420,8 +420,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     "steps.comment_only.outputs.rust_tests_skip == 'true'")
         outputs = jobs["changes"]["outputs"]
         self.assertEqual(outputs["rust_tests_skip"], "${{ " + verified + " && 'true' || 'false' }}")
+        lint_verified = verified.replace("outputs.rust_tests_skip", "outputs.rust_lint_skip")
         for name in ("rust_or_policy", "rust_compile"):
-            self.assertEqual(outputs[name], "${{ " + verified + " && 'false' || steps.filter.outputs." + name + " }}")
+            self.assertEqual(outputs[name], "${{ " + lint_verified + " && 'false' || steps.filter.outputs." + name + " }}")
         for name, needs in (("lib_test_prepare", "changes"),
                             ("relay_authority_targets", ["changes", "lib_test_prepare"]),
                             ("relay_authority_mutations", "changes")):
@@ -438,6 +439,26 @@ class FastCheckCiWiringTests(unittest.TestCase):
             if step.get("run") == "./scripts/required-check-mirror.sh":
                 self.assertEqual(step["env"]["CHANGED_PATHS_RESULT"], "${{ needs.changes.result }}")
                 self.assertEqual(step["env"]["FILTER_OUTPUT"], RUST_REQUIRED_OUTPUT)
+
+    def test_rust_comment_skip_retains_compile_and_lint_checks(self) -> None:
+        outputs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["changes"]["outputs"]
+        cases = (("rust comments", "false", "success", "true", True),
+                 ("missing lint proof", None, "success", "true", True),
+                 ("empty lint proof", "", "success", "true", True),
+                 ("failed gate", "true", "failure", "true", True),
+                 ("not comment only", "true", "success", "false", True),
+                 ("docs and YAML", "true", "success", "true", False))
+        for name in ("rust_or_policy", "rust_compile"):
+            expression = "(" + outputs[name][3:-2] + ") == 'true'"
+            for case, lint_skip, outcome, comment_only, selected in cases:
+                with self.subTest(output=name, case=case):
+                    self.assertEqual(eval_step_if(expression, {
+                        "steps.comment_only.outcome": outcome,
+                        "steps.comment_only.outputs.comment_only": comment_only,
+                        "steps.comment_only.outputs.rust_tests_skip": "true",
+                        "steps.comment_only.outputs.rust_lint_skip": lint_skip,
+                        "steps.filter.outputs." + name: "true",
+                    }), selected)
 
     def test_pr_lint_runner_is_the_ubuntu_compile_and_policy_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

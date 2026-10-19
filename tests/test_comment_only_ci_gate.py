@@ -302,17 +302,37 @@ class GateProcessTests(unittest.TestCase):
         self.write("docs/guide.md", "# guide\n")
         result, output = self.run_gate(self.commit("comment only"))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n")
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\nrust_lint_skip=false\n")
         summary = (self.root / "gh-summary").read_text(encoding="utf-8")
         self.assertIn("comment_only=true", summary)
         self.assertIn("scanned 1 include calls", summary)
         self.assertIn("OK: every changed Rust file is byte-identical", summary)
         self.assertIn("yaml_available=true version=", summary)
 
+    def test_rust_comments_keep_lint_and_compile_even_when_sweep_skips(self) -> None:
+        self.write("src/lib.rs", "// reworded\npub fn one() -> u32 {\n    1\n}\n")
+        result, output = self.run_gate(self.commit("Rust comment only"))
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\nrust_lint_skip=false\n", result.stdout)
+
+    def test_markdown_path_changes_reach_literal_only_rust_readers(self) -> None:
+        self.write("docs/deleted.md", "# deleted\n")
+        self.write("docs/renamed.md", "# renamed\n")
+        self.write("src/mentions.rs", 'const A: &str = "docs/deleted.md";\nconst B: &str = "docs/moved.md";\n')
+        self.base = self.commit("Markdown path literals without I/O calls")
+        self.git("rm", "-q", "docs/deleted.md")
+        self.git("mv", "docs/renamed.md", "docs/moved.md")
+        result, output = self.run_gate(self.commit("delete and rename docs"), filters=json.dumps(outputs()))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
+        self.assertIn("docs/deleted.md", result.stdout)
+        self.assertIn("docs/moved.md", result.stdout)
+
     def test_docs_and_36_yaml_comments_without_rust_skip(self) -> None:
         paths = [f"tests/e2e/tui_relay/scenarios/E-{i}.yaml" for i in range(1, 37)]
         for path in paths:
             self.write(path, "coverage_class: live\n")
+        from rust_runtime_reads import SCENARIO_READER
+
+        self.write(SCENARIO_READER, (REPO_ROOT / SCENARIO_READER).read_text())
         self.base = self.commit("scenario seed")
         for path in paths:
             self.write(path, "# manual procedure\ncoverage_class: live\n")
@@ -321,7 +341,7 @@ class GateProcessTests(unittest.TestCase):
             self.write(path, "# Manual procedure\n")
         filters = json.dumps(outputs(rust_or_policy=paths + docs[-1:], rust_compile=paths + docs[-1:]))
         result, output = self.run_gate(self.commit("docs and YAML comments"), filters=filters)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout + result.stderr)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\nrust_lint_skip=true\n", result.stdout + result.stderr)
 
     def test_yaml_value_block_scalar_and_invalid_parse_keep_full_run(self) -> None:
         path = "tests/scenario.yaml"
@@ -334,7 +354,7 @@ class GateProcessTests(unittest.TestCase):
                 self.write(path, after)
                 result, output = self.run_gate(self.commit("YAML edit"), base=base,
                                                filters=json.dumps(outputs(rust_compile=[path])))
-                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
 
     def test_yaml_rename_and_delete_cannot_use_parse_only_exception(self) -> None:
         old, new = "tests/old.yaml", "tests/new.yaml"
@@ -342,11 +362,11 @@ class GateProcessTests(unittest.TestCase):
         self.base = self.commit("YAML seed")
         self.git("mv", old, new)
         result, output = self.run_gate(self.commit("rename YAML"), filters=json.dumps(outputs(rust_compile=[old, new])))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         base = self.git("rev-parse", "HEAD")
         self.git("rm", new)
         result, output = self.run_gate(self.commit("delete YAML"), base=base, filters=json.dumps(outputs(rust_compile=[new])))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
 
     def test_unlisted_runtime_yaml_reader_keeps_full_run(self) -> None:
         path = "tests/scenario.yaml"
@@ -355,7 +375,7 @@ class GateProcessTests(unittest.TestCase):
         self.base = self.commit("raw YAML reader")
         self.write(path, "# comment\nid: unchanged\n")
         result, output = self.run_gate(self.commit("YAML comment"), filters=json.dumps(outputs(rust_compile=[path])))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("runtime reader", result.stdout)
 
     def test_parse_only_reader_allows_yaml_but_source_pin_change_refuses(self) -> None:
@@ -370,10 +390,10 @@ class GateProcessTests(unittest.TestCase):
         head = self.commit("YAML comment")
         filters = json.dumps(outputs(rust_compile=[path]))
         result, output = self.run_gate(head, filters=filters)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\nrust_lint_skip=true\n", result.stdout)
         self.write(reader, (REPO_ROOT / reader).read_text() + "\n// reader source changed\n")
         result, output = self.run_gate(self.commit("reader pin drift"), filters=filters)
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("source pin mismatch", result.stdout)
 
     def test_included_markdown_keeps_full_run(self) -> None:
@@ -383,7 +403,7 @@ class GateProcessTests(unittest.TestCase):
         self.base = self.commit("included Markdown")
         self.write(path, "# After\n")
         result, output = self.run_gate(self.commit("Markdown edit"), filters=json.dumps(outputs()))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("include_str!", result.stdout)
 
     def test_missing_yaml_module_and_runtime_scan_failure_keep_full_run(self) -> None:
@@ -392,19 +412,19 @@ class GateProcessTests(unittest.TestCase):
         # A module placed next to the gate simulates an interpreter without PyYAML.
         (self.root / "scripts/ci/yaml.py").write_text("raise ImportError('unavailable')\n")
         result, output = self.run_gate(head, filters=json.dumps(outputs()))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("yaml_available=false version=unavailable", result.stdout)
         (self.root / "scripts/ci/yaml.py").unlink()
         (self.root / "scripts/ci/rust_runtime_reads.py").write_text("raise RuntimeError('runtime scan exploded')\n")
         result, output = self.run_gate(head, filters=json.dumps(outputs()))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("runtime reader scan error", result.stdout)
 
     def test_comment_edit_a_test_may_read_keeps_the_library_sweep(self) -> None:
         filters = json.dumps(outputs(rust_or_policy=["src/body.rs"]))
         self.write("src/body.rs", "// reworded\npub fn two() -> u32 {\n    2\n}\n")
         result, output = self.run_gate(self.commit("comment on an included file"), filters=filters)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("src/body.rs is read by src/reader.rs:1 include_str! -> src/body.rs", result.stdout)
 
         # The call may exist only on the base side, when main added it after the PR branched.
@@ -415,7 +435,7 @@ class GateProcessTests(unittest.TestCase):
         self.git("checkout", "-q", "-b", "pr", fork)
         self.write("src/body.rs", "// reworded twice\npub fn two() -> u32 {\n    2\n}\n")
         result, output = self.run_gate(self.commit("comment on body"), base=base, filters=filters)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n", result.stdout)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
         self.assertIn("src/body.rs is read by src/reader.rs:1", result.stdout)
 
     def test_call_inside_a_file_include_splices_is_seen(self) -> None:
@@ -424,7 +444,7 @@ class GateProcessTests(unittest.TestCase):
         self.base = self.commit("reader splices its calls")
         self.write("src/body.rs", "// reworded\npub fn two() -> u32 {\n    2\n}\n")
         result, output = self.run_gate(self.commit("comment on body"), filters=json.dumps(outputs(rust_or_policy=["src/body.rs"])))
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("src/body.rs is read by src/calls.inc:1 include_str!", result.stdout)
 
     def test_unresolved_include_keeps_the_library_sweep_and_a_scan_failure_writes_false(self) -> None:
@@ -433,12 +453,12 @@ class GateProcessTests(unittest.TestCase):
         self.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n")
         head = self.commit("comment only")
         result, output = self.run_gate(head)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("unresolved, tail '/gen.rs'", result.stdout)
 
         (self.root / "scripts/ci/rust_include_reads.py").write_text("raise RuntimeError('scan exploded')\n", encoding="utf-8")
         result, output = self.run_gate(head)
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("include scan error: RuntimeError('scan exploded')", result.stdout)
 
     def test_line_break_the_judge_erases_inside_a_literal_writes_false(self) -> None:
@@ -449,7 +469,7 @@ class GateProcessTests(unittest.TestCase):
                 base = self.commit(f"literal with {old!r}")
                 self.write("src/lib.rs", f'const S: &str = "a{new}b";\n')
                 result, output = self.run_gate(self.commit(f"literal with {new!r}"), base=base)
-                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n", result.stdout)
                 self.assertIn("other than LF/CRLF", result.stdout)
 
     def test_crlf_comment_edit_still_writes_true(self) -> None:
@@ -458,12 +478,12 @@ class GateProcessTests(unittest.TestCase):
         base = self.commit("crlf source")
         (self.root / "src/lib.rs").write_bytes(b'const S: &str = "a\r\nb";\r\npub fn one() -> u32 {\r\n    1 // why\r\n}\r\n')
         result, output = self.run_gate(self.commit("crlf comment"), base=base)
-        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\nrust_lint_skip=false\n", result.stdout)
 
     def test_code_change_writes_false_with_the_judge_finding(self) -> None:
         self.write("src/lib.rs", "// chatty\npub fn one() -> u32 {\n    2\n}\n")
         result, output = self.run_gate(self.commit("code"))
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("code differs after comment removal", result.stdout)
 
     def test_unknown_base_writes_false(self) -> None:
@@ -472,19 +492,19 @@ class GateProcessTests(unittest.TestCase):
         for base in ("0" * 40, "not-a-sha"):
             with self.subTest(base=base):
                 _result, output = self.run_gate(head, base=base)
-                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n")
 
     def test_broken_judge_or_filter_input_writes_false(self) -> None:
         self.write("src/lib.rs", "pub fn one() -> u32 {\n    1\n}\n")
         head = self.commit("comment only")
         _result, output = self.run_gate(head, filters="{not json")
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n")
         (self.root / "scripts/check_comment_only_change.py").write_text(
             "raise RuntimeError('judge exploded')\n", encoding="utf-8"
         )
         result, output = self.run_gate(head)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n")
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\nrust_lint_skip=false\n")
         self.assertIn("judge exploded", result.stdout)
 
 
@@ -627,6 +647,7 @@ class WorkflowSimulation:
         comment_only: str | None,
         forced: dict[str, str] | None = None,
         rust_tests_skip: str | None = None,
+        rust_lint_skip: str | None = None,
         gate_outcome: str = "success",
         run_cancelled: bool = False,
         force_full: str = "false",
@@ -634,7 +655,7 @@ class WorkflowSimulation:
         self.run_cancelled = run_cancelled
         self.force_full = force_full
         self.jobs = yaml.safe_load(PR_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-        gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip}
+        gate_outputs = {"comment_only": comment_only, "rust_tests_skip": rust_tests_skip, "rust_lint_skip": rust_lint_skip}
         steps = {"filter": filters, "comment_only": {k: v for k, v in gate_outputs.items() if v is not None}}
         outcomes = {"filter": "success", "comment_only": gate_outcome}
 
@@ -789,7 +810,7 @@ class WorkflowWiringTests(unittest.TestCase):
     def test_comment_only_skips_heavy_lanes_and_every_required_context_is_green(self) -> None:
         for raw in (HEAVY_RAW, outputs(rust_or_policy=["tests/scenario.yaml", "tests/README.md"],
                                       rust_compile=["tests/scenario.yaml", "tests/README.md"])):
-            run = WorkflowSimulation(raw, "true", rust_tests_skip="true")
+            run = WorkflowSimulation(raw, "true", rust_tests_skip="true", rust_lint_skip="true")
             with self.subTest(filters=raw):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "skipped", job_id)
@@ -798,6 +819,16 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertEqual(run.changes["comment_only"], "true")
                 self.assertEqual(run.changes["rust_compile"], "false")
                 self.assertEqual(run.changes["rust_or_policy"], "false")
+                self.assertPublishedGreen(run)
+
+    def test_rust_comments_skip_sweep_but_keep_lint_and_compile(self) -> None:
+        for lint_skip in ("false", None, ""):
+            run = WorkflowSimulation(HEAVY_RAW, "true", rust_tests_skip="true", rust_lint_skip=lint_skip)
+            with self.subTest(rust_lint_skip=lint_skip):
+                self.assertEqual(run.changes["rust_or_policy"], "true")
+                self.assertEqual(run.changes["rust_compile"], "true")
+                self.assertEqual(run.results["lint"], "success")
+                self.assertEqual(run.results["library_sweep"], "skipped")
                 self.assertPublishedGreen(run)
 
     def test_include_reader_runs_only_the_library_sweep(self) -> None:
@@ -811,9 +842,9 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertPublishedGreen(run)
 
     def test_gate_false_unset_or_failed_keeps_the_raw_filters(self) -> None:
-        # A step that failed after writing both outputs still reads as the full run.
+        # A step that failed after writing skip outputs still reads as the full run.
         for outcome, gate_output in (("success", "false"), ("success", None), ("success", ""), ("failure", "true")):
-            run = WorkflowSimulation(HEAVY_RAW, gate_output, rust_tests_skip="true", gate_outcome=outcome)
+            run = WorkflowSimulation(HEAVY_RAW, gate_output, rust_tests_skip="true", rust_lint_skip="true", gate_outcome=outcome)
             with self.subTest(outcome=outcome, gate_output=gate_output):
                 self.assertEqual(run.changes["comment_only"], "false")
                 for output, raw_filter in OVERRIDDEN.items():

@@ -69,7 +69,10 @@ class RepositoryTests(unittest.TestCase):
     def test_allowtable_source_and_parse_only_shape_are_pinned(self) -> None:
         pin = readers.PARSE_ONLY_READERS[readers.SCENARIO_READER]
         source = (ROOT / readers.SCENARIO_READER).read_bytes()
-        assert hashlib.sha256(source).hexdigest() == pin.sha256
+        assert hashlib.sha256(source).hexdigest() == pin.sha256, (
+            "scenario_census_e2e.rs changed: re-verify parse-only shape (lines 70-90) "
+            "and update PARSE_ONLY_READERS sha256 in scripts/ci/rust_runtime_reads.py"
+        )
         lines = source.decode().splitlines()
         assert "std::fs::read_dir(&dir)" in lines[69]
         assert 'extension == "yaml"' in lines[74]
@@ -87,6 +90,12 @@ class RepositoryTests(unittest.TestCase):
         readme = "tests/e2e/tui_relay/scenarios/README.md"
         assert not readers.runtime_readers(str(repo), "HEAD", {yaml_path, readme}, {yaml_path})
         assert readers.runtime_readers(str(repo), "HEAD", {yaml_path}, set())
+
+    def test_pinned_yaml_reader_ignores_added_readme_path_change(self) -> None:
+        yaml_path = "tests/e2e/tui_relay/scenarios/E-1-single-prompt.yaml"
+        readme = "tests/e2e/tui_relay/scenarios/README.md"
+        blockers = readers.runtime_readers(str(self.repo), "HEAD", {yaml_path, readme}, {yaml_path}, {readme})
+        assert not blockers, blockers
 
     def test_source_pin_mutation_blocks_even_if_reader_path_literal_disappears(self) -> None:
         repo = self.repo
@@ -137,6 +146,41 @@ class RepositoryTests(unittest.TestCase):
         repo = self.repo
         with self.assertRaises(RuntimeError):
             readers.runtime_readers(str(repo), "missing-ref", {"docs/guide.md"}, set())
+
+    def test_literal_only_rename_is_scanned_but_inplace_edit_is_not_blocked(self) -> None:
+        (self.repo / "src/mention.rs").write_text('const DOC: &str = "docs/guide.md";')
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "path mention without filesystem calls")
+        changed = {"docs/guide.md", "docs/renamed.md"}
+        blockers = readers.runtime_readers(str(self.repo), "HEAD", changed, set(), changed)
+        assert any("src/mention.rs" in item and "docs/guide.md" in item for item in blockers)
+        assert not readers.runtime_readers(str(self.repo), "HEAD", changed, set())
+
+
+class PathObservationTests(unittest.TestCase):
+    def test_exists_format_on_deleted_path_blocks(self) -> None:
+        changed = {"docs/x.md"}
+        body = 'exists(&format!("{base}/docs/x.md"));'
+        assert readers.scan("src/prompt.rs", body, changed, changed)
+
+    def test_exists_on_inplace_edit_blocks_without_path_change_guard(self) -> None:
+        assert readers.scan("src/prompt.rs", 'exists(&format!("{base}/docs/x.md"));', {"docs/x.md"})
+
+    def test_presence_and_metadata_observers_block_inplace_edits(self) -> None:
+        for name in ("try_exists", "is_file", "is_dir", "metadata", "symlink_metadata", "canonicalize", "copy", "File"):
+            with self.subTest(name=name):
+                assert readers.scan("src/prompt.rs", f'{name}("docs/x.md");', {"docs/x.md"})
+
+    def test_literal_only_rename_blocks_old_and_new_paths(self) -> None:
+        changed = {"docs/old.md", "docs/new.md"}
+        body = 'const OLD: &str = "docs/old.md"; const NEW: &str = "docs/new.md";'
+        blockers = readers.scan("src/mentions.rs", body, changed, changed)
+        assert len(blockers) == 2
+        assert not readers.scan("src/mentions.rs", body, changed)
+
+    def test_comment_only_mentions_do_not_observe_path_changes(self) -> None:
+        changed = {"docs/x.md"}
+        assert not readers.scan("src/mentions.rs", '// "docs/x.md"', changed, changed)
 
 
 if __name__ == "__main__":
