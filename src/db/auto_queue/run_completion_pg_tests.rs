@@ -344,15 +344,15 @@ async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
     )
     .await;
     // Grace is still open behind the gate: clearing the gate exposes it.
-    sqlx::query("UPDATE auto_queue_phase_gates SET status = $1 WHERE run_id = 'run-1'")
-        .bind("passed")
-        .execute(&pool)
-        .await
-        .expect("set gate status");
+    assert!(
+        super::phase_gates::clear_phase_gate_state_on_pg(&pool, "run-1", 0)
+            .await
+            .expect("clear phase gate through its writer")
+    );
     assert_eq!(
         finalize_run_if_ready_pg(&pool, "run-1")
             .await
-            .expect("completion after gate passes"),
+            .expect("completion after gate clears"),
         blocked(RunCompletionBlockedReason::PhaseGateGraceWindow)
     );
     pool.close().await;
