@@ -1,6 +1,7 @@
 use super::RebindError;
 
-pub(super) type CodexRebindRelayGenerationGate = std::sync::Arc<std::sync::Mutex<u64>>;
+pub(in crate::services::discord::recovery_engine) type CodexRebindRelayGenerationGate =
+    std::sync::Arc<std::sync::Mutex<u64>>;
 
 static CODEX_REBIND_RELAY_GENERATIONS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Weak<std::sync::Mutex<u64>>>>,
@@ -22,6 +23,37 @@ fn generation_gate(relay_output_path: &str) -> CodexRebindRelayGenerationGate {
         std::sync::Arc::downgrade(&gate),
     );
     gate
+}
+
+/// Reserve an absent producer without invalidating an incumbent generation.
+pub(in crate::services::discord::recovery_engine) fn ensure_absent(
+    relay_output_path: &str,
+) -> Option<(CodexRebindRelayGenerationGate, u64)> {
+    let mut registry = CODEX_REBIND_RELAY_GENERATIONS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if registry
+        .get(relay_output_path)
+        .and_then(std::sync::Weak::upgrade)
+        .is_some()
+    {
+        return None;
+    }
+    let gate = std::sync::Arc::new(std::sync::Mutex::new(1));
+    registry.insert(
+        relay_output_path.to_string(),
+        std::sync::Arc::downgrade(&gate),
+    );
+    Some((gate, 1))
+}
+
+pub(in crate::services::discord::recovery_engine) fn present(relay_output_path: &str) -> bool {
+    CODEX_REBIND_RELAY_GENERATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(relay_output_path)
+        .and_then(std::sync::Weak::upgrade)
+        .is_some()
 }
 
 pub(super) fn prepare(
