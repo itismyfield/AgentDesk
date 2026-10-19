@@ -898,8 +898,8 @@ async fn promote_run_and_clear_inactive_slots(
     Ok(())
 }
 
-/// Counts the run's entries; when zero, best-effort completes the stale run
-/// and short-circuits the activate request. Both the "stale empty run
+/// Counts the run's entries; when zero, asks the canonical writer to complete
+/// the stale run and short-circuits the activate request. Both the "stale empty run
 /// completed" OK response and any DB failure are returned as
 /// `Err(ActivateResponse)`; `Ok(())` means the run has entries to dispatch.
 /// Count and completion share the run token, so an entry appended under it is seen.
@@ -923,48 +923,45 @@ pub(super) async fn complete_run_if_empty(
         .await
         .map_err(|error| format!("count postgres auto-queue entries for {run_id}: {error}"))?;
         if entry_count > 0 {
-            return Ok(false);
+            return Ok(None);
         }
-        sqlx::query(
-            // #2048 F18: only auto-complete runs that are still active /
-            // promotable. A caller passing a cancelled/completed run_id
-            // should not flip its status — only the explicit cancel/complete
-            // paths may finalize. The activate path is best-effort.
-            "UPDATE auto_queue_runs
-             SET status = 'completed',
-                 completed_at = NOW()
-             WHERE id = $1
-               AND status IN ('active', 'paused', 'generated', 'pending')",
-        )
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("complete stale postgres auto-queue run {run_id}: {error}"))?;
+        let outcome =
+            crate::db::auto_queue::finalize_run_if_ready_on_pg_tx(&mut tx, run_id).await?;
         tx.commit().await.map_err(|error| error.to_string())?;
-        Ok::<bool, String>(true)
+        Ok::<Option<crate::db::auto_queue::RunCompletionOutcome>, String>(Some(outcome))
     }
     .await;
-    match completed {
-        Ok(false) => return Ok(()),
-        Ok(true) => {}
+    let outcome = match completed {
+        Ok(None) => return Ok(()),
+        Ok(Some(outcome)) => outcome,
         Err(error) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": error })),
             ));
         }
-    }
-    crate::auto_queue_log!(
-        info,
-        "activate_stale_empty_run_completed_pg",
-        run_log_ctx.clone(),
-        "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
-    );
+    };
+    let message = if outcome.is_completed() {
+        crate::auto_queue_log!(
+            info,
+            "activate_stale_empty_run_completed_pg",
+            run_log_ctx.clone(),
+            "[auto-queue] Completed stale empty PG run {run_id} — no entries, skipping fallback populate (#85)"
+        );
+        "Stale empty run completed — no entries to dispatch".to_string()
+    } else {
+        let reason = outcome.describe();
+        crate::auto_queue_log!(
+            info,
+            "activate_stale_empty_run_unchanged_pg",
+            run_log_ctx.clone(),
+            "[auto-queue] Stale empty PG run {run_id} left unchanged ({reason}) — no entries to dispatch"
+        );
+        format!("Stale empty run left unchanged ({reason}) — no entries to dispatch")
+    };
     Err((
         StatusCode::OK,
-        Json(
-            json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
-        ),
+        Json(json!({ "dispatched": [], "count": 0, "message": message })),
     ))
 }
 
@@ -1332,7 +1329,7 @@ async fn compute_activate_groups_to_dispatch(
 /// builds the success payload. Count
 /// failures short-circuit with a 500 returned as `Err(ActivateResponse)`; the
 /// success payload is returned as `Ok(ActivateResponse)`.
-async fn finalize_activate_run_and_build_response(
+pub(super) async fn finalize_activate_run_and_build_response(
     pool: &sqlx::PgPool,
     run_id: &str,
     run_log_ctx: &AutoQueueLogContext<'_>,
@@ -1360,14 +1357,15 @@ async fn finalize_activate_run_and_build_response(
         }
     };
     if remaining == 0 {
-        match crate::db::auto_queue::runs::complete_run_after_activate_on_pg(pool, run_id).await {
-            Ok(true) => {}
-            Ok(false) => crate::auto_queue_log!(
+        match crate::db::auto_queue::finalize_run_if_ready_pg(pool, run_id).await {
+            Ok(outcome) if outcome.is_completed() => {}
+            Ok(outcome) => crate::auto_queue_log!(
                 info,
                 "activate_finalize_run_deferred_pg",
                 run_log_ctx.clone(),
-                "[auto-queue] canonical completion left PG run {} unchanged because it was ineligible or runnable entries remained",
-                run_id
+                "[auto-queue] canonical completion left PG run {} unchanged ({})",
+                run_id,
+                outcome.describe()
             ),
             Err(error) => crate::auto_queue_log!(
                 warn,

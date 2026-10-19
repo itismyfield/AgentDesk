@@ -19,6 +19,8 @@ mod capture_stress_tests;
 #[cfg(test)]
 mod capture_tests;
 #[cfg(test)]
+mod overflow_tests;
+#[cfg(test)]
 pub(crate) mod test_capture;
 
 use serde::Serialize;
@@ -65,21 +67,17 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// #2049 Finding 13: all three pieces of state (buffer + two indices) move
-/// under a single mutex. Splitting them across three locks left a window
-/// where `push` had advanced `buffer.len()` but not yet `next_logical_idx`,
-/// causing `drain_unflushed` to compute a wrong absolute start and silently
-/// skip the most recent event for an entire flush cycle.
+/// Keep history, absolute indices, and overflow state under one mutex so a
+/// snapshot cannot skip a concurrently pushed event.
 #[derive(Debug, Default)]
 struct EventLogInner {
     buffer: VecDeque<StructuredEvent>,
     next_logical_idx: u64,
     last_flushed_idx: u64,
-    /// Total number of events evicted from the ring buffer because the
-    /// capacity was reached before `drain_unflushed` could observe them.
-    /// Exposed via `dropped_total()` so operators see ring-eviction loss
-    /// instead of having to grep tracing for the warn line.
+    /// Events evicted before persistence was acknowledged, excluding history
+    /// already saved to disk.
     dropped_total: u64,
+    loss_warned: bool,
 }
 
 /// Bounded ring buffer for structured events.
@@ -105,15 +103,34 @@ impl EventLog {
             return;
         };
         if inner.buffer.len() == self.capacity {
+            let oldest_idx = inner
+                .next_logical_idx
+                .saturating_sub(inner.buffer.len() as u64);
+            let unflushed = oldest_idx >= inner.last_flushed_idx;
             inner.buffer.pop_front();
-            // #2049 Finding 13: warn on ring eviction so silent event loss is
-            // observable. Increment a counter exposed via `dropped_total()`.
-            inner.dropped_total = inner.dropped_total.saturating_add(1);
-            tracing::warn!(
-                "[observability] event ring buffer full (capacity={}); dropping oldest event (total_dropped={})",
-                self.capacity,
-                inner.dropped_total,
-            );
+            if unflushed {
+                inner.dropped_total = inner.dropped_total.saturating_add(1);
+                let already_warned = std::mem::replace(&mut inner.loss_warned, true);
+                if already_warned {
+                    tracing::debug!(
+                        capacity = self.capacity,
+                        total_dropped = inner.dropped_total,
+                        "[observability] event ring buffer full; dropping unflushed event"
+                    );
+                } else {
+                    tracing::warn!(
+                        capacity = self.capacity,
+                        total_dropped = inner.dropped_total,
+                        "[observability] event ring buffer full; dropping unflushed event"
+                    );
+                }
+            } else {
+                inner.loss_warned = false;
+                tracing::debug!(
+                    capacity = self.capacity,
+                    "[observability] evicting flushed event from recent history"
+                );
+            }
         }
         inner.buffer.push_back(event);
         #[cfg(test)]
@@ -138,10 +155,8 @@ impl EventLog {
         inner.buffer.iter().skip(len - take).cloned().collect()
     }
 
-    /// Drain any events that haven't been flushed to disk yet. Returns
-    /// `(events, new_flushed_idx)` — caller must advance via
-    /// `commit_flushed(new_flushed_idx)` on successful persistence so that the
-    /// same events aren't emitted twice in a subsequent cycle.
+    /// Snapshot events not yet persisted. Commit the returned watermark only
+    /// after successful persistence; snapshots alone do not advance the cursor.
     pub fn drain_unflushed(&self) -> (Vec<StructuredEvent>, u64) {
         let Ok(inner) = self.inner.lock() else {
             return (Vec::new(), 0);
@@ -176,6 +191,7 @@ impl EventLog {
             inner.next_logical_idx = 0;
             inner.last_flushed_idx = 0;
             inner.dropped_total = 0;
+            inner.loss_warned = false;
         }
     }
 }

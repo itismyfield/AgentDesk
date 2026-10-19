@@ -6,10 +6,28 @@ use crate::services::codex_tui::session::codex_tui_rollout_paths_same;
 use crate::services::codex_tui::session::source_observation::VerifiedCodexHookSource;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
+// Provider workers inherit only a fixture's explicit test root, never the live runtime root.
+#[cfg(test)]
+fn events_dir() -> io::Result<Option<PathBuf>> {
+    Ok(super::events_dir()?.or_else(|| {
+        std::env::var_os("AGENTDESK_TEST_CODEX_BINDING_ROOT")
+            .map(|root| PathBuf::from(root).join(BINDING_EVENTS_DIR))
+    }))
+}
+
+#[cfg(test)]
+fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
+    Ok(events_dir()?.map(|root| root.join(format!("{channel}.log"))))
+}
+
 mod commit;
+mod terminal;
 #[cfg(test)]
 pub(crate) use commit::commit_claim;
+#[cfg(test)]
+pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
 pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
+pub(crate) use terminal::terminal_pending_at_seq;
 
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
     let mut events = binding_events_since(channel, 0)?;
@@ -610,6 +628,27 @@ pub(crate) fn proof_at_seq(
             _ => None,
         }
     }))
+}
+
+pub(crate) fn latest_ownership(
+    channel: u64,
+    tmux: &str,
+) -> io::Result<Option<(u64, String, DateTime<Utc>)>> {
+    let _logs = lock_logs();
+    if log_path(channel)?.is_none() {
+        return Ok(None);
+    }
+    Ok(ownership_records(channel)?
+        .into_iter()
+        .rev()
+        .find_map(|record| {
+            let ownership = record.codex_ownership?;
+            (ownership.context.tmux_session == tmux).then_some((
+                record.event.seq,
+                ownership.context.execution_nonce,
+                record.event.committed_at,
+            ))
+        }))
 }
 
 pub(crate) fn context_for_nonce(

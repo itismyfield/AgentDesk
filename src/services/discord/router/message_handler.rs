@@ -62,6 +62,10 @@ pub(in crate::services::discord) use watchdog::incident_attach;
 use self::goal_lifecycle::*;
 #[cfg(test)]
 pub(in crate::services::discord) use self::provider_dispatch::producer_error_test_support::producer_error_frame;
+#[cfg(test)]
+pub(in crate::services::discord) use self::provider_dispatch::{
+    CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
+};
 use self::provider_isolation::*;
 use self::tui_followup::*;
 pub(in crate::services::discord) use self::turn_lifecycle::mailbox_try_start_turn_with_terminal_marker_cleanup;
@@ -318,6 +322,9 @@ pub(in crate::services::discord) fn hold_input_effect_for_tests(
 
 #[cfg(test)]
 mod session_strategy_lifecycle_tests;
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod codex_resume_companion_queue_tests;
 
 mod turn_context;
 use turn_context::TurnContext;

@@ -185,7 +185,7 @@ fn dedupe_phase_gate_dispatch_ids(dispatch_ids: &[String]) -> Vec<String> {
     deduped
 }
 
-async fn lock_phase_gate_state_on_pg_tx(
+pub(super) async fn lock_phase_gate_state_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase: i64,
@@ -201,202 +201,40 @@ async fn lock_phase_gate_state_on_pg_tx(
     Ok(())
 }
 
-async fn valid_phase_gate_dispatch_ids_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    dispatch_ids: &[String],
-) -> Result<Vec<String>, String> {
-    if dispatch_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = sqlx::query("SELECT id FROM task_dispatches WHERE id = ANY($1)")
-        .bind(dispatch_ids.to_vec())
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| format!("load postgres phase-gate dispatch ids: {error}"))?;
-
-    let valid: std::collections::HashSet<String> = rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<String, _>("id").ok())
-        .collect();
-
-    Ok(dispatch_ids
-        .iter()
-        .filter(|dispatch_id| valid.contains(dispatch_id.as_str()))
-        .cloned()
-        .collect())
-}
-
-async fn delete_stale_phase_gate_rows_on_pg_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    run_id: &str,
-    phase: i64,
-    dispatch_ids: &[String],
-) -> Result<usize, String> {
-    let rows_affected = if dispatch_ids.is_empty() {
-        sqlx::query(
-            "DELETE FROM auto_queue_phase_gates
-             WHERE run_id = $1
-               AND phase = $2
-               AND dispatch_id IS NOT NULL",
-        )
-        .bind(run_id)
-        .bind(phase)
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| {
-            format!("delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}")
-        })?
-        .rows_affected()
-    } else {
-        sqlx::query(
-            "DELETE FROM auto_queue_phase_gates
-             WHERE run_id = $1
-               AND phase = $2
-               AND (dispatch_id IS NULL OR NOT (dispatch_id = ANY($3)))",
-        )
-        .bind(run_id)
-        .bind(phase)
-        .bind(dispatch_ids.to_vec())
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| {
-            format!("delete postgres stale phase-gate rows for run {run_id} phase {phase}: {error}")
-        })?
-        .rows_affected()
-    };
-
-    usize::try_from(rows_affected)
-        .map_err(|error| format!("convert postgres phase-gate delete count for {run_id}: {error}"))
-}
-
 pub async fn save_phase_gate_state_on_pg(
     pool: &PgPool,
     run_id: &str,
     phase: i64,
     state: &PhaseGateStateWrite,
 ) -> Result<PhaseGateSaveResult, String> {
-    let status = normalize_phase_gate_status(&state.status);
-    let verdict = normalize_optional_text(state.verdict.as_deref());
-    let pass_verdict = normalize_phase_gate_pass_verdict(&state.pass_verdict);
-    let anchor_card_id = normalize_optional_text(state.anchor_card_id.as_deref());
-    let failure_reason = normalize_optional_text(state.failure_reason.as_deref());
-    let created_at = normalize_optional_text(state.created_at.as_deref());
+    let normalized = super::run_owner_guard::NormalizedPhaseGateState {
+        status: normalize_phase_gate_status(&state.status),
+        verdict: normalize_optional_text(state.verdict.as_deref()),
+        pass_verdict: normalize_phase_gate_pass_verdict(&state.pass_verdict),
+        next_phase: state.next_phase,
+        final_phase: state.final_phase,
+        anchor_card_id: normalize_optional_text(state.anchor_card_id.as_deref()),
+        failure_reason: normalize_optional_text(state.failure_reason.as_deref()),
+        created_at: normalize_optional_text(state.created_at.as_deref()),
+    };
     let deduped_dispatch_ids = dedupe_phase_gate_dispatch_ids(&state.dispatch_ids);
 
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("begin postgres phase-gate save for run {run_id}: {error}"))?;
-    lock_phase_gate_state_on_pg_tx(&mut tx, run_id, phase).await?;
-    let dispatch_ids =
-        valid_phase_gate_dispatch_ids_on_pg_tx(&mut tx, &deduped_dispatch_ids).await?;
-    let removed_stale_rows =
-        delete_stale_phase_gate_rows_on_pg_tx(&mut tx, run_id, phase, &dispatch_ids).await?;
-
-    if dispatch_ids.is_empty() {
-        sqlx::query(
-            "INSERT INTO auto_queue_phase_gates (
-                run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                final_phase, anchor_card_id, failure_reason, created_at, updated_at
-             ) VALUES (
-                $1, $2, $3, $4, NULL, $5, $6, $7, $8, $9,
-                COALESCE($10::timestamptz, NOW()), NOW()
-             )
-             ON CONFLICT (run_id, phase, COALESCE(dispatch_id, ''))
-             DO UPDATE SET
-                status = EXCLUDED.status,
-                verdict = EXCLUDED.verdict,
-                pass_verdict = EXCLUDED.pass_verdict,
-                next_phase = EXCLUDED.next_phase,
-                final_phase = EXCLUDED.final_phase,
-                anchor_card_id = EXCLUDED.anchor_card_id,
-                failure_reason = EXCLUDED.failure_reason,
-                created_at = COALESCE($10::timestamptz, auto_queue_phase_gates.created_at, NOW()),
-                updated_at = NOW()",
-        )
-        .bind(run_id)
-        .bind(phase)
-        .bind(&status)
-        .bind(verdict.as_deref())
-        .bind(&pass_verdict)
-        .bind(state.next_phase)
-        .bind(state.final_phase)
-        .bind(anchor_card_id.as_deref())
-        .bind(failure_reason.as_deref())
-        .bind(created_at.as_deref())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| {
-            format!("upsert postgres phase-gate row for run {run_id} phase {phase}: {error}")
-        })?;
-    } else {
-        for dispatch_id in &dispatch_ids {
-            sqlx::query(
-                "DELETE FROM auto_queue_phase_gates
-                 WHERE dispatch_id = $1
-                   AND NOT (run_id = $2 AND phase = $3)",
-            )
-            .bind(dispatch_id)
-            .bind(run_id)
-            .bind(phase)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "delete existing postgres phase-gate row for dispatch {dispatch_id}: {error}"
-                )
-            })?;
-            sqlx::query(
-                "INSERT INTO auto_queue_phase_gates (
-                    run_id, phase, status, verdict, dispatch_id, pass_verdict, next_phase,
-                    final_phase, anchor_card_id, failure_reason, created_at, updated_at
-                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    COALESCE($11::timestamptz, NOW()), NOW()
-                 )
-                 ON CONFLICT (run_id, phase, COALESCE(dispatch_id, ''))
-                 DO UPDATE SET
-                    status = EXCLUDED.status,
-                    verdict = EXCLUDED.verdict,
-                    dispatch_id = EXCLUDED.dispatch_id,
-                    pass_verdict = EXCLUDED.pass_verdict,
-                    next_phase = EXCLUDED.next_phase,
-                    final_phase = EXCLUDED.final_phase,
-                    anchor_card_id = EXCLUDED.anchor_card_id,
-                    failure_reason = EXCLUDED.failure_reason,
-                    created_at = COALESCE($11::timestamptz, auto_queue_phase_gates.created_at, NOW()),
-                    updated_at = NOW()",
-            )
-            .bind(run_id)
-            .bind(phase)
-            .bind(&status)
-            .bind(verdict.as_deref())
-            .bind(dispatch_id)
-            .bind(&pass_verdict)
-            .bind(state.next_phase)
-            .bind(state.final_phase)
-            .bind(anchor_card_id.as_deref())
-            .bind(failure_reason.as_deref())
-            .bind(created_at.as_deref())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| {
-                format!(
-                    "upsert postgres phase-gate row for run {run_id} phase {phase} dispatch {dispatch_id}: {error}"
-                )
-            })?;
-        }
-    }
-
+    let result = super::run_owner_guard::publish_phase_gate_state_on_pg_tx(
+        &mut tx,
+        run_id,
+        phase,
+        &normalized,
+        &deduped_dispatch_ids,
+    )
+    .await?;
     tx.commit()
         .await
         .map_err(|error| format!("commit postgres phase-gate save for run {run_id}: {error}"))?;
-
-    Ok(PhaseGateSaveResult {
-        persisted_dispatch_ids: dispatch_ids,
-        removed_stale_rows,
-    })
+    Ok(result)
 }
 
 pub async fn clear_phase_gate_state_on_pg(
@@ -2089,10 +1927,7 @@ mod reconcile_phase_gate_pg_tests {
         pg_db.drop().await;
     }
 
-    /// Helper: seed a `pending` auto-queue entry so the run still has work
-    /// remaining after a gate clear. This prevents `maybe_finalize_run_if_ready_pg`
-    /// from automatically finalizing the run, exposing the resume-only
-    /// behavior we want to assert.
+    /// Seeds a pending entry so a gate clear resumes the run instead of finalizing it.
     async fn seed_pending_entry(pool: &PgPool, run_id: &str, entry_id: &str, batch_phase: i64) {
         sqlx::query(
             "INSERT INTO kanban_cards (id, repo_id, title, status)
@@ -2194,7 +2029,11 @@ mod reconcile_phase_gate_pg_tests {
         let pool = pg_db.connect_and_migrate().await;
         fixture(&pool).await;
 
-        // No pending entries — drained run, ready to finalize.
+        seed_pending_entry(&pool, "run-pg-test", "entry-drained", 0).await;
+        sqlx::query("UPDATE auto_queue_entries SET status = 'done' WHERE id = 'entry-drained'")
+            .execute(&pool)
+            .await
+            .expect("drain entry");
         let mut final_context = gate_context();
         final_context["phase_gate"]["final_phase"] = json!(true);
         insert_dispatch(
@@ -2244,7 +2083,6 @@ mod reconcile_phase_gate_pg_tests {
             other => panic!("expected Cleared, got {other:?}"),
         }
         assert_eq!(run_status(&pool, "run-pg-test").await, "completed");
-        // Completion notification should be queued in the outbox.
         let notify_count: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::BIGINT FROM message_outbox WHERE bot = 'notify'",
         )

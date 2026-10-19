@@ -807,7 +807,7 @@ unless producer.is_a?(Hash) && producer["runs-on"] == "ubuntu-latest" && produce
   warn "#{path}: lib_test_prepare must retain its independent build, inventory verification and upload contract"
   exit 1
 end
-consumers = %w[test_fast high-risk-recovery library_sweep scripts relay_authority_targets]
+consumers = %w[test_fast pg15_owner_proof high-risk-recovery library_sweep scripts relay_authority_targets]
 expected_download = {"name" => "Download shared lib tests", "continue-on-error" => true, "uses" => "actions/download-artifact@v4", "with" => {"name" => "lib-test-artifact", "path" => "${{ runner.temp }}/lib-test-download"}}
 expected_restore = {"name" => "Restore shared lib tests", "continue-on-error" => true, "shell" => "bash", "run" => "mkdir -p \"$RUNNER_TEMP/lib-test-artifact\"\nif [ -f \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\" ]; then\n  tar -C \"$RUNNER_TEMP/lib-test-artifact\" -xzf \"$RUNNER_TEMP/lib-test-download/lib-test-artifact.tar.gz\"\nfi\n"}
 consumers.each do |job_id|
@@ -925,6 +925,22 @@ targets = {
         "commands" => ["python3 scripts/ci/test-selection.py run --lane pg"],
         "timeout_minutes" => 75,
         "env" => {"ADK_TEST_SELECTION_PLAN" => "${{ needs.pg_shards.outputs.plan }}", "BASH_ENV" => "/dev/null", "CARGO_PROFILE_DEV_DEBUG" => "0", "CARGO_PROFILE_TEST_DEBUG" => "0"},
+      },
+    },
+  },
+  "pg15_owner_proof" => {
+    "label" => "PostgreSQL 15 owner proof job",
+    "name" => "PostgreSQL 15 owner proof",
+    "needs" => ["changes", "pg_shards", "lib_test_prepare"],
+    "if" => "${{ !cancelled() && (needs.changes.outputs.pg_db == 'true' || needs.pg_shards.outputs.force_full == 'true') }}",
+    "runs_on" => "ubuntu-latest",
+    "job_timeout_minutes" => 50,
+    "job_sha256" => "76ea7647252d90c94f50c18bb062cdbfc90649309c634c268195eecf64faec0b",
+    "cargo_steps" => {
+      "PostgreSQL 15 exact owner proof" => {
+        "commands" => ["python3 scripts/run_test_lane.py --lane pg --max-summaries 4 --expected-ids scripts/ci/pg15_required_ids.txt -- env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- --exact db::auto_queue::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg db::auto_queue::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg db::auto_queue::run_owner_guard_pg_tests::force_pause_cleanup_waits_for_run_token_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_cannot_escape_cancel_pg db::auto_queue::run_owner_guard_pg_tests::legacy_context_only_retry_waits_on_run_token_not_origin_row_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_context_create_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_foreign_to_target_refused_after_cancel_pg db::auto_queue::run_owner_guard_pg_tests::phase_gate_transfer_target_to_foreign_serializes_with_cancel_pg db::auto_queue::run_owner_guard_pg_tests::rest_revival_refused_for_cancelled_owner_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_cas_rejects_direct_cancel_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_refuses_failed_dispatch_of_cancelled_run_pg db::auto_queue::run_owner_guard_pg_tests::review_recovery_waits_for_run_cancel_and_refuses_pg db::auto_queue::run_owner_guard_pg_tests::verdict_rollback_revival_refused_for_cancelled_owner_pg db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context services::auto_queue::cancel_run::malformed_context_pg_tests::owner_context_extract_matrix_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_census_failure_rolls_back_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg --test-threads=1"],
+        "timeout_minutes" => 40,
+        "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact", "BASH_ENV" => "/dev/null"},
       },
     },
   },
@@ -1062,7 +1078,7 @@ targets = {
     "needs" => %w[changes lib_test_prepare],
     "if" => "${{ !cancelled() && needs.changes.outputs.high_risk_recovery == 'true' }}",
     "runs_on" => "ubuntu-latest",
-    "job_sha256" => "0f88cf3c3567f8e0f114483af9a1e4e8f9514c7939cb5f7a416f35e9024bc7e0",
+    "job_sha256" => "54c7aa6278835c21b0af00d7e37fec97340aeb37fe163ec689beb45d1eaaecd9",
     "cargo_steps" => {
       "High-risk recovery lane" => {
         "commands" => ["python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib high_risk_recovery:: -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_health::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::relay_dead_reattach::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::terminal_ui_obligation::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::hang_forensics::tests -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::health::recovery::self_watchdog -- --test-threads=1", "python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::health_diagnostics::tests -- --test-threads=1"],
@@ -1071,7 +1087,7 @@ targets = {
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
       },
       "Operational alert intake admission regressions" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1"],
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::dispatch_policy::allowed_turn_sender_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::formatting::delivery::attachment_delivery_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::catch_up::classification_order_tests::catch_up_human_visible_marker_recovers_and_strips_but_bot_marker_is_rejected -- --exact --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::gate::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib server::outbox_actionable_delivery::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib -- server::policy_tick_logging:: services::observability::events:: server::policy_tick_schedule_tests::", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::message_outbox::dedupe_key_tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints -- --exact --test-threads=1"],
         "timeout_minutes" => nil,
         "shell" => nil,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
@@ -1083,7 +1099,7 @@ targets = {
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},
       },
       "Cancel-preserved queue observation regression" => {
-        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1"],
+        "commands" => ["env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::discord::queue_park_ledger::tests -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission -- --test-threads=1", "env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run -- cargo test --lib services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests -- --test-threads=1"],
         "timeout_minutes" => nil,
         "shell" => nil,
         "env" => {"ADK_LIB_TEST_ARTIFACT" => "${{ runner.temp }}/lib-test-artifact"},

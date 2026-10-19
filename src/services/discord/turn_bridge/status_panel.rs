@@ -24,9 +24,22 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     source: &'static str,
     expected_user_msg_id: u64,
     permits_channel_effects: bool,
+    provider_failure: bool,
 ) -> bool {
     if !permits_channel_effects {
         return true;
+    }
+    if provider_failure {
+        return provider_failure::end_status_panel(
+            shared,
+            gateway,
+            channel_id,
+            status_panel_msg_id,
+            provider,
+            started_at_unix,
+            last_status_panel_text,
+        )
+        .await;
     }
     complete_status_panel_v2_on_surface(
         shared,
@@ -302,6 +315,7 @@ async fn complete_status_panel_v2_on_surface<G: TurnGateway + ?Sized>(
 }
 
 mod fallback;
+pub(super) mod provider_failure;
 mod purge;
 mod singleton;
 use fallback::{

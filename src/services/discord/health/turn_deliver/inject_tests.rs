@@ -240,7 +240,7 @@ impl InjectPane {
     }
 
     /// Leaves only the channel name to name the pane.
-    async fn drop_row(&self, shared: &SharedData) {
+    pub(in crate::services::discord) async fn drop_row(&self, shared: &SharedData) {
         crate::services::discord::inflight::clear_inflight_state(
             &ProviderKind::Claude,
             self.channel,
@@ -1852,3 +1852,6 @@ async fn a_pane_veto_stays_logged_when_the_delivery_starts_or_fails() {
         assert!(line.contains("inject_attempted=true"), "{line}");
     }
 }
+
+#[path = "inject/turn_mode_reading_tests.rs"]
+mod turn_mode_reading;

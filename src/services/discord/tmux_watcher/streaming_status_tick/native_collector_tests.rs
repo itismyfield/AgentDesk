@@ -187,6 +187,7 @@ fn native_collector_case(test_name: &str, mode: u8) {
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
             host: Arc::new(HostSnapshot::new(WatchHost::Legacy)),
             legacy_mode: WatcherLegacyMode::Legacy,
+            watcher_instance_id: 1,
         };
         shared.tmux_watchers.insert(
             fx.channel,

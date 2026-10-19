@@ -2025,6 +2025,11 @@ pub(crate) mod p11 {
         /// The server and the boot section for `channel`, installed for this whole child
         /// process; nothing under the runtime root is written yet.
         pub(crate) fn boot(channel: u64) -> Self {
+            Self::boot_with(channel, false)
+        }
+
+        /// As `boot`, with the recorded provider's process read as alive when `provider_alive`.
+        pub(crate) fn boot_with(channel: u64, provider_alive: bool) -> Self {
             assert!(std::env::var_os(TERMINATE_TEST_CHILD).is_some());
             let server = serve();
             server.vanish_on_close.store(true, Ordering::SeqCst);
@@ -2052,7 +2057,7 @@ pub(crate) mod p11 {
             Self {
                 server,
                 boot,
-                os: ScriptedOs::new(pending, Ok(false)),
+                os: ScriptedOs::new(pending, Ok(provider_alive)),
                 channel,
             }
         }
@@ -2086,12 +2091,52 @@ pub(crate) mod p11 {
             session_key: &str,
             state: HostedState,
         ) -> LiveSwitches {
+            let held = state != HostedState::Retired;
+            self.insert(pool, (token_hash, session_key), state, held, true)
+                .await
+        }
+
+        /// As `bind` for a Pending execution no attach ever took: no hold, evidence recorded.
+        pub(crate) async fn bind_never_attached(
+            &self,
+            pool: &sqlx::PgPool,
+            token_hash: &str,
+            session_key: &str,
+        ) -> LiveSwitches {
+            let pending = HostedState::Pending;
+            self.insert(pool, (token_hash, session_key), pending, false, true)
+                .await
+        }
+
+        /// As `bind_never_attached` for a launch whose provider was never proven: no evidence.
+        pub(crate) async fn bind_without_evidence(
+            &self,
+            pool: &sqlx::PgPool,
+            token_hash: &str,
+            session_key: &str,
+        ) -> LiveSwitches {
+            let pending = HostedState::Pending;
+            self.insert(pool, (token_hash, session_key), pending, false, false)
+                .await
+        }
+
+        async fn insert(
+            &self,
+            pool: &sqlx::PgPool,
+            (token_hash, session_key): (&str, &str),
+            state: HostedState,
+            held: bool,
+            evidence: bool,
+        ) -> LiveSwitches {
             let logical = session_key.rsplit_once(':').unwrap().1;
             let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
             std::fs::write(marker, "herdr").unwrap();
             self.os
                 .swap(Arc::new(FakeOs::launched(env_naming(&context(NONCE)))));
             let mut record = stored(&self.server, state);
+            if !evidence {
+                record.expected = None;
+            }
             record.owner.discord_token_hash = token_hash.into();
             record.owner.channel_id = self.channel.to_string();
             record.owner.logical_key = logical.into();
@@ -2101,14 +2146,11 @@ pub(crate) mod p11 {
                 .bind(session_key).bind(token_hash).bind(self.channel.to_string())
                 .bind(serde_json::to_value(&record).unwrap())
                 .execute(pool).await.unwrap();
-            if state != HostedState::Retired {
+            if held {
                 crate::services::claude::herdr_turn::hold(NONCE).unwrap();
             }
             let switches = LiveSwitches(LiveTerminateSwitch::new());
-            let mut config = switches.0.0.clone();
-            config.runtime.herdr_terminate_enabled = Some(true);
-            config.runtime.herdr_turn_enabled = Some(true);
-            crate::config_live_reload::install(config);
+            switches.set_terminate(Some(true));
             switches
         }
 
@@ -2207,6 +2249,16 @@ pub(crate) mod p11 {
 
     /// Restores the live config the child started with.
     pub(crate) struct LiveSwitches(LiveTerminateSwitch);
+
+    impl LiveSwitches {
+        /// The live terminate switch set to `enabled`, the turn switch on.
+        pub(crate) fn set_terminate(&self, enabled: Option<bool>) {
+            let mut config = self.0.0.clone();
+            config.runtime.herdr_terminate_enabled = enabled;
+            config.runtime.herdr_turn_enabled = Some(true);
+            crate::config_live_reload::install(config);
+        }
+    }
 
     /// A held end check: the service waits between its close and its retire CAS.
     pub(crate) struct EndCheckPause {

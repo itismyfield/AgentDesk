@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner, pending, record};
+use crate::db::dispatched_sessions::hosted_execution::tests::{
+    expected, location, owner, pending, record,
+};
 use crate::services::session_host::{RestoreUnverified, ServerWitness};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 
@@ -375,7 +377,7 @@ async fn herdr_launch_creates_nothing_unless_its_own_pending_commits_pg() {
     }
     assert_eq!(stored(&pool).await, None);
 
-    // A failed launch script leaves no Pending; a failed marker leaves Pending without a pane.
+    // A failed launch script leaves no Pending; a failed marker retires its own, which names no pane.
     seed_row(&pool, None).await;
     let host = Arc::new(FakeHost::created("pane-1"));
     let failed = |_: &PreparedIncarnation| Err("launch script".to_string());
@@ -388,10 +390,29 @@ async fn herdr_launch_creates_nothing_unless_its_own_pending_commits_pg() {
     let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone());
     assert!(matches!(result.await, Err(HerdrLaunchError::Marker(_))));
     let HostedRecord::Known(left) = decoded(stored(&pool).await) else {
-        panic!("Pending stays");
+        panic!("the execution stays recorded");
     };
-    assert_eq!(left, pending(&owner, &left.execution_nonce));
+    let mut retired = pending(&owner, &left.execution_nonce);
+    retired.state = HostedState::Retired;
+    assert_eq!(left, retired);
     assert_eq!(host.creates.load(Ordering::SeqCst), 0);
+    pool.close().await;
+    db.drop().await;
+}
+
+// A Pending that names a pane may have made one, so an unsent create of its launch never retires it.
+#[tokio::test(flavor = "multi_thread")]
+async fn herdr_launch_keeps_a_pending_that_names_a_pane_after_an_unsent_create_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut placed = pending(&owner(CHANNEL), "n1");
+    placed.location = Some(location("pane-1"));
+    seed_row(&pool, Some(wire(&placed))).await;
+    let unsent = HerdrLaunchError::NotSent("connect refused".into());
+    let returned = retire_unsent(&pool, &owner(CHANNEL), "n1", unsent.clone()).await;
+    assert_eq!(returned, unsent);
+    assert_eq!(decoded(stored(&pool).await), HostedRecord::Known(placed));
     pool.close().await;
     db.drop().await;
 }
@@ -418,7 +439,7 @@ async fn herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_repl
         let result =
             launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone()).await;
         let HostedRecord::Known(left) = decoded(stored(&pool).await) else {
-            panic!("{reply:?}: Pending must stay");
+            panic!("{reply:?}: the execution must stay recorded");
         };
         match (&reply, result) {
             (HerdrCreateOutcome::NotSent(_), Err(HerdrLaunchError::NotSent(_))) => {}
@@ -432,11 +453,12 @@ async fn herdr_launch_keeps_pending_and_never_recreates_after_a_lost_create_repl
             }
             (_, other) => panic!("{reply:?}: {other:?}"),
         }
-        assert_eq!(
-            left,
-            pending(&owner(CHANNEL), &left.execution_nonce),
-            "{reply:?}"
-        );
+        // Only a create that never left retires its Pending; one that may have made a pane keeps it.
+        let mut kept = pending(&owner(CHANNEL), &left.execution_nonce);
+        if matches!(reply, HerdrCreateOutcome::NotSent(_)) {
+            kept.state = HostedState::Retired;
+        }
+        assert_eq!(left, kept, "{reply:?}");
         assert_eq!(host.creates.load(Ordering::SeqCst), 1, "{reply:?}: resent");
         assert_eq!(host.probes.load(Ordering::SeqCst), 0, "{reply:?}: adopted");
         assert_eq!(marker(), HostKindMarker::Known(HostKind::Herdr));
@@ -636,8 +658,9 @@ async fn herdr_launch_reads_restore_resume_again_right_before_create_pg() {
             assert!(servers.is_empty(), "{second:?}: no create");
             let kept = decoded(stored(&pool).await);
             assert!(
-                matches!(&kept, HostedRecord::Known(record) if record.state == HostedState::Pending),
-                "the refusal deletes nothing: {kept:?}"
+                matches!(&kept, HostedRecord::Known(record)
+                    if record.state == HostedState::Retired && record.location.is_none()),
+                "the refusal deletes nothing and retires its own Pending: {kept:?}"
             );
         }
         pool.close().await;
@@ -831,4 +854,58 @@ fn herdr_launch_gate_needs_an_owned_ready_channel_with_a_checkpoint_and_changes_
         before,
         "the gate only reads the store"
     );
+}
+
+// A late-reserved channel delegated here is not O's for a Herdr turn whatever its home and writer:
+// its output stays Legacy's, so its first input is refused before any launch.
+#[test]
+fn a_late_reserved_delegated_channel_is_not_o_owned_for_a_herdr_turn() {
+    use crate::db::o_channel_homes::HomeState;
+    use crate::services::cluster::channel_home;
+    use crate::services::tui_o::channel_policy::{self, BootChannels};
+    use crate::services::tui_o::cutover::{self, test_override};
+    const LATE: u64 = 9_300_000_000_000_201;
+    let root = tempfile::tempdir().unwrap();
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "server": {},
+        "tui_o": {"writer": {"channels": [LATE], "late_adopt": true}},
+        "agents": [{"id": "late", "name": "Late", "channels": {
+            "claude": {"id": LATE.to_string(), "runtime": "tui"}
+        }}]
+    }))
+    .unwrap();
+    let snapshot = BootChannels::validate(&config)
+        .unwrap()
+        .seeded(true, &config, |channels, _| {
+            Ok(channel_policy::stored(Some(root.path()), channels))
+        })
+        .unwrap();
+    let _boot = test_override::force_boot(snapshot);
+    let reserved = cutover::boot_ownership()
+        .into_iter()
+        .find(|(c, ..)| *c == LATE);
+    let candidate = reserved
+        .and_then(|(.., candidate)| candidate)
+        .expect("a candidate");
+    assert!(
+        candidate.late_adopt_origin(),
+        "the boot reserved it for late adoption"
+    );
+    let home = channel_home::register_for_test(LATE, Some(HomeState::Worker));
+    assert!(home.intake_open(), "its home is held here with intake open");
+    let _accepts = force_writer_accepts(Some(true));
+    let (store, era) = o_store_for_test(root.path(), &[LATE]);
+    let mut opened = store.open_channel(&era, LATE).unwrap().unwrap();
+    opened.set_binding_checkpoint(0).unwrap();
+    assert_eq!(
+        cutover::peek_o_owns_tui_output_for_channel(LATE, Some(RuntimeHandoffKind::ClaudeTui)),
+        Ok(false),
+        "a late reservation leaves the output Legacy's"
+    );
+    assert!(!o_ready_at(
+        Some(root.path()),
+        LATE,
+        RuntimeHandoffKind::ClaudeTui
+    ));
+    channel_home::unregister(&LATE.to_string());
 }

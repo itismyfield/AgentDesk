@@ -284,7 +284,7 @@ class DormantCensusTests(unittest.TestCase):
         self.assertEqual(self.inspect('fn unrelated() { RETIRED.insert(key); }'), [])
         errors = self.inspect('fn writer() { legacy_supervision::RETIRED.get_or_init(make); }')
         self.assertEqual(len(errors), 1)
-        self.assertIn(':writer: external RETIRED', errors[0])
+        self.assertIn(':writer: external legacy_supervision', errors[0])
 
     def test_protected_body_and_helper_manifest_drift_fail(self):
         errors = guard.audit({'primitive.rs': 'fn extra() {}', 'canonical.rs': 'changed'},
@@ -295,7 +295,6 @@ class DormantCensusTests(unittest.TestCase):
 
     # Narrowed pins run on the real main sources: what each function pin catches and what it lets pass.
     TURN = 'src/services/discord/tui_direct_pending_start/turn_retirement.rs'
-    LEGACY = 'src/services/discord/health/legacy_supervision.rs'
 
     def protected_audit(self, path, edit=lambda code: code):
         code = edit(guard.classifier._production_text(Path(path)))
@@ -349,12 +348,17 @@ class DormantCensusTests(unittest.TestCase):
             code = guard.classifier._production_text(path)
         self.assertTrue(guard.function_text(code, 'start').endswith('run(); }'))
 
-    def test_new_pub_fn_in_legacy_supervision_fails(self):
-        errors = self.protected_audit(self.LEGACY, lambda code: code + (
-            '\npub(in crate::services::discord) fn mark(p: &str, c: u64) '
-            '{ RETIRED.get_or_init(Default::default); }\n'))
-        self.assertEqual(len(errors), 1)
-        self.assertIn(self.LEGACY + '::*: protected boot/RETIRED body changed', errors[0])
+    def test_restored_retired_gate_fails(self):
+        legacy = 'src/services/discord/health/legacy_supervision.rs'
+        errors = guard.audit({legacy: 'static RETIRED: Set = Set::new();'}, entries={}, protected={})
+        self.assertEqual(errors, [legacy + ': deleted RETIRED owner restored'])
+        for reader in ('legacy_retired(p, c, "site")', 'retired_in(&cell, p, c)',
+                       'RetiredForTest::new(p, c)'):
+            with self.subTest(reader=reader):
+                errors = self.inspect('fn backstop() { ' + reader + '; }')
+                self.assertEqual(len(errors), 1)
+                self.assertIn(':backstop: external ' + reader.split('(')[0].split('::')[0], errors[0])
+        self.assertEqual(self.inspect('fn count() { counters.retired_incarnation += 1; }'), [])
 
     def test_new_primitive_macro_or_hidden_file_fails(self):
         entries = {guard.R + '.rs': ''}

@@ -192,6 +192,10 @@ fn build_fallback_session_key_for_clear(
 #[cfg(test)]
 mod clear_wait_tests;
 #[cfg(test)]
+pub(in crate::services::discord) mod codex_clear_relaunch_tests;
+#[cfg(test)]
+mod codex_clear_retirement_tests;
+#[cfg(test)]
 #[cfg(unix)]
 mod codex_verified_clear_tests;
 
@@ -575,7 +579,7 @@ pub(super) fn parse_queued_message_id(raw: &str) -> Option<MessageId> {
         .map(MessageId::new)
 }
 
-/// /cancel-queued — Remove one queued message without affecting active work.
+/// /cancel-queued <message_id> — Remove one queued message (`/queue` shows IDs)
 ///
 /// The target is an exact Discord message id. The mailbox actor serializes the
 /// removal against dispatch, so a queued-to-active race is reported as stale

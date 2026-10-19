@@ -25,6 +25,9 @@ mod coordinate_adoption;
 #[cfg(test)]
 mod coordinate_adoption_tests;
 mod episode_handoff;
+mod raw_cursor_keep;
+#[cfg(all(test, unix))]
+mod raw_cursor_keep_tests;
 mod test_barriers;
 mod watcher_claim;
 #[cfg(test)]
@@ -34,12 +37,12 @@ use watcher_claim::claim_rebind_watcher;
 
 pub(crate) use self::adoption::{
     claude_tui_force_initial_offset_for_adopted_transcript,
-    claude_tui_rebind_should_reregister_runtime_binding, rebind_initial_offset_with_floor,
-    rebind_initial_offset_with_floor_unless_forced, rebind_output_paths_same,
+    claude_tui_rebind_should_reregister_runtime_binding,
+    rebind_initial_offset_with_floor_unless_forced,
 };
 pub(crate) use self::codex_tui_replay::{
     CodexTuiRebindPromptReplayEvidence, PendingCodexTuiRebindRelay,
-    codex_tui_existing_inflight_cursor_is_raw_rollout, codex_tui_existing_inflight_raw_cursor,
+    codex_tui_existing_inflight_cursor_is_raw_rollout,
     codex_tui_existing_normalized_relay_replay_events,
     codex_tui_existing_normalized_relay_resume_path,
     codex_tui_rebind_already_relayed_response_prefix, codex_tui_rebind_crossed_provider_turn,
@@ -401,7 +404,17 @@ async fn rebind_inflight_for_channel_inner(
         });
     let mut pending_codex_tui_rebind_relay: Option<PendingCodexTuiRebindRelay> = None;
     let mut discard_restored_render_seed = false;
-    if let Some(rollout_path) = runtime_state.codex_rollout_path.as_deref() {
+    if let Some(raw_path) = raw_cursor_keep::matching_raw_cursor(
+        &tmux_session_name,
+        existing_inflight.as_ref(),
+        runtime_state.codex_rollout_path.as_deref(),
+    ) {
+        output_path = raw_path;
+        force_initial_offset = None;
+        existing_offset_rebase_to_output = None;
+        // The floor is channel-scoped, not an A offset; the sink drops the replayed overlap.
+        minimum_initial_offset = None;
+    } else if let Some(rollout_path) = runtime_state.codex_rollout_path.as_deref() {
         let prompt_replay_evidence = existing_inflight
             .as_ref()
             .filter(|existing| {
@@ -432,10 +445,7 @@ async fn rebind_inflight_for_channel_inner(
             existing_inflight.as_ref(),
             prompt_replay_evidence,
         );
-        // The persisted prompt boundary belongs to the stale turn. A marker
-        // can also be stale while dcserver is down, so a crossed-turn rebuild
-        // begins at the latest proven user-prompt boundary rather than
-        // re-posting earlier turns into the replacement Discord surface.
+        // A crossed-turn rebuild starts at the latest proven user-prompt boundary.
         raw_start_offset = codex_tui_rebind_start_after_crossed_provider_turn(
             raw_start_offset,
             discard_restored_render_seed,
@@ -493,33 +503,27 @@ async fn rebind_inflight_for_channel_inner(
                 "Codex rebind found a later rollout user prompt; rebuilding at the latest prompt frontier and dropping the stale Discord render seed"
             );
         }
-        if let Some(relay_path) = normalized_relay_resume_path {
-            output_path = relay_path;
-            force_initial_offset = None;
-            existing_offset_rebase_to_output = None;
-            pending_codex_tui_rebind_relay = Some(PendingCodexTuiRebindRelay {
-                rollout_path: rollout_path.to_string(),
-                raw_start_offset,
-                truncate_relay_output: false,
-                session_id: session_id_for_state.clone(),
-                already_relayed_response,
-                already_normalized_replay_events,
-            });
-        } else {
-            output_path =
-                crate::services::tmux_common::session_temp_path(&tmux_session_name, "jsonl");
-            pending_codex_tui_rebind_relay = Some(PendingCodexTuiRebindRelay {
-                rollout_path: rollout_path.to_string(),
-                raw_start_offset,
-                truncate_relay_output: true,
-                session_id: session_id_for_state.clone(),
-                already_relayed_response,
-                already_normalized_replay_events: Vec::new(),
-            });
+        let truncate_relay_output = normalized_relay_resume_path.is_none();
+        output_path = normalized_relay_resume_path.unwrap_or_else(|| {
+            crate::services::tmux_common::session_temp_path(&tmux_session_name, "jsonl")
+        });
+        force_initial_offset = truncate_relay_output.then_some(0);
+        existing_offset_rebase_to_output = force_initial_offset;
+        if truncate_relay_output {
             synthetic_initial_offset = 0;
-            force_initial_offset = Some(0);
-            existing_offset_rebase_to_output = Some(0);
         }
+        pending_codex_tui_rebind_relay = Some(PendingCodexTuiRebindRelay {
+            rollout_path: rollout_path.to_string(),
+            raw_start_offset,
+            truncate_relay_output,
+            session_id: session_id_for_state.clone(),
+            already_relayed_response,
+            already_normalized_replay_events: if truncate_relay_output {
+                Vec::new()
+            } else {
+                already_normalized_replay_events
+            },
+        });
     }
 
     let initial_offset_without_floor = if let Some(offset) = force_initial_offset {
@@ -550,13 +554,8 @@ async fn rebind_inflight_for_channel_inner(
         synthetic_initial_offset
     };
     let output_len_for_floor = if force_initial_offset.is_some() {
-        // A forced initial offset is already expressed in the coordinate space
-        // the watcher must use. In the Codex-TUI rebuild path we deliberately
-        // set it to 0 before `spawn_codex_tui_rebind_relay_output` truncates the
-        // normalized relay file; applying a durable floor here would mix the old
-        // pre-truncation file coordinates into the new zero-based relay stream.
-        // This exemption also covers remembered retry floors, which arrive
-        // through `minimum_initial_offset`.
+        // Forced offsets use the new output's coordinates; old durable floors
+        // cannot be applied to a normalized relay that is about to be truncated.
         None
     } else {
         Some(

@@ -272,6 +272,7 @@ struct RoutinesRestartFingerprint {
     tick_interval_secs: u64,
     default_timezone: String,
     agent_timeout_secs: u64,
+    headless_fresh_agents: bool,
     max_checkpoint_bytes: usize,
 }
 
@@ -282,6 +283,7 @@ fn routines_restart_fingerprint(routines: &RoutinesConfig) -> RoutinesRestartFin
         tick_interval_secs: routines.tick_interval_secs,
         default_timezone: routines.default_timezone.clone(),
         agent_timeout_secs: routines.agent_timeout_secs,
+        headless_fresh_agents: routines.headless_fresh_agents,
         max_checkpoint_bytes: routines.max_checkpoint_bytes,
     }
 }
@@ -1027,6 +1029,10 @@ mod tests {
         let mut enabled = base.clone();
         enabled.routines.enabled = !base.routines.enabled;
         assert_eq!(restart_required_changes(&base, &enabled), vec!["routines"]);
+
+        let mut headless = base.clone();
+        headless.routines.headless_fresh_agents = true;
+        assert_eq!(restart_required_changes(&base, &headless), vec!["routines"]);
 
         let mut dir = base.clone();
         dir.routines.dir = PathBuf::from("./alternate-routines");

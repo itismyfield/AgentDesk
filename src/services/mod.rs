@@ -40,7 +40,6 @@ pub mod dispatch_watchdog;
 pub mod dispatched_sessions;
 pub mod dispatches;
 pub mod dispatches_followup;
-pub mod escalation_settings;
 pub mod explicit_auth_route;
 pub mod gemini;
 pub mod git;

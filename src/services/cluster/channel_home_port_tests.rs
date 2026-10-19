@@ -1,6 +1,7 @@
 //! The production drain port read against a hosted O writer and the channel's mailbox.
 
 use super::*;
+use crate::services::cluster::channel_home_boot;
 use crate::services::tui_o::writer::actor::{Owing, Undelivered};
 use crate::services::turn_orchestrator::ChannelMailboxSnapshot;
 use crate::services::turn_orchestrator::registry_purge::MailboxRefusal;
@@ -41,6 +42,119 @@ async fn the_turn_comes_from_the_mailbox_and_nothing_unknown_reads_as_zero() {
     for channel in [QUEUED, QUIET, GONE] {
         registry.remove_fixture_for_test(ChannelId::new(channel));
     }
+}
+
+/// One P5 binding event of `channel` as the hook log lines it.
+fn p5_line(channel: u64) -> Vec<u8> {
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    let event = p5::BindingEvent {
+        seq: 1,
+        channel_id: channel,
+        provider: "claude".into(),
+        tmux_session: "tmux".into(),
+        execution_nonce: None,
+        old: None,
+        new: p5::BindingTarget::Pending {
+            payload_session_id: "s".into(),
+            payload_transcript_path: None,
+        },
+        cause: p5::BindingCause::Startup,
+        parent_hint: None,
+        evidence: p5::BindingEvidence {
+            hook_event: None,
+            received_at: chrono::Utc::now(),
+        },
+        committed_at: chrono::Utc::now(),
+    };
+    let mut line = serde_json::to_vec(&event).unwrap();
+    line.push(b'\n');
+    line
+}
+
+// Under the writer's root, a channel with neither a store directory nor a P5 event owes nothing and
+// runs no POST; a directory in any state, an unreadable entry or a bound session stays unknown.
+#[tokio::test]
+async fn only_a_channel_never_stored_nor_bound_here_reads_as_nothing_owed() {
+    use crate::services::tui_o::store::STORE_DIR_NAME;
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    const NEVER: u64 = 9_100_000_000_000_011;
+    const STORED: u64 = 9_100_000_000_000_012;
+    const PARTIAL: u64 = 9_100_000_000_000_013;
+    const BOUND: u64 = 9_100_000_000_000_014;
+    let (root, flat) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store = root.path().join(STORE_DIR_NAME);
+    std::fs::create_dir_all(store.join(STORED.to_string()).join("spool")).unwrap();
+    std::fs::write(store.join(STORED.to_string()).join("init"), b"{}").unwrap();
+    std::fs::create_dir_all(store.join(PARTIAL.to_string())).unwrap();
+    std::fs::write(store.join(PARTIAL.to_string()).join("ledger"), b"").unwrap();
+    let log = root.path().join(p5::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(log.join(format!("{BOUND}.log")), p5_line(BOUND)).unwrap();
+    std::fs::write(flat.path().join(STORE_DIR_NAME), b"not a directory").unwrap();
+    let saved = p5::test_root();
+    if !channel_home_boot::writer_mutant("p5_root_unset") {
+        p5::set_test_root(Some(root.path()));
+    }
+    let under = |root: &tempfile::TempDir, channel| {
+        let port = ChannelHomePort::new(channel, Arc::default(), restored());
+        port.stored_under(Some(root.path().to_path_buf()))
+    };
+    let read =
+        |port: ChannelHomePort| async move { (port.owed().await, port.posts_in_flight().await) };
+
+    assert_eq!(
+        read(under(&root, NEVER)).await,
+        (Some(Owed::default()), Some(0))
+    );
+    assert_eq!(read(under(&root, STORED)).await, (None, None), "a store");
+    assert_eq!(
+        read(under(&root, PARTIAL)).await,
+        (None, None),
+        "an init not yet written"
+    );
+    assert_eq!(
+        read(under(&root, BOUND)).await,
+        (None, None),
+        "a session bound here"
+    );
+    assert_eq!(
+        read(under(&flat, NEVER)).await,
+        (None, None),
+        "an unreadable entry"
+    );
+    assert_eq!(
+        p5::test_root().as_deref(),
+        Some(root.path()),
+        "the reads saw this root"
+    );
+    p5::set_test_root(saved.as_deref());
+}
+
+// A P5 log that cannot be read is no empty one: a channel without a store whose log is corrupt
+// stays unknown, never read as one O never held here.
+#[tokio::test]
+async fn an_unreadable_p5_log_is_not_a_channel_never_bound_here() {
+    use crate::services::tui_o::writer::binding::BindingLog;
+    use crate::services::tui_prompt_dedupe::binding_events as p5;
+    const CORRUPT: u64 = 9_100_000_000_000_015;
+    let root = tempfile::tempdir().unwrap();
+    let log = root.path().join(p5::BINDING_EVENTS_DIR);
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(log.join(format!("{CORRUPT}.log")), b"not json\n").unwrap();
+    let saved = p5::test_root();
+    p5::set_test_root(Some(root.path()));
+    assert!(
+        BindingLog.binding_events_since(CORRUPT, 0).is_err(),
+        "the log reads as an error, not as no event"
+    );
+    let port = ChannelHomePort::new(CORRUPT, Arc::default(), restored());
+    let port = port.stored_under(Some(root.path().to_path_buf()));
+    assert_eq!(
+        (port.owed().await, port.posts_in_flight().await),
+        (None, None),
+        "a corrupt log is unknown"
+    );
+    p5::set_test_root(saved.as_deref());
 }
 
 fn hosted_owing(ready: &Readiness, channel: u64) -> Owing {

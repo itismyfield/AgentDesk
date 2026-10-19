@@ -1,5 +1,5 @@
 use crate::voice::{VoiceConfig, barge_in::BargeInSensitivity};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,9 +20,11 @@ pub(crate) mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub(crate) mod disk_write;
 mod peer_filter;
+mod tool_activity_display;
 pub(crate) use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
+pub use tool_activity_display::ToolActivityDisplay;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Config {
@@ -63,8 +65,6 @@ pub struct Config {
     pub runtime: RuntimeSettingsConfig,
     #[serde(default, skip_serializing_if = "RoutinesConfig::is_default")]
     pub routines: RoutinesConfig,
-    #[serde(default, skip_serializing_if = "EscalationConfig::is_empty")]
-    pub escalation: EscalationConfig,
     #[serde(default, skip_serializing_if = "OnboardingConfig::is_empty")]
     pub onboarding: OnboardingConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1307,13 +1307,8 @@ pub struct PlaceholderConfig {
     pub live_events_enabled: bool,
     #[serde(default = "default_true")]
     pub status_panel_v2_enabled: bool,
-    /// #3805 P2: rollout gate for the two-message panel model (answer chunks
-    /// first, the live status panel re-anchored beneath the latest chunk).
-    /// Default OFF and restart-required — the whole `placeholder` section is
-    /// boot-bound, copied into shared UI state once at startup (see
-    /// `config_live_reload::restart_required_changes`). PR-A is pure
-    /// scaffolding: no branch reads this flag yet (later PR-B~ gates the
-    /// two-message create/re-anchor path behind it).
+    pub tool_activity_display: ToolActivityDisplay,
+    /// Restart-required rollout gate for the two-message panel model (default OFF).
     #[serde(default)]
     pub two_message_panel_enabled: bool,
 }
@@ -1323,6 +1318,7 @@ impl Default for PlaceholderConfig {
         Self {
             live_events_enabled: true,
             status_panel_v2_enabled: true,
+            tool_activity_display: ToolActivityDisplay::default(),
             two_message_panel_enabled: false,
         }
     }
@@ -1961,120 +1957,6 @@ mod runtime_hook_registry_config_tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum EscalationMode {
-    Pm,
-    User,
-    Scheduled,
-}
-
-impl Default for EscalationMode {
-    fn default() -> Self {
-        Self::Pm
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationScheduleConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pm_hours: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timezone: Option<String>,
-}
-
-impl EscalationScheduleConfig {
-    pub fn is_empty(&self) -> bool {
-        self.pm_hours.is_none() && self.timezone.is_none()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationConfig {
-    #[serde(default)]
-    pub mode: EscalationMode,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_u64",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub owner_user_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pm_channel_id: Option<String>,
-    #[serde(default, skip_serializing_if = "EscalationScheduleConfig::is_empty")]
-    pub schedule: EscalationScheduleConfig,
-}
-
-impl EscalationConfig {
-    pub fn is_empty(&self) -> bool {
-        self.mode == EscalationMode::Pm
-            && self.owner_user_id.is_none()
-            && self.pm_channel_id.is_none()
-            && self.schedule.is_empty()
-    }
-}
-
-/// Default PM-hours window applied when escalation settings leave it unset.
-pub const DEFAULT_ESCALATION_PM_HOURS: &str = "00:00-08:00";
-/// Default timezone applied when escalation settings leave it unset.
-pub const DEFAULT_ESCALATION_TIMEZONE: &str = "Asia/Seoul";
-
-/// Resolved (non-optional) escalation schedule used by the settings API and
-/// Discord text commands. Distinct from [`EscalationScheduleConfig`], which is
-/// the optional on-disk config representation; this is the materialized
-/// wire/runtime shape with defaults applied.
-///
-/// Lives in the config (domain) layer so service-layer callers can depend on it
-/// without reaching back into the server route module that owns the HTTP
-/// handlers (#3037 service→server backflow).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationScheduleSettings {
-    pub pm_hours: String,
-    pub timezone: String,
-}
-
-impl Default for EscalationScheduleSettings {
-    fn default() -> Self {
-        Self {
-            pm_hours: DEFAULT_ESCALATION_PM_HOURS.to_string(),
-            timezone: DEFAULT_ESCALATION_TIMEZONE.to_string(),
-        }
-    }
-}
-
-/// Resolved escalation settings (materialized wire/runtime shape with defaults
-/// applied). See [`EscalationScheduleSettings`] for the layering rationale.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct EscalationSettings {
-    pub mode: EscalationMode,
-    pub owner_user_id: Option<u64>,
-    pub pm_channel_id: Option<String>,
-    pub schedule: EscalationScheduleSettings,
-}
-
-impl Default for EscalationSettings {
-    fn default() -> Self {
-        Self {
-            mode: EscalationMode::Pm,
-            owner_user_id: None,
-            pm_channel_id: None,
-            schedule: EscalationScheduleSettings::default(),
-        }
-    }
-}
-
-/// API response body for the escalation settings endpoint: the current
-/// effective settings plus the computed defaults.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EscalationSettingsResponse {
-    pub current: EscalationSettings,
-    pub defaults: EscalationSettings,
-}
-
 /// Onboarding wizard / agent-factory rules. Externalizes the values that used
 /// to be hardcoded inside the `project-agentfactory` Discord prompt: the
 /// active Discord guild ID, the named category IDs new channels can be
@@ -2472,17 +2354,14 @@ impl Default for PoliciesConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct RoutinesConfig {
-    /// Master on/off switch. Defaults to false; requires PostgreSQL and is
-    /// unavailable without the PG control plane.
+    /// Master on/off switch. Defaults to false; requires the PostgreSQL control plane.
     #[serde(default)]
     pub enabled: bool,
-    /// Release-managed directory containing bundled *.js routine scripts.
-    /// Defaults to `./routines`.
+    /// Release-managed bundled *.js routine directory. Defaults to `./routines`.
     #[serde(default = "default_routines_dir")]
     pub dir: PathBuf,
-    /// Additional operator-managed routine script directories. These are loaded
-    /// after `dir`, so a script with the same relative path overrides the
-    /// bundled script without being copied into the release directory.
+    /// Operator-managed directories loaded after `dir`; matching relative paths
+    /// override bundled scripts without copying them into the release directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_dirs: Vec<PathBuf>,
     /// How often the due-scan tick runs, in seconds. Defaults to 30.
@@ -2500,6 +2379,9 @@ pub struct RoutinesConfig {
     /// Default maximum wait for agent-backed routine completion, in seconds.
     #[serde(default = "default_routines_agent_timeout_secs")]
     pub agent_timeout_secs: u64,
+    /// Opt in to headless fresh agent runs. Defaults to false; requires restart.
+    #[serde(default)]
+    pub headless_fresh_agents: bool,
     /// Maximum serialized checkpoint payload accepted from a routine run.
     #[serde(default = "default_routines_max_checkpoint_bytes")]
     pub max_checkpoint_bytes: usize,
@@ -2525,7 +2407,6 @@ pub struct RoutinesConfig {
     /// `'migration_invalid'`, or `NULL` (pre-existing rows) are NEVER touched.
     /// The `ResumeRequiresNextDueAt` guard also applies: schedule-less routines
     /// with no `next_due_at` are skipped.
-    ///
     /// Defaults to 0 (disabled). Set to e.g. 3600 (1 hour) to enable.
     #[serde(default)]
     pub failure_pause_auto_resume_secs: u64,
@@ -2550,6 +2431,7 @@ impl Default for RoutinesConfig {
             max_agent_polls_per_tick: default_routines_max_agent_polls_per_tick(),
             default_timezone: default_routines_timezone(),
             agent_timeout_secs: default_routines_agent_timeout_secs(),
+            headless_fresh_agents: false,
             max_checkpoint_bytes: default_routines_max_checkpoint_bytes(),
             hot_reload: true,
             stale_paused_alert_secs: 0,
@@ -2620,6 +2502,20 @@ fn default_routines_max_consecutive_failures() -> u32 {
 #[cfg(test)]
 mod routine_config_unit_tests {
     use super::*;
+
+    #[test]
+    fn headless_fresh_agents_defaults_to_disabled() {
+        let config: RoutinesConfig = serde_json::from_str("{}").expect("empty routines config");
+        assert!(!config.headless_fresh_agents);
+        assert_eq!(config, RoutinesConfig::default());
+    }
+
+    #[test]
+    fn headless_fresh_agents_deserializes_opt_in() {
+        let config: RoutinesConfig =
+            serde_json::from_str(r#"{"headless_fresh_agents":true}"#).expect("headless opt-in");
+        assert!(config.headless_fresh_agents);
+    }
 
     #[test]
     fn routine_script_dirs_preserve_default_then_operator_order() {
@@ -2804,7 +2700,6 @@ impl Default for Config {
             placeholder: PlaceholderConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
             routines: RoutinesConfig::default(),
-            escalation: EscalationConfig::default(),
             onboarding: OnboardingConfig::default(),
             memory: None,
             mcp: McpConfig::default(),
@@ -2886,7 +2781,6 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.cluster.runtime_profile.validate(&config.cluster)?;
     session_hosts::validate(config)?;
     config.onboarding.warn_invalid_rules();
-    validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,
     )
@@ -2934,27 +2828,6 @@ mod scheduled_message_required_mention_config_tests {
     }
 }
 
-fn validate_escalation_schedule(schedule: &EscalationScheduleConfig) -> Result<()> {
-    if let Some(timezone) = schedule.timezone.as_deref()
-        && timezone.parse::<chrono_tz::Tz>().is_err()
-    {
-        bail!("schedule.timezone must be a valid IANA timezone");
-    }
-    if let Some(pm_hours) = schedule.pm_hours.as_deref()
-        && parse_escalation_time_window(pm_hours).is_none()
-    {
-        bail!("schedule.pm_hours must be HH:MM-HH:MM");
-    }
-    Ok(())
-}
-
-fn parse_escalation_time_window(raw: &str) -> Option<(chrono::NaiveTime, chrono::NaiveTime)> {
-    let (start, end) = raw.trim().split_once('-')?;
-    let start = chrono::NaiveTime::parse_from_str(start.trim(), "%H:%M").ok()?;
-    let end = chrono::NaiveTime::parse_from_str(end.trim(), "%H:%M").ok()?;
-    Some((start, end))
-}
-
 fn register_config_secrets(config: &Config) {
     if let Some(token) = config.server.auth_token.as_deref() {
         crate::utils::redact::register_known_secret(token);
@@ -2997,20 +2870,20 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
+    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retired-shadow-config.yaml");
-        let settings = format!(
-            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n\
-             writer: {{channels: [41, 42], late_adopt: true, dormant_channels: [42]}}\n\
-             turn: {{channels: [41], all_owned: true}}\n\
-             repost: {{enabled: true, channels: [41]}}\n\
+        let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
+             turn: {channels: [41], all_owned: true}\n\
+             repost: {enabled: true, channels: [41]}\n\
              alert_channel_id: 42\n\
-             codex_history_adoption: false\n"
-        );
+             codex_history_adoption: false\n";
+        let settings =
+            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
-            serde_yaml::from_str(&settings).unwrap();
+            serde_yaml::from_str(live).unwrap();
         let indented = settings
             .lines()
             .map(|line| format!("  {line}\n"))
@@ -3033,12 +2906,10 @@ mod secret_bearing_config_file_tests {
         let output = loaded.tui_o.as_ref().unwrap();
 
         assert_eq!(output, &expected);
-        assert_eq!(output.shadow.enabled, enabled);
-        assert_eq!(output.shadow.channel_allowlist, [41, 42]);
-        assert_eq!(
-            serde_yaml::to_string(output).unwrap(),
-            serde_yaml::to_string(&expected).unwrap()
-        );
+        assert!(output.writer.late_adopt && output.repost.enabled);
+        let rendered = serde_yaml::to_string(output).unwrap();
+        assert_eq!(rendered, serde_yaml::to_string(&expected).unwrap());
+        assert!(!rendered.contains("shadow"), "{rendered}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
     }
 
@@ -3053,29 +2924,20 @@ mod secret_bearing_config_file_tests {
     }
 
     #[test]
-    fn load_from_path_rejects_invalid_escalation_schedule_timezone() {
+    fn load_from_path_ignores_retired_escalation_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
-        let mut config = Config::default();
-        config.escalation.schedule.timezone = Some("Mars/Olympus".to_string());
-        save_to_path(&path, &config).unwrap();
-
-        let error = format!("{:#}", load_from_path(&path).unwrap_err());
-
-        assert!(error.contains("schedule.timezone must be a valid IANA timezone"));
-    }
-
-    #[test]
-    fn load_from_path_rejects_invalid_escalation_schedule_pm_hours() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agentdesk.yaml");
-        let mut config = Config::default();
-        config.escalation.schedule.pm_hours = Some("soon".to_string());
-        save_to_path(&path, &config).unwrap();
-
-        let error = format!("{:#}", load_from_path(&path).unwrap_err());
-
-        assert!(error.contains("schedule.pm_hours must be HH:MM-HH:MM"));
+        save_to_path(&path, &Config::default()).unwrap();
+        let mut legacy_yaml = std::fs::read_to_string(&path).unwrap();
+        legacy_yaml.push_str("\nescalation:\n  mode: scheduled\n  owner_user_id: \"9\"\n  schedule:\n    timezone: Mars/Olympus\n");
+        std::fs::write(&path, legacy_yaml).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+        assert!(
+            serde_yaml::to_value(&loaded)
+                .unwrap()
+                .get("escalation")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3138,7 +3000,8 @@ mod secret_bearing_config_file_tests {
         let path = dir.path().join("agentdesk.yaml");
         let mut config = Config::default();
         config.database.password = Some("database-secret".to_string());
-        config.escalation.schedule.timezone = Some("Mars/Olympus".to_string());
+        config.discord.scheduled_message_required_mention_user_ids =
+            vec!["not-a-user-id".to_string()];
         save_to_path(&path, &config).unwrap();
 
         let mut loose_permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -3147,7 +3010,7 @@ mod secret_bearing_config_file_tests {
 
         let error = format!("{:#}", load_from_path(&path).unwrap_err());
 
-        assert!(error.contains("schedule.timezone must be a valid IANA timezone"));
+        assert!(error.contains("scheduled_message_required_mention_user_ids must contain"));
         let hardened_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(hardened_mode, 0o600);
     }

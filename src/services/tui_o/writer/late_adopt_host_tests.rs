@@ -357,3 +357,221 @@ async fn late_adopt_stalled_frontier_never_skips_to_eof() {
     f.assert_new_once(end).await;
     handle.stop_and_join().await.unwrap();
 }
+
+/// Startup binds of `sources` in order, each `old` naming the one before, as restarts log them.
+fn startup_binds(f: &Late, sources: &[SourceId]) {
+    let mut log = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        let event = p5::BindingEvent {
+            seq: index as u64 + 1,
+            channel_id: CHANNEL,
+            provider: "claude".into(),
+            tmux_session: "tmux".into(),
+            execution_nonce: None,
+            old: index.checked_sub(1).map(|before| sources[before].clone()),
+            new: p5::BindingTarget::Source(source.clone()),
+            cause: p5::BindingCause::Startup,
+            parent_hint: None,
+            evidence: p5::BindingEvidence {
+                hook_event: Some("SessionStart".into()),
+                received_at: chrono::Utc::now(),
+            },
+            committed_at: chrono::Utc::now(),
+        };
+        log.extend(serde_json::to_vec(&event).unwrap());
+        log.push(b'\n');
+    }
+    p5_log(f.harness._runtime.path(), CHANNEL, &log);
+}
+
+/// A delivered transcript of its own, as one restart left it.
+fn delivered_elsewhere(f: &Late, name: &str, session: &str) -> SourceId {
+    let path = f.harness._runtime.path().join(format!("{name}.jsonl"));
+    std::fs::write(
+        &path,
+        [row(name, "delivered before a restart"), closed()].concat(),
+    )
+    .unwrap();
+    source_id_for(session, &path).unwrap()
+}
+
+/// A log of `rows` restarts logged before this process: one new transcript each, the second with
+/// an empty session id, the current one last with Legacy's frontier at its end.
+fn restarted(f: &Late, rows: usize) -> (Vec<SourceId>, u64) {
+    let mut sources: Vec<SourceId> = (1..rows)
+        .map(|index| {
+            let session = if index == 2 {
+                String::new()
+            } else {
+                format!("s{index}")
+            };
+            delivered_elsewhere(f, &format!("restart-{index}"), &session)
+        })
+        .collect();
+    append(&f.path, &row("late-old", "old delivered payload"));
+    append(&f.path, &closed());
+    let end = std::fs::metadata(&f.path).unwrap().len();
+    f.legacy.frontier.store(end, Ordering::SeqCst);
+    sources.push(source_id_for(&format!("s{rows}"), &f.path).unwrap());
+    startup_binds(f, &sources);
+    (sources, end)
+}
+
+/// The one rotation the channel was released for.
+fn released_detail(f: &Late) -> String {
+    let released = f.io.alarms.released();
+    let rotations: Vec<_> = (released.iter())
+        .filter(|(channel, detail)| *channel == CHANNEL && detail.contains("bound while"))
+        .collect();
+    assert_eq!(rotations.len(), 1, "{released:?}");
+    rotations[0].1.clone()
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_adopt_history_logged_before_the_reservation_commits_and_posts_new_once() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_history_logged_before_the_reservation_commits_and_posts_new_once"
+    )) {
+        return;
+    }
+    let f = Late::new();
+    let (sources, end) = restarted(&f, 24);
+    let handle = f.start();
+    f.assert_new_once(end).await;
+    let init = f.harness.store.read_init(CHANNEL).unwrap().unwrap();
+    let starts: Vec<_> = (init.sources.iter())
+        .map(|source| (source.source_id.clone(), source.delivery_start))
+        .collect();
+    let len = |source: &SourceId| std::fs::metadata(&source.path).unwrap().len();
+    let past = sources[..23]
+        .iter()
+        .rev()
+        .map(|source| (source.clone(), len(source)));
+    let expected: Vec<_> = [(sources[23].clone(), end)]
+        .into_iter()
+        .chain(past)
+        .collect();
+    assert_eq!(
+        starts, expected,
+        "every earlier transcript starts at its end"
+    );
+    handle.stop_and_join().await.unwrap();
+    // A restart over the committed store posts neither history nor the delivered body again.
+    let _restarted = seed(&f.harness, false);
+    assert_eq!(adoption(CHANNEL), Adoption::Committed);
+    let handle = f.start();
+    append(&f.path, &row("late-after", "after restart payload"));
+    polls(3).await;
+    assert_eq!(
+        f.harness.port.posts(),
+        ["unique new payload", "after restart payload"]
+    );
+    handle.stop_and_join().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_adopt_bind_after_the_reservation_boundary_releases_naming_its_seq() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_bind_after_the_reservation_boundary_releases_naming_its_seq"
+    )) {
+        return;
+    }
+    // A new transcript, then an earlier one bound again (A→B→A), after the boundary.
+    for again in [false, true] {
+        let f = Late::new();
+        let (mut sources, end) = restarted(&f, 4);
+        f.legacy.frontier.store(0, Ordering::SeqCst);
+        let handle = f.start();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(adoption(CHANNEL), Adoption::Deferred, "again {again}");
+        let next = match again {
+            true => sources[1].clone(),
+            false => delivered_elsewhere(&f, "after-boundary", "s5"),
+        };
+        sources.push(next.clone());
+        startup_binds(&f, &sources);
+        f.legacy.frontier.store(end, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(adoption(CHANNEL), Adoption::Released, "again {again}");
+        let detail = released_detail(&f);
+        let (rotated, current) = (next.path.display(), f.path.display());
+        let expected = format!(
+            "source {rotated} was bound while the adoption waited (seq 5; baseline {current}@4; boundary 4;"
+        );
+        assert!(detail.contains(&expected), "again {again}: {detail}");
+        assert!(!init_path(&f.harness, CHANNEL).exists());
+        assert!(f.harness.port.posts().is_empty());
+        handle.stop_and_join().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_adopt_inflight_row_at_the_boundary_keeps_the_whole_history_as_baseline() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_inflight_row_at_the_boundary_keeps_the_whole_history_as_baseline"
+    )) {
+        return;
+    }
+    let f = Late::new();
+    let (sources, _) = restarted(&f, 4);
+    // A previous process's turn row survives the restart; its source is not known to be done.
+    *f.io.custody.lock().unwrap() = Ok(Custody::Row);
+    let handle = f.start();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    let (rotated, first) = (sources[1].path.display(), sources[0].path.display());
+    let expected = format!(
+        "source {rotated} was bound while the adoption waited (seq 2; baseline {first}@1; boundary 0;"
+    );
+    let detail = released_detail(&f);
+    assert!(detail.contains(&expected), "{detail}");
+    assert!(!init_path(&f.harness, CHANNEL).exists());
+    assert!(f.harness.port.posts().is_empty());
+    handle.stop_and_join().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_adopt_successor_host_keeps_the_reservation_boundary() {
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::late_adopt_successor_host_keeps_the_reservation_boundary"
+    )) {
+        return;
+    }
+    let f = Late::new();
+    let (mut sources, _) = restarted(&f, 4);
+    f.legacy.frontier.store(0, Ordering::SeqCst);
+    let handle = f.start();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(adoption(CHANNEL), Adoption::Deferred);
+    handle.keep_reservation();
+    handle.stop_and_join().await.unwrap();
+    assert_eq!(
+        adoption(CHANNEL),
+        Adoption::Deferred,
+        "the reservation is kept"
+    );
+    let next = delivered_elsewhere(&f, "between-hosts", "s5");
+    sources.push(next.clone());
+    startup_binds(&f, &sources);
+    // Legacy delivered the new transcript, so only the kept boundary refuses it.
+    *f.io.legacy.lock().unwrap() = Some(Arc::new(Legacy {
+        path: next.path.clone(),
+        frontier: AtomicU64::new(std::fs::metadata(&next.path).unwrap().len()),
+    }));
+    let handle = f.start();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(adoption(CHANNEL), Adoption::Released);
+    let (rotated, current) = (next.path.display(), f.path.display());
+    let expected = format!(
+        "source {rotated} was bound while the adoption waited (seq 5; baseline {current}@4; boundary 4;"
+    );
+    let detail = released_detail(&f);
+    assert!(detail.contains(&expected), "{detail}");
+    assert!(!init_path(&f.harness, CHANNEL).exists());
+    assert!(f.harness.port.posts().is_empty());
+    handle.stop_and_join().await.unwrap();
+}

@@ -206,7 +206,13 @@ fn plan(capture: &str) -> Result<Option<Vec<String>>, Veto> {
         {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
     std::fs::write(transcript.path(), busy_turn).unwrap();
     let text = super::frame("discord", "ann", "n1", "hello");
-    let plan = judge_before_paste(capture, transcript.path(), &text, Some((46, 37)))?;
+    let plan = judge_before_paste(
+        capture,
+        transcript.path(),
+        &text,
+        Some((46, 37)),
+        super::TurnGate::BusyOnly,
+    )?;
     Ok(match plan {
         Plan::Direct(_) => None,
         Plan::Stash(rows) => Some(rows),

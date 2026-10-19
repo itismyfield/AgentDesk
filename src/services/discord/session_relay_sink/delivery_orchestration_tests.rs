@@ -437,6 +437,30 @@ async fn native_codex_restart_sink_fixture() {
                 RelaySinkOutcome::FrameAccepted
             );
         }
+        if !successor && !retained_sink {
+            // Another file's output first: the newer file's verified native terminal
+            // must still deliver its canonical body alone, never appended to it.
+            use crate::services::cluster::stream_relay::ReadSource;
+            let other_file = temp.path().join("other-rollout.jsonl");
+            std::fs::write(&other_file, &source).unwrap();
+            let mut other = terminal.clone();
+            other.payload = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"other-file-only\"}]}}\n".into();
+            other.terminal_consumed_end = None;
+            other.read_source = Some(ReadSource {
+                file: crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                    &std::fs::File::open(&other_file).unwrap(),
+                ),
+                producer: 5,
+            });
+            assert_eq!(
+                sink.deliver(&other).await.unwrap(),
+                RelaySinkOutcome::FrameAccepted
+            );
+            terminal.read_source = Some(ReadSource {
+                file: file_identity,
+                producer: 6,
+            });
+        }
         let result = sink.deliver(&terminal).await.unwrap();
         if successor {
             assert_eq!(result, RelaySinkOutcome::TerminalNotDelivered);

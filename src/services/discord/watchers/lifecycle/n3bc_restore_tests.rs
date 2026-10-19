@@ -2,7 +2,7 @@
 use super::super::watcher_install_fixture::{fixture_with_pool, isolated, list_sessions};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::health::legacy_supervision::test_support;
+use crate::services::discord::health::test_support;
 use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::tmux_common as tc;
@@ -80,9 +80,9 @@ async fn n3bc_restore_off_registry_keeps_legacy_adoption_and_old_row_semantics_p
     ) {
         return;
     }
-    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(20));
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(20));
     let (legacy, sibling, _discord) = pair(&pool, 632_532_200).await;
     let row = seed_row(&legacy);
     let generation = PathBuf::from(tc::session_temp_path(&legacy.session, "generation"));

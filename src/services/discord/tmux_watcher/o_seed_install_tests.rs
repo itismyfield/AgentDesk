@@ -1,6 +1,6 @@
 //! Isolated real watcher entry cases, retaining raw observations through task completion.
 use super::*;
-use crate::services::discord::health::legacy_supervision::test_support::{
+use crate::services::discord::health::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
 };
 use crate::services::discord::inflight::o_seed_observation::{Guard, Snapshot};

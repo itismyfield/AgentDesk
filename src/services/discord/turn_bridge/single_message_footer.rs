@@ -20,6 +20,10 @@ pub(super) fn make_owner_now(
 }
 
 pub(super) fn bridge_single_message_panel_footer_enabled(status_panel_v2_enabled: bool) -> bool {
+    #[cfg(test)]
+    if SEPARATE_PANEL_FOR_TESTS.get() {
+        return false;
+    }
     super::single_message_panel::footer_mode_enabled(
         crate::services::discord::single_message_panel_enabled(),
         status_panel_v2_enabled,
@@ -213,12 +217,11 @@ pub(super) fn build_bridge_single_message_panel_status_block(
     full_response: &str,
 ) -> String {
     if bridge_single_message_panel_footer_enabled(shared.ui.status_panel_v2_enabled) {
-        let panel_text = shared.ui.placeholder_live_events.render_status_panel(
-            channel_id,
-            provider,
-            started_at_unix,
-        );
-        return super::single_message_panel::compose_footer_status_block(indicator, &panel_text);
+        let content = (full_response, indicator);
+        return shared
+            .ui
+            .placeholder_live_events
+            .render_footer_status_panel(channel_id, provider, started_at_unix, content);
     }
     if shared.ui.status_panel_v2_enabled {
         super::formatting::build_processing_status_block(indicator)
@@ -379,6 +382,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
     this_turn_status_panel_generation: u64,
     tmux_session_name: Option<&str>,
     permits_channel_effects: bool,
+    provider_failure: bool,
 ) -> bool {
     complete_bridge_terminal_footer_or_status_panel_with_sniffer(
         shared,
@@ -397,6 +401,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         this_turn_status_panel_generation,
         tmux_session_name.map(str::to_string),
         permits_channel_effects,
+        provider_failure,
         |tmux_session_name| async move {
             // #4353: `super::super::tmux` is cfg(unix). No tmux pane means nothing
             // can be pending in one.
@@ -439,6 +444,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel_with_sniffer
     this_turn_status_panel_generation: u64,
     tmux_session_name: Option<String>,
     permits_channel_effects: bool,
+    provider_failure: bool,
     sniff_background_agent_pending: S,
 ) -> bool
 where
@@ -493,7 +499,8 @@ where
             this_turn_user_msg_id,
             started_at_unix,
         );
-        return match terminal_text {
+        // A provider failure notice is the turn's last word, so it gets no success footer.
+        return match terminal_text.filter(|_| !provider_failure) {
             Some(text) => {
                 if tui_direct_completion_footer_suppressed(
                     single_message_panel_footer_mode,
@@ -542,6 +549,7 @@ where
         "turn_terminal_delivery",
         this_turn_user_msg_id,
         permits_channel_effects,
+        provider_failure,
     )
     .await
 }
@@ -811,6 +819,7 @@ mod tests {
                 0,
                 Some("AgentDesk-claude-background-test".to_string()),
                 true,
+                false,
                 move |tmux_session_name| async move {
                     sniffer_observed_tmux_session
                         .lock()
