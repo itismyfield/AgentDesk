@@ -23,9 +23,11 @@ preserves the conservative convention established by
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 
-CFG_ATTR_START_RE = re.compile(r"#\s*\[\s*(cfg|cfg_attr)\s*\(")
+CFG_ATTR_START_RE = re.compile(r"#\s*!?\s*\[\s*(cfg|cfg_attr)\s*\(")
+ATTR_OPEN_RE = re.compile(r"#\s*!?\s*\[")
 
 
 class _CfgNode:
@@ -50,12 +52,20 @@ class CfgAttributeMatch:
     the exclusive end of the complete ``#[...]`` attribute.
     """
 
-    __slots__ = ("_start", "_close_paren", "_attribute_end")
+    __slots__ = ("_start", "_close_paren", "_attribute_end", "is_inner")
 
-    def __init__(self, start: int, close_paren: int, attribute_end: int) -> None:
+    def __init__(
+        self,
+        start: int,
+        close_paren: int,
+        attribute_end: int,
+        *,
+        is_inner: bool = False,
+    ) -> None:
         self._start = start
         self._close_paren = close_paren
         self._attribute_end = attribute_end
+        self.is_inner = is_inner
 
     def start(self) -> int:
         return self._start
@@ -222,40 +232,116 @@ def _cfg_attr_gate(expression: str) -> _CfgNode | None:
     )
 
 
+def _attribute_match(code: str, opening: re.Match[str]) -> CfgAttributeMatch | None:
+    """Parse one candidate at its opening token, if it is a test-only cfg."""
+    cfg = CFG_ATTR_START_RE.match(code, opening.start())
+    if cfg is None:
+        return None
+    open_paren = code.find("(", cfg.start(), cfg.end())
+    depth = 0
+    close_paren = None
+    for index in range(open_paren, len(code)):
+        char = code[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                close_paren = index
+                break
+    if close_paren is None:
+        return None
+    attribute_end = close_paren + 1
+    while attribute_end < len(code) and code[attribute_end].isspace():
+        attribute_end += 1
+    if attribute_end >= len(code) or code[attribute_end] != "]":
+        return None
+    attribute_end += 1
+
+    expression = code[open_paren + 1 : close_paren]
+    kind = cfg.group(1)
+    parsed = (
+        _parse_cfg_expression(expression)
+        if kind == "cfg"
+        else _cfg_attr_gate(expression)
+    )
+    if parsed is not None and not _can_be_true_without_test(parsed):
+        is_inner = re.match(r"#\s*!", code[cfg.start() :]) is not None
+        return CfgAttributeMatch(cfg.start(), close_paren, attribute_end, is_inner=is_inner)
+    return None
+
+
+def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
+    """Yield test-only cfg attributes outside strings, attributes, and macro token trees.
+
+    `code` must already have comments and strings blanked. Attribute-like tokens in
+    a doc RHS or macro input are tokens, not active build gates. Delimiter state is
+    kept across lines so multi-line invocations are treated the same way.
+    """
+    stack: list[tuple[str, bool, bool]] = []  # opener, macro-token-tree, attribute
+    index = 0
+    while index < len(code):
+        char = code[index]
+        if char == "#":
+            opening = ATTR_OPEN_RE.match(code, index)
+            if opening:
+                nested = any(is_macro or is_attribute for _, is_macro, is_attribute in stack)
+                if not nested:
+                    match = _attribute_match(code, opening)
+                    if match is not None:
+                        yield match
+                bracket = code.find("[", index, opening.end())
+                stack.append(("[", False, True))
+                index = bracket + 1
+                continue
+        if char in "([{":
+            macro = _macro_delimiter_precedes(code, index)
+            stack.append((char, macro, False))
+        elif char in ")]}" and stack:
+            expected = {")": "(", "]": "[", "}": "{"}[char]
+            if stack[-1][0] == expected:
+                stack.pop()
+        index += 1
+
+
+def _macro_delimiter_precedes(code: str, index: int) -> bool:
+    """Recognize macro calls and named definitions with any token-tree delimiter."""
+    def word_before(position: int) -> tuple[str, int]:
+        while position >= 0 and code[position].isspace():
+            position -= 1
+        end = position + 1
+        while position >= 0 and (code[position].isalnum() or code[position] == "_"):
+            position -= 1
+        start = position + 1
+        if start < end and position >= 1 and code[position - 1 : position + 1] == "r#":
+            position -= 2
+        return code[start:end], position
+
+    cursor = index - 1
+    while cursor >= 0 and code[cursor].isspace():
+        cursor -= 1
+    if cursor >= 0 and code[cursor] == "!":
+        name, _ = word_before(cursor - 1)
+        return bool(name)
+    if index >= 0 and code[index] in "([{":
+        name, cursor = word_before(cursor)
+        while cursor >= 0 and code[cursor].isspace():
+            cursor -= 1
+        if name and cursor >= 0 and code[cursor] == "!":
+            macro_rules, _ = word_before(cursor - 1)
+            return macro_rules == "macro_rules"
+    return False
+
+
 def find_test_only_cfg_attribute(
     code: str, start: int = 0
 ) -> CfgAttributeMatch | None:
-    """Find the next cfg/cfg_attr whose effective gate requires ``test``."""
-
-    for opening in CFG_ATTR_START_RE.finditer(code, start):
-        open_paren = code.find("(", opening.start(), opening.end())
-        depth = 0
-        close_paren = None
-        for index in range(open_paren, len(code)):
-            char = code[index]
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    close_paren = index
-                    break
-        if close_paren is None:
-            continue
-        attribute_end = close_paren + 1
-        while attribute_end < len(code) and code[attribute_end].isspace():
-            attribute_end += 1
-        if attribute_end >= len(code) or code[attribute_end] != "]":
-            continue
-        attribute_end += 1
-
-        expression = code[open_paren + 1 : close_paren]
-        kind = opening.group(1)
-        parsed = (
-            _parse_cfg_expression(expression)
-            if kind == "cfg"
-            else _cfg_attr_gate(expression)
-        )
-        if parsed is not None and not _can_be_true_without_test(parsed):
-            return CfgAttributeMatch(opening.start(), close_paren, attribute_end)
-    return None
+    """Find the next active cfg/cfg_attr whose effective gate requires ``test``."""
+    return next(
+        (
+            match
+            for match in find_test_only_cfg_attributes(code)
+            if match.start() >= start
+        ),
+        None,
+    )
