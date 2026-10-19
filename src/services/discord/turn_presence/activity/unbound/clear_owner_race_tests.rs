@@ -558,7 +558,7 @@ async fn a2_relaunch_open_canary_foreign_self_holds_dequeue_with_watcher_reason_
     )) {
         return;
     }
-    canary_conflict_holds(false, true).await;
+    canary_conflict_holds(false, true, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -569,7 +569,7 @@ async fn a2_local_foreign_owner_cannot_hide_runtime_self_claim_at_canary_dequeue
     )) {
         return;
     }
-    canary_conflict_holds(true, true).await;
+    canary_conflict_holds(true, true, false).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -580,10 +580,21 @@ async fn a2_conflicting_foreign_runtime_owners_hold_canary_dequeue_pg() {
     )) {
         return;
     }
-    canary_conflict_holds(true, false).await;
+    canary_conflict_holds(true, false, false).await;
 }
 
-async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool) {
+#[tokio::test(flavor = "current_thread")]
+async fn a2_herdr_probe_failed_conflicting_candidate_holds_dequeue_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::a2_herdr_probe_failed_conflicting_candidate_holds_dequeue_pg"
+    )) {
+        return;
+    }
+    canary_conflict_holds(true, false, true).await;
+}
+
+async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool, failed_herdr: bool) {
     use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
     use crate::services::tui_prompt_dedupe::{
         binding_context::PreparedIncarnation, binding_events::codex, clear_relaunch,
@@ -598,6 +609,20 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool) {
         .unwrap();
     let fixture = Fixture::connect_and_migrate_fixture(CANARY_CHANNEL, ProviderKind::Codex).await;
     fixture.produce_owners();
+    let claimed_name = if failed_herdr {
+        CANARY_TMUX
+    } else {
+        &fixture.foreign_name
+    };
+    if failed_herdr {
+        for runtime in &fixture.foreign {
+            assert!(
+                runtime
+                    .tmux_watchers
+                    .restore_owner_channel_for_tmux_session(claimed_name, fixture.foreign_channel,)
+            );
+        }
+    }
     if foreign_self {
         for runtime in &fixture.foreign {
             runtime
@@ -612,54 +637,135 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool) {
                 .shared
                 .tmux_watchers
                 .restore_owner_channel_for_tmux_session(
-                    &fixture.foreign_name,
+                    claimed_name,
                     ChannelId::new(fixture.foreign_channel.get() + 1),
                 )
         );
     }
-    let digest = format!("sha256:{}", "0".repeat(64));
-    let prepared = PreparedIncarnation::prepare_pinned(
-        "codex",
-        CANARY_TMUX,
-        Some(CANARY_CHANNEL),
-        None,
-        false,
-        Some(
-            fixture
-                .rig
-                .root
-                .path()
-                .join("codex-home")
-                .canonicalize()
-                .unwrap(),
-        ),
-        (Some(digest.clone()), Some("verified".into())),
-    )
-    .unwrap();
-    let claim = codex::Claim {
-        session_id: uuid::Uuid::new_v4().to_string(),
-        path: None,
-        evidence: codex::ClaimEvidence::NativeHook {
-            event: "session_start".into(),
-            source: Some("startup".into()),
-            first_prompt_digest: Some(digest),
-        },
-    };
-    codex::commit_claim(&prepared.context, &claim, codex::Decision::Pending, || {
-        Ok(())
-    })
-    .unwrap();
-    let captured = clear_relaunch::capture(CANARY_TMUX)
-        .unwrap()
-        .expect("durable pinned ownership fixture");
-    clear_relaunch::commit(&captured, "explicit_clear").unwrap();
-    assert!(
-        clear_relaunch::relaunch_open(CANARY_TMUX),
-        "the existing canary exception must be open in this test"
-    );
+    let _hosts = failed_herdr.then(|| {
+        crate::config::session_hosts::force_for_test(
+            Some("test-node"),
+            &[(CANARY_CHANNEL, "test-node")],
+        )
+    });
+    let _probe = failed_herdr.then(|| {
+        crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
+            CANARY_CHANNEL,
+            "/usr/bin/false".into(),
+        )
+    });
+    if failed_herdr {
+        let mut config = crate::config_live_reload::current()
+            .unwrap()
+            .as_ref()
+            .clone();
+        config.session_hosts =
+            crate::config::session_hosts::with_boot(|boot| boot.unwrap().config().clone());
+        std::fs::write(
+            crate::runtime_layout::config_file_path(fixture.rig.root.path()),
+            serde_yaml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        crate::config_live_reload::install(config);
+        let ports = Arc::new(LivePorts {
+            root: Some(fixture.rig.root.path().to_owned()),
+        });
+        let (snapshot, namespace, next) = Snapshot::collect_pair(
+            &fixture.rig.shared,
+            &fixture.provider,
+            fixture.rig.channel,
+            ports,
+        )
+        .await
+        .unwrap();
+        assert!(snapshot.same_inputs(&next));
+        assert!(matches!(namespace.inventory, Inventory::ProbeFailed(_)));
+        assert_eq!(
+            snapshot.scope(&fixture.rig.shared).result,
+            Scope::HerdrFirstCreate
+        );
+        assert!(
+            snapshot
+                .files
+                .candidates
+                .as_ref()
+                .unwrap()
+                .names
+                .iter()
+                .any(|candidate| {
+                    candidate.name == claimed_name && candidate.origin == Origin::Core
+                })
+        );
+        assert!(
+            snapshot
+                .ownership
+                .as_ref()
+                .unwrap()
+                .local_conflict(claimed_name)
+        );
+        assert!(
+            snapshot
+                .files
+                .candidates
+                .as_ref()
+                .unwrap()
+                .names
+                .iter()
+                .all(|candidate| { matches!(candidate.origin, Origin::Core | Origin::Fallback) })
+        );
+        assert!(matches!(snapshot.files.row, Ok(None)));
+        assert_eq!(snapshot.exact, HostedLookup::Missing);
+        assert_eq!(snapshot.canonical, HostedLookup::Missing);
+        eprintln!(
+            "A2_S4_PROBE_FAILED_CONFLICT herdr_first_create=1 core_candidate=1 local_foreign_conflict=1"
+        );
+    }
+    if !failed_herdr {
+        let digest = format!("sha256:{}", "0".repeat(64));
+        let prepared = PreparedIncarnation::prepare_pinned(
+            "codex",
+            CANARY_TMUX,
+            Some(CANARY_CHANNEL),
+            None,
+            false,
+            Some(
+                fixture
+                    .rig
+                    .root
+                    .path()
+                    .join("codex-home")
+                    .canonicalize()
+                    .unwrap(),
+            ),
+            (Some(digest.clone()), Some("verified".into())),
+        )
+        .unwrap();
+        let claim = codex::Claim {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            path: None,
+            evidence: codex::ClaimEvidence::NativeHook {
+                event: "session_start".into(),
+                source: Some("startup".into()),
+                first_prompt_digest: Some(digest),
+            },
+        };
+        codex::commit_claim(&prepared.context, &claim, codex::Decision::Pending, || {
+            Ok(())
+        })
+        .unwrap();
+        let captured = clear_relaunch::capture(CANARY_TMUX)
+            .unwrap()
+            .expect("durable pinned ownership fixture");
+        clear_relaunch::commit(&captured, "explicit_clear").unwrap();
+        assert!(
+            clear_relaunch::relaunch_open(CANARY_TMUX),
+            "the existing canary exception must be open in this test"
+        );
+    }
     assert_eq!(
         fixture.observed().await,
-        observed(Activity::Unknown, "watcher_unbound")
+        observed(Activity::Unknown, "watcher_unbound"),
+        "conflicting exact claims must Hold even when Herdr inventory probing fails"
     );
     let source = CANARY_CHANNEL + 201;
     assert!(
@@ -709,7 +815,10 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool) {
     assert!(
         text.lines()
             .any(|line| line.contains("dequeue_held") && line.contains("watcher_unbound")),
-        "the actual dequeue did not report its self-owner hold: {text}"
+        "the actual dequeue did not report its owner-conflict hold"
     );
     INPUT_EFFECT_PROBE.lock().unwrap().take();
+    if failed_herdr {
+        eprintln!("A2_S4_PROBE_FAILED_DEQUEUE held=1 queue_preserved=1 provider_entries=0");
+    }
 }

@@ -414,6 +414,7 @@ async fn supervisor_drains_pair(
         .last_kick_at()
         .unwrap()
         .duration_since(first_wake);
+    // When the wake policy improves, invert this bound to <= RECOVERY_LIMIT.
     assert!(periodic_wake >= LiveSupervisor::SUPERVISOR_WAKE_EVERY);
     assert!(b_after_a_kick <= RECOVERY_LIMIT);
     assert_eq!(supervisor.woken_head(), Some(b));

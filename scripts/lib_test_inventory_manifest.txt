@@ -10494,6 +10494,7 @@ services::discord::turn_presence::activity::unbound::live::owner_tests::cross_ru
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_clear_watcher_exit_then_enqueue_kick_drains_fifo_once_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_closed_bound_read_survives_clear_until_watcher_release_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_conflicting_foreign_runtime_owners_hold_canary_dequeue_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_herdr_probe_failed_conflicting_candidate_holds_dequeue_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_local_foreign_owner_cannot_hide_runtime_self_claim_at_canary_dequeue_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_relaunch_open_canary_foreign_self_holds_dequeue_with_watcher_reason_pg
 services::discord::turn_presence::activity::unbound::live::owner_tests::cross_runtime_owner_e2e_tests::clear_owner_race_tests::a2_turn_start_route_requires_foreign_owner_then_starts_once_pg

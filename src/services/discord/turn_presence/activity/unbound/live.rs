@@ -443,13 +443,21 @@ impl Snapshot {
     }
     fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
         let candidates = self.files.candidates.clone();
-        let conflict = match inventory {
-            Inventory::Sessions(names) => self
-                .ownership
-                .as_ref()
-                .is_some_and(|owners| names.iter().any(|name| owners.local_conflict(name))),
-            Inventory::Empty(_) | Inventory::ProbeFailed(_) => false,
+        let inventory_names = match inventory {
+            Inventory::Sessions(names) => names.as_slice(),
+            Inventory::Empty(_) | Inventory::ProbeFailed(_) => &[],
         };
+        let conflict = self.ownership.as_ref().is_some_and(|owners| {
+            inventory_names
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    candidates
+                        .iter()
+                        .flat_map(|c| c.names.iter().map(|c| c.name.as_str())),
+                )
+                .any(|name| owners.local_conflict(name))
+        });
         let verdict = if conflict {
             // Conflicting exact claims keep the existing watcher Hold for every consumer.
             Verdict::Hold("watcher_unbound")
