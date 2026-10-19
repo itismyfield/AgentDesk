@@ -2,7 +2,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use super::{HerdrTurnLines, is_turn_output, is_turn_prompt};
+use super::{HerdrTurnLines, SourceFileIdentity, is_turn_output, is_turn_prompt};
 use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 
 /// A turn's provider terminal as `HerdrTurnLines` accepts it, and the record range it read.
@@ -35,12 +35,7 @@ pub(crate) fn replay_herdr_turn(
     len: u64,
 ) -> Option<(u64, NativeTerminalKind, u64)> {
     let bytes = read_prefix(file, len).ok()?;
-    let records =
-        match crate::services::provider::herdr_before_start::mutant("prb_newline_required") {
-            true => complete_records(&bytes),
-            false => records_to_end(&bytes).0,
-        };
-    let terminal = turn_in(&records, submitted_at, len).ok()??;
+    let terminal = turn_in(&records_to_end(&bytes).0, submitted_at, len).ok()??;
     Some((terminal.start, terminal.kind, terminal.end))
 }
 
@@ -193,14 +188,10 @@ fn records_to_end(bytes: &[u8]) -> (Vec<(u64, &str)>, &[u8]) {
 /// whole, and `ended_turn` reads the turn's terminal there.
 pub(crate) fn ended_tail(
     path: &str,
-    (from, opened): (
-        u64,
-        crate::services::cluster::stream_relay::SourceFileIdentity,
-    ),
+    (from, opened): (u64, SourceFileIdentity),
     submitted_at: chrono::DateTime<chrono::Utc>,
     target: &super::HerdrTarget,
 ) -> Option<String> {
-    use crate::services::cluster::stream_relay::SourceFileIdentity;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     if SourceFileIdentity::from_open_file(&file) != opened

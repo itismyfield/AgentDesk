@@ -858,9 +858,9 @@ fn read_to_provider_terminal(
     token: &Arc<CancelToken>,
     ended: impl Fn((u64, SourceFileIdentity)) -> Option<String>,
 ) -> Result<Option<ClaudeTurnTerminal>, String> {
-    use std::cell::Cell;
     let mut lines = HerdrTurnLines::default();
-    let (opened, tail) = (Cell::new(SourceFileIdentity::Unavailable), Cell::new(None));
+    let opened = std::cell::Cell::new(SourceFileIdentity::Unavailable);
+    let tail = std::cell::RefCell::new(None);
     // A buffer's raw end is sent only once a later read shows all its records were processed.
     let pending = std::cell::Cell::new(None::<u64>);
     let (offsets, relay) = (sender.clone(), sender.clone());
@@ -875,17 +875,16 @@ fn read_to_provider_terminal(
         }
         processed
     };
-    let read = poll_output_file_until_result(
+    let mut read = poll_output_file_until_result(
         transcript,
         start,
         Some(token.clone()),
         &mut lines,
         || {
             let at = (pending.get().unwrap_or(start), opened.get());
-            let found = ended(at).map(|found| (at.0, found));
-            let alive = found.is_none();
-            tail.set(found);
-            alive
+            let mut tail = tail.borrow_mut();
+            *tail = ended(at).map(|found| (at.0, found));
+            tail.is_none()
         },
         || false,
         |raw_end| {
@@ -900,15 +899,14 @@ fn read_to_provider_terminal(
         |file| opened.set(SourceFileIdentity::from_open_file(file)),
     )
     .map_err(|failure| failure.error)?;
-    let read = match (read, tail.take()) {
-        (ReadOutputResult::SessionDied { offset }, Some((from, tail))) if offset == from => {
-            process(&tail, &mut lines);
-            ReadOutputResult::Completed {
-                offset: offset + tail.len() as u64,
-            }
-        }
-        (read, _) => read,
-    };
+    if let (ReadOutputResult::SessionDied { offset }, Some((from, tail))) = (read, tail.take())
+        && offset == from
+    {
+        process(&tail, &mut lines);
+        read = ReadOutputResult::Completed {
+            offset: offset + tail.len() as u64,
+        };
+    }
     let end = match read {
         ReadOutputResult::Completed { offset }
         | ReadOutputResult::Cancelled { offset }
