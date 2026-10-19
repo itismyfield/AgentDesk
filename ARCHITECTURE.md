@@ -1146,6 +1146,8 @@ src/
 │   │   │   │   ├── input_fence_reaper_tests.rs
 │   │   │   │   └── scoped_restore.rs
 │   │   │   ├── save_store/
+│   │   │   │   ├── delivery_rewind/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── identity_gate/
 │   │   │   │   │   ├── runtime_stamp/
 │   │   │   │   │   │   ├── before_start_stop_admission.rs
@@ -2021,6 +2023,8 @@ src/
 │   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
+│   │   │   ├── retry_state/
+│   │   │   │   └── delivery_rewind.rs
 │   │   │   ├── runtime_handoff_loop/
 │   │   │   │   ├── guarded_save.rs
 │   │   │   │   ├── herdr_owner_tests.rs
@@ -2047,9 +2051,12 @@ src/
 │   │   │   │   ├── expected_identity_tests.rs
 │   │   │   │   ├── message_conversion.rs
 │   │   │   │   ├── provider_recovery.rs
+│   │   │   │   ├── rewind_owner_tests.rs
 │   │   │   │   ├── tool_arms.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
+│   │   │   │   ├── reclaim/
+│   │   │   │   │   └── tests.rs
 │   │   │   │   ├── body_footer_rollover_tests.rs
 │   │   │   │   ├── guarded_persist.rs
 │   │   │   │   ├── guarded_persist_tests.rs
@@ -2058,6 +2065,7 @@ src/
 │   │   │   │   ├── o_panel.rs
 │   │   │   │   ├── o_tool_activity_tests.rs
 │   │   │   │   ├── output.rs
+│   │   │   │   ├── reclaim.rs
 │   │   │   │   ├── rollover_guard.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
