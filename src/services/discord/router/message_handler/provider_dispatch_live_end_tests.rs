@@ -35,9 +35,8 @@ pub(in crate::services::discord) struct LiveEnd {
 }
 
 impl LiveEnd {
-    /// `token` holds the channel's mailbox and finalizer entry with `logical`'s current row, as
-    /// intake leaves a dispatched Herdr turn, and one more input waits in its queue. Discord
-    /// refuses the channel's writes until `route`.
+    /// `token` holds the mailbox, finalizer entry and current row of `logical` as intake leaves a
+    /// Herdr turn, with one more input queued; Discord refuses the channel's writes until `route`.
     pub(in crate::services::discord) fn start(
         database_url: &str,
         token_hash: &str,
@@ -342,10 +341,8 @@ fn handoff(fx: &super::Fixture) -> (String, u64) {
     (binding.output_path, binding.last_offset)
 }
 
-/// A live Claude turn whose provider died mid-record, past the queue guard's stale limit, ends once
-/// its notice lands: the guard keeps it, the first pass, its notice refused, keeps it after retiring
-/// its execution; the next settles it, wakes the reader without a hand-off and lets the queued
-/// input start.
+/// A stale live Claude turn whose provider died mid-record: the queue guard and a refused notice keep
+/// it; the next pass settles it once, wakes the reader without a hand-off, starts the queued input.
 #[test]
 fn a_live_claude_turn_whose_provider_died_ends_once_and_frees_its_channel_pg() {
     let fx = super::Fixture::new("liveend", None);
