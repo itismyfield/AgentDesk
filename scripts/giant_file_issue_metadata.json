@@ -1,11 +1,22 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-10-18T03:27:30Z",
+  "refreshed_at": "2026-10-19T03:06:16Z",
   "ratchets": {
-    "closed_deadline_entries": 74,
+    "closed_deadline_entries": 73,
     "transition_list_entries": 74
   },
   "issues": [
+    {
+      "number": 4229,
+      "state": "open",
+      "title": "decompose: tmux_watcher.rs giant 잔여 — root 2,541 prod LoC + turn_stream_collector 1,148줄 (#3832/#4712 승계)",
+      "owners": [
+        "discord-relay"
+      ],
+      "files": [
+        "src/services/discord/tmux_watcher.rs"
+      ]
+    },
     {
       "number": 4710,
       "state": "closed",
