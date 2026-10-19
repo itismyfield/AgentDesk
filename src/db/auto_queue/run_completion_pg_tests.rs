@@ -343,18 +343,17 @@ async fn gate_and_grace_opened_after_readiness_read_report_gate_pg() {
         RunCompletionBlockedReason::BlockingPhaseGate,
     )
     .await;
-    let (in_grace, pending_gates) = sqlx::query_as::<_, (bool, i64)>(
-        "SELECT COALESCE(phase_gate_grace_until > NOW(), false),
-                (SELECT COUNT(*)::BIGINT FROM auto_queue_phase_gates
-                 WHERE run_id = 'run-1' AND status = 'pending')
-         FROM auto_queue_runs WHERE id = 'run-1'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("read both blockers");
-    assert!(
-        in_grace && pending_gates == 1,
-        "both blockers must stay open"
+    // Grace is still open behind the gate: clearing the gate exposes it.
+    sqlx::query("UPDATE auto_queue_phase_gates SET status = $1 WHERE run_id = 'run-1'")
+        .bind("passed")
+        .execute(&pool)
+        .await
+        .expect("set gate status");
+    assert_eq!(
+        finalize_run_if_ready_pg(&pool, "run-1")
+            .await
+            .expect("completion after gate passes"),
+        blocked(RunCompletionBlockedReason::PhaseGateGraceWindow)
     );
     pool.close().await;
     pg_db.drop().await;
