@@ -34,13 +34,18 @@ import comment_only_gate as gate  # noqa: E402
 import rust_include_reads as includes  # noqa: E402
 
 SKIPPED_WHEN_COMMENT_ONLY = (
+    "lib_test_prepare",
+    "lint",
+    "relay_authority_targets",
+    "relay_authority_mutations",
     "test_fast",
     "high-risk-recovery",
     "check_fast_cross_os",
     "check_fast_cross_os_targets",
     "library_sweep",
 )
-KEPT_WHEN_COMMENT_ONLY = ("lint", "scripts", "scripts_guards", "scripts_contracts")
+KEPT_WHEN_COMMENT_ONLY = ("scripts", "scripts_guards", "scripts_contracts")
+KEPT_FOR_INCLUDED_RUST = {"lib_test_prepare", "lint", "relay_authority_targets", "relay_authority_mutations", "library_sweep"}
 REQUIRED_CONTEXTS = (
     "Lint",
     "Script checks",
@@ -56,6 +61,8 @@ REQUIRED_CONTEXTS = (
 
 def outputs(**lists: list[str]) -> dict[str, str]:
     """paths-filter outputs as toJSON renders them with ``list-files: json``."""
+    lists = {**dict.fromkeys(("dashboard", "high_risk_recovery", "pg_db", "rust_or_policy",
+                            "rust_compile", "relay_contract", "cross_os_rust", "win32_build_token"), []), **lists}
     rendered: dict[str, str] = {"changes": json.dumps([n for n, f in lists.items() if f])}
     for name, files in lists.items():
         rendered[name] = "true" if files else "false"
@@ -87,8 +94,10 @@ class DecideTests(unittest.TestCase):
             with self.subTest(rc=rc):
                 self.assertVerdict(False, rc, [("M", RS, RS)], outputs(**RS_FILTERS), "exited")
 
-    def test_docs_only_change_refuses(self) -> None:
-        self.assertVerdict(False, 0, [("M", "README.md", "README.md")], outputs(dashboard=[]), "no changed .rs")
+    def test_docs_only_changes_pass_including_filtered_markdown(self) -> None:
+        for status in ("A", "M", "D", "R", "C"):
+            with self.subTest(status=status):
+                self.assertVerdict(True, 0, [(status, "README.md", "README.md")], outputs(rust_compile=["README.md"]))
 
     def test_non_markdown_file_refuses_even_when_no_filter_selects_it(self) -> None:
         entries = [("M", RS, RS), ("A", "docs/diagram.svg", "docs/diagram.svg")]
@@ -97,12 +106,29 @@ class DecideTests(unittest.TestCase):
     def test_workflow_file_refuses(self) -> None:
         wf = ".github/workflows/ci-pr.yml"
         filters = {**RS_FILTERS, "high_risk_recovery": [wf], "rust_or_policy": [RS, wf]}
-        self.assertVerdict(False, 0, [("M", RS, RS), ("M", wf, wf)], outputs(**filters), "non-Rust, non-Markdown")
+        self.assertVerdict(False, 0, [("M", RS, RS), ("M", wf, wf)], outputs(**filters), "protected")
 
     def test_markdown_that_selects_a_filter_refuses(self) -> None:
         doc = "docs/relay-state-contract.md"
-        filters = {**RS_FILTERS, "relay_contract": [doc]}
-        self.assertVerdict(False, 0, [("M", RS, RS), ("M", doc, doc)], outputs(**filters), doc)
+        for name in ("relay_contract", "dashboard", "win32_build_token"):
+            filters = {**RS_FILTERS, name: [doc]}
+            self.assertVerdict(False, 0, [("M", RS, RS), ("M", doc, doc)], outputs(**filters), doc)
+
+    def test_protected_paths_refuse_even_when_the_filter_misses_them(self) -> None:
+        for path in (".github/README.md", "scripts/README.md", "policies/a.yaml", "migrations/notes.md", "Cargo.md", "tools/build.rs"):
+            with self.subTest(path=path):
+                self.assertVerdict(False, 0, [("M", path, path)], outputs(), "protected")
+
+    def test_yaml_requires_an_in_place_modification(self) -> None:
+        for status in ("A", "D", "R", "C", "T"):
+            with self.subTest(status=status):
+                self.assertVerdict(False, 0, [(status, "tests/a.yaml", "tests/a.yaml")], outputs(), "in-place")
+
+    def test_empty_diff_and_missing_protected_filter_refuse(self) -> None:
+        self.assertVerdict(False, 0, [], outputs())
+        missing = outputs(**RS_FILTERS)
+        del missing["relay_contract"]
+        self.assertVerdict(False, 0, [("M", RS, RS)], missing)
 
     def test_added_deleted_renamed_or_retyped_rust_refuses(self) -> None:
         for entry in (
@@ -179,6 +205,39 @@ class IncludeScanTests(unittest.TestCase):
         self.assertFalse(json_site.reads("docs/guide.md"))
 
 
+class YamlTokenTests(unittest.TestCase):
+    def test_comments_and_spaces_preserve_all_token_attributes(self) -> None:
+        for before, after in (
+            ("id: E-1\n", "# note\nid: E-1  # more\n"),
+            ("a: &name [1, 2]\nb: *name\n", "a: &name [1,  2] # note\nb: *name\n"),
+            ("---\nx: 1\n---\nx: 2\n", "---\nx: 1 # note\n---\nx: 2\n"),
+            ("x: 1\nx: 2\n", "x: 1\nx: 2 # duplicate unchanged\n"),
+        ):
+            with self.subTest(before=before):
+                self.assertEqual(gate.yaml_tokens(before.encode()), gate.yaml_tokens(after.encode()))
+
+    def test_values_scalar_styles_tags_anchors_and_all_documents_are_significant(self) -> None:
+        for before, after in (
+            ("x: true\n", "x: 1\n"),
+            ("x: 1\n", "x: 1.0\n"),
+            ("x: 1\n", 'x: "1"\n'),
+            ('x: "value"\n', "x: 'value'\n"),
+            ("x: |\n  # content\n", "x: |\n  # changed content\n"),
+            ("x: |\n  words\n", "x: >\n  words\n"),
+            ("x: !!str 1\n", "x: 1\n"),
+            ("x: &one 1\ny: *one\n", "x: &two 1\ny: *two\n"),
+            ("---\nx: 1\n---\nx: 2\n", "---\nx: 1\n---\nx: 3\n"),
+            ("x: 1\nx: 2\n", "x: 2\nx: 1\n"),
+        ):
+            with self.subTest(before=before, after=after):
+                self.assertNotEqual(gate.yaml_tokens(before.encode()), gate.yaml_tokens(after.encode()))
+
+    def test_invalid_syntax_aliases_and_encoding_refuse(self) -> None:
+        for raw in (b"x: [1\n", b"x: *undefined\n", b"x: \xff\n", b"x: [1}\n"):
+            with self.subTest(raw=raw), self.assertRaises(Exception):
+                gate.yaml_tokens(raw)
+
+
 class GateProcessTests(unittest.TestCase):
     """Runs the gate the way the workflow step does, against a real git history."""
 
@@ -190,12 +249,14 @@ class GateProcessTests(unittest.TestCase):
             "scripts/rust_lex.py",
             "scripts/ci/comment_only_gate.py",
             "scripts/ci/rust_include_reads.py",
+            "scripts/ci/rust_runtime_reads.py",
         ):
             (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / rel, self.root / rel)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "gate@example.invalid")
         self.git("config", "user.name", "gate")
+        (self.root / ".git/info/exclude").write_text("gh-output\ngh-summary\n")
         self.write("src/lib.rs", "// chatty\npub fn one() -> u32 {\n    1\n}\n")
         self.write("src/body.rs", "// body\npub fn two() -> u32 {\n    2\n}\n")
         self.write("src/reader.rs", 'const BODY: &str = include_str!("body.rs");\n')
@@ -246,6 +307,98 @@ class GateProcessTests(unittest.TestCase):
         self.assertIn("comment_only=true", summary)
         self.assertIn("scanned 1 include calls", summary)
         self.assertIn("OK: every changed Rust file is byte-identical", summary)
+        self.assertIn("yaml_available=true version=", summary)
+
+    def test_docs_and_36_yaml_comments_without_rust_skip(self) -> None:
+        paths = [f"tests/e2e/tui_relay/scenarios/E-{i}.yaml" for i in range(1, 37)]
+        for path in paths:
+            self.write(path, "coverage_class: live\n")
+        self.base = self.commit("scenario seed")
+        for path in paths:
+            self.write(path, "# manual procedure\ncoverage_class: live\n")
+        docs = ["docs/e2e/manual.md", "docs/runbook.md", "tests/e2e/tui_relay/scenarios/README.md"]
+        for path in docs:
+            self.write(path, "# Manual procedure\n")
+        filters = json.dumps(outputs(rust_or_policy=paths + docs[-1:], rust_compile=paths + docs[-1:]))
+        result, output = self.run_gate(self.commit("docs and YAML comments"), filters=filters)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout + result.stderr)
+
+    def test_yaml_value_block_scalar_and_invalid_parse_keep_full_run(self) -> None:
+        path = "tests/scenario.yaml"
+        for before, after in (("x: true\n", "x: 1\n"),
+                              ("x: |\n  # text\n", "x: |\n  # other\n"),
+                              ("x: [1\n", "# comment\nx: [1\n")):
+            with self.subTest(before=before):
+                self.write(path, before)
+                base = self.commit("YAML seed")
+                self.write(path, after)
+                result, output = self.run_gate(self.commit("YAML edit"), base=base,
+                                               filters=json.dumps(outputs(rust_compile=[path])))
+                self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+
+    def test_yaml_rename_and_delete_cannot_use_parse_only_exception(self) -> None:
+        old, new = "tests/old.yaml", "tests/new.yaml"
+        self.write(old, "id: unchanged\n")
+        self.base = self.commit("YAML seed")
+        self.git("mv", old, new)
+        result, output = self.run_gate(self.commit("rename YAML"), filters=json.dumps(outputs(rust_compile=[old, new])))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        base = self.git("rev-parse", "HEAD")
+        self.git("rm", new)
+        result, output = self.run_gate(self.commit("delete YAML"), base=base, filters=json.dumps(outputs(rust_compile=[new])))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+
+    def test_unlisted_runtime_yaml_reader_keeps_full_run(self) -> None:
+        path = "tests/scenario.yaml"
+        self.write(path, "id: unchanged\n")
+        self.write("src/raw_reader.rs", f'fn reader() {{ std::fs::read_to_string("{path}"); }}\n')
+        self.base = self.commit("raw YAML reader")
+        self.write(path, "# comment\nid: unchanged\n")
+        result, output = self.run_gate(self.commit("YAML comment"), filters=json.dumps(outputs(rust_compile=[path])))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("runtime reader", result.stdout)
+
+    def test_parse_only_reader_allows_yaml_but_source_pin_change_refuses(self) -> None:
+        import rust_runtime_reads as runtime
+
+        path = "tests/e2e/tui_relay/scenarios/a.yaml"
+        self.write(path, "id: unchanged\n")
+        reader = runtime.SCENARIO_READER
+        self.write(reader, (REPO_ROOT / reader).read_text())
+        self.base = self.commit("parse-only YAML reader")
+        self.write(path, "# comment\nid: unchanged\n")
+        head = self.commit("YAML comment")
+        filters = json.dumps(outputs(rust_compile=[path]))
+        result, output = self.run_gate(head, filters=filters)
+        self.assertEqual(output, "comment_only=true\nrust_tests_skip=true\n", result.stdout)
+        self.write(reader, (REPO_ROOT / reader).read_text() + "\n// reader source changed\n")
+        result, output = self.run_gate(self.commit("reader pin drift"), filters=filters)
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("source pin mismatch", result.stdout)
+
+    def test_included_markdown_keeps_full_run(self) -> None:
+        path = "docs/data.md"
+        self.write(path, "# Before\n")
+        self.write("src/raw_reader.rs", f'const DOC: &str = include_str!("../{path}");\n')
+        self.base = self.commit("included Markdown")
+        self.write(path, "# After\n")
+        result, output = self.run_gate(self.commit("Markdown edit"), filters=json.dumps(outputs()))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("include_str!", result.stdout)
+
+    def test_missing_yaml_module_and_runtime_scan_failure_keep_full_run(self) -> None:
+        self.write("docs/guide.md", "# guide\n")
+        head = self.commit("documentation")
+        # A module placed next to the gate simulates an interpreter without PyYAML.
+        (self.root / "scripts/ci/yaml.py").write_text("raise ImportError('unavailable')\n")
+        result, output = self.run_gate(head, filters=json.dumps(outputs()))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("yaml_available=false version=unavailable", result.stdout)
+        (self.root / "scripts/ci/yaml.py").unlink()
+        (self.root / "scripts/ci/rust_runtime_reads.py").write_text("raise RuntimeError('runtime scan exploded')\n")
+        result, output = self.run_gate(head, filters=json.dumps(outputs()))
+        self.assertEqual(output, "comment_only=false\nrust_tests_skip=false\n", result.stdout)
+        self.assertIn("runtime reader scan error", result.stdout)
 
     def test_comment_edit_a_test_may_read_keeps_the_library_sweep(self) -> None:
         filters = json.dumps(outputs(rust_or_policy=["src/body.rs"]))
@@ -361,10 +514,12 @@ def cancelled_path_gate(expr: str, lookup) -> bool:
     assert re.fullmatch(r"cancelled\s*\(\s*\)", unparen(status[1:])), expr
     path, *opened = unparen(terms[1]).split("||")
     assert not opened or terms[1].strip().startswith("(") and [o.strip() for o in opened] == [FORCE_FULL], expr
-    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*==\s*'true'", unparen(path))
+    output = re.fullmatch(r"needs\.changes\.outputs\.([A-Za-z0-9_-]+)\s*(==|!=)\s*'true'", unparen(path))
     assert output, expr
     forced = bool(opened) and str(lookup("needs.pg_shards.outputs.force_full")).lower() == "true"
     selected = str(lookup("needs.changes.outputs." + output.group(1))).lower() == "true"
+    if output.group(2) == "!=":
+        selected = not selected
     return not truthy(lookup("cancelled()")) and (selected or forced)
 
 
@@ -632,15 +787,17 @@ class WorkflowWiringTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_comment_only_skips_heavy_lanes_and_every_required_context_is_green(self) -> None:
-        for relay_contract in ([], ["src/services/discord/inflight/store.rs"]):
-            raw = {**HEAVY_RAW, **outputs(relay_contract=relay_contract)}
+        for raw in (HEAVY_RAW, outputs(rust_or_policy=["tests/scenario.yaml", "tests/README.md"],
+                                      rust_compile=["tests/scenario.yaml", "tests/README.md"])):
             run = WorkflowSimulation(raw, "true", rust_tests_skip="true")
-            with self.subTest(relay_contract=bool(relay_contract)):
+            with self.subTest(filters=raw):
                 for job_id in SKIPPED_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "skipped", job_id)
                 for job_id in KEPT_WHEN_COMMENT_ONLY:
                     self.assertEqual(run.results[job_id], "success", job_id)
                 self.assertEqual(run.changes["comment_only"], "true")
+                self.assertEqual(run.changes["rust_compile"], "false")
+                self.assertEqual(run.changes["rust_or_policy"], "false")
                 self.assertPublishedGreen(run)
 
     def test_include_reader_runs_only_the_library_sweep(self) -> None:
@@ -649,8 +806,8 @@ class WorkflowWiringTests(unittest.TestCase):
             with self.subTest(rust_tests_skip=skip):
                 self.assertEqual(run.changes["rust_tests"], HEAVY_RAW["rust_or_policy"])
                 self.assertEqual(run.results["library_sweep"], "success")
-                for job_id in SKIPPED_WHEN_COMMENT_ONLY[:-1]:
-                    self.assertEqual(run.results[job_id], "skipped", job_id)
+                for job_id in SKIPPED_WHEN_COMMENT_ONLY:
+                    self.assertEqual(run.results[job_id], "success" if job_id in KEPT_FOR_INCLUDED_RUST else "skipped", job_id)
                 self.assertPublishedGreen(run)
 
     def test_gate_false_unset_or_failed_keeps_the_raw_filters(self) -> None:
@@ -677,6 +834,9 @@ class WorkflowWiringTests(unittest.TestCase):
 
     def test_heavy_mirrors_still_fail_closed_when_not_comment_only(self) -> None:
         contexts = {
+            "lint": "Lint",
+            "relay_authority_targets": "relay-authority-contract",
+            "relay_authority_mutations": "relay-authority-contract",
             "test_fast": "Fast targeted tests (ubuntu-latest)",
             "high-risk-recovery": "High-risk recovery",
             "check_fast_cross_os": "Fast check cross OS required context (ubuntu-latest)",
