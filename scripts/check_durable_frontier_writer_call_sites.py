@@ -187,9 +187,9 @@ from collections.abc import Iterable
 from pathlib import Path
 
 try:
-    from rust_cfg import find_test_only_cfg_attribute as _cfg_test_only_match
+    from rust_production import production_lines, _production_text
 except ModuleNotFoundError:  # imported from a repo-root unittest
-    from scripts.rust_cfg import find_test_only_cfg_attribute as _cfg_test_only_match
+    from scripts.rust_production import production_lines, _production_text
 
 try:
     from rust_lex import StripState, strip_line
@@ -460,164 +460,8 @@ def _defn_re(symbol: str) -> re.Pattern[str]:
 CALL_RES = {symbol: _call_re(symbol) for symbol in EXPECTED_CALL_SITES}
 DEFN_RES = {symbol: _defn_re(symbol) for symbol in EXPECTED_CALL_SITES}
 
-# An item keyword that introduces a braced body, in ITEM POSITION: at the start
-# of a line, or right after the `]` closing an attribute, or right after a `}`.
-# The position anchor is load-bearing. A bare `\bfn\b` also matches the `fn` in a
-# field type like `cb: Option<fn(u8, u8)>,`, which would suppress the comma rule
-# for exactly the struct-field shape the comma rule exists to handle. See the
-# DEVIATION note in the module docstring.
-ITEM_START_RE = re.compile(
-    r"(?:^|\]|\})\s*"
-    r"(?:pub(?:\([^)]*\))?\s+)?"
-    r"(?:default\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
-    r'(?:extern\s+(?:"[^"]*"\s+)?)?'
-    r"(?:fn|impl|mod|trait|macro_rules)\b"
-)
-# Other pipe prefixes stay uncertain and expose a following body conservatively.
-CLOSURE_START_RE = re.compile(r"(?:[=([{,;]|=>|\b(?:move|async|return))\s*$")
-
-# Cross-line string/comment stripper imported from scripts/rust_lex.py.
-# Blanked output keeps `{` / `}` / `;` / `,` counts honest for the cfg(test)
-# tracking below: without cross-line state, an unbalanced `{` inside a
-# multi-line raw string poisons the brace depth and hides every later call.
-
-
 def is_test_file(name: str) -> bool:
     return _SKIP_PIN.is_basename_test_file(name)
-
-
-def production_lines(path: Path):
-    """Yield ``(lineno, stripped_code, is_production)`` for one Rust file."""
-    state = StripState()
-    brace_depth = 0
-    group_depth = 0  # `(` and `[` nesting
-    mode = "normal"  # normal | armed (saw cfg(test) attr) | skip (in test item)
-    armed_start_depth = 0
-    skip_start_depth = 0
-    saw_body_keyword = False
-    closure_parameter_depth: int | None = None
-    closure_parameters_known = False
-    armed_parameter = False
-    armed_parameter_known = False
-    previous_code = ""
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        code = strip_line(raw, state)
-        countable = mode == "normal"
-        parameter_mask_start = 0 if mode == "armed" and armed_parameter else None
-        arm_at = None
-        if mode == "normal":
-            match = _cfg_test_only_match(code)
-            if match:
-                # Arm after the complete attribute so its own delimiters
-                # cannot affect the attributed statement's starting depth.
-                arm_at = match.attribute_end() - 1
-        # Resolve the item-start keyword position BEFORE walking the line: the
-        # comma that must not disarm (`-> HashMap<String, u64> {`) sits on the
-        # same line as the `fn` that suppresses the comma rule, so deciding at
-        # end-of-line is one line too late.
-        item_start = ITEM_START_RE.search(code, arm_at if arm_at is not None else 0)
-        item_start_at = item_start.end() if item_start else None
-        for index, char in enumerate(code):
-            if item_start_at is not None and index >= item_start_at:
-                saw_body_keyword = True
-            if char in "([":
-                group_depth += 1
-            elif char in ")]":
-                group_depth -= 1
-            elif char == "{":
-                # An uncertain parameter header cannot make its body test-only.
-                if armed_parameter and (
-                    not armed_parameter_known or closure_parameter_depth is not None
-                ):
-                    mode = "normal"
-                    countable = True
-                    if parameter_mask_start is not None:
-                        code = (
-                            code[:parameter_mask_start]
-                            + " " * (index - parameter_mask_start) + code[index:]
-                        )
-                if mode == "armed":
-                    mode = "skip"
-                    skip_start_depth = brace_depth
-                closure_parameter_depth = None
-                armed_parameter = False
-                brace_depth += 1
-            elif char == "}":
-                brace_depth -= 1
-                if mode == "skip" and brace_depth <= skip_start_depth:
-                    mode = "normal"
-            elif (
-                char == ";"
-                and mode == "armed"
-                and brace_depth + group_depth == armed_start_depth
-            ):
-                mode = "normal"  # Test-only statements / unbraced items end here.
-            elif (
-                char == ","
-                and mode == "armed"
-                and brace_depth + group_depth == armed_start_depth
-                and not saw_body_keyword
-            ):
-                mode = "normal"  # `#[cfg(test)] field: T,` / enum variant
-            if (
-                char in ")]}"
-                and mode == "armed"
-                and brace_depth + group_depth < armed_start_depth
-            ):
-                mode = "normal"
-            if (
-                char == "|" and mode != "skip"
-                and (index == 0 or code[index - 1] != "|")
-                and (index + 1 == len(code) or code[index + 1] != "|")
-            ):
-                depth = brace_depth + group_depth
-                if closure_parameter_depth == depth:
-                    closure_parameter_depth = None
-                    if armed_parameter:
-                        mode = "normal"
-                        countable = True
-                        if parameter_mask_start is not None:
-                            end = index + 1
-                            code = (
-                                code[:parameter_mask_start]
-                                + " " * (end - parameter_mask_start) + code[end:]
-                            )
-                        armed_parameter = False
-                elif closure_parameter_depth is None:
-                    closure_parameter_depth = depth
-                    prefix = code[:index].rstrip() or previous_code
-                    closure_parameters_known = bool(CLOSURE_START_RE.search(prefix))
-            if closure_parameter_depth is not None and (
-                (char == ";" and brace_depth + group_depth <= closure_parameter_depth)
-                or (char in ")]}" and brace_depth + group_depth < closure_parameter_depth)
-            ):
-                closure_parameter_depth = None
-                armed_parameter_known = False
-            if arm_at is not None and index == arm_at:
-                mode = "armed"
-                armed_start_depth = brace_depth + group_depth
-                saw_body_keyword = False
-                armed_parameter = closure_parameter_depth is not None
-                armed_parameter_known = closure_parameters_known
-                if armed_parameter:
-                    parameter_mask_start = match.start()
-        if code.strip():
-            previous_code = code.rstrip()
-        yield lineno, code, countable
-
-
-def _production_text(path: Path) -> str:
-    """Return stripped production text while preserving cross-line chains."""
-
-    lines: list[str] = []
-    for _lineno, code, countable in production_lines(path):
-        if countable:
-            # Mask compact `#[cfg(test)] fn ... { raw_atomic(); }` items too.
-            cfg_test = _cfg_test_only_match(code)
-            if cfg_test:
-                code = code[: cfg_test.start()] + " " * (len(code) - cfg_test.start())
-        lines.append(code if countable else " " * len(code))
-    return "\n".join(lines)
 
 
 def _scan_inputs(
