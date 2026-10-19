@@ -15,14 +15,6 @@ pub(crate) fn existing_incarnation(tmux: &str) -> bool {
     dedupe::codex_verified_requires_proof(tmux) && !dedupe::clear_relaunch::relaunch_open(tmux)
 }
 
-pub(crate) fn existing_incarnation_observed(
-    tmux: &str,
-    observation: &crate::services::discord::codex_absence::InflightObs,
-) -> bool {
-    dedupe::clear_relaunch::absent_capture(tmux, observation).is_none()
-        && existing_incarnation(tmux)
-}
-
 pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Result<(), String> {
     #[cfg(test)]
     if let Some(sender) = HOLD_ENTERED_FOR_TESTS

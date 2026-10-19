@@ -13,6 +13,7 @@ pub(crate) enum Checkpoint {
     /// The claim picked its row and has not confirmed it yet.
     ClaimSelected,
     AfterClaim,
+    BeforeFinalO,
     PreAccept,
     Spawned,
     FinalDb,

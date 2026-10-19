@@ -241,9 +241,19 @@ impl ChannelStore {
 
     /// Moves each pending boundary to the start its durable `BoundaryResolved` names.
     pub fn apply_resolved_boundaries(&mut self) -> Result<Vec<SourceId>, StoreError> {
+        self.apply_resolved_boundaries_filtered(|_| true)
+    }
+
+    pub(crate) fn apply_resolved_boundaries_filtered(
+        &mut self,
+        mut selected: impl FnMut(&SourceId) -> bool,
+    ) -> Result<Vec<SourceId>, StoreError> {
         let mut rotation = self.rotation()?;
         let mut applied = Vec::new();
         for link in rotation.links.values_mut() {
+            if !selected(&link.source) {
+                continue;
+            }
             let from = self.ledger.boundary_resolved(&link.source);
             if let (Boundary::Pending { .. }, Some(from)) = (&link.boundary, from) {
                 if let Some(evidence) = self.ledger.boundary_evidence(&link.source) {
@@ -254,6 +264,9 @@ impl ChannelStore {
                         || from >= evidence.through
                     {
                         return Err(damage("automatic boundary evidence does not match link"));
+                    }
+                    if !selected(&evidence.candidate.parent) {
+                        return Err(StoreError::Rejected("boundary parent is suspended".into()));
                     }
                     link.parent = Some(evidence.candidate.parent.clone());
                 } else {

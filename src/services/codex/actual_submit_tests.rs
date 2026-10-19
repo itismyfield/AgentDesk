@@ -129,6 +129,14 @@ pub(crate) fn before_create_effect(effect: Box<dyn FnOnce()>) {
     BEFORE_CREATE_EFFECT.with_borrow_mut(|slot| *slot = Some(effect));
 }
 
+pub(crate) fn after_initial_absence_capture(effect: Box<dyn FnOnce(bool)>) {
+    super::absence_launch::AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| *slot = Some(effect));
+}
+
+pub(crate) fn observe_absence_admission(observer: super::absence_launch::AdmissionObserver) {
+    super::absence_launch::ADMISSION_OBSERVER.with_borrow_mut(|slot| *slot = Some(observer));
+}
+
 pub(crate) fn run_before_create_effect() {
     BEFORE_CREATE_EFFECT.with_borrow_mut(|slot| {
         if let Some(effect) = slot.take() {

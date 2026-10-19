@@ -2,6 +2,34 @@ use super::*;
 use crate::services::discord::codex_absence::InflightObs;
 use crate::services::tui_prompt_dedupe::clear_relaunch;
 
+#[cfg(test)]
+pub(crate) type AdmissionObserver =
+    Box<dyn FnOnce(Option<&InflightObs>, Option<&std::sync::Arc<CancelToken>>)>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static AFTER_INITIAL_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce(bool)>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static ADMISSION_OBSERVER: std::cell::RefCell<Option<AdmissionObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+enum LaunchReason {
+    AbsentVerified(clear_relaunch::Captured),
+    ExistingRail,
+}
+
+impl LaunchReason {
+    fn captured(&self) -> Option<&clear_relaunch::Captured> {
+        match self {
+            Self::AbsentVerified(captured) => Some(captured),
+            Self::ExistingRail => None,
+        }
+    }
+
+    fn preserves_existing(&self, tmux: &str) -> bool {
+        matches!(self, Self::ExistingRail) && verified_hold::existing_incarnation(tmux)
+    }
+}
+
 pub(super) struct LocalTuiTurn<'a> {
     pub prompt: &'a str,
     pub session_id: Option<&'a str>,
@@ -52,21 +80,30 @@ pub(super) fn execute_observed(
             .as_ref()
             .is_some_and(|token| observed.matches_token(token))
     });
+    #[cfg(test)]
+    ADMISSION_OBSERVER.with_borrow_mut(|slot| {
+        if let Some(observer) = slot.take() {
+            observer(observation, cancel_token.as_ref());
+        }
+    });
     let captured = (!clear_relaunch::relaunch_open(tmux_session_name))
         .then(|| {
             observation
                 .and_then(|observed| clear_relaunch::absent_capture(tmux_session_name, observed))
         })
         .flatten();
+    #[cfg(test)]
+    AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| {
+        if let Some(effect) = slot.take() {
+            effect(captured.is_some());
+        }
+    });
+    // Only the initial capture selects absence; later checks may only revoke that reason.
+    let reason = captured.map_or(LaunchReason::ExistingRail, LaunchReason::AbsentVerified);
+    let captured = reason.captured();
     let inherited_verified = captured.is_some();
     let session_id = if inherited_verified { None } else { session_id };
-    let held = || {
-        observation.map_or_else(
-            || verified_hold::existing_incarnation(tmux_session_name),
-            |observed| verified_hold::existing_incarnation_observed(tmux_session_name, observed),
-        )
-    };
-    if held()
+    if reason.preserves_existing(tmux_session_name)
         && !force_fresh_provider_session
         && crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled()
         && let (Some(session_id), Some(channel), Some(token)) =
@@ -94,12 +131,28 @@ pub(super) fn execute_observed(
             },
         );
     }
-    let warm_followup_enabled = match observation.map_or_else(
-        || verified_hold::preflight(tmux_session_name, cancel_token.as_ref()),
-        |_| {
-            held().then(|| verified_hold::wait_for_cancel(tmux_session_name, cancel_token.as_ref()))
-        },
-    ) {
+    let preflight = match &reason {
+        LaunchReason::AbsentVerified(_) => None,
+        LaunchReason::ExistingRail => {
+            #[cfg(test)]
+            {
+                let reopened = crate::services::claude_tui::source_verify::n2b_mutant("b1b-reason")
+                    && observation.is_some_and(|observed| {
+                        clear_relaunch::absent_capture(tmux_session_name, observed).is_some()
+                    });
+                if reopened {
+                    None
+                } else {
+                    verified_hold::preflight(tmux_session_name, cancel_token.as_ref())
+                }
+            }
+            #[cfg(not(test))]
+            {
+                verified_hold::preflight(tmux_session_name, cancel_token.as_ref())
+            }
+        }
+    };
+    let warm_followup_enabled = match preflight {
         Some(result) => return result,
         None => crate::services::codex_tui::warm_followup::codex_tui_warm_followup_enabled(),
     };
@@ -224,7 +277,7 @@ pub(super) fn execute_observed(
 
     let cleaned =
         crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-            if captured.as_ref().is_some_and(|captured| {
+            if captured.is_some_and(|captured| {
                 !observation.is_some_and(|observed| {
                     clear_relaunch::absent_matches_under(authority, observed, captured)
                 })
@@ -283,7 +336,7 @@ pub(super) fn execute_observed(
 
     #[cfg(test)]
     actual_submit_tests::run_before_create_effect();
-    if captured.as_ref().is_some_and(|captured| {
+    if captured.is_some_and(|captured| {
         !observation.is_some_and(|observed| {
             clear_relaunch::absent_matches(tmux_session_name, observed, captured)
         })

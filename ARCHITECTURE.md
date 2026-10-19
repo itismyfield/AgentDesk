@@ -754,6 +754,7 @@ src/
 │   │   │   ├── execution_requirement_tests.rs
 │   │   │   ├── home_route_tests.rs
 │   │   │   ├── model.rs
+│   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_record.rs
 │   │   │   ├── placement.rs
@@ -771,6 +772,7 @@ src/
 │   │   │   ├── drain_tests.rs
 │   │   │   ├── home_accept_tests.rs
 │   │   │   ├── home_route_tests.rs
+│   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_fence_pg_tests.rs
 │   │   │   ├── replay_hold_tests.rs
@@ -1524,6 +1526,7 @@ src/
 │   │   │   │   │   └── replay_hold.rs
 │   │   │   │   ├── attachment.rs
 │   │   │   │   ├── home_order_tests.rs
+│   │   │   │   ├── initial_fresh_tests.rs
 │   │   │   │   ├── notice.rs
 │   │   │   │   ├── policy_channel.rs
 │   │   │   │   ├── queued.rs
@@ -1634,6 +1637,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
+│   │   │   ├── o_writer_host/
+│   │   │   │   └── b1b_fresh_launch_tests.rs
 │   │   │   ├── queued_placeholders/
 │   │   │   │   ├── tests/
 │   │   │   │   │   └── n3bc_tests.rs
@@ -2741,6 +2746,8 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── legacy_return.rs
 │   │   │   └── legacy_return_tests.rs
+│   │   ├── herdr_host_tests/
+│   │   │   └── teardown_census_tests.rs
 │   │   ├── consumer_guard.rs
 │   │   ├── herdr_clear_adapter.rs
 │   │   ├── herdr_clear_adapter_tests.rs
@@ -2820,6 +2827,8 @@ src/
 │   │   ├── cutover/
 │   │   │   ├── channel_gate/
 │   │   │   │   └── tests.rs
+│   │   │   ├── intake_route/
+│   │   │   │   └── input.rs
 │   │   │   ├── channel_gate.rs
 │   │   │   └── intake_route.rs
 │   │   ├── repost/
@@ -2889,6 +2898,7 @@ src/
 │   │   ├── writer/
 │   │   │   ├── actor/
 │   │   │   │   ├── codex_submission.rs
+│   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── binding/
@@ -2906,6 +2916,8 @@ src/
 │   │   │   ├── host/
 │   │   │   │   ├── activation_io.rs
 │   │   │   │   ├── first_init.rs
+│   │   │   │   ├── fresh_input.rs
+│   │   │   │   ├── fresh_input_tests.rs
 │   │   │   │   ├── hosting.rs
 │   │   │   │   ├── recover.rs
 │   │   │   │   └── transition.rs
@@ -2926,6 +2938,8 @@ src/
 │   │   │   │   ├── provenance.rs
 │   │   │   │   ├── readers.rs
 │   │   │   │   ├── retained_capture.rs
+│   │   │   │   ├── scoped.rs
+│   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── activation.rs
@@ -2953,6 +2967,7 @@ src/
 │   │   │   ├── fork_lineage_tests.rs
 │   │   │   ├── fork_mask_tests.rs
 │   │   │   ├── fork_tests.rs
+│   │   │   ├── fresh_resume_tests.rs
 │   │   │   ├── herdr_resume_tests.rs
 │   │   │   ├── historical_hops.rs
 │   │   │   ├── host.rs
@@ -3002,10 +3017,12 @@ src/
 │   │   │   ├── rotation_unsettled_tests.rs
 │   │   │   ├── round_trip.rs
 │   │   │   ├── s2a_actor_tests.rs
+│   │   │   ├── scoped_repost_tests.rs
 │   │   │   ├── source_identity_tests.rs
 │   │   │   ├── source_read_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
+│   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
 │   │   │   ├── tool_result_repost_tests.rs
@@ -3058,6 +3075,7 @@ src/
 │   │   │   │   ├── absent_open.rs
 │   │   │   │   ├── absent_open_tests.rs
 │   │   │   │   ├── clear_relaunch.rs
+│   │   │   │   ├── fresh_admission.rs
 │   │   │   │   ├── hold_detail.rs
 │   │   │   │   └── provenance_tests.rs
 │   │   │   ├── codex_verified/

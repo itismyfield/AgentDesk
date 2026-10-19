@@ -184,6 +184,7 @@ impl Reply {
 /// The sending side of one run's mailbox.
 #[derive(Clone)]
 pub(crate) struct TransitionPort {
+    suspension: super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Envelope>,
@@ -201,6 +202,15 @@ pub(crate) struct Receiver {
 }
 
 impl TransitionPort {
+    pub(crate) fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
+        self.suspension = suspension;
+        self
+    }
+
+    pub(crate) fn sources_unsuspended(&self) -> bool {
+        self.suspension.is_empty()
+    }
+
     pub(crate) fn new(
         generation: u64,
         gate: Arc<OwnershipGate>,
@@ -209,6 +219,7 @@ impl TransitionPort {
     ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
         let port = Self {
+            suspension: Default::default(),
             generation,
             run: Arc::clone(&run),
             send,
@@ -250,6 +261,9 @@ impl TransitionPort {
         operation: Operation,
         context: Context,
     ) -> Result<Reply, String> {
+        if !self.sources_unsuspended() {
+            return Err("suspended_sources".into());
+        }
         let (reply, answer) = oneshot::channel();
         let envelope = Envelope {
             generation: named.generation,
@@ -260,9 +274,13 @@ impl TransitionPort {
         };
         let sent = self.send.send(envelope).await;
         sent.map_err(|_| "actor ended".to_owned())?;
-        answer
+        let reply = answer
             .await
-            .map_err(|_| "actor reply unavailable".to_owned())
+            .map_err(|_| "actor reply unavailable".to_owned())?;
+        if !self.sources_unsuspended() {
+            return Err("suspended_sources".into());
+        }
+        Ok(reply)
     }
 }
 

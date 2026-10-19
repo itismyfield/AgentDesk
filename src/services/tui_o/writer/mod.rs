@@ -18,6 +18,7 @@ pub mod pieces;
 pub mod resume;
 pub mod rotation;
 pub mod round_trip;
+pub(crate) mod suspension;
 pub mod switch;
 mod tool_results;
 

@@ -7,12 +7,12 @@ use std::sync::Mutex;
 
 mod policy_tests;
 
-const Q1: &str = "B1 restored FIFO first instruction";
-const Q2: &str = "B1 restored FIFO second instruction";
+pub(in crate::services::discord) const Q1: &str = "B1 restored FIFO first instruction";
+pub(in crate::services::discord) const Q2: &str = "B1 restored FIFO second instruction";
 const Q3: &str = "B1 instruction after the second incarnation disappeared";
 const THIRD_NATIVE_ID: &str = "019e660d-4859-7522-9cee-8ba7c4e7c745";
 
-pub(super) fn instruction(message: u64, text: &str) -> Intervention {
+pub(in crate::services::discord) fn instruction(message: u64, text: &str) -> Intervention {
     Intervention {
         author_id: serenity::UserId::new(1),
         author_is_bot: false,
@@ -32,7 +32,7 @@ pub(super) fn instruction(message: u64, text: &str) -> Intervention {
     }
 }
 
-pub(super) async fn restore_instructions(
+pub(in crate::services::discord) async fn restore_instructions(
     fixture: &mut CanaryFixture,
     instructions: Vec<Intervention>,
 ) -> Vec<QueueIdentity> {
@@ -63,7 +63,9 @@ pub(super) async fn restore_instructions(
     identities
 }
 
-pub(super) async fn queue_identities(fixture: &CanaryFixture) -> Vec<QueueIdentity> {
+pub(in crate::services::discord) async fn queue_identities(
+    fixture: &CanaryFixture,
+) -> Vec<QueueIdentity> {
     fixture
         .shared
         .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
@@ -137,7 +139,7 @@ async fn warm_diagnostic(fixture: &CanaryFixture, context: &BindingContext) {
     );
 }
 
-pub(super) async fn recorder(
+pub(in crate::services::discord) async fn recorder(
     fixture: &mut CanaryFixture,
 ) -> crate::services::discord::admin_host_guard::tests::Recorder {
     let api = crate::services::discord::admin_host_guard::tests::Recorder::start_with(Arc::new(
@@ -157,7 +159,7 @@ pub(super) async fn recorder(
     api
 }
 
-pub(super) fn target_missing(fixture: &CanaryFixture, remove_markers: bool) {
+pub(in crate::services::discord) fn target_missing(fixture: &CanaryFixture, remove_markers: bool) {
     fixture.fake.mark_missing();
     fixture.alive.store(false, Ordering::SeqCst);
     crate::services::session_backend::remove_process_session(CANARY_TMUX);
@@ -166,7 +168,7 @@ pub(super) fn target_missing(fixture: &CanaryFixture, remove_markers: bool) {
     }
 }
 
-pub(super) async fn kickoff(
+pub(in crate::services::discord) async fn kickoff(
     fixture: &CanaryFixture,
     api: &crate::services::discord::admin_host_guard::tests::Recorder,
 ) -> bool {
@@ -186,7 +188,10 @@ pub(super) async fn kickoff(
     .started
 }
 
-pub(super) async fn wait_context_after(fixture: &CanaryFixture, previous: &str) -> BindingContext {
+pub(in crate::services::discord) async fn wait_context_after(
+    fixture: &CanaryFixture,
+    previous: &str,
+) -> BindingContext {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Ok(path) = fs::read_to_string(fixture.root.path().join("fresh-context")) {
@@ -206,7 +211,7 @@ pub(super) async fn wait_context_after(fixture: &CanaryFixture, previous: &str) 
     .expect("the actual CLI did not publish a different launch nonce")
 }
 
-pub(super) fn publish_named_source(
+pub(in crate::services::discord) fn publish_named_source(
     fixture: &CanaryFixture,
     context: &BindingContext,
     native: &str,
@@ -250,7 +255,7 @@ fn publish_named(fixture: &CanaryFixture, context: &BindingContext, native: &str
     terminal(&path, "new-clear-turn", "clear relaunch completed");
 }
 
-pub(super) fn terminal(path: &std::path::Path, turn: &str, text: &str) {
+pub(in crate::services::discord) fn terminal(path: &std::path::Path, turn: &str, text: &str) {
     let mut output = fs::OpenOptions::new().append(true).open(path).unwrap();
     for row in [
         json!({"type":"response_item","payload":{"type":"message","role":"assistant",
@@ -268,7 +273,7 @@ pub(super) fn terminal(path: &std::path::Path, turn: &str, text: &str) {
     );
 }
 
-pub(super) async fn wait_completion(token: &Arc<CancelToken>) {
+pub(in crate::services::discord) async fn wait_completion(token: &Arc<CancelToken>) {
     let complete = tokio::time::timeout(Duration::from_secs(15), async {
         while !token.is_completion_cleanup() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -283,7 +288,7 @@ pub(super) async fn wait_completion(token: &Arc<CancelToken>) {
     assert_eq!(token.cancel_source(), None);
 }
 
-pub(super) async fn wait_idle(fixture: &CanaryFixture) {
+pub(in crate::services::discord) async fn wait_idle(fixture: &CanaryFixture) {
     tokio::time::timeout(Duration::from_secs(15), async {
         while fixture
             .shared
@@ -363,7 +368,7 @@ fn warm_draft(prompt: &str) -> String {
     pane
 }
 
-pub(super) fn warm_probe(
+pub(in crate::services::discord) fn warm_probe(
     context: &BindingContext,
     accepted: Arc<Mutex<Vec<String>>>,
     calls: Arc<Mutex<Vec<String>>>,

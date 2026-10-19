@@ -21,6 +21,9 @@ use crate::services::tui_o::writer::adoption::LegacyView;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{self, Custody, FencedFacts, HostIo};
 
+#[cfg(all(test, unix))]
+mod b1b_fresh_launch_tests;
+
 /// How long a first activation waits for the cluster bootstrap to publish this node's id.
 const SELF_ID_WAIT: Duration = Duration::from_secs(10);
 

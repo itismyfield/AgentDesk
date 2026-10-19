@@ -80,6 +80,148 @@ async fn late_foreign_spawn_nonce_holds_before_create_pg() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn initial_probe_failure_cannot_become_absent_launch_pg() {
+    if !isolated(concat!(
+        module_path!(),
+        "::initial_probe_failure_cannot_become_absent_launch_pg"
+    )) {
+        return;
+    }
+    let mut fixture =
+        CanaryFixture::build_with_host(0, CodexSourceMode::Verified, Some("b1-absent-test-host"))
+            .await;
+    let api = recorder(&mut fixture).await;
+    let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(format!(
+        "http://127.0.0.1:{}",
+        api.port
+    ));
+    let _cli = fixture.cold_cli();
+    let _warm = fixture.warm_followup(false);
+    target_missing(&fixture, false);
+    crate::services::platform::tmux::invalidate_availability_cache();
+    restore_instructions(
+        &mut fixture,
+        vec![instruction(
+            CANARY_CHANNEL + 251,
+            "fix the initial launch reason",
+        )],
+    )
+    .await;
+    let mut evidence = old_evidence(&fixture);
+    for extension in [
+        "spawn_nonce",
+        crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+    ] {
+        let path = PathBuf::from(crate::services::tmux_common::session_temp_path(
+            CANARY_TMUX,
+            extension,
+        ));
+        evidence.push((path.clone(), fs::read(path).unwrap()));
+    }
+    let (setup_tx, setup_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    let mut start = ReleaseEffect(Some(start_tx));
+    let (captured_tx, captured_rx) = mpsc::channel();
+    let (capture_tx, capture_rx) = mpsc::channel();
+    let mut capture = ReleaseEffect(Some(capture_tx));
+    let (escaped_tx, escaped_rx) = mpsc::channel();
+    let (effect_tx, effect_rx) = mpsc::channel();
+    let mut effect = ReleaseEffect(Some(effect_tx));
+    let _setup = crate::services::discord::codex_absence::test_setup::install(
+        CANARY_CHANNEL,
+        Box::new(move |_| {
+            crate::services::codex::actual_submit_tests::after_initial_absence_capture(Box::new(
+                move |captured| {
+                    captured_tx.send(captured).unwrap();
+                    capture_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("release the initial capture boundary");
+                },
+            ));
+            crate::services::codex::actual_submit_tests::before_create_effect(Box::new(
+                move || {
+                    escaped_tx.send(()).unwrap();
+                    effect_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("release an incorrectly admitted launch");
+                },
+            ));
+            setup_tx.send(()).unwrap();
+            start_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("release the actual provider entry");
+            Box::new(())
+        }),
+    );
+    let (hold_tx, hold_rx) = mpsc::channel();
+    *crate::services::codex_tui::verified_hold::HOLD_ENTERED_FOR_TESTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(hold_tx);
+    let _hold_reset = HoldHookReset;
+    fixture.fake.take_calls();
+    let _ = crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
+    assert!(kickoff(&fixture, &api).await);
+    let guard = fixture.turn_failure_guard().await;
+    receive(&setup_rx, "actual provider setup").await;
+    fixture.fake.fail_probes();
+    assert_eq!(
+        crate::services::platform::tmux::session_presence(CANARY_TMUX),
+        crate::services::platform::tmux::SessionPresence::ProbeFailed
+    );
+    start.release();
+    assert!(
+        !receive(&captured_rx, "initial failed absence capture").await,
+        "a failed presence probe must not capture an absence permission"
+    );
+    fixture.fake.restore_probes();
+    assert_eq!(
+        crate::services::platform::tmux::session_presence(CANARY_TMUX),
+        crate::services::platform::tmux::SessionPresence::Missing
+    );
+    capture.release();
+    let preserved = tokio::select! {
+        tmux = receive(&hold_rx, "the preserving provider hold") => {
+            assert_eq!(tmux, CANARY_TMUX);
+            true
+        }
+        () = receive(&escaped_rx, "an incorrectly admitted create boundary") => false,
+    };
+    guard.token.cancelled.store(true, Ordering::SeqCst);
+    effect.release();
+    wait_idle(&fixture).await;
+    assert!(
+        preserved,
+        "a later Missing probe replaced the initial failed launch reason"
+    );
+    let cleanup =
+        crate::services::codex::actual_submit_tests::take_dead_temp_cleanup_trace(CANARY_TMUX);
+    assert!(
+        cleanup.is_empty(),
+        "initial rejection performed cleanup: {cleanup:?}"
+    );
+    let calls = fixture.fake.take_calls();
+    assert!(
+        calls.iter().all(|call| {
+            !["new-session", "kill-session", "send-keys", "paste-buffer"]
+                .iter()
+                .any(|effect| call.starts_with(effect))
+        }),
+        "initial rejection performed pane effects: {calls:?}"
+    );
+    assert!(!fixture.root.path().join("fresh-context").exists());
+    assert!(!fixture.root.path().join("fresh-argv.json").exists());
+    for (path, bytes) in evidence {
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "changed {}",
+            path.display()
+        );
+    }
+    drop(guard);
+}
+
 async fn receive<T>(receiver: &mpsc::Receiver<T>, what: &str) -> T {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {

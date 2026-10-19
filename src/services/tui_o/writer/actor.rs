@@ -178,6 +178,7 @@ struct Actor<P, L, A, B> {
     notice: Option<watch::Receiver<u64>>,
     waiting: Waiting,
     clock: (tokio::time::Instant, chrono::DateTime<chrono::Utc>),
+    scope_hold: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -186,8 +187,7 @@ struct Waiting {
     incident: Option<String>,
 }
 
-/// Returns when the channel stops, with why, or when `stop` turns true or closes. `resumed` turns
-/// true once the spool and sources are recovered, and closes when the actor returns.
+/// Runs until stopped; `resumed` means every non-suspended source was restored.
 pub async fn run_channel<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
@@ -254,7 +254,8 @@ where
 {
     let writer = writer.with_repost_stop(stop.clone());
     let deriver = UnitDeriver::new(writer.channel(), provider);
-    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings));
+    let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
+        .with_suspension(writer.suspension.clone());
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
@@ -271,6 +272,7 @@ where
         transitions: transition::Transitions::new(transitions, stop.clone()),
         notice: None,
         waiting: Waiting::default(),
+        scope_hold: None,
         clock: (
             tokio::time::Instant::now(),
             utc.unwrap_or_else(chrono::Utc::now),
@@ -278,6 +280,10 @@ where
     };
     let mut sources_resumed = false;
     while !actor.writer.is_stopped() && !*stop.borrow() {
+        if actor.rescope() {
+            sources_resumed = false;
+            resumed.send_replace(false);
+        }
         if !sources_resumed && actor.sources_allowed() {
             let (writer, deriver) = (&mut actor.writer, &mut actor.deriver);
             let restored = match &mut actor.verified {
@@ -375,6 +381,7 @@ where
     .await
 }
 
+mod fresh_resume;
 mod transition;
 mod transition_snapshot;
 
@@ -480,7 +487,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if ready == 0 && prepared.is_none() {
             // A fresh actor's empty queue is evidence only after its durable sources were restored.
             if self.waiting.incident.take().is_some()
-                || (restored && self.waiting.ready.is_empty() && open.is_none())
+                || (restored
+                    && self.waiting.ready.is_empty()
+                    && open.is_none()
+                    && self.writer.suspension.is_empty())
             {
                 self.writer.waiting_cleared();
             }
@@ -512,10 +522,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return self.delivery_allowed();
         }
         let channel = self.writer.channel();
+        let suspension = self.writer.suspension.clone();
         self.writer
             .store()
             .cursors()
-            .filter(|cursor| !cursor.retired)
+            .filter(|cursor| !cursor.retired && !suspension.contains(&cursor.source))
             .all(|cursor| {
                 crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
                     channel,
@@ -702,6 +713,7 @@ mod test_support {
             notice: None,
             waiting: Waiting::default(),
             clock: (tokio::time::Instant::now(), chrono::Utc::now()),
+            scope_hold: None,
         };
         actor
             .sources

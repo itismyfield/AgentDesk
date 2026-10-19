@@ -29,14 +29,10 @@ pub(super) fn custody_pending_under(authority: &TmuxSourceAuthority<'_>) -> bool
     })
 }
 
-fn candidate_under(authority: &TmuxSourceAuthority<'_>) -> Option<Captured> {
+pub(super) fn candidate_under(authority: &TmuxSourceAuthority<'_>) -> Option<Captured> {
     let captured = capture_pin(authority).ok()??;
     let tmux = authority.session();
-    if !local_context(&captured.context, tmux)
-        || crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(CANARY_CHANNEL))
-        || !runtime_markers_match(tmux)
-        || !target_absent(tmux)
-    {
+    if !scoped_context(&captured.context, tmux) || !target_absent(tmux) {
         return None;
     }
     let nonce = read_nonce(tmux);
@@ -63,6 +59,22 @@ fn candidate_under(authority: &TmuxSourceAuthority<'_>) -> Option<Captured> {
         }
     }
     Some(captured)
+}
+
+pub(super) fn scoped_context(context: &BindingContext, tmux: &str) -> bool {
+    use crate::services::provider_hosting::{
+        ProviderSessionDriver, resolve_provider_session_selection_with_channel,
+    };
+    local_context(context, tmux)
+        && !crate::services::herdr_launch::herdr_configured_for_tui_launch(Some(CANARY_CHANNEL))
+        && runtime_markers_match(tmux)
+        && resolve_provider_session_selection_with_channel(
+            &crate::services::provider::ProviderKind::Codex,
+            true,
+            Some(CANARY_CHANNEL),
+        )
+        .driver
+            == ProviderSessionDriver::TuiHosting
 }
 
 fn local_context(context: &BindingContext, tmux: &str) -> bool {
@@ -109,7 +121,7 @@ fn marker_paths(tmux: &str, extension: &str) -> Option<[PathBuf; 2]> {
     Some([canonical, legacy])
 }
 
-fn read_nonce(tmux: &str) -> SpawnNonceMarker {
+pub(super) fn read_nonce(tmux: &str) -> SpawnNonceMarker {
     let Some(paths) = marker_paths(tmux, "spawn_nonce") else {
         return SpawnNonceMarker::Unreadable;
     };

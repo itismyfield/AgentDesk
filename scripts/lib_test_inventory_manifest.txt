@@ -3684,6 +3684,7 @@ services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::custody_directory_io_error_keeps_restored_head_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::partially_conflicting_custody_keeps_captured_absence_held_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::custody_tests::unrelated_custody_does_not_close_captured_absence_pg
+services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::initial_probe_failure_cannot_become_absent_launch_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_cancellation_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_cleanup_pg
 services::discord::commands::control::codex_clear_relaunch_tests::absent_launch_tests::late_tests::late_foreign_spawn_nonce_holds_before_create_pg
@@ -6700,6 +6701,11 @@ services::discord::router::intake_dispatch::home_order_tests::a_home_row_routes_
 services::discord::router::intake_dispatch::home_order_tests::dormant_owner_admission_primitive_preserves_full_sources_without_receipt_key_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_active_foreign_delivery_carries_every_source_to_the_actual_claim_fence_pg
 services::discord::router::intake_dispatch::home_order_tests::source_forwarding_tests::b_dormant_forwarding_and_old_null_source_delivery_keep_the_legacy_claim_path_pg
+services::discord::router::intake_dispatch::initial_fresh_tests::historical_verified_empty_store_admits_input_before_source_resume_pg
+services::discord::router::intake_dispatch::initial_fresh_tests::initial_fresh_probe_does_not_block_the_current_thread_runtime_pg
+services::discord::router::intake_dispatch::initial_fresh_tests::initial_fresh_worker_discovers_and_checks_a_claimed_input_pg
+services::discord::router::intake_dispatch::initial_fresh_tests::initial_fresh_worker_preserves_a_claim_taken_by_another_owner_pg
+services::discord::router::intake_dispatch::initial_fresh_tests::initial_fresh_worker_rechecks_absence_after_claim_pg
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
 services::discord::router::intake_dispatch::queued::tests::queued_admission_carries_every_absorbed_source_message_id
@@ -7276,6 +7282,8 @@ services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_missing_binary_requires_install
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_literal_rg_read_failure_and_incomplete_text_refuse
 services::discord::runtime_bootstrap::o_writer_host::activation_tests::rollback_rehearsal_tests::tests::d4act3_rollback_scan_requires_wait_and_every_activated_ledger
+services::discord::runtime_bootstrap::o_writer_host::b1b_fresh_launch_tests::actual_gateway_empty_store_launches_fresh_then_warm_fifo_pg
+services::discord::runtime_bootstrap::o_writer_host::b1b_fresh_launch_tests::actual_gateway_retained_cursor_launches_fresh_without_old_consumption_pg
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::a_host_without_an_intake_fence_refuses_deferred_activation_facts
 services::discord::runtime_bootstrap::o_writer_host::fence_tests::gateway_intake_fence_keeps_fresh_facts_with_one_pool_connection_pg
 services::discord::runtime_bootstrap::o_writer_host::repost_tests::f6_gateway_and_delegated_hosts_build_a_repost_turn_only_with_a_pool
@@ -12049,6 +12057,8 @@ services::session_host::herdr_host::tests::m0_close_variant_closed_world
 services::session_host::herdr_host::tests::name_only_scan_follows_reexports_and_function_values
 services::session_host::herdr_host::tests::name_only_teardown_calls_stay_on_the_reviewed_list
 services::session_host::herdr_host::tests::session_target_guard_stays_behind_the_keyed_gate
+services::session_host::herdr_host::tests::teardown_census_tests::authority_cleanup_inventory_follows_aliases_and_function_values
+services::session_host::herdr_host::tests::teardown_census_tests::authority_sweep_requires_the_host_and_captured_guards
 services::session_host::herdr_host::tests::typed_session_probe_entries_have_no_production_caller
 services::session_host::herdr_host::tests::u_observer_callers_confined
 services::session_host::herdr_host::windows_tests::an_unconfigured_herdr_host_refuses_every_operation
@@ -12700,6 +12710,9 @@ services::tui_o::writer::codex_adoption::probe_tests::a_probe_counts_n_k_u_per_d
 services::tui_o::writer::codex_adoption::probe_tests::a_probe_fails_instead_of_shrinking_its_input
 services::tui_o::writer::codex_adoption::probe_tests::a_wrapper_without_its_read_cursor_is_never_counted_adoptable
 services::tui_o::writer::host::claim_tests::an_old_claim_drop_leaves_a_replacement_ready_and_hosted
+services::tui_o::writer::host::fresh_input::tests::queued_transition_reply_is_rejected_after_shared_selection_changes
+services::tui_o::writer::host::fresh_input::tests::submission_request_rejects_suspension_with_a_live_receiver
+services::tui_o::writer::host::fresh_input::tests::suspended_live_blocks_submission_and_prebuilt_transition_reply_callbacks
 services::tui_o::writer::host::test_io::local_retry::local_retry_host_recovers_after_transient_halts_and_a_stopped_host_sends_nothing
 services::tui_o::writer::input_facts::observation_tests::s0o_full_equivalence_includes_events_resume_and_durable_prefix
 services::tui_o::writer::input_facts::observation_tests::s0o_observation_records_filtered_native_boundaries_even_before_block
@@ -12744,6 +12757,14 @@ services::tui_o::writer::rotation::fork_lineage::tests::all_identities_and_each_
 services::tui_o::writer::rotation::fork_lineage::tests::every_byte_split_preserves_offsets_and_never_promotes_an_incomplete_tail
 services::tui_o::writer::rotation::fork_lineage::tests::repeated_ids_use_maximum_parent_start_and_include_the_exact_boundary
 services::tui_o::writer::rotation::fork_lineage::tests::warm_scanner_rechecks_identity_length_absence_and_scan_cap_without_more_bytes
+services::tui_o::writer::rotation::scoped::tests::contracts::default_empty_selection_keeps_ordinary_metadata_and_reference_behavior
+services::tui_o::writer::rotation::scoped::tests::contracts::scoped_old_cursor_without_checkpoint_or_with_unreadable_checkpoint_stays_held
+services::tui_o::writer::rotation::scoped::tests::contracts::selected_parent_and_content_candidate_cannot_reopen_a_suspended_source
+services::tui_o::writer::rotation::scoped::tests::contracts::suspended_content_boundary_and_malformed_rotation_stay_held
+services::tui_o::writer::rotation::scoped::tests::contracts::suspended_incoming_dev_renumber_still_resolves_to_the_stored_denial
+services::tui_o::writer::rotation::scoped::tests::contracts::suspended_old_parent_and_new_bind_references_fail_before_file_open_or_rotation
+services::tui_o::writer::rotation::scoped::tests::rescope_reset_keeps_reader_policy_binding_port_and_suspension
+services::tui_o::writer::rotation::scoped::tests::rescope_waits_for_actual_partial_native_record_to_finish
 services::tui_o::writer::rotation::transition::tests::transition_legacy_hop_candidates_keep_every_applied_match
 services::tui_o::writer::rotation::transition::tests::transition_legacy_hop_candidates_refuse_a_history_short_of_the_checkpoint
 services::tui_o::writer::rotation::transition::tests::transition_watch_closes_only_a_configured_readers_fd_and_names_an_unwatched_one
@@ -12784,6 +12805,8 @@ services::tui_o::writer::tests::actor::a_whole_message_row_posts_each_block_once
 services::tui_o::writer::tests::actor::an_announced_unit_keeps_its_segment_until_it_is_sealed_and_posted
 services::tui_o::writer::tests::actor::canary_policy::canary_alternate_legacy_and_herdr_owner_actor_capture_and_post
 services::tui_o::writer::tests::actor::canary_policy::canary_without_authoritative_owner_actor_preserves_durable_unavailable_hold
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::fresh_startup_proof_resumes_with_old_cursor_untouched
+services::tui_o::writer::tests::actor::canary_policy::fresh_resume::same_actor_scopes_two_fresh_incarnations_without_clear_or_restart
 services::tui_o::writer::tests::actor::canary_policy::operator_resume::local_retry_managed_verified_host_drains_budget_before_following_exact_work
 services::tui_o::writer::tests::actor::canary_policy::operator_resume::local_retry_retired_source_stays_held_when_only_the_new_source_is_allowed
 services::tui_o::writer::tests::actor::canary_policy::operator_resume::operator_resume_verified_source_hold_preserves_approval_cursor_and_post_count
@@ -13046,6 +13069,7 @@ services::tui_o::writer::tests::actor::repost_turn::f6_t11_pre_activation_backlo
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_not_found_poll_holds_ready_pg_and_following_ordinary_work_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_durable_intent_and_scope_denial_return_distinct_owners_pg
 services::tui_o::writer::tests::actor::repost_turn::local_retry::local_retry_real_hook_off_and_denied_channel_grant_local_budget_without_pg_reads
+services::tui_o::writer::tests::actor::repost_turn::scoped::scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg
 services::tui_o::writer::tests::actor::repost_turn::tool_result::shared_tool_result_without_local_history_is_excluded_before_repost_pg
 services::tui_o::writer::tests::actor::restored_prepared_uses_durable_utc_age_and_clamps_future_time
 services::tui_o::writer::tests::actor::rotation::a_bind_waiting_for_its_file_alarms_once_late_and_its_resolution_attaches_it

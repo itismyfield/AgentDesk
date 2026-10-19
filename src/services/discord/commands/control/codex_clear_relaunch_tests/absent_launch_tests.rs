@@ -6,7 +6,7 @@ use crate::services::turn_orchestrator::{
 };
 use std::sync::mpsc;
 
-mod auxiliary_tests;
+pub(in crate::services::discord) mod auxiliary_tests;
 pub(in crate::services::discord) mod custody_tests;
 mod late_tests;
 mod negative_tests;

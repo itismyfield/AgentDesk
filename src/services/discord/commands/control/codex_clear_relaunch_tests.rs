@@ -119,7 +119,7 @@ pub(in crate::services::discord) struct CanaryFixture {
     pub(in crate::services::discord) fake: FakeTmux,
     pub(in crate::services::discord) shared: Arc<SharedData>,
     pub(in crate::services::discord) context: BindingContext,
-    old_source: p5::SourceId,
+    pub(in crate::services::discord) old_source: p5::SourceId,
     alive: Arc<AtomicBool>,
     pub(in crate::services::discord) root: tempfile::TempDir,
     _confirmation: TestConfirmation,
@@ -152,7 +152,7 @@ impl CanaryFixture {
         Self::build_with_host(prefix, process_mode, None).await
     }
 
-    async fn build_with_host(
+    pub(in crate::services::discord) async fn build_with_host(
         prefix: u64,
         process_mode: CodexSourceMode,
         host: Option<&str>,
@@ -383,6 +383,14 @@ impl CanaryFixture {
             "AGENTDESK_CODEX_TUI_WARM_FOLLOWUP",
             std::ffi::OsStr::new(if enabled { "1" } else { "0" }),
         )
+    }
+
+    pub(in crate::services::discord) fn scoped_test_env(
+        &self,
+        key: &str,
+        value: &std::ffi::OsStr,
+    ) -> crate::config::TestEnvVarGuard {
+        crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(key, value)
     }
 
     pub(in crate::services::discord) fn history(&self) -> PathBuf {

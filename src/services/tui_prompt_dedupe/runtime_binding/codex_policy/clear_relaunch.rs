@@ -9,6 +9,12 @@ use std::{fs, io::Read, path::PathBuf};
 
 #[path = "absent_open.rs"]
 mod absent_open;
+#[path = "fresh_admission.rs"]
+mod fresh_admission;
+pub(crate) use fresh_admission::{
+    fresh_scope_eligible, input_reason_for_channel, successor_unproved_for_channel,
+    with_fresh_scope,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Captured {

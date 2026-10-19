@@ -29,10 +29,12 @@ use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
 mod first_init;
+mod fresh_input;
 mod hosting;
 mod recover;
 mod transition;
 pub use activation_io::{Custody, FencedFacts};
+pub(crate) use fresh_input::initial_fresh_ready;
 use recover::{Recovered, recover, recover_boot};
 /// What the gateway runtime supplies; asked only for channels O owns.
 pub trait HostIo: Send + Sync + 'static {
@@ -261,7 +263,11 @@ impl Readiness {
         {
             return Err("actor_unavailable");
         }
-        consume(live.submission.as_ref().ok_or("actor_unavailable")?)
+        let port = live.submission.as_ref().ok_or("actor_unavailable")?;
+        if !port.sources_unsuspended() {
+            return Err("suspended_sources");
+        }
+        consume(port)
     }
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
@@ -643,6 +649,9 @@ async fn host_channel<I: HostIo>(
         Err(error) => return hold(&alarms, channel, &error.detail),
     };
     // Seeded before the port wait, so a recovered panel tick already knows O's newest post.
+    if let Some(reason) = fresh_input::hold_metadata(&store) {
+        return hold(&alarms, channel, reason);
+    }
     super::deliver::seed_last_posted(channel, store.ledger());
     let Some(port) = unless_stopped(&stopping, io.port()).await else {
         return;
@@ -742,9 +751,10 @@ impl<I: HostIo> Hosted<'_, I> {
         let readers = crate::services::tui_o::channel_policy::boot()
             .filter(|boot| boot.dormant_channels().contains(&channel))
             .map(|_| ReaderConfig { dormant: true });
+        let suspension = writer.suspension.clone();
         let spawn =
             || actor::spawn_projecting(&config, readers, writer, self.provider, bindings, watches);
-        let (ports, spawned) = self.spawn_ports(spawn);
+        let (ports, spawned) = self.spawn_ports(suspension, spawn);
         let actor = spawned?;
         let watched = (resumed.clone(), unsettled, owed, self.stopping.clone());
         let readiness = &self.claim.readiness;
