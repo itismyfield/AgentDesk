@@ -15,11 +15,11 @@ async fn slow_activity_reads_do_not_starve_successful_typing_deadlines() {
     let run = supervise(&fake);
     wait(1).await;
     lock(&fake.read_delay).insert(channel, Duration::from_secs(20));
-    wait(17).await;
+    wait(TYPING_EVERY.as_secs() * 2).await;
     run.abort();
     assert_eq!(
         successes(&fake, channel),
-        [0, 8, 16].map(Duration::from_secs)
+        [0, 1, 2].map(|n| TYPING_EVERY * n)
     );
     assert_eq!(typing_counts(channel), (3, 0));
 }
@@ -37,15 +37,22 @@ async fn a_slow_channel_does_not_delay_another_channels_idle_or_generation() {
     wait(3).await;
     assert_eq!(status(fast).unwrap()["activity"], "idle");
     fake.set(fast, BUSY);
-    wait(13).await;
+    wait(TYPING_EVERY.as_secs() * 2 + 1).await;
     run.abort();
     assert_eq!(
         successes(&fake, slow),
-        [0, 8, 16, 24].map(Duration::from_secs)
+        (0..=fake.since().as_secs() / TYPING_EVERY.as_secs())
+            .map(|n| Duration::from_secs(TYPING_EVERY.as_secs() * n))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         successes(&fake, fast),
-        [0, 8, 15, 23].map(Duration::from_secs)
+        [
+            Duration::ZERO,
+            TYPING_EVERY,
+            Duration::from_secs(15),
+            Duration::from_secs(15) + TYPING_EVERY
+        ]
     );
     assert_eq!(status(fast).unwrap()["generation"], 3);
     assert_eq!(typing_counts(fast), (4, 0));
@@ -58,7 +65,7 @@ async fn exactly_ten_seconds_between_successes_is_accepted_without_overlapping_s
     let fake = Fake::new(&[channel], BUSY);
     let run = supervise(&fake);
     wait(1).await;
-    lock(&fake.typing_delay).insert(channel, Duration::from_secs(2));
+    lock(&fake.typing_delay).insert(channel, Duration::from_secs(10) - TYPING_EVERY);
     wait(8).await;
     assert_eq!(typing_counts(channel), (1, 0));
     wait(2).await;
@@ -70,8 +77,46 @@ async fn exactly_ten_seconds_between_successes_is_accepted_without_overlapping_s
             .windows(2)
             .all(|p| p[1] - p[0] <= Duration::from_secs(10))
     );
-    assert_eq!(fake.typed_secs(channel), [0, 8]);
+    assert_eq!(fake.typed_secs(channel), [0, TYPING_EVERY.as_secs()]);
     assert_eq!(typing_counts(channel), (2, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_second_http_delay_keeps_same_busy_generation_success_gaps_within_ten_seconds() {
+    let channel = 6_200_024;
+    let _confirmed = TestConfirmation::new(channel);
+    let fake = Fake::new(&[channel], BUSY);
+    let run = supervise(&fake);
+    wait(1).await;
+    assert_eq!(successes(&fake, channel), [Duration::ZERO]);
+    let generation = status(channel).unwrap()["generation"].clone();
+    lock(&fake.typing_delay).insert(channel, Duration::from_secs(3));
+    wait(30).await;
+    let times = successes(&fake, channel);
+    assert!(
+        times.len() >= 3,
+        "must observe consecutive HTTP completions"
+    );
+    assert_eq!(status(channel).unwrap()["activity"], "busy");
+    assert_eq!(status(channel).unwrap()["generation"], generation);
+    assert!(
+        times
+            .windows(2)
+            .all(|p| p[1] - p[0] <= Duration::from_secs(10)),
+        "HTTP completion gaps exceed ten seconds: {times:?}"
+    );
+    assert_eq!(times[1], TYPING_EVERY + Duration::from_secs(3));
+    fake.set(channel, IDLE);
+    wait(4).await;
+    assert_eq!(status(channel).unwrap()["activity"], "idle");
+    let stopped = (fake.typed_secs(channel), successes(&fake, channel));
+    wait(30).await;
+    run.abort();
+    assert_eq!(
+        (fake.typed_secs(channel), successes(&fake, channel)),
+        stopped
+    );
+    assert_eq!(typing_counts(channel), (stopped.1.len() as u64, 0));
 }
 
 #[tokio::test(start_paused = true)]
@@ -79,19 +124,37 @@ async fn idle_fences_a_due_mailbox_wait_and_old_generation_cannot_restart_typing
     let channel = 6_200_021;
     let _confirmed = TestConfirmation::new(channel);
     let fake = Fake::new(&[channel], BUSY);
-    let run = supervise(&fake);
-    wait(7).await;
+    let mut supervisor = Supervisor::new(fake.clone());
+    let presence = supervisor.presence(channel);
+    let supervisor = Arc::new(supervisor);
+    supervisor.tick(Instant::now()).await;
+    wait(TYPING_EVERY.as_secs()).await;
     lock(&fake.mailbox_delay).insert(channel, Duration::from_secs(5));
+    let due = tokio::spawn({
+        let supervisor = supervisor.clone();
+        async move { supervisor.send_due(Instant::now()).await }
+    });
+    tokio::task::yield_now().await;
+    assert!(!lock(&fake.mailbox_delay).contains_key(&channel));
     fake.set(channel, IDLE);
-    wait(3).await;
+    supervisor.tick(Instant::now()).await;
     assert_eq!(status(channel).unwrap()["activity"], "idle");
     assert_eq!(successes(&fake, channel), [Duration::ZERO]);
     fake.set(channel, BUSY);
-    wait(12).await;
-    run.abort();
+    supervisor.tick(Instant::now()).await;
+    wait(5).await;
+    due.await.unwrap();
+    assert_eq!(successes(&fake, channel), [Duration::ZERO, TYPING_EVERY]);
+    assert_eq!(
+        lock(&presence).next_typing_at,
+        Some(fake.start + TYPING_EVERY * 2)
+    );
+    wait(TYPING_EVERY.as_secs() - 5).await;
+    supervisor.send_due(Instant::now()).await;
+    wait(1).await;
     assert_eq!(
         successes(&fake, channel),
-        [0, 12, 20].map(Duration::from_secs)
+        [0, 1, 2].map(|n| TYPING_EVERY * n)
     );
     assert_eq!(status(channel).unwrap()["generation"], 3);
     assert_eq!(typing_counts(channel), (3, 0));
