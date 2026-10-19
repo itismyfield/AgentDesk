@@ -598,8 +598,7 @@ impl AgentChannel {
     /// Returns the configured prompt-cache TTL selector in minutes, but only
     /// for the retained 5/60 buckets. Subscription Claude automatically
     /// requests the 1h TTL without an env override, so this value is currently
-    /// inert for native sessions; forwarding it to claude-e remains an
-    /// unimplemented gap documented in `docs/claude-e-rollout/`.
+    /// inert for native sessions.
     pub fn cache_ttl_minutes(&self) -> Option<u32> {
         match self {
             Self::Legacy(_) => None,
@@ -623,9 +622,8 @@ pub fn normalize_cache_ttl_minutes(value: Option<u32>) -> Option<u32> {
 /// `AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES` accepts `5` or `60`; anything
 /// else (including the variable being unset) returns `None`. The Discord
 /// resolver still carries this value through the existing config chain, but
-/// native subscription Claude already auto-requests the 1h TTL (no env is
-/// needed), and claude-e forwarding is not implemented yet; see
-/// `docs/claude-e-rollout/`.
+/// native subscription Claude already auto-requests the 1h TTL without an env
+/// override.
 pub fn default_cache_ttl_minutes_from_env() -> Option<u32> {
     let raw = std::env::var("AGENTDESK_PROMPT_CACHE_DEFAULT_MINUTES").ok()?;
     let parsed = raw.trim().parse::<u32>().ok()?;
@@ -697,8 +695,7 @@ pub struct AgentChannelConfig {
     /// Retained Anthropic prompt-cache TTL selector (#1088). Only `5` or `60`
     /// minutes are valid. Subscription Claude automatically requests the 1h
     /// TTL without an env override, so this field is currently inert for
-    /// native sessions. Forwarding it to claude-e is an unimplemented gap;
-    /// see `docs/claude-e-rollout/`.
+    /// native sessions.
     #[serde(
         default,
         alias = "cacheTtlMinutes",
@@ -2870,20 +2867,20 @@ fn audit_config_file_permissions_if_secret_bearing(path: &Path, config: &Config)
 mod secret_bearing_config_file_tests {
     use super::*;
 
+    /// A leftover `tui_o.shadow` block still loads, and the rest of `tui_o` is kept.
     fn assert_retired_shadow_settings_load(enabled: bool) {
         let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retired-shadow-config.yaml");
-        let settings = format!(
-            "shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n\
-             writer: {{channels: [41, 42], late_adopt: true, dormant_channels: [42]}}\n\
-             turn: {{channels: [41], all_owned: true}}\n\
-             repost: {{enabled: true, channels: [41]}}\n\
+        let live = "writer: {channels: [41, 42], late_adopt: true, dormant_channels: [42]}\n\
+             turn: {channels: [41], all_owned: true}\n\
+             repost: {enabled: true, channels: [41]}\n\
              alert_channel_id: 42\n\
-             codex_history_adoption: false\n"
-        );
+             codex_history_adoption: false\n";
+        let settings =
+            format!("shadow: {{enabled: {enabled}, channel_allowlist: [41, 42]}}\n{live}");
         let expected: crate::services::tui_o::shadow::tap::TuiOConfig =
-            serde_yaml::from_str(&settings).unwrap();
+            serde_yaml::from_str(live).unwrap();
         let indented = settings
             .lines()
             .map(|line| format!("  {line}\n"))
@@ -2906,12 +2903,10 @@ mod secret_bearing_config_file_tests {
         let output = loaded.tui_o.as_ref().unwrap();
 
         assert_eq!(output, &expected);
-        assert_eq!(output.shadow.enabled, enabled);
-        assert_eq!(output.shadow.channel_allowlist, [41, 42]);
-        assert_eq!(
-            serde_yaml::to_string(output).unwrap(),
-            serde_yaml::to_string(&expected).unwrap()
-        );
+        assert!(output.writer.late_adopt && output.repost.enabled);
+        let rendered = serde_yaml::to_string(output).unwrap();
+        assert_eq!(rendered, serde_yaml::to_string(&expected).unwrap());
+        assert!(!rendered.contains("shadow"), "{rendered}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
     }
 

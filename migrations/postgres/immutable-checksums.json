@@ -720,6 +720,11 @@
       "path": "migrations/postgres/0141_sessions_hosted_execution_archive.sql",
       "sha256": "8bd647f7c3fd5298e37eeea2d88634fa78ebf93dc35dfc8bf052b159067132e7",
       "version": 141
+    },
+    {
+      "path": "migrations/postgres/0142_relay_dead_letter_redelivery_state_check.sql",
+      "sha256": "da14c5d6da7840ecd1e8fb96502a5337b6d7c4bdf3cf1349f535ac2b86dedac2",
+      "version": 142
     }
   ],
   "version": 1

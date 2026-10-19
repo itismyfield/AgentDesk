@@ -248,6 +248,7 @@ jobs:
               - 'src/db/postgres/test_db_reclaim.rs'
               - 'src/db/prompt_manifests/tests.rs'
               - 'src/db/relay_dead_letter.rs'
+              - 'src/db/relay_dead_letter/migration_tests.rs'
               - 'src/db/replay_disposition/register_tests.rs'
               - 'src/db/replay_disposition/write_tests.rs'
               - 'src/db/replay_disposition_tests.rs'
@@ -384,6 +385,8 @@ jobs:
               - 'src/services/discord/queue_io/queued_head_auto_tests.rs'
               - 'src/services/discord/queue_io/queued_head_inject_tests.rs'
               - 'src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_guard_tests.rs'
+              - 'src/services/discord/recovery_engine/herdr_row_end_rig_tests.rs'
               - 'src/services/discord/recovery_engine/host_reconcile_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs'
               - 'src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs'
@@ -2134,7 +2137,7 @@ jobs:
     name: Script checks runner (guards)
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2170,7 +2173,7 @@ jobs:
     name: Script checks runner (contracts)
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2231,7 +2234,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d6185791546e805d03d7c36685ef940b1cc8ca1c22bdc2544a41d35e2133e243
+          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -2483,7 +2486,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=d6185791546e805d03d7c36685ef940b1cc8ca1c22bdc2544a41d35e2133e243
+          expected=baf2d0e4103002f8e388100d5ee8c68da60f8a0d95ff49db131ae4df0be33267
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

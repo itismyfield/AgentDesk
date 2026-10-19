@@ -430,16 +430,6 @@ pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBot
     // Registered before the writer host reads the registry for each channel's gate.
     start_channel_homes(&shared, &provider, HomeRole::Gateway, &homes).await;
     run_bot_maybe_spawn_intake_worker(&shared, &provider);
-    if boot_config
-        .tui_o
-        .as_ref()
-        .is_some_and(|config| config.shadow.enabled)
-    {
-        static SHADOW_REMOVAL_WARNING: std::sync::Once = std::sync::Once::new();
-        SHADOW_REMOVAL_WARNING.call_once(|| {
-            tracing::warn!("shadow observer was removed; setting ignored");
-        });
-    }
     let pg_gateway = gateway_lease.is_some();
     o_writer_host::spawn(&shared, &provider, boot_config.tui_o.as_ref(), pg_gateway);
     run_bot_spawn_sigterm_handler(&shared, provider.clone());

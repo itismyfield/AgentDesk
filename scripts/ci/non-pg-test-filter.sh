@@ -32,6 +32,7 @@ NON_PG_SKIP_ARGS=(
   --skip db::o_channel_activation::fence_tests
   --skip db::o_channel_homes::tests
   --skip db::prompt_manifests::tests
+  --skip db::relay_dead_letter::migration_tests
   --skip db::relay_dead_letter::tests
   --skip db::replay_disposition::register_tests
   --skip db::replay_disposition::tests
@@ -130,6 +131,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::queue_dispatch::canary_workspace::tests
   --skip services::discord::queue_io::queued_head_inject::tests
   --skip services::discord::recovery_engine::herdr_before_start_restart::tests
+  --skip services::discord::recovery_engine::herdr_row_end::tests::rig
   --skip services::discord::recovery_engine::host_reconcile::tests
   --skip services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
   --skip services::discord::recovery_engine::restore_inflight::host_probe_tests

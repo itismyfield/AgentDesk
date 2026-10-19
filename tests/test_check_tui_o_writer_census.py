@@ -28,7 +28,21 @@ EVID_FILE = """pub fn read_receipt() -> bool { lookup_receipt() }
 """
 CUTOVER_FILE = """pub const O_TUI_WRITER: bool = false;
 pub fn o_owns_tui_output(kind: Kind) -> bool { O_TUI_WRITER && kind.is_tui() }
+pub fn mark_codex_turn_admitted() { candidate.mark_turn_admitted(ch, read_seq); }
 """
+TURN_START_FILE = """pub async fn log_session_strategy_diagnostic() {
+    cutover::mark_codex_turn_admitted(ch, provider, session);
+    tokio::task::spawn_blocking(probe);
+}
+"""
+INTAKE_FILE = """pub async fn handle_text_message() {
+    log_session_strategy_diagnostic().await;
+    provider_dispatch::execute(turn);
+    spawn_turn_bridge(turn);
+}
+"""
+TURN_START = "src/services/discord/router/turn_start.rs"
+INTAKE = "src/services/discord/router/message_handler/intake_turn.rs"
 MAPS = {
     "EXPECTED_PRIMITIVES": {"sink.rs": {"send_channel_message*": 1}},
     "CENSUS": {"sink.rs": ("W20", "CUT_D")},
@@ -37,6 +51,8 @@ MAPS = {
     },
     "R_EVID": ("src/services/discord/outbound/delivery_record.rs",),
     "RAW_CLAIM_SITES": {},
+    "TURN_MARK_SITES": census.TURN_MARK_SITES,
+    "TURN_ADMISSION_ORDER": census.TURN_ADMISSION_ORDER,
 }
 
 
@@ -48,6 +64,8 @@ class CensusGateTests(unittest.TestCase):
         self.write("src/services/discord/sink.rs", CUT_FILE)
         self.write("src/services/discord/outbound/delivery_record.rs", EVID_FILE)
         self.write("src/services/tui_o/cutover.rs", CUTOVER_FILE)
+        self.write(TURN_START, TURN_START_FILE)
+        self.write(INTAKE, INTAKE_FILE)
         self.maps = {key: _copy(value) for key, value in MAPS.items()}
 
     def write(self, rel: str, text: str) -> None:
@@ -172,7 +190,10 @@ class CensusGateTests(unittest.TestCase):
         self.write("src/services/discord/sink.rs", held + early)
         self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "early:claim")
         self.assert_fails_with("raw claim: src/services/discord/sink.rs claims in early outside")
-        for raw in ("adoption.claim_body(ch);", "channels.map(Candidate::claim_body);"):
+        for raw in (
+            "adoption.claim_body(ch);", "channels.map(Candidate::claim_body);",
+            "adoption.claim_body_from(ch, origin);", "channels.map(Candidate::claim_body_from);",
+        ):
             with self.subTest(raw=raw):
                 self.write("src/services/tui_o/early.rs", f"fn early(ch: u64) {{ {raw} }}\n")
                 self.assert_fails_with("raw claim: src/services/tui_o/early.rs claims in early outside")
@@ -214,6 +235,71 @@ class CensusGateTests(unittest.TestCase):
         self.maps["EXPECTED_GATES"]["src/services/discord/sink.rs"] = ("deliver:claim", "g:claim")
         ok, message = self.run_gate()
         self.assertTrue(ok, message)
+
+    def test_turn_mark_cannot_move_to_a_different_production_function(self) -> None:
+        self.write(TURN_START, TURN_START_FILE.replace(
+            "    cutover::mark_codex_turn_admitted(ch, provider, session);\n", ""
+        ))
+        for boundary in ("provider_dispatch::execute(turn);", "spawn_turn_bridge(turn);"):
+            with self.subTest(boundary=boundary):
+                self.write(INTAKE, INTAKE_FILE.replace(
+                    boundary, boundary + "\n    cutover::mark_codex_turn_admitted(ch, provider, session);"
+                ))
+                self.assert_fails_with(
+                    f"turn mark sites: {INTAKE} has ['handle_text_message:admit'], expected []"
+                )
+
+    def test_admission_call_moved_after_submit_or_spawn_fails_with_unchanged_sites(self) -> None:
+        call = "    log_session_strategy_diagnostic().await;\n"
+        for boundary in ("provider_dispatch::execute(turn);", "spawn_turn_bridge(turn);"):
+            with self.subTest(boundary=boundary):
+                moved = INTAKE_FILE.replace(call, "").replace(boundary, boundary + "\n" + call)
+                self.write(INTAKE, moved)
+                self.assert_fails_with(
+                    f"turn admission: {INTAKE} handle_text_message must order "
+                    "log_session_strategy_diagnostic -> provider_dispatch::execute -> spawn_turn_bridge"
+                )
+
+    def test_mark_moved_after_diagnostic_probe_fails_with_unchanged_sites(self) -> None:
+        call = "    cutover::mark_codex_turn_admitted(ch, provider, session);\n"
+        self.write(TURN_START, TURN_START_FILE.replace(call, "").replace(
+            "    tokio::task::spawn_blocking(probe);\n",
+            "    tokio::task::spawn_blocking(probe);\n" + call,
+        ))
+        self.assert_fails_with(
+            f"turn admission: {TURN_START} log_session_strategy_diagnostic must order "
+            "mark_codex_turn_admitted -> spawn_blocking"
+        )
+
+    def test_missing_or_duplicate_admission_tokens_fail(self) -> None:
+        call = "    log_session_strategy_diagnostic().await;\n"
+        for copies in (0, 2):
+            with self.subTest(copies=copies):
+                self.write(INTAKE, INTAKE_FILE.replace(call, call * copies))
+                self.assert_fails_with(
+                    f"turn admission: {INTAKE} handle_text_message has {copies}x "
+                    "log_session_strategy_diagnostic, expected 1x"
+                )
+
+    def test_admission_order_missing_function_or_file_fails(self) -> None:
+        self.write(INTAKE, "fn other() {}\n")
+        self.assert_fails_with(f"turn admission: {INTAKE} needs one production fn handle_text_message")
+        (self.root / INTAKE).unlink()
+        self.assert_fails_with(f"turn admission: missing production file {INTAKE}")
+
+    def test_turn_mark_in_a_new_file_needs_a_site_pin(self) -> None:
+        rel = "src/services/tui_o/new_mark.rs"
+        self.write(rel, "fn early() { candidate.mark_turn_admitted(ch, read_seq); }\n")
+        self.assert_fails_with(f"turn mark sites: {rel} has ['early:mark'], expected []")
+
+    def test_turn_mark_prose_and_test_code_do_not_satisfy_production_pins(self) -> None:
+        call = "    cutover::mark_codex_turn_admitted(ch, provider, session);"
+        self.write(TURN_START, TURN_START_FILE.replace(call, "    // " + call))
+        self.write("src/services/tui_o/mark_test.rs",
+                   "#[cfg(test)]\nfn test() { candidate.mark_turn_admitted(ch, read_seq); }\n")
+        self.assert_fails_with(
+            f"turn mark sites: {TURN_START} has [], expected ['log_session_strategy_diagnostic:admit']"
+        )
 
     def test_flag_token_outside_cutover_fails(self) -> None:
         self.write("src/services/discord/other.rs", "fn f() -> bool { cutover::O_TUI_WRITER }\n")

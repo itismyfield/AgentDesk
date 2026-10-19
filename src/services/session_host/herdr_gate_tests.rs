@@ -2025,6 +2025,11 @@ pub(crate) mod p11 {
         /// The server and the boot section for `channel`, installed for this whole child
         /// process; nothing under the runtime root is written yet.
         pub(crate) fn boot(channel: u64) -> Self {
+            Self::boot_with(channel, false)
+        }
+
+        /// As `boot`, with the recorded provider's process read as alive when `provider_alive`.
+        pub(crate) fn boot_with(channel: u64, provider_alive: bool) -> Self {
             assert!(std::env::var_os(TERMINATE_TEST_CHILD).is_some());
             let server = serve();
             server.vanish_on_close.store(true, Ordering::SeqCst);
@@ -2052,7 +2057,7 @@ pub(crate) mod p11 {
             Self {
                 server,
                 boot,
-                os: ScriptedOs::new(pending, Ok(false)),
+                os: ScriptedOs::new(pending, Ok(provider_alive)),
                 channel,
             }
         }

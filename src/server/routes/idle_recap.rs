@@ -118,7 +118,7 @@ async fn run_idle_recap_post_job(
         None => None,
     };
     // The transcript file outlives the pane, so it covers runtimes without a live tmux
-    // pane (e.g. `claude-e`) and sessions already torn down.
+    // pane, including sessions already torn down.
     let scrollback = match (
         scrollback,
         snapshot.cwd.as_deref(),

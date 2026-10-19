@@ -21,6 +21,11 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     let Some(key) = key else {
         return false;
     };
+    if crate::services::discord::recovery_engine::producer_resume::waiting_for_receipt(
+        shared, provider, key,
+    ) {
+        return false;
+    }
     let channel_id = key.channel_id;
     let finalizer_turn_id = key.user_msg_id;
     if finalizer_turn_id == 0 {

@@ -151,7 +151,26 @@ async fn read_end(target: HerdrTarget, record: HostedExecution) -> Result<(), Te
     .await
     .map_err(|e| TerminationResult::Indeterminate(e.to_string()))?
 }
-async fn retire_confirmed(
+/// What a fresh read of a stored execution shows; nothing is closed or written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecutionEnd {
+    /// The pane is gone or back at its own shell, and the provider process is gone.
+    Ended,
+    /// The pane no longer runs it, but the provider process lives.
+    ProviderAlive,
+    /// The pane still runs it, or a read failed.
+    Unconfirmed,
+}
+
+/// `read_end` for a caller that sent no close.
+pub(super) async fn execution_end(target: HerdrTarget, record: HostedExecution) -> ExecutionEnd {
+    match read_end(target, record).await {
+        Ok(()) => ExecutionEnd::Ended,
+        Err(TerminationResult::ProviderSurvivedClose) => ExecutionEnd::ProviderAlive,
+        Err(_) => ExecutionEnd::Unconfirmed,
+    }
+}
+pub(super) async fn retire_confirmed(
     pool: &PgPool,
     row: &HostedObservation,
     record: &HostedExecution,
