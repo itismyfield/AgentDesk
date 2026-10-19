@@ -425,13 +425,26 @@ fn terminal_ordering_fixture(
                     let published_sites = gateway.sites.lock().unwrap().clone();
                     let terminal_bodies = &published_bodies[streamed_before_terminal..];
                     let terminal_sites = &published_sites[streamed_before_terminal..];
-                    assert_eq!(terminal_sites, ["replace_message_with_outcome", "send_message"],
-                        "one terminal body edit precedes one standalone summary; gateway traffic: {}",
+                    let live_completion = source_race == Some(SourceRace::Unchanged);
+                    let expected_sites: &[&str] = if live_completion {
+                        &["replace_message_with_outcome", "send_message"]
+                    } else {
+                        &["replace_message_with_outcome"]
+                    };
+                    assert_eq!(terminal_sites, expected_sites,
+                        "{source_race:?}/{provider:?}: live completion has one summary; dormant recovery has none; gateway traffic: {}",
                         gateway.traffic_dump());
-                    assert_eq!(terminal_bodies.len(), 2, "one body and one summary only");
-                    assert_eq!(terminal_bodies[0], body, "terminal publication preserves the exact body");
-                    assert!(terminal_bodies[1].starts_with("-# ✅ ") && !terminal_bodies[1].contains('\n'),
-                        "completion summary is a separate single line: {:?}", terminal_bodies[1]);
+                    assert_eq!(terminal_bodies.len(), if live_completion { 2 } else { 1 },
+                        "{source_race:?}/{provider:?}: exact live/recovery publication count");
+                    assert_eq!(terminal_bodies[0], body,
+                        "{source_race:?}/{provider:?}: terminal publication preserves the exact body");
+                    if live_completion {
+                        assert!(terminal_bodies[1].starts_with("-# ✅ ") && !terminal_bodies[1].contains('\n'),
+                            "{source_race:?}/{provider:?}: completion summary is a separate single line: {:?}", terminal_bodies[1]);
+                    } else {
+                        assert_eq!(terminal_bodies.iter().filter(|text| text.starts_with("-# ")).count(), 0,
+                            "{source_race:?}/{provider:?}: dormant recovery must not backfill a summary");
+                    }
                 }
                 assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());
