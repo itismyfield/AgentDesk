@@ -264,8 +264,13 @@ impl RoutineAgentExecutor {
         // backstop (the in-line completion path still tears the session down),
         // so it must never fail the started turn.
         if started && execution_mode != execution::AgentExecutionMode::Process {
-            self.record_owned_fresh_session(store, claimed, &result_json)
-                .await;
+            self.record_owned_fresh_session(
+                store,
+                claimed,
+                &result_json,
+                outcome.owned_session_key.as_deref(),
+            )
+            .await;
         }
 
         Ok(StartedAgentTurn {

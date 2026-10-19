@@ -3,6 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 
 mod execution;
 mod launch;
+mod owned_session;
 pub(crate) mod reliability;
 pub(crate) mod start_deferral;
 use reliability::{current_attempt_started_at, provider_error_from_completion};
@@ -1071,104 +1072,6 @@ impl RoutineAgentExecutor {
                 tmux_session = %owned_tmux_session,
                 error = %error,
                 "recovered fresh routine session teardown failed"
-            ),
-        }
-    }
-
-    /// Records the tmux session a freshly-started fresh-routine run owns (#3022).
-    /// No-op for non-fresh routines (they reuse a persistent session that must
-    /// survive). Best-effort and non-fatal: every failure path only forgoes the
-    /// boot-recovery reap backstop, never the turn itself.
-    ///
-    /// DM-bound fresh actions (`dmUserId`) are intentionally NOT recorded: the
-    /// DM session is named `dm-<user_id>` in a DM channel with no
-    /// `thread_channel_id`, so the thread-based resolver would record the *wrong*
-    /// token and boot recovery could reap an unrelated session. Recording nothing
-    /// keeps such a session out of the reap (no positive ownership proof) and
-    /// lets the existing idle-kill backstop collect it — the pre-#3022 behavior,
-    /// with no risk of killing the wrong session.
-    async fn record_owned_fresh_session(
-        &self,
-        store: &RoutineStore,
-        claimed: &ClaimedRoutineRun,
-        result_json: &Value,
-    ) {
-        if claimed.execution_strategy != "fresh"
-            || execution::AgentExecutionMode::from_result(Some(result_json))
-                == execution::AgentExecutionMode::Process
-        {
-            return;
-        }
-        if started_turn_is_dm(result_json) {
-            tracing::debug!(
-                routine_id = %claimed.routine_id,
-                run_id = %claimed.run_id,
-                "fresh routine ownership not recorded: DM-bound session is not thread-resolvable"
-            );
-            return;
-        }
-        let routine = match store.get_routine(&claimed.routine_id).await {
-            Ok(Some(routine)) => routine,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    routine_id = %claimed.routine_id,
-                    run_id = %claimed.run_id,
-                    error = %error,
-                    "fresh routine ownership not recorded: routine lookup failed"
-                );
-                return;
-            }
-        };
-        let controller =
-            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-        let ownership_token = match controller
-            .resolve_fresh_ownership_token(&routine, Some(result_json))
-            .await
-        {
-            Ok(Some(ownership_token)) => ownership_token,
-            Ok(None) => {
-                // No concrete started session row was resolvable; recording a
-                // guessed/derived token risks reaping a non-existent session
-                // and leaving the real orphan alive (#3022). Leave it to the
-                // idle-kill backstop instead.
-                tracing::debug!(
-                    routine_id = %claimed.routine_id,
-                    run_id = %claimed.run_id,
-                    "fresh routine ownership not recorded: no concrete started session resolvable"
-                );
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    routine_id = %claimed.routine_id,
-                    run_id = %claimed.run_id,
-                    error = %error,
-                    "fresh routine ownership not recorded: session unresolved"
-                );
-                return;
-            }
-        };
-        match store
-            .set_run_owned_tmux_session(&claimed.run_id, &ownership_token)
-            .await
-        {
-            Ok(true) => tracing::debug!(
-                routine_id = %claimed.routine_id,
-                run_id = %claimed.run_id,
-                ownership_token = %ownership_token,
-                "fresh routine run owned-session recorded"
-            ),
-            Ok(false) => tracing::debug!(
-                routine_id = %claimed.routine_id,
-                run_id = %claimed.run_id,
-                "fresh routine ownership not recorded: run no longer running"
-            ),
-            Err(error) => tracing::warn!(
-                routine_id = %claimed.routine_id,
-                run_id = %claimed.run_id,
-                error = %error,
-                "fresh routine ownership not recorded: persist failed"
             ),
         }
     }
