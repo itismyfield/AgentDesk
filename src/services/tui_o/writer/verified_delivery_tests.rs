@@ -426,7 +426,11 @@ async fn the_actor_posts_permitted_episodes_holds_unknown_ones_and_waits_behind_
         resumed,
     ));
     tokio::time::sleep(POLL_INTERVAL * 4).await;
-    assert_eq!(port.posts(), ["one", "-# ✅ 완료"], "unattributed work stops the pass");
+    assert_eq!(
+        port.posts(),
+        ["one", "-# ✅ 완료"],
+        "unattributed work stops the pass"
+    );
     let span = episode_span(channel, &a, 9, loose);
     opened(&store).persist_codex_span(span.clone()).unwrap();
     let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
@@ -434,7 +438,10 @@ async fn the_actor_posts_permitted_episodes_holds_unknown_ones_and_waits_behind_
     )));
     issue_for_tests(span.execution.clone(), span.episode.clone(), &token).unwrap();
     tokio::time::sleep(POLL_INTERVAL * 4).await;
-    assert_eq!(port.posts(), ["one", "-# ✅ 완료", "loose", "two", "-# ✅ 완료"]);
+    assert_eq!(
+        port.posts(),
+        ["one", "-# ✅ 완료", "loose", "two", "-# ✅ 완료"]
+    );
     stop.send(true).unwrap();
     assert_eq!(task.await.unwrap(), None);
 }
