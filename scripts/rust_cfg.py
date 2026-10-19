@@ -305,14 +305,17 @@ def find_test_only_cfg_attributes(code: str) -> Iterator[CfgAttributeMatch]:
 
 
 def _macro_delimiter_precedes(code: str, index: int) -> bool:
-    """Recognize both ordinary `name!{...}` calls and `macro_rules! name {...}`."""
+    """Recognize macro calls and named definitions with any token-tree delimiter."""
     def word_before(position: int) -> tuple[str, int]:
         while position >= 0 and code[position].isspace():
             position -= 1
         end = position + 1
         while position >= 0 and (code[position].isalnum() or code[position] == "_"):
             position -= 1
-        return code[position + 1 : end], position
+        start = position + 1
+        if start < end and position >= 1 and code[position - 1 : position + 1] == "r#":
+            position -= 2
+        return code[start:end], position
 
     cursor = index - 1
     while cursor >= 0 and code[cursor].isspace():
@@ -320,7 +323,7 @@ def _macro_delimiter_precedes(code: str, index: int) -> bool:
     if cursor >= 0 and code[cursor] == "!":
         name, _ = word_before(cursor - 1)
         return bool(name)
-    if index >= 0 and code[index] == "{":
+    if index >= 0 and code[index] in "([{":
         name, cursor = word_before(cursor)
         while cursor >= 0 and code[cursor].isspace():
             cursor -= 1
