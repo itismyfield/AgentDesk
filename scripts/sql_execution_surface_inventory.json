@@ -34754,6 +34754,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/discord/tui_prompt_relay/relay_e2e/herdr_stop_activation_http_e2e_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:0fd0453a7ee7028ffbb5e2ea4c7c06793692eca9a9432395cbd158f55d17530d"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/discord/tui_prompt_relay/relay_e2e/reconcile_stale_turn_e2e_tests.rs",
       "api": "sqlx::query",
       "symbol": "query",
