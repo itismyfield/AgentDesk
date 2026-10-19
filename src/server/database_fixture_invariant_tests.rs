@@ -166,9 +166,8 @@ mod tests {
     /// The shared helper the four fixtures now depend on.
     const SHARED_HELPER_SOURCE: &str = include_str!("../db/postgres.rs");
 
-    /// Classification 2: guards match comment-free text. Literals stay, so a quoted
-    /// address or key still counts; required calls and declarations use the code mask.
-    /// A lexical tripwire: no aliases, macro expansion or reachability.
+    /// Classification 2: comment-free text (literals kept, so a quoted address still counts);
+    /// required calls use the code mask. Lexical tripwire: no aliases, macros or reachability.
     fn code_text(source: &str) -> String {
         strip_rust_comments(source).unwrap_or_else(|error| panic!("fixture source: {error}"))
     }

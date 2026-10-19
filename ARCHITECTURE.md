@@ -3257,6 +3257,8 @@ src/
 │   └── writer_protocol.rs
 ├── supervisor/
 │   └── mod.rs
+├── test_support/
+│   └── source_text_tests.rs
 ├── ui/
 │   ├── ai_screen.rs
 │   └── mod.rs
@@ -3321,7 +3323,8 @@ src/
 ├── queue_contract.rs
 ├── receipt.rs
 ├── reconcile.rs
-└── test_env_panic_probe.rs
+├── test_env_panic_probe.rs
+└── test_support.rs
 ```
 <!-- END GENERATED: SRC TREE -->
 
@@ -3348,6 +3351,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
 | `src/supervisor/` | Runtime supervisor signals and recovery decisions for orphaned or stalled work. |
+| `src/test_support/` | Tests for the test-only Rust source lexer. |
 | `src/ui/` | Compatibility shims for persisted UI/session types used by the Discord runtime. |
 | `src/utils/` | Shared formatting and Unicode-safe string utilities. |
 | `src/voice/` | Voice command, STT/TTS, prompt, progress, metrics, receiver, and barge-in helpers. |
@@ -3371,6 +3375,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/receipt.rs` | Receipt parsing and workspace attribution helpers. |
 | `src/reconcile.rs` | Boot-time reconciliation for persisted state and dispatch-runtime drift. |
 | `src/test_env_panic_probe.rs` | Isolated test-fixture panic and environment restoration probes. |
+| `src/test_support.rs` | Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards. |
 <!-- END GENERATED: TOP LEVEL MODULE MAP -->
 
 ### Discord Runtime

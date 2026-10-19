@@ -135,6 +135,8 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
     "test_env_panic_probe.rs": "Isolated test-fixture panic and environment restoration probes.",
+    "test_support.rs": "Test-only Rust source lexer that strips comments and masks literals for `include_str!` guards.",
+    "test_support/": "Tests for the test-only Rust source lexer.",
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",

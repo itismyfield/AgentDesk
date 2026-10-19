@@ -1,7 +1,5 @@
-//! Test-only Rust source text helpers for `include_str!` guards.
-//!
-//! A small lexer that knows only comments and literals: it does not evaluate
-//! `cfg`, expand macros or resolve names, and it is not a TOML/YAML/SQL parser.
+//! Test-only Rust lexer for `include_str!` guards. It knows comments and literals only:
+//! no `cfg` evaluation, macro expansion, name resolution, or TOML/YAML/SQL parsing.
 
 use std::fmt;
 use std::ops::Range;
