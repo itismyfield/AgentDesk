@@ -181,6 +181,7 @@ NON_PG_SKIP_ARGS=(
   --skip services::discord::tui_prompt_relay::rehydration::tests::host_defer
   --skip services::discord::tui_prompt_relay::relay_e2e::busy_inject_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::cancel_backstop_e2e
+  --skip services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_o_e2e
   --skip services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_route_e2e

@@ -378,9 +378,8 @@ async fn a_drain_restart_row_settles_and_a_hot_swap_row_is_kept() {
     }
 }
 
-/// A drain restart's authority is taken only from the locked row that is still the episode it
-/// read: a row changed since that read keeps its bytes and shows nothing, and one replaced after
-/// the takeover is never cleared.
+/// A drain row changed since restart read it keeps its bytes and shows nothing; one replaced
+/// after the takeover is never cleared.
 #[tokio::test(flavor = "current_thread")]
 async fn a_drain_row_changed_after_its_read_is_not_taken() {
     let fixture = Fixture::new("drain-changed");

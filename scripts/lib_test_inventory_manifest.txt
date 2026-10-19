@@ -5996,6 +5996,7 @@ services::discord::recovery_engine::crash_resume_guard::tests::session_bound_rel
 services::discord::recovery_engine::crash_resume_guard::tests::synthetic_owner_turn_is_not_a_real_user_black_hole
 services::discord::recovery_engine::crash_resume_guard::tests::watcher_owned_turn_is_not_a_black_hole_risk
 services::discord::recovery_engine::herdr_admitted_restart::tests::a_drain_restart_row_settles_and_a_hot_swap_row_is_kept
+services::discord::recovery_engine::herdr_admitted_restart::tests::a_drain_row_changed_after_its_read_is_not_taken
 services::discord::recovery_engine::herdr_admitted_restart::tests::a_send_new_terminal_acks_and_clears_in_one_run
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_actor_registered_before_cleanup_is_left_alone
 services::discord::recovery_engine::herdr_admitted_restart::tests::an_o_owned_destination_ends_the_row_without_a_legacy_body
@@ -8813,6 +8814,7 @@ services::discord::tui_prompt_relay::relay_e2e::discord_mock::history_page_retur
 services::discord::tui_prompt_relay::relay_e2e::discord_mock::unregistered_channels_are_unhandled_until_explicitly_allowed
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_provider_mismatch_refuses_before_mailbox_or_session_mutation
 services::discord::tui_prompt_relay::relay_e2e::headless_turn_provider_tests::headless_turn_setup_failure_releases_only_its_slot_and_active_count
+services::discord::tui_prompt_relay::relay_e2e::herdr_stop_activation_e2e::an_activated_stop_settles_through_the_bridge_and_starts_the_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_refused_herdr_kickoff_keeps_its_queued_input_for_the_switch_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::a_restarted_bound_herdr_channel_prompts_its_queued_input_once_pg
 services::discord::tui_prompt_relay::relay_e2e::herdr_terminate_e2e::m2_1621_real_intake_through_termination_to_one_herdr_start_pg
@@ -9311,6 +9313,7 @@ services::discord::turn_bridge::before_start_stop::tests::coldstop_restart_finis
 services::discord::turn_bridge::before_start_stop::tests::coldstop_typed_untouched_not_indeterminate_and_late_exit_is_sealed
 services::discord::turn_bridge::before_start_stop::tests::disk_gate::coldstop_receipt_refuses_a_planned_restart_row_of_the_same_episode
 services::discord::turn_bridge::before_start_stop::tests::o_reply::coldstop_o_owned_body_shows_the_stop_as_one_reply_then_settles
+services::discord::turn_bridge::before_start_stop::tests::o_reply::coldstop_o_reply_shown_before_a_failed_ack_is_acked_without_a_second_send
 services::discord::turn_bridge::before_start_stop::tests::o_reply::coldstop_unreadable_o_ownership_shows_nothing
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_ack_post_commit_exact_witness
 services::discord::turn_bridge::before_start_stop::tests::policy::p10_fin_ack_pre_commit_unconfirmed

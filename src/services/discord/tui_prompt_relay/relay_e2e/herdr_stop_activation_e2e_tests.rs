@@ -1,6 +1,5 @@
-//! An activated `/stop` on a bound Herdr turn, end to end: intake starts the turn, the bridge holds
-//! its row and token until the provider's own abort, then the finalizer frees the channel and the
-//! queue starts the input that waited behind it, once.
+//! An activated `/stop` on a bound Herdr turn keeps its row and token until the provider's own
+//! abort; the finalizer then frees the channel and the queued input starts once.
 
 use std::time::Duration;
 
