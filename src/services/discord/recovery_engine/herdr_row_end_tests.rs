@@ -333,9 +333,8 @@ fn the_turn_body_is_its_result_or_its_streamed_text() {
     }
 }
 
-/// Once the writer is gone a final record without its newline counts only when it parses whole,
-/// in a Claude transcript and a Codex rollout alike; no torn tail leaves the source unread, but a
-/// source cut after its length was read is unread.
+/// Once the writer is gone a final record without its newline counts only when it parses whole, in
+/// either provider's source; only a source cut after its length was read stays unread.
 #[test]
 fn an_ended_sources_torn_tail_counts_only_when_it_parses_whole() {
     use crate::services::claude::herdr_turn::{EndedTurn, ended_turn};
