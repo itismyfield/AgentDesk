@@ -64,8 +64,12 @@ _restore_policy_generation() {
     echo "↩ Previous policies restored with the previous binary"
 }
 
-# Success path, after the binary backup is dropped: a leftover policy backup
-# without its binary backup is discarded by the next deploy's arm step.
+# Success path: drops the policy backup only once its binary backup is gone, so a
+# surviving .prev keeps its pair; an unpaired leftover is discarded by the next arm.
 _drop_policy_generation_backup() {
+    if [ -e "$2" ]; then
+        echo "⚠ Binary backup $2 was not removed — keeping its paired policy backup"
+        return 0
+    fi
     rm -rf "$1/policies.prev" 2>/dev/null || true
 }

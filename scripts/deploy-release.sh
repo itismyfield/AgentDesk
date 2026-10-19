@@ -3367,6 +3367,9 @@ STAGED_BINARY=""
 # ANY non-zero exit before DEPLOY_OK (set on the success path) restores the
 # last-known-good backup and restarts the service — see _rollback_release_binary.
 ROLLBACK_ARMED=1
+# Swap policies with nothing fallible since promotion, so rollback and fail-forward see one generation.
+_swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
+POLICIES_STAGED=""
 # NOTE: the immutable re-lock (chflags uchg) is deferred until AFTER the health
 # check passes (see below). Locking here would force the rollback path to fight
 # the uchg flag on the bad binary, and the lock's only job — blocking unsigned
@@ -3401,9 +3404,6 @@ rm -rf "$ADK_REL/skills.old"
 [ -d "$ADK_REL/skills" ] && mv "$ADK_REL/skills" "$ADK_REL/skills.old"
 mv "$SKILLS_STAGED" "$ADK_REL/skills"
 rm -rf "$ADK_REL/skills.old"
-
-_swap_policy_generation "$ADK_REL" "$POLICIES_STAGED"
-POLICIES_STAGED=""
 
 # #3288: self-heal policies.dir config drift. The release runtime must load
 # policies from the deployed snapshot ($ADK_REL/policies, staged above from the
@@ -3642,7 +3642,7 @@ chflags nouchg "$REL_BINARY_BACKUP" 2>/dev/null || true
 rm -f "$REL_BINARY_BACKUP" 2>/dev/null || true
 # Also drop a stray atomic-backup temp, then the policy backup paired with .prev.
 rm -f "$REL_BINARY_BACKUP.tmp" 2>/dev/null || true
-_drop_policy_generation_backup "$ADK_REL"
+_drop_policy_generation_backup "$ADK_REL" "$REL_BINARY_BACKUP"
 
 if _health_json_unhealthy_only_no_provider_runtimes "${WAIT_FOR_HTTP_SERVICE_LAST_HEALTH_JSON:-}"; then
     echo "✓ Release is serving on :${REL_PORT} (deploy-ready: no provider runtimes registered —"
