@@ -158,14 +158,19 @@ fn in_memory(message: u64) -> Option<InjectionOutcome> {
     disposition::terminal(Some(&ProviderKind::Claude), MessageId::new(message), now)
 }
 
-/// A turn mid-run on the pane takes the text: pasted once, marked 📥, the checkpoint past it,
-/// nothing queued or started, and the injection recorded where a restart finds it.
+/// A turn mid-run takes the text under the author's idle name and id: pasted once, marked 📥, the
+/// checkpoint past it, nothing queued or started, and recorded where a restart finds it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_busy_pane_takes_a_person_s_text_and_marks_it_taken_pg() {
     let busy = busy().await;
     let rt = &busy.rt;
     let message = fresh_id();
     rt.h.deliver_user_message(message, "status?").await.unwrap();
+    let header = format!(
+        "[User: queue-user (ID: {USER_ID}) · 📱 v1 mode=inject source=discord:{CHANNEL_ID}:{message} · "
+    );
+    let buffer = busy.pane.read("buffer").unwrap_or_default();
+    assert!(buffer.starts_with(&header), "{buffer}");
     let observed = (
         busy.pane.keys(),
         rt.marks(message),

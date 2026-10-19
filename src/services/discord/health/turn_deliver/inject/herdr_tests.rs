@@ -193,10 +193,9 @@ fn herdr_busy_input_reaches_the_bound_pane_once_and_never_tmux_pg() {
         let sends = rig.sends();
         assert_eq!(sends.len(), 2, "{sends:?}");
         let pasted = sends[0]["text"].as_str().unwrap();
-        assert!(
-            pasted.starts_with("\u{1b}[200~[📱 imessage · 200 · "),
-            "{pasted:?}"
-        );
+        let header =
+            "\u{1b}[200~[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · ";
+        assert!(pasted.starts_with(header), "{pasted:?}");
         assert!(pasted.ends_with("]\nstatus?\u{1b}[201~"), "{pasted:?}");
         assert_eq!(sends[1]["keys"], json!(["enter"]));
         assert_eq!(pane.tmux_calls(), 0);

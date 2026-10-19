@@ -15,6 +15,8 @@ pub(super) async fn queued_attempt(
     if let Some(mended) = super::queued_reconcile::mend(shared, request, parent, gate).await {
         return mended;
     }
+    // Named before the session transition is held, which nothing then waits on.
+    let name = author_name(shared, request.author_id).await;
     let target = match resolve(shared, request, true).await {
         Ok(target) => target,
         Err(veto) => return InjectAttempt::NotSent(veto),
@@ -63,6 +65,11 @@ pub(super) async fn queued_attempt(
             provider: request.provider.as_str().to_string(),
             source: turn_id.clone().unwrap(),
             author: item.author_id.to_string(),
+            name: if item.author_id.get() == request.author_id {
+                name
+            } else {
+                format!("user-{}", item.author_id)
+            },
             text: item.text.clone(),
             nonce: busy_inject::fresh_nonce(),
         });
@@ -180,4 +187,24 @@ pub(super) async fn queued_attempt(
         Ok(attempt) => attempt,
         Err(_) => InjectAttempt::OwnerFailed { turn_id: None },
     }
+}
+
+/// How long the author lookup may take before the input names its author by id.
+const NAME_LOOKUP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The name an idle start of the same queued input puts in its header.
+async fn author_name(shared: &SharedData, author: u64) -> String {
+    if author <= 1 {
+        return "system".to_string();
+    }
+    let lookup = async {
+        let http = shared.serenity_http_or_token_fallback()?;
+        let user = poise::serenity_prelude::UserId::new(author);
+        user.to_user(&http).await.ok().map(|user| user.name)
+    };
+    let found = tokio::time::timeout(NAME_LOOKUP, lookup)
+        .await
+        .ok()
+        .flatten();
+    found.unwrap_or_else(|| format!("user-{author}"))
 }

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, MessageId, UserId};
+use serenity::{ChannelId, MessageId};
 
 use super::super::intake_queue_transaction::SoftInterventionSpec;
 use crate::services::discord::health::{
@@ -130,9 +130,9 @@ pub(super) struct LiveText<'a> {
     pub(super) channel_id: ChannelId,
     pub(super) parent: Option<ChannelId>,
     pub(super) message_id: MessageId,
-    pub(super) author_id: UserId,
-    /// The author marks intake's own queue entry would carry, which a handback carries too.
-    pub(super) author_is_bot: bool,
+    /// The author; the queue entry a handback becomes carries its id and bot mark, and the
+    /// paste names it as the idle header does.
+    pub(super) author: &'a serenity::User,
     pub(super) author_is_allowed_automation: bool,
     pub(super) text: &'a str,
     pub(super) reply_context: Option<&'a str>,
@@ -165,8 +165,8 @@ fn body(live: &LiveText<'_>) -> String {
 fn handback(live: &LiveText<'_>) -> (crate::services::turn_orchestrator::Intervention, String) {
     let spec = SoftInterventionSpec {
         channel_id: live.channel_id,
-        author_id: live.author_id,
-        author_is_bot: live.author_is_bot,
+        author_id: live.author.id,
+        author_is_bot: live.author.bot,
         author_is_allowed_automation: live.author_is_allowed_automation,
         message_id: live.message_id,
         text: live.text.to_string(),
@@ -200,8 +200,8 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         channel_id: live.channel_id,
         provider: data.provider.clone(),
         text: body(live),
-        author_id: live.author_id.get(),
-        source: "discord".to_string(),
+        author_id: live.author.id.get(),
+        source: format!("discord:{}:{}", live.channel_id, live.message_id),
         metadata: None,
         channel_name_hint: None,
     };
@@ -210,6 +210,7 @@ pub(super) async fn offered(ctx: &serenity::Context, data: &Data, live: &LiveTex
         message,
         handback,
         guard,
+        name: live.author.name.clone(),
     };
     let attempt = inject_human_input(&data.shared, &request, origin).await;
     #[cfg(test)]

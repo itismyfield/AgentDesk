@@ -210,10 +210,8 @@ async fn the_route_stashes_an_attached_persons_draft_only_on_the_allowlisted_cha
     let records = listed.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0], listed.read("buffer").unwrap());
-    assert!(
-        records[0].starts_with("[📱 imessage · 200 · "),
-        "{records:?}"
-    );
+    let header = "[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · ";
+    assert!(records[0].starts_with(header), "{records:?}");
     assert!(records[0].ends_with("\nstatus?"), "{records:?}");
     assert!(!records[0].contains(draft));
     assert!(queue_texts(&shared, agents[0].1).await.is_empty());
@@ -791,7 +789,11 @@ mod s1a {
         let buffer = pane.read("buffer").expect("legacy pane bytes");
         let (header, text) = buffer.split_once('\n').unwrap();
         assert_eq!(text, "pane\nbytes");
-        assert!(header.starts_with("[📱 imessage · 200 · ") && header.ends_with(']'));
+        assert!(
+            header.starts_with(
+                "[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · "
+            ) && header.ends_with(']')
+        );
         assert!(pane.transcript_recorded_the_paste());
         assert_eq!(f.counts().await, (0, 0));
 
@@ -1376,7 +1378,7 @@ mod s1a {
             assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
             let nonce = pane.nonce().expect("the pasted frame names its nonce");
             let framed = format!(
-                "[📱 imessage · 200 · {nonce}]\n{}\n\nstatus?",
+                "[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · {nonce}]\n{}\n\nstatus?",
                 contract(&f, guid)
             );
             assert_eq!(pane.records(), [framed]);
@@ -1590,7 +1592,9 @@ mod s1a {
             let answer = f.call(false, input(Some(guid), "status?", 200)).await;
             assert_eq!(answer.1["delivery"], "injected", "{}", answer.1);
             let nonce = off.nonce().unwrap();
-            let legacy = format!("[📱 imessage · 200 · {nonce}]\nstatus?");
+            let legacy = format!(
+                "[User: imessage:200 (ID: 200) · 📱 v1 mode=inject source=imessage · {nonce}]\nstatus?"
+            );
             assert_eq!(off.read("buffer"), Some(legacy.clone()));
             assert_eq!(off.records(), [legacy]);
             assert_eq!(off.applied(), ["C-s", "paste", "Enter"]);

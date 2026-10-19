@@ -31,6 +31,9 @@ pub(super) static ATTEMPT_ROWS: std::sync::Mutex<Vec<super::AttemptRow>> =
 #[path = "queued_head_auto_tests.rs"]
 mod auto;
 
+/// The name the fake Discord API gives every user the queued paste looks up.
+const AUTHOR_NAME: &str = "s2b author";
+
 struct Fixture {
     _db: TestPostgresDb,
     pool: sqlx::PgPool,
@@ -155,6 +158,11 @@ impl Fixture {
             async move {
             use axum::response::IntoResponse;
             assert_eq!(method, Method::GET, "queued injection cannot publish or tear down a queued card before consume: {uri}");
+            // The paste names its author as the idle start of the same input does.
+            if let Some(id) = uri.path().strip_prefix("/api/v10/users/") {
+                let user = json!({"id": id, "username": AUTHOR_NAME, "discriminator": "0"});
+                return axum::Json(user).into_response();
+            }
             assert!(uri.path().starts_with("/api/v10/channels/"), "{uri}");
             let mut answer = json!({
                 "id": channel.get().to_string(), "type": 0,
@@ -506,29 +514,20 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     assert!(fixture.pane.transcript_recorded_the_paste());
     let buffer = std::fs::read_to_string(fixture.pane.path("buffer")).unwrap();
-    let (header, text) = buffer.split_once('\n').unwrap();
-    assert_eq!(text, "status?", "the owner must paste the original H body");
-    let fields: Vec<_> = header
-        .strip_prefix("[📱 ")
-        .unwrap()
-        .strip_suffix(']')
-        .unwrap()
-        .split(" · ")
-        .collect();
-    assert_eq!(fields.len(), 3);
+    let (header, text) = crate::services::tui_input::human_frame::parse(&buffer).unwrap();
     assert_eq!(
-        fields[0],
-        format!("discord:{}:{}", fixture.channel, before[0].message_id)
+        text, "\nstatus?",
+        "the owner must paste the original H body"
     );
+    let source = format!("discord:{}:{}", fixture.channel, before[0].message_id);
+    assert_eq!((header.name, header.source), (AUTHOR_NAME, source.as_str()));
     assert_eq!(
-        fields[1], "200",
+        header.author, "200",
         "H's author must not become holder A's author"
     );
-    assert_eq!(fields[2].len(), 8);
-    assert!(
-        fields[2]
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
+    assert_eq!(
+        header.mode,
+        crate::services::tui_input::human_frame::Mode::Inject
     );
     let transcript = std::fs::read_to_string(fixture.pane.path(InjectPane::TRANSCRIPT)).unwrap();
     let acknowledged: Vec<Value> = transcript
@@ -537,7 +536,7 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
         .filter(|record: &Value| record["type"] == "queue-operation")
         .collect();
     assert_eq!(acknowledged.len(), 1);
-    assert_eq!(acknowledged[0]["content"], format!("{header}\nstatus?"));
+    assert_eq!(acknowledged[0]["content"], buffer);
     assert!(!buffer.contains("distinct tail B"));
     let after = fixture.queue().await;
     assert_eq!(after.len(), 1);
@@ -594,7 +593,7 @@ async fn s2b_actual_router_kickoff_opens_both_gates_for_the_same_durable_head_pg
     let (header, text) = buffer.split_once('\n').unwrap();
     assert_eq!(text, before[0].text);
     assert!(header.starts_with(&format!(
-        "[📱 discord:{}:{} · 200 · ",
+        "[User: {AUTHOR_NAME} (ID: 200) · 📱 v1 mode=inject source=discord:{}:{} · ",
         fixture.channel, before[0].message_id
     )));
     assert!(!buffer.contains("distinct tail B"));

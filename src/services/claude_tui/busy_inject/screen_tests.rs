@@ -198,25 +198,52 @@ const BUSY_DRAFT: &str =
     include_str!("../../../../tests/fixtures/tui_input/claude-busy-statusline-draft.ansi");
 const TOAST: &str = "      \x1b[38;5;114m✔ Update installed · Restart to update\x1b[39m";
 
-/// The plan for a short Discord input under a live turn: the stashed draft rows, or none for
-/// a direct paste.
+/// The plan for a short input under a live turn: the stashed draft rows, or none for a direct
+/// paste.
 fn plan(capture: &str) -> Result<Option<Vec<String>>, Veto> {
+    plan_for(capture, "hello", (46, 37))
+}
+
+fn plan_for(capture: &str, text: &str, size: (usize, usize)) -> Result<Option<Vec<String>>, Veto> {
     let transcript = tempfile::NamedTempFile::new().unwrap();
     let busy_turn = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n\
         {\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}}\n";
     std::fs::write(transcript.path(), busy_turn).unwrap();
-    let text = super::frame("discord", "ann", "n1", "hello");
     let plan = judge_before_paste(
         capture,
         transcript.path(),
-        &text,
-        Some((46, 37)),
+        text,
+        Some(size),
         super::TurnGate::BusyOnly,
     )?;
     Ok(match plan {
         Plan::Direct(_) => None,
         Plan::Stash(rows) => Some(rows),
     })
+}
+
+/// A Discord input header wider than an 80-column pane wraps into rows a direct paste can still
+/// predict; a person's draft is stashed only where the whole header renders flat.
+#[test]
+fn a_header_wider_than_the_pane_wraps_predictably_and_stashes_only_where_it_fits() {
+    let source = "discord:1479671298497183835:1561196979327869080";
+    let frame = super::frame(
+        source,
+        "343742347365974026",
+        "0hbujang",
+        "abcdef12",
+        "status?",
+    );
+    let Some(Drawn::Rows(rows)) = drawn(&frame, PANE) else {
+        panic!("an unpredictable header vetoes every direct paste: {frame}");
+    };
+    let folded = |text: &str| text.split_whitespace().collect::<String>();
+    assert!(rows.len() > 2, "{rows:?}");
+    assert_eq!(folded(&rows.concat()), folded(&frame));
+    let draft = BUSY_DRAFT.replace(TOAST, "");
+    assert_eq!(plan_for(&draft, &frame, (46, 37)), Err(Veto::Draft));
+    let fits = plan_for(&draft, &frame, (160, 37));
+    assert_eq!(fits, Ok(Some(vec!["js".to_string()])));
 }
 
 #[test]

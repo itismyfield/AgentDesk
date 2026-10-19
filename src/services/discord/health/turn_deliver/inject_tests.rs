@@ -149,7 +149,7 @@ impl InjectPane {
         for (name, value) in [
             ("attached", "4".to_string()),
             ("last", "100".to_string()),
-            ("width", "60".to_string()),
+            ("width", "160".to_string()),
             ("height", "50".to_string()),
             ("cursor_x", "3".to_string()),
             ("cursor_y", "20".to_string()),
@@ -468,6 +468,7 @@ async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
         message,
         handback: Box::new((entry, format!("discord:{ch}:{message}"))),
         guard,
+        name: "Ann [ops]".into(),
     };
     let result = inject::attempt(&shared, &request, origin).await;
     assert_eq!(result, inject::InjectAttempt::Injected { turn_id: None });
@@ -477,10 +478,8 @@ async fn discord_origin_uses_the_attached_stash_transaction_once_pg() {
     let records = pane.records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0], pane.read("buffer").unwrap());
-    assert!(
-        records[0].starts_with("[📱 discord · 200 · "),
-        "{records:?}"
-    );
+    let header = "[User: Ann (ops) (ID: 200) · 📱 v1 mode=inject source=discord · ";
+    assert!(records[0].starts_with(header), "{records:?}");
     assert!(records[0].ends_with("\ndiscord status?"), "{records:?}");
     assert!(queue_texts(&shared, ch).await.is_empty());
     assert!(claim_source(&provider, message, std::time::Instant::now()).is_none());

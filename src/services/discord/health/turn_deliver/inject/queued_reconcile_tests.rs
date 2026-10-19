@@ -32,18 +32,27 @@ fn identity(sources: &[u64]) -> QueueIdentity {
         .unwrap()
 }
 
-fn prompt(nonce: &str, wrapped: bool) -> String {
-    let source = format!("discord:{CHANNEL}:{HEAD}");
-    let frame = busy_inject::frame(&source, "200", nonce, "status?");
+fn wrap(frame: String, wrapped: bool) -> String {
     match wrapped {
         true => format!("<pasted_content id=\"b0ac\">\n{frame}\n</pasted_content id=\"b0ac\">"),
         false => frame,
     }
 }
 
+fn prompt(nonce: &str, wrapped: bool) -> String {
+    let source = format!("discord:{CHANNEL}:{HEAD}");
+    wrap(
+        busy_inject::frame(&source, "200", "ann", nonce, "status?"),
+        wrapped,
+    )
+}
+
 /// Claude's records of an absorbed queued paste: enqueue, removal and human prompt command.
 fn chain(nonce: &str, stamp: &str) -> [Value; 3] {
-    let content = prompt(nonce, true);
+    chain_of(prompt(nonce, true), nonce, stamp)
+}
+
+fn chain_of(content: String, nonce: &str, stamp: &str) -> [Value; 3] {
     let ids = (format!("cmd-{nonce}"), format!("del-{nonce}"));
     [
         json!({"type": "queue-operation", "operation": "enqueue", "timestamp": stamp,
@@ -518,4 +527,46 @@ fn the_proof_session_is_the_one_the_transcript_file_is_named_for() {
         None,
         "records of another session in this session's file"
     );
+}
+
+/// Heads pasted before v1 are still proven by their old frame, recorded or not; a v1 frame proves
+/// its head under the name it shows, never under another author or source.
+#[test]
+fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_source() {
+    let source = format!("discord:{CHANNEL}:{HEAD}");
+    let legacy = |nonce: &str| {
+        let frame = crate::services::tui_input::human_frame::legacy_inject;
+        wrap(frame(&source, "200", nonce, "status?"), true)
+    };
+    let unrecorded = Transcript::new(&chain_of(legacy(NONCE), NONCE, AFTER));
+    assert_eq!(unrecorded.legacy().as_deref(), Some(NONCE));
+    let transcript = Transcript::new(&[]);
+    let offset = std::fs::metadata(&transcript.path).unwrap().len();
+    for record in chain_of(legacy(NONCE), NONCE, BEFORE) {
+        transcript.write(&format!("{record}\n"));
+    }
+    let want = transcript.want(
+        &[HEAD],
+        "status?",
+        Some(recorded(&transcript, NONCE, offset)),
+    );
+    let found = want.unwrap().search().map(|proof| proof.nonce);
+    assert_eq!(found.as_deref(), Some(NONCE));
+
+    let v1 = |author: &str, name: &str, source: &str| {
+        wrap(
+            busy_inject::frame(source, author, name, NONCE, "status?"),
+            true,
+        )
+    };
+    let proven = |content: String| Transcript::new(&chain_of(content, NONCE, AFTER)).legacy();
+    assert_eq!(
+        proven(v1("200", "renamed (ops)", &source)).as_deref(),
+        Some(NONCE)
+    );
+    assert_eq!(proven(v1("201", "ann", &source)), None, "another author");
+    let other = format!("discord:{CHANNEL}:{}", HEAD - 1);
+    assert_eq!(proven(v1("200", "ann", &other)), None, "another source");
+    let fresh = v1("200", "ann", &source).replace("mode=inject", "mode=new");
+    assert_eq!(proven(fresh), None, "a new turn's header");
 }

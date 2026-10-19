@@ -109,6 +109,8 @@ pub(crate) enum Origin {
         message: MessageId,
         handback: Box<(Intervention, String)>,
         guard: SourceGuard,
+        /// The author's name as the idle header for this message shows it.
+        name: String,
     },
 }
 
@@ -433,11 +435,17 @@ pub(crate) async fn attempt(
         Some((reply, _)) => reply.frame(&request.text),
         None => request.text.clone(),
     };
+    // An external input names its author as its idle header does: the source and the id.
+    let name = match &origin {
+        Origin::Discord { name, .. } => name.clone(),
+        _ => format!("{}:{}", request.source, request.author_id),
+    };
     let input = Arc::new(Input {
         channel,
         provider: request.provider.as_str().to_string(),
         source: request.source.clone(),
         author: request.author_id.to_string(),
+        name,
         text,
         nonce: busy_inject::fresh_nonce(),
     });
@@ -449,6 +457,7 @@ pub(crate) async fn attempt(
             message,
             handback,
             guard,
+            ..
         } => (Some(message), *handback, Some(guard)),
         Origin::QueuedHead { .. } => unreachable!("queued origin has its own owner"),
     };
@@ -651,6 +660,7 @@ struct Input {
     provider: String,
     source: String,
     author: String,
+    name: String,
     text: String,
     nonce: String,
 }
@@ -673,6 +683,7 @@ fn run(
         transcript,
         source: &input.source,
         author: &input.author,
+        name: &input.name,
         nonce,
         text: &input.text,
     };
@@ -743,6 +754,7 @@ fn run_codex(
         rollout,
         source: &input.source,
         author: &input.author,
+        name: &input.name,
         nonce,
         text: &input.text,
         target_turn,
