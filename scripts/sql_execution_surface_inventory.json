@@ -36203,15 +36203,6 @@
     {
       "root": "src",
       "kind": "RUST",
-      "path": "src/services/discord/watchers/lifecycle/ready_failure.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:8909f747b713c873c4718be41c7272121e4f0e268887bd9ea9b51df19eeb9a28"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
       "path": "src/services/discord/watchers/lifecycle/recovery_markers.rs",
       "api": "sqlx::query",
       "symbol": "query",
