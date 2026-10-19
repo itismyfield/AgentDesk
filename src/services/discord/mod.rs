@@ -2029,9 +2029,8 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
     let mut failed = 0usize;
     let mut preserved = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in pending {
-        // #5035 (A3): re-gate — the verdict taken when the card was parked is
-        // stale by the time this ctx-ready drain runs. The sidecar carries only
-        // the parked owner, so the hint is partial; that cannot flip a verdict.
+        // Re-gate: the verdict taken at parking is stale by now, and the parked owner
+        // alone is a partial hint, which cannot flip a verdict. Unmeasured stays parked.
         let teardown = match queued_card_gate::release_or_rekey(
             shared,
             channel_id,
@@ -2056,6 +2055,7 @@ pub(in crate::services::discord) async fn drain_pending_queue_exit_placeholder_c
                 continue;
             }
             QueuedCardDisposition::Released(teardown) => teardown,
+            QueuedCardDisposition::Unmeasured => continue,
         };
         match queued_card_gate::teardown_via_deleter(shared, deleter, teardown).await {
             Ok(_) => {
