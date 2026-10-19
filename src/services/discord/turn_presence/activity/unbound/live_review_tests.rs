@@ -26,6 +26,14 @@ impl Rig {
         let live = crate::config_live_reload::test_live_guard(
             crate::config::test_env_lock::acquire_shared_test_env_lock(),
         );
+        Self::with_live_guard(id, hosted, retired, live).await
+    }
+    pub(in crate::services::discord::turn_presence::activity) async fn with_live_guard(
+        id: u64,
+        hosted: bool,
+        retired: bool,
+        live: crate::config_live_reload::TestLiveGuard,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let root_env = set("AGENTDESK_ROOT_DIR", root.path());

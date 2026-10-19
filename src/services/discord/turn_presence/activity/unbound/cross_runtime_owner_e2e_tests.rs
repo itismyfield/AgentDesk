@@ -154,6 +154,8 @@ impl Drop for PrivateHost {
 }
 
 pub(super) struct Fixture {
+    // Restore process overrides before Rig releases the shared environment lock.
+    _env: Vec<crate::config::TestEnvVarGuard>,
     pub(super) rig: Rig,
     pub(super) registry: Arc<HealthRegistry>,
     pub(super) foreign: Vec<Arc<SharedData>>,
@@ -167,7 +169,6 @@ pub(super) struct Fixture {
     server: tokio::task::JoinHandle<()>,
     api_server: tokio::task::JoinHandle<()>,
     pump: tokio::task::JoinHandle<()>,
-    _env: Vec<crate::config::TestEnvVarGuard>,
     _turn: TestConfirmation,
 }
 impl Fixture {
@@ -177,7 +178,10 @@ impl Fixture {
             .with_ansi(false)
             .with_max_level(tracing::Level::INFO)
             .try_init();
-        let mut rig = Rig::new(id, false, false).await;
+        let live = crate::config_live_reload::test_live_guard(
+            crate::config::test_env_lock::acquire_shared_test_env_lock(),
+        );
+        let mut rig = Rig::with_live_guard(id, false, false, live).await;
         let registry = Arc::new(HealthRegistry::new());
         let root = rig.root.path();
         let config_path = crate::runtime_layout::config_file_path(root);
