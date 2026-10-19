@@ -51,13 +51,6 @@ pub(super) async fn restore_instructions(
     )
     .unwrap();
     let identities: Vec<_> = disk.iter().map(QueueIdentity::of).collect();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while Arc::strong_count(&fixture.shared) != 1 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the previous provider task must release SharedData before simulated restore");
     fixture.shared.mailboxes.remove_fixture_for_test(channel);
     let restored = fixture
         .shared
@@ -213,7 +206,11 @@ async fn wait_context_after(fixture: &CanaryFixture, previous: &str) -> BindingC
     .expect("the actual CLI did not publish a different launch nonce")
 }
 
-fn publish_named(fixture: &CanaryFixture, context: &BindingContext, native: &str) {
+fn publish_named_source(
+    fixture: &CanaryFixture,
+    context: &BindingContext,
+    native: &str,
+) -> PathBuf {
     let path = context
         .provider_root
         .as_ref()
@@ -241,11 +238,16 @@ fn publish_named(fixture: &CanaryFixture, context: &BindingContext, native: &str
             Some(native)
         ));
     }
-    terminal(&path, "new-clear-turn", "clear relaunch completed");
     assert!(!dedupe::codex_verified_o_source_allowed(
         CANARY_CHANNEL,
         &fixture.old_source
     ));
+    path
+}
+
+fn publish_named(fixture: &CanaryFixture, context: &BindingContext, native: &str) {
+    let path = publish_named_source(fixture, context, native);
+    terminal(&path, "new-clear-turn", "clear relaunch completed");
 }
 
 fn terminal(path: &std::path::Path, turn: &str, text: &str) {
@@ -306,7 +308,59 @@ struct WarmProbe {
 impl Drop for WarmProbe {
     fn drop(&mut self) {
         *self.calls.lock().unwrap() = self.spy.calls();
+        crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY
+            .with_borrow_mut(|slot| *slot = None);
     }
+}
+
+fn warm_draft(prompt: &str) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let canonical = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    let mut rows = Vec::new();
+    for line in canonical.split('\n') {
+        let mut row = String::new();
+        let mut width = 0;
+        for character in line.chars() {
+            let cells = character
+                .width()
+                .expect("the fixture prompt must be printable");
+            if width + cells > 196 {
+                rows.push(std::mem::take(&mut row));
+                width = 0;
+            }
+            row.push(character);
+            width += cells;
+        }
+        rows.push(row);
+    }
+    assert!(rows.len() <= 40, "fixture draft must fit its 200x80 pane");
+    let mut pane = format!("╭{}╮\n", "─".repeat(198));
+    let last = rows.len() - 1;
+    for (index, row) in rows.into_iter().enumerate() {
+        pane.push_str(&format!(
+            "│ {row}{}│\n",
+            if index == last { "▌" } else { "" }
+        ));
+    }
+    pane.push_str(&format!(
+        "╰{}╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send",
+        "─".repeat(198)
+    ));
+    let parsed = crate::services::codex_tui::input::submission_draft_in_pane(&pane)
+        .expect("every fixture prompt row must remain inside the composer frame");
+    assert_eq!(
+        parsed.split_whitespace().collect::<String>(),
+        canonical.split_whitespace().collect::<String>(),
+        "the fixture must prove the complete actual admitted prompt",
+    );
+    assert!(
+        crate::services::codex_tui::input::prompt_submission_fits_pane(
+            &canonical,
+            canonical.contains('\n'),
+            Some((200, 80)),
+        )
+    );
+    pane
 }
 
 fn warm_probe(
@@ -317,6 +371,7 @@ fn warm_probe(
     crate::services::discord::codex_absence::test_setup::ResetGuard,
     mpsc::Receiver<String>,
     mpsc::Sender<()>,
+    mpsc::Receiver<String>,
 ) {
     let path = context
         .provider_root
@@ -325,6 +380,7 @@ fn warm_probe(
         .join(format!("rollout-{NEW_NATIVE_ID}.jsonl"));
     let (entered, wait_entered) = mpsc::channel();
     let (release, wait_release) = mpsc::channel();
+    let (boundary, boundary_events) = mpsc::channel();
     let setup = crate::services::discord::codex_absence::test_setup::install(
         CANARY_CHANNEL,
         Box::new(move |prompt| {
@@ -336,9 +392,13 @@ fn warm_probe(
             let prompt = prompt.to_owned();
             entered.send(prompt.clone()).unwrap();
             let ready = "╭──────────────────────────────────────────────╮\n│ ▌                                            │\n╰──────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send";
-            let draft = format!(
-                "╭──────────────────────────────────────────────╮\n│ {prompt} ▌ │\n╰──────────────────────────────────────────────╯\n  Esc to interrupt   Ctrl+J newline   ⏎ send"
-            );
+            let draft = warm_draft(&prompt);
+            crate::services::codex_tui::warm_followup::ACTUAL_BOUNDARY.with_borrow_mut(|slot| {
+                *slot = Some(Box::new(move |stage| {
+                    eprintln!("B1_Q2_WARM_BOUNDARY {stage}");
+                    let _ = boundary.send(stage.to_owned());
+                }));
+            });
             let spy = SpyGuard::install(SpyState {
                 pane_size: Some((200, 80)),
                 captures: [ready.to_owned(), draft, ready.to_owned(), ready.to_owned()]
@@ -358,7 +418,7 @@ fn warm_probe(
             Box::new(WarmProbe { spy, calls })
         }),
     );
-    (setup, wait_entered, release)
+    (setup, wait_entered, release, boundary_events)
 }
 
 async fn full_fifo(recover: Option<bool>) {
@@ -426,11 +486,60 @@ async fn full_fifo(recover: Option<bool>) {
     assert_eq!(queue_identities(&fixture).await, identities[1..]);
     let accepted = Arc::new(Mutex::new(Vec::new()));
     let input_calls = Arc::new(Mutex::new(Vec::new()));
-    let (_setup, warm_entered, warm_release) =
+    let (_setup, warm_entered, warm_release, warm_boundary) =
         warm_probe(&n2, Arc::clone(&accepted), Arc::clone(&input_calls));
-    publish_named(&fixture, &n2, NEW_NATIVE_ID);
+    let n2_rollout = publish_named_source(&fixture, &n2, NEW_NATIVE_ID);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &ProviderKind::Codex,
+                CANARY_CHANNEL,
+            )
+            .unwrap();
+            if row.is_some_and(|row| {
+                row.turn_nonce.as_deref() == first.token.turn_nonce()
+                    && row.session_id.as_deref() == Some(NEW_NATIVE_ID)
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the real Q1 Init must reach its own inflight row before terminal");
+    terminal(&n2_rollout, "new-clear-turn", "clear relaunch completed");
     wait_completion(&first.token).await;
-    wait_idle(&fixture).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while fixture
+            .shared
+            .mailbox(serenity::ChannelId::new(CANARY_CHANNEL))
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &first.token))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the completed Q1 must release its exact mailbox token");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while fixture
+            .shared
+            .core
+            .lock()
+            .await
+            .sessions
+            .get(&serenity::ChannelId::new(CANARY_CHANNEL))
+            .and_then(|session| session.session_id.as_deref())
+            != Some(NEW_NATIVE_ID)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("real Q1 completion must publish its native selector before warm Q2");
     first.finish();
     let before_attach = activity::activity_now(
         &fixture.shared,
@@ -522,6 +631,32 @@ async fn full_fifo(recover: Option<bool>) {
     );
     let second = fixture.turn_failure_guard().await;
     warm_release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(stage) = warm_boundary.try_recv() {
+                panic!("Q2 actual verified provider held before accepted Enter: {stage}");
+            }
+            if accepted.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Q2 must receive exactly one actual guarded Enter before its terminal");
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Ok(stage) = warm_boundary.try_recv() {
+                panic!("Q2 actual verified provider held after accepted Enter: {stage}");
+            }
+            if second.token.is_completion_cleanup() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Q2 accepted Enter but its actual provider did not complete the terminal");
     wait_completion(&second.token).await;
     wait_idle(&fixture).await;
     second.finish();
