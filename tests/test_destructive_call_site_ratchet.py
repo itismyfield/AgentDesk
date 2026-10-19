@@ -92,6 +92,14 @@ class SourceContractTests(unittest.TestCase):
         wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
         self.assertIn("check_destructive_call_site_ratchet.py --check", wiring)
 
+    def test_ci_wiring_checks_baseline_against_head(self) -> None:
+        wiring = (ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check\n'
+            "git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json\n",
+            wiring,
+        )
+
     def test_fs_unlink_ratchet_allows_decreases_and_blocks_growth(self) -> None:
         path = "src/services/probe.rs"
         baseline = {category: {} for category in ratchet.CATEGORIES}
@@ -580,6 +588,7 @@ fn test_only_turbofish() { std::fs::remove_file::<&Path>(test_path); }
             write(root, "src/services/probe.rs", "std::fs::remove_file::<&Path>(path);\n")
             baseline = {
                 "schema_version": 1,
+                "measured_at_sha": "a" * 40,
                 "categories": {category: {"files": {}} for category in ratchet.CATEGORIES},
             }
             write(root, ratchet.BASELINE_PATH.as_posix(), json.dumps(baseline))
@@ -632,6 +641,36 @@ fn probe() {
         self.assertEqual(loaded, counts)
         self.assertEqual(payload["measured_at_sha"], "a" * 40)
         self.assertEqual(payload["comment"], ratchet.WARNING)
+
+    def test_repin_omits_historical_registry_prose(self) -> None:
+        for values in ((10, 2, 3, 2), (1, 0, 0, 0)):
+            with self.subTest(subcounts=values), tempfile.TemporaryDirectory() as tmp:
+                counts = empty_counts()
+                counts["registry_remove"] = {"src/services/discord/a.rs": sum(values)}
+                subcounts = dict(zip(ratchet.REGISTRY_PATTERNS, values))
+                path = Path(tmp) / "baseline.json"
+                ratchet.write_baseline(path, counts, subcounts, "a" * 40)
+                loaded, payload = ratchet.load_baseline(path)
+                self.assertEqual(loaded, counts)
+                self.assertNotIn("comment", payload["categories"]["registry_remove"])
+
+    def test_baseline_requires_full_lowercase_hex_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baseline.json"
+            payload = copy.deepcopy(json.loads((ROOT / ratchet.BASELINE_PATH).read_text()))
+            for invalid in ("", "a" * 39, "a" * 41, "g" * 40, "A" * 40, "a" * 40 + "\n", None, 123):
+                with self.subTest(sha=invalid):
+                    payload["measured_at_sha"] = invalid
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(ratchet.RatchetError, "measured_at_sha"):
+                        ratchet.load_baseline(path)
+            del payload["measured_at_sha"]
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ratchet.RatchetError, "measured_at_sha"):
+                ratchet.load_baseline(path)
+            payload["measured_at_sha"] = "0123456789abcdef" * 2 + "01234567"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(ratchet.load_baseline(path)[1]["measured_at_sha"], payload["measured_at_sha"])
 
 
 if __name__ == "__main__":

@@ -76,6 +76,18 @@ REQUIRED_INVOCATIONS = (
         '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
     ),
     RequiredInvocation(
+        "destructive call-site ratchet gate",
+        '"$PYTHON" scripts/check_destructive_call_site_ratchet.py --check',
+    ),
+    RequiredInvocation(
+        "destructive call-site baseline dirty-worktree guard",
+        "git diff --exit-code HEAD -- scripts/destructive_call_site_baseline.json",
+    ),
+    RequiredInvocation(
+        "destructive call-site ratchet unittest module",
+        '"$PYTHON" -m unittest tests.test_destructive_call_site_ratchet',
+    ),
+    RequiredInvocation(
         "CI runner hardening gate",
         "./scripts/check-ci-runner-hardening.sh",
     ),
@@ -127,17 +139,20 @@ def check_text(text: str) -> list[str]:
         ("durable-frontier writer gate", "durable-frontier writer unittest module"),
         ("intake-outbox done-writer gate", "intake-outbox done-writer unittest module"),
         ("SQL execution surface inventory gate", "SQL execution surface inventory unittest module"),
+        ("destructive call-site ratchet gate", "destructive call-site ratchet unittest module"),
     )
     for gate_label, test_label in ordered_pairs:
         if gate_label in positions and test_label in positions:
             if positions[gate_label] >= positions[test_label]:
                 errors.append(f"{gate_label} must run before {test_label}")
 
-    gate_label = "SQL execution surface inventory gate"
-    dirty_label = "SQL execution surface baseline dirty-worktree guard"
-    if gate_label in positions and dirty_label in positions:
-        if positions[dirty_label] != positions[gate_label] + 1:
-            errors.append(f"{dirty_label} must run immediately after {gate_label}")
+    for gate_label, dirty_label in (
+        ("SQL execution surface inventory gate", "SQL execution surface baseline dirty-worktree guard"),
+        ("destructive call-site ratchet gate", "destructive call-site baseline dirty-worktree guard"),
+    ):
+        if gate_label in positions and dirty_label in positions:
+            if positions[dirty_label] != positions[gate_label] + 1:
+                errors.append(f"{dirty_label} must run immediately after {gate_label}")
 
     return errors
 
