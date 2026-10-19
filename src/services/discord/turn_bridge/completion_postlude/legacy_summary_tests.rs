@@ -469,6 +469,9 @@ impl TurnGateway for SuspendedPanelGateway {
     fn can_chain_locally(&self) -> bool {
         false
     }
+    fn can_deliver_directly(&self) -> bool {
+        true
+    }
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Claude)
     }
