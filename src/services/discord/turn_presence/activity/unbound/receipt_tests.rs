@@ -18,7 +18,7 @@ struct ProviderTurn {
     extra: Arc<AtomicUsize>,
 }
 impl ProviderTurn {
-    fn arm(channel: u64) -> Self {
+    fn arm(channel: u64, unexpected_channel: u64) -> Self {
         let (entered, ran) = tokio::sync::oneshot::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let probe = InputEffectProbe {
@@ -35,7 +35,7 @@ impl ProviderTurn {
                 .lock()
                 .unwrap()
                 .replace((
-                    channel,
+                    unexpected_channel,
                     Box::new(move || {
                         count.fetch_add(1, Ordering::SeqCst);
                         Err("unexpected real provider start".into())
@@ -69,15 +69,25 @@ impl ProviderTurn {
         assert_ne!(ran, std::thread::current().id());
         assert!(INPUT_EFFECT_PROBE.lock().unwrap().is_none());
     }
-    async fn finish(mut self) {
+    async fn finish(mut self, pool: &sqlx::PgPool) {
         self.release.take().unwrap().send(()).unwrap();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.done.take().unwrap(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let delivered = AtomicUsize::new(0);
+        // Stand in for the outbox worker while the real bridge/postlude completes.
+        let worker = async {
+            loop {
+                let rows = sqlx::query("UPDATE message_outbox SET status='sent', sent_at=NOW() WHERE status='pending' AND source='headless_turn'")
+                    .execute(pool).await.unwrap().rows_affected();
+                delivered.fetch_add(rows as usize, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            result = tokio::time::timeout(std::time::Duration::from_secs(10), self.done.take().unwrap()) => {
+                result.unwrap().unwrap();
+            },
+            _ = worker => unreachable!(),
+        }
+        assert!(delivered.load(Ordering::SeqCst) > 0);
         assert_eq!(self.extra.load(Ordering::SeqCst), 0);
     }
 }
@@ -106,6 +116,14 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", TEST, "--nocapture"])
             .env(CHILD, "1")
+            .env(
+                crate::services::tui_o::cutover::test_override::CHILD_ENV,
+                "1",
+            )
+            .env(
+                crate::services::tui_o::cutover::test_override::CHANNELS_ENV,
+                "[]",
+            )
             .output()
             .unwrap();
         let logs = format!(
@@ -120,7 +138,12 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         );
         return;
     }
-    let rig = Rig::new(69_183_106, false, false).await;
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .try_init();
+    let mut rig = Rig::new(69_183_106, false, false).await;
+    Arc::get_mut(&mut rig.shared).unwrap().token_hash = "discord_0123456789abcdef".into();
     let _turn_mode = TestConfirmation::new(rig.channel.get());
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
@@ -158,6 +181,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         settings.allowed_channel_ids = vec![parent, thread];
     }
     let mock = discord_mock::DiscordMockState::new();
+    mock.park_first_placeholder.store(false, Ordering::SeqCst);
     mock.allow_channel(parent);
     mock.add_thread(thread, parent);
     let (proxy, gateway, discord_server) = discord_mock::start(mock.clone()).await;
@@ -170,6 +194,18 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         .unwrap();
     let registry = Arc::new(HealthRegistry::new());
     registry.register("claude".into(), rig.shared.clone()).await;
+    registry
+        .register_http(
+            "claude".into(),
+            rig.shared
+                .http
+                .cached_serenity_ctx
+                .get()
+                .unwrap()
+                .http
+                .clone(),
+        )
+        .await;
     let config = crate::config::Config::default();
     let engine = crate::engine::PolicyEngine::new(&config).unwrap();
     let broadcast = crate::eventbus::new_broadcast();
@@ -185,8 +221,15 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     crate::services::discord::internal_api::init(port, Some(pool.clone()));
-    let serving = app.clone();
-    let api_server = tokio::spawn(async move { axum::serve(listener, serving).await.unwrap() });
+    let serving = axum::Router::new().nest("/api", app.clone());
+    let api_server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            serving.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
     let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
         Arc::new(pool.clone()),
         "Asia/Seoul",
@@ -230,7 +273,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
             .pop()
             .expect("due routine");
         let run = claimed.run_id.clone();
-        let mut turn = ProviderTurn::arm(thread);
+        let mut turn = ProviderTurn::arm(thread, parent);
         let outcome = executor
             .start_agent_run(
                 &store,
@@ -245,6 +288,11 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
             .await
             .unwrap();
         assert_eq!(outcome.status, "running", "{outcome:?}");
+        assert_eq!(
+            outcome.result_json.as_ref().unwrap()["channel_id"],
+            thread.to_string(),
+            "routine must use its real thread"
+        );
         turn.entered().await;
         let row = inflight::load_inflight_state(&ProviderKind::Claude, thread).unwrap();
         let name = row
@@ -289,7 +337,11 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
                 Some(receipt.as_str())
             );
         }
-        turn.finish().await;
+        turn.finish(&pool).await;
+        assert!(
+            inflight::load_inflight_state(&ProviderKind::Claude, thread).is_none(),
+            "completed producer must not leave inflight behind"
+        );
         assert!(
             store
                 .complete_agent_run(
@@ -311,7 +363,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
     let process_run = claimed.run_id.clone();
-    let mut process_turn = ProviderTurn::arm(thread);
+    let mut process_turn = ProviderTurn::arm(thread, parent);
     let process = executor
         .clone()
         .with_headless_fresh_agents(true)
@@ -336,7 +388,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
             .is_none()
     );
     assert_eq!(owned(&pool, &process_run).await, None);
-    process_turn.finish().await;
+    process_turn.finish(&pool).await;
     assert!(
         store
             .complete_agent_run(
@@ -363,21 +415,25 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     let unknown = observed(Activity::Unknown, "session_identity_unresolved");
     let other_key =
         adk_session::build_namespaced_session_key("other-token", &ProviderKind::Claude, &tmux_name);
-    sqlx::query("UPDATE routine_runs SET owned_tmux_session = $1")
-        .bind(other_key)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE routine_runs SET owned_tmux_session = $1 WHERE owned_tmux_session IS NOT NULL",
+    )
+    .bind(other_key)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         unbound(&rig).await.0,
         unknown,
         "different token must never establish ownership"
     );
-    sqlx::query("UPDATE routine_runs SET owned_tmux_session = $1")
-        .bind(&receipt)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE routine_runs SET owned_tmux_session = $1 WHERE owned_tmux_session IS NOT NULL",
+    )
+    .bind(&receipt)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (_, stamp, watch) = unbound(&rig).await;
     sqlx::query("UPDATE routine_runs SET result_json = jsonb_set(result_json, '{channel_id}', to_jsonb($1::text)) WHERE id = $2")
         .bind(parent.to_string()).bind(&old_run).execute(&pool).await.unwrap();
@@ -390,22 +446,42 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     sqlx::query("UPDATE routine_runs SET result_json = jsonb_set(result_json, '{channel_id}', to_jsonb($1::text)) WHERE id = $2")
         .bind(thread.to_string()).bind(&old_run).execute(&pool).await.unwrap();
 
-    let bound = "receipt-bound";
+    let bound = ProviderKind::Claude.build_tmux_session_name(&format!("s1e-{parent}"));
+    let bound_output = rig.root.path().join("reset-bound.jsonl");
+    std::fs::write(&bound_output, b"").unwrap();
+    crate::services::discord::turn_presence::activity::tests::companion_attach_log_watcher(
+        &rig.shared,
+        parent,
+        &bound,
+        &bound_output,
+    );
+    assert!(
+        rig.shared
+            .tmux_watchers
+            .channel_binding(&rig.channel)
+            .is_some()
+    );
     crate::services::discord::host_teardown_gate::test_support::busy_turn(
         &rig.shared,
         rig.channel,
-        bound,
+        &bound,
     )
     .await;
     let target = TurnLifecycleTarget {
         provider: Some(ProviderKind::Claude),
         channel_id: Some(rig.channel),
-        tmux_name: bound.into(),
+        tmux_name: bound,
     };
     let stopped = force_kill_turn(Some(&registry), &target, "receipt reset", "receipt_test").await;
     assert_eq!(stopped.lifecycle_path, "runtime-fallback", "{stopped:?}");
     assert_eq!(stopped.mailbox_foreground_free, Some(true));
-    let mut turn = ProviderTurn::arm(parent);
+    assert!(
+        rig.shared
+            .tmux_watchers
+            .channel_binding(&rig.channel)
+            .is_none()
+    );
+    let mut turn = ProviderTurn::arm(parent, parent);
     let (status, body) = post_start(&app, agent).await;
     assert_eq!(status, axum::http::StatusCode::OK, "{body}");
     assert_eq!(body["ok"], true);
@@ -418,7 +494,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     );
     let (again, refused) = post_start(&app, agent).await;
     assert_eq!(again, axum::http::StatusCode::CONFLICT, "{refused}");
-    turn.finish().await;
+    turn.finish(&pool).await;
     let mut codex =
         crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     Arc::get_mut(&mut codex).unwrap().provider = ProviderKind::Codex;
@@ -433,6 +509,12 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         .cached_bot_token
         .set("test-token".into())
         .unwrap();
+    registry
+        .register_http(
+            "codex".into(),
+            codex.http.cached_serenity_ctx.get().unwrap().http.clone(),
+        )
+        .await;
     registry.register("codex".into(), codex).await;
     sqlx::query("UPDATE agents SET provider = 'codex', discord_channel_cdx = discord_channel_cc WHERE id = $1")
         .bind(agent).execute(&pool).await.unwrap();
@@ -443,7 +525,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
     let consumed_run = claimed.run_id.clone();
-    let _unexpected_provider = ProviderTurn::arm(thread);
+    let _unexpected_provider = ProviderTurn::arm(thread, parent);
     let consumed = executor
         .start_agent_run(
             &store,

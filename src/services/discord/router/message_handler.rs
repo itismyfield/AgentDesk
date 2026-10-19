@@ -17,7 +17,11 @@ use super::response_format::{
 pub(in crate::services::discord) use super::turn_start::reserve_headless_turn;
 pub(crate) use super::turn_start::{
     HeadlessTurnReservation, HeadlessTurnStartError, HeadlessTurnStartOutcome,
-    HeadlessTurnStartStatus,
+};
+#[cfg(test)]
+use super::turn_start::{
+    HeadlessTurnStartStatus, session_strategy_lifecycle_event,
+    should_emit_session_strategy_lifecycle,
 };
 use super::turn_start::{
     cli_just_spawned_for_emit, dispatch_reset_lifecycle_code, emit_session_strategy_lifecycle,
@@ -28,8 +32,6 @@ use super::turn_start::{
     take_and_merge_wip_warning, take_session_retry_context,
     try_intake_runtime_transition_after_redirect,
 };
-#[cfg(test)]
-use super::turn_start::{session_strategy_lifecycle_event, should_emit_session_strategy_lifecycle};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 #[cfg(unix)]
 use crate::services::discord::tmux_reaper::heal_stale_busy_mailbox;
