@@ -2337,6 +2337,7 @@ export AGENTDESK_DEPLOY_DETACHED_CHILD=1
 export AGENTDESK_DEPLOY_LOG_PATH=$(printf '%q' "$log_path")
 export AGENTDESK_DEPLOY_TEST_MODE=$(printf '%q' "$DEPLOY_TEST_MODE")
 export AGENTDESK_SKIP_TURN_DRAIN=$(printf '%q' "${AGENTDESK_SKIP_TURN_DRAIN:-1}")
+export AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=$(printf '%q' "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}")
 export AGENTDESK_POST_DEPLOY_SMOKE_SCOPE=$(printf '%q' "$POST_DEPLOY_SMOKE_SCOPE")
 export AGENTDESK_CODESIGN_IDENTITY=$(printf '%q' "${AGENTDESK_CODESIGN_IDENTITY:-}")
 export AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN=$(printf '%q' "${AGENTDESK_ALLOW_ADHOC_RELEASE_SIGN:-}")
@@ -2391,9 +2392,8 @@ EOF
     echo "    so the wait below covers the cluster verdict too (#5189)."
     echo ""
     echo "    One-shot wait command (polling loop — self-terminates after match):"
-    # `^`-anchored: `grep -qm1` stops at the FIRST match, so a line that merely quotes
-    # a marker (the per-peer ✓ lines do) would end the wait early and be reported as
-    # the verdict. Terminal markers are emitted at column 0 (#5189).
+    # `^`-anchored: `grep -qm1` stops at the first match, so a line quoting a marker (the
+    # per-peer ✓ lines do) would end the wait early; terminal markers start at column 0.
     echo "      LOG=$log_path; until [ -f \"\$LOG\" ] && grep -qm1 -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\"; do sleep 3; done; grep -E '^═══ Deploy Complete ═══|^═══ DEPLOY FAILED' \"\$LOG\" | tail -1"
     echo ""
     echo "    ⚠ DO NOT use 'tail -F | grep -m1' — grep -m1 exits on match but tail -F stays alive"
