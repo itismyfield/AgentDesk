@@ -173,6 +173,8 @@ src/services/discord/queue_dispatch/codex_clear_compat_tests.rs
 src/services/discord/queue_io/queued_head_auto_tests.rs
 src/services/discord/queue_io/queued_head_inject_tests.rs
 src/services/discord/recovery_engine/herdr_before_start_restart_tests.rs
+src/services/discord/recovery_engine/herdr_row_end_guard_tests.rs
+src/services/discord/recovery_engine/herdr_row_end_rig_tests.rs
 src/services/discord/recovery_engine/host_reconcile_tests.rs
 src/services/discord/recovery_engine/manual_rebind/adoption_notice_pg_tests.rs
 src/services/discord/recovery_engine/manual_rebind/herdr_withheld_tests.rs
@@ -270,7 +272,9 @@ src/services/discord/turn_bridge/voice_completion_tests.rs
 src/services/discord/turn_presence/activity/unbound/dormancy_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_bound_tests.rs
 src/services/discord/turn_presence/activity/unbound/herdr_chain_tests.rs
+src/services/discord/turn_presence/activity/unbound/live_owner_tests.rs
 src/services/discord/turn_presence/activity/unbound/live_review_tests.rs
+src/services/discord/turn_presence/activity/unbound/routine_owner_tests.rs
 src/services/discord/turn_presence/activity/unbound/unit_tests.rs
 src/services/discord/turn_presence/activity_tests.rs
 src/services/discord/turn_teardown_clearance_tests.rs
@@ -518,6 +522,8 @@ services::discord::queue_dispatch::codex_clear_compat::tests
 services::discord::queue_io::queued_head_inject::tests
 services::discord::queue_io::queued_head_inject::tests::auto
 services::discord::recovery_engine::herdr_before_start_restart::tests
+services::discord::recovery_engine::herdr_row_end::tests::rig
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards
 services::discord::recovery_engine::host_reconcile::tests
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld
@@ -626,7 +632,9 @@ services::discord::turn_presence::activity::tests
 services::discord::turn_presence::activity::unbound::dormancy_tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain
+services::discord::turn_presence::activity::unbound::live::owner_tests
 services::discord::turn_presence::activity::unbound::live::review_tests
+services::discord::turn_presence::activity::unbound::routine_owner::tests
 services::discord::turn_presence::activity::unbound::tests
 services::discord::turn_teardown_clearance::tests
 services::dispatches::discord_delivery::guard::tests::delivery_journal_pg_tests
@@ -1786,6 +1794,20 @@ services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_all_receipt_precedes_replay_debt_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_off_stays_held_no_effect_pg
 services::discord::recovery_engine::herdr_before_start_restart::tests::s3act_b3b_receipt_replay_conflict_is_held_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_codex_draft_keeps_a_closed_turn_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_live_actor_keeps_an_idle_row_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_same_second_previous_tail_falls_back_to_the_notice_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_clear_keeps_its_row_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_successor_before_the_retire_keeps_everything_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::a_surviving_provider_keeps_an_exited_pane_row_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_o_owned_channel_shows_only_the_marker_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::an_unrouted_channel_keeps_an_ended_row_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::the_pass_never_waits_on_an_end_task_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::guards::unresolved_reads_keep_the_row_as_production_does_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::r1_restarted_claude_turn_ends_with_its_transcript_answer_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::r2_restarted_codex_turn_ends_with_the_recovery_notice_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::r3_a_turn_busy_at_boot_ends_on_a_later_pass_pg
+services::discord::recovery_engine::herdr_row_end::tests::rig::r4_an_ended_execution_retires_and_ends_its_row_pg
 services::discord::recovery_engine::host_reconcile::tests::herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg
 services::discord::recovery_engine::manual_rebind::adoption::notice_pg_tests::fence_forward_notice_is_enqueued_and_delivered_pg
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::herdr_withheld::a_rebind_withheld_after_its_adoption_keeps_it_and_a_repeat_changes_nothing_pg
@@ -2271,6 +2293,10 @@ services::discord::turn_presence::activity::tests::codex_unterminated_historical
 services::discord::turn_presence::activity::unbound::dormancy_tests::u_active_entrypoints_collect_real_unbound_evidence_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::chain::a_restarted_herdr_channel_drains_its_queue_only_after_the_restart_pass_reconnects_it_pg
 services::discord::turn_presence::activity::unbound::herdr_bound::tests::restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_watcher_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::queued_input_drains_in_order_once_unrelated_sessions_remain_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::start_gate_and_deliver_start_once_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::turn_start_route_runs_one_provider_turn_beside_unrelated_sessions_pg
+services::discord::turn_presence::activity::unbound::live::owner_tests::unrelated_host_sessions_leave_a_session_less_channel_idle_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_actual_reading_revalidates_absence_and_has_no_busy_identity_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_herdr_first_create_keeps_legacy_runtime_trace_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_historical_host_traces_survive_current_absence_pg
@@ -2286,6 +2312,7 @@ services::discord::turn_presence::activity::unbound::live::review_tests::s1e_suc
 services::discord::turn_presence::activity::unbound::live::review_tests::s1e_unbound_publication_rejects_native_seq_and_namespace_changes_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_canonical_change_during_inventory_pg
 services::discord::turn_presence::activity::unbound::live::review_tests::s1f_publication_exact_change_during_inventory_pg
+services::discord::turn_presence::activity::unbound::routine_owner::tests::routine_turn_channels_need_exact_started_records_pg
 services::discord::turn_presence::activity::unbound::tests::u_host_scope_matrix_pg
 services::discord::turn_presence::activity::unbound::tests::u_local_row_identity_pg
 services::discord::turn_teardown_clearance::tests::a_snapshot_turn_is_judged_by_its_own_row_only_pg
