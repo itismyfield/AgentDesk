@@ -116,10 +116,7 @@ pub(in crate::services::discord) async fn row_end_pass(
         let ending = Ending(key);
         let (shared, provider) = (shared.clone(), provider.clone());
         if mutant("inline") {
-            match live {
-                true => _ = live::end_live(&shared, &provider, row).await,
-                false => end_row(&shared, &provider, row).await,
-            }
+            end_row(&shared, &provider, row).await;
             continue;
         }
         super::task_supervisor::spawn_observed("herdr_row_end", async move {
