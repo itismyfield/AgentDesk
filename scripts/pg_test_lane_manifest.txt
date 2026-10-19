@@ -37,6 +37,7 @@ src/db/postgres/advisory_lock_tests.rs
 src/db/postgres/test_db_reclaim.rs
 src/db/prompt_manifests/tests.rs
 src/db/relay_dead_letter.rs
+src/db/relay_dead_letter/migration_tests.rs
 src/db/replay_disposition/register_tests.rs
 src/db/replay_disposition/write_tests.rs
 src/db/replay_disposition_tests.rs
@@ -375,6 +376,7 @@ db::postgres::advisory_lock::tests
 db::postgres::test_db_reclaim::tests
 db::postgres::tests
 db::prompt_manifests::tests
+db::relay_dead_letter::migration_tests
 db::relay_dead_letter::tests
 db::replay_disposition::register_tests
 db::replay_disposition::tests
@@ -1052,6 +1054,8 @@ db::prompt_manifests::tests::manifest_storage_stats_counts_utf8_bytes_not_chars_
 db::prompt_manifests::tests::prompt_manifest_apply_retention_trims_old_full_content_pg
 db::prompt_manifests::tests::prompt_manifest_save_applies_write_time_cap_via_global_pg
 db::prompt_manifests::tests::prompt_manifest_save_fetch_round_trip_pg
+db::relay_dead_letter::migration_tests::state_constraint_preserves_unknown_legacy_rows_and_fences_new_writes_pg
+db::relay_dead_letter::migration_tests::upgrade_path_preserves_original_migration_checksums_pg
 db::relay_dead_letter::tests::deferred_rows_do_not_starve_a_never_tried_row_pg
 db::relay_dead_letter::tests::insert_read_back_detached_and_retention_roundtrip_pg
 db::relay_dead_letter::tests::redelivery_state_check_rejects_unknown_values_pg

@@ -1,14 +1,4 @@
 {
-  "repairs": [
-    {
-      "path": "migrations/postgres/0120_relay_dead_letter_redelivery.sql",
-      "old_sha256": "ba6981fecb0e07c30dabf307d7b948e358ccfc9958ad6ab6c6f525cff62cf8a6",
-      "new_sha256": "b94f60e6081d0fe9d83e0ffcbad938d19ecabe09c3a7513eae60316c38a228df",
-      "issue": "#6021",
-      "reason": "Correct the transition comment: deferred claims return to pending for retry; SQL schema is unchanged.",
-      "covered_by_migration": "0142_relay_dead_letter_redelivery_state_check.sql",
-      "repair_doc": "docs/postgres-migration-checksum-repair.md"
-    }
-  ],
+  "repairs": [],
   "version": 1
 }

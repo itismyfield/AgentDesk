@@ -4,8 +4,7 @@
 -- already replayed from one it has not. Recording is at-least-once and NOT
 -- idempotent (invariant I17), so replaying rows verbatim duplicates the body in
 -- the user's channel. These columns are the durable claim that makes redelivery
--- claim per attempt: 'pending' -> 'claimed' under FOR UPDATE SKIP LOCKED;
--- deferred delivery settles 'claimed' back to 'pending' for a later attempt.
+-- exactly-once: 'pending' -> 'claimed' under FOR UPDATE SKIP LOCKED, never back.
 ALTER TABLE relay_dead_letter
     ADD COLUMN IF NOT EXISTS redelivery_state TEXT NOT NULL DEFAULT 'pending';
 

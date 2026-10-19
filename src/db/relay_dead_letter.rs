@@ -262,6 +262,9 @@ pub(crate) async fn settle_redelivery(
 }
 
 #[cfg(test)]
+mod migration_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::Row;
@@ -395,7 +398,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert!(validated, "migration must validate all pre-existing rows");
+        assert!(
+            !validated,
+            "existing rows await a separate validation migration"
+        );
 
         let id = insert(&pool, &terminal_row("state contract"))
             .await
@@ -422,6 +428,18 @@ mod tests {
             .execute(&pool)
             .await
             .expect_err("unknown state must fail at write time");
+        assert_eq!(
+            error.as_database_error().and_then(|db| db.constraint()),
+            Some("relay_dead_letter_redelivery_state_check")
+        );
+        let error = sqlx::query(
+            "INSERT INTO relay_dead_letter (kind, channel_id, content, reason, redelivery_state) \
+             VALUES ($1, '5551', 'unknown state', 'state contract', 'pendign')",
+        )
+        .bind(KIND_TERMINAL_NO_DELIVERY_OWNER)
+        .execute(&pool)
+        .await
+        .expect_err("unknown state must also fail on insert");
         assert_eq!(
             error.as_database_error().and_then(|db| db.constraint()),
             Some("relay_dead_letter_redelivery_state_check")
